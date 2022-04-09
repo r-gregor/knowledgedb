@@ -1,0 +1,200 @@
+filename: c_scandir-list-sorted-subdirectories-recursively_20211117.txt
+https://stackoverflow.com/questions/66936692/how-to-use-scandir-in-c-to-list-sorted-subdirectories-recursively
+
+How to use scandir() in C to list sorted subdirectories recursively
+
+***
+   There are two recommended methods for traversing entire filesystem trees in Linux and other POSIXy
+   systems:
+	 * nftw(): man 3 nftw
+	   Given an initial path, a callback function, the maximum number of descriptors to use, and a set
+	   of flags, nftw() will call the callback function once for every filesystem object in the subtree.
+	   The order in which entries in the same directory is called is not specified, however.
+	   This is the POSIX.1 (IEEE 1003) function.
+	 * fts_open()/fts_read()/fts_children()/fts_close(): man 3 fts
+	   The fts interface provides a way to traverse filesystem hierarchies. The fts_children() provides
+	   a linked list of filesystem entries sorted by the comparison function specified in the fts_open()
+	   call. It is rather similar to how scandir() returns an array of filesystem entries, except that
+	   the two use very different structures to describe each filesystem entry.
+	   Prior to glibc 2.23 (released in 2016), the Linux (glibc) fts implementation had bugs when using
+	   64-bit file sizes (so on x86-64, or when compiling with -D_FILE_OFFSET_BITS=64).
+	   These are BSD functions (FreeBSD/OpenBSD/macOS), but are available in Linux also.
+
+   Finally, there is also the atfile version of scandir(), scandirat(), that returns the filtered
+   and sorted filesystem entries from a specific directory, but in addition to the pathname, it takes a
+   file descriptor to the relative root directory to be used as a parameter. (If AT_FDCWD is used
+   instead of a file descriptor, then scandirat() behaves like scandir().)
+
+   The simplest option here is to use nftw(), store all walked paths, and finally sort the paths. For
+   example, walk.c:
+<code>
+// SPDX-License-Identifier: CC0-1.0
+#define  _POSIX_C_SOURCE  200809L
+#define  _GNU_SOURCE
+#include <stdlib.h>
+#include <locale.h>
+#include <ftw.h>
+#include <string.h>
+#include <stdio.h>
+#include <errno.h>
+
+struct entry {
+	/* Insert additional properties like 'off_t size' here. */
+	char		   *name;		/* Always points to name part of pathname */
+	char			pathname[]; /* Full path and name */
+};
+
+struct listing {
+	size_t			max;		/* Number of entries allocated for */
+	size_t			num;		/* Number of entries in the array */
+	struct entry  **ent;		/* Array of pointers, one per entry */
+};
+#define  STRUCT_LISTING_INITIALIZER  { 0, 0, NULL }
+
+/* Locale-aware sort for arrays of struct entry pointers. */
+
+static int entrysort(const void *ptr1, const void *ptr2) {
+	const struct entry	*ent1 = *(const struct entry **)ptr1;
+	const struct entry	*ent2 = *(const struct entry **)ptr2;
+	return strcoll(ent1->pathname, ent2->pathname);
+}
+
+/* Global variable used by nftw_add() to add to the listing */
+static struct listing  *nftw_listing = NULL;
+
+static int nftw_add(const char *pathname, const struct stat *info, int typeflag, struct FTW *ftwbuf) {
+	const char *name = pathname + ftwbuf->base;
+
+	/* These generate no code, just silences the warnings about unused parameters. */
+	(void)info;
+	(void)typeflag;
+
+	/* Ignore "." and "..". */
+	if (name[0] == '.' && !name[1])
+		return 0;
+	if (name[0] == '.' && name[1] == '.' && !name[2])
+		return 0;
+
+	/* Make sure there is room for at least one more entry in the listing. */
+	if (nftw_listing->num >= nftw_listing->max) {
+		const size_t   new_max = nftw_listing->num + 1000;
+		struct entry **new_ent;
+
+		new_ent = realloc(nftw_listing->ent, new_max * sizeof (struct entry *));
+		if (!new_ent)
+			return -ENOMEM;
+
+		nftw_listing->max = new_max;
+		nftw_listing->ent = new_ent;
+	}
+
+	const size_t  pathnamelen = strlen(pathname);
+	struct entry *ent;
+
+	/* Allocate memory for this entry.
+	   Remember to account for the name, and the end-of-string terminator, '\0', at end of name. */
+	ent = malloc(sizeof (struct entry) + pathnamelen + 1);
+	if (!ent)
+		return -ENOMEM;
+
+	/* Copy other filesystem entry properties to ent here; say 'ent->size = info->st_size;'. */
+
+	/* Copy pathname, including the end-of-string terminator, '\0'. */
+	memcpy(ent->pathname, pathname, pathnamelen + 1);
+
+	/* The name pointer is always to within the pathname. */
+	ent->name = ent->pathname + ftwbuf->base;
+
+	/* Append. */
+	nftw_listing->ent[nftw_listing->num++] = ent;
+
+	return 0;
+}
+
+/* Scan directory tree starting at path, adding the entries to struct listing.
+   Note: the listing must already have been properly initialized!
+   Returns 0 if success, nonzero if error; -1 if errno is set to indicate error.
+*/
+int scan_tree_sorted(struct listing *list, const char *path)
+{
+	if (!list) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (!path || !*path) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	nftw_listing = list;
+
+	int  result = nftw(path, nftw_add, 64, FTW_DEPTH);
+
+	nftw_listing = NULL;
+
+	if (result < 0) {
+		errno = -result;
+		return -1;
+	} else
+	if (result > 0) {
+		errno = 0;
+		return result;
+	}
+
+	if (list->num > 2)
+		qsort(list->ent, list->num,  sizeof list->ent[0], entrysort);
+
+	return 0;
+}
+
+int main(int argc, char *argv[]) {
+	struct listing list = STRUCT_LISTING_INITIALIZER;
+
+	setlocale(LC_ALL, "");
+
+	if (argc < 2 || !strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
+		const char *arg0 = (argc > 0 && argv && argv[0] && argv[0][0]) ? argv[0] : "(this)";
+		fprintf(stderr, "\n");
+		fprintf(stderr, "Usage: %s [ -h | --help ]\n", arg0);
+		fprintf(stderr, "       %s .\n", arg0);
+		fprintf(stderr, "       %s TREE [ TREE ... ]\n", arg0);
+		fprintf(stderr, "\n");
+		fprintf(stderr, "This program lists all files and directories starting at TREE,\n");
+		fprintf(stderr, "in sorted order.\n");
+		fprintf(stderr, "\n");
+		return EXIT_SUCCESS;
+	}
+
+	for (int arg = 1; arg < argc; arg++) {
+		if (scan_tree_sorted(&list, argv[arg])) {
+			fprintf(stderr, "%s: Error scanning directory tree: %s.\n", argv[arg], strerror(errno));
+			return EXIT_FAILURE;
+		}
+	}
+
+	printf("Found %zu entries:\n", list.num);
+	for (size_t i = 0; i < list.num; i++)
+		printf("\t%s\t(%s)\n", list.ent[i]->pathname, list.ent[i]->name);
+
+	return EXIT_SUCCESS;
+}
+</code>
+
+   Compile using gcc -Wall -Wextra -O2 walk.c -o walk, and run using e.g. ./walk ...
+
+   The scan_tree_sorted() function calls nftw() for the directory specified, updating the global
+   variable nftw_listing so that the nftw_add() callback function can add each new directory entry to
+   it. If the listing contains more that one entry afterwards, it is sorted using qsort() and a
+   locale-aware comparison function (based on strcoll()).
+
+   nftw_add() skips . and .., and adds every other pathname to the listing structure nftw_listing. It
+   automatically grows the array as needed in linear fashion; the new_max = nftw_listing->num + 1000;
+   means we allocate in units of a thousand (pointers).
+
+   The scan_tree_sorted() can be called multiple times with the same listing as the target, if one wants
+   to list disjoint subtrees in one listing. Note, however, that it does not check for duplicates,
+   although those could easily be filtered out after the qsort.
+
+
+---
+

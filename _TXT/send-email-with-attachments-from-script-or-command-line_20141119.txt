@@ -1,0 +1,238 @@
+filename: send-email-with-attachments-from-script-or-command-line_20141119.txt
+http://backreference.org/2013/05/22/send-email-with-attachments-from-script-or-command-line/
+
+Send email with attachment(s) from script or command line
+
+   Posted by [13]waldner on 22 May 2013, 4:07 pm
+
+   Since every time I have to do this (which is "not very often") I have to look it up, google
+   for it, etc., let's summarize it here once and for all. The problem is not sending the
+   email, but rather adding the damned attachment.
+
+   There are many ways, but let's focus on how to do it with commonly installed programs
+   first.
+
+   Throughout the examples, we'll assume that a function exists to determine the MIME time of
+   the file given as argument. A simple way to implement it is to use the file utility with
+   its --mime-type option.
+get_mimetype(){
+  # warning: assumes that the passed file exists
+  file --mime-type "$1" | sed 's/.*: //'
+}
+
+   Also, where SMTP with authentication is used, we assume the variables $user, $password,
+   $smtpserver and $smtpport are available and contain the obvious values.
+
+Using sendmail
+
+   Here, "sendmail" just means "the executable named sendmail", and is not a reference to the
+   MTA named "sendmail"; nowadays, an executable with this name is usually provided by any
+   decent MTA, such as postfix or exim (or even nullmailer); of course, the sendmail MTA
+   itself also provides such a binary.
+
+   In essence, an email with an attachment is normally implemented with a [14]MIME message
+   whose body is of type multipart/mixed: the first part is the message text, and the
+   subsequent parts are the attachments (well, the order can be different, but it just seems
+   logical to put the text in the first part). Each attachment can be encoded in various ways;
+   here we're using the base64 encoding, since the utility to produce it is widely available.
+   Parts are separated by an arbitrary string, called "boundary". Ok, it's not arbitrary;
+   [15]RFC2046 has the syntax:
+     boundary := 0*69<bchars> bcharsnospace
+
+     bchars := bcharsnospace / " "
+
+     bcharsnospace := DIGIT / ALPHA / "'" / "(" / ")" /
+                      "+" / "_" / "," / "-" / "." /
+                      "/" / ":" / "=" / "?"
+
+   But as long as it obeys the syntax above, for almost all practical purposes it's as if it's
+   arbitrary (modulo the recommendations contained in the RFC about unpredictability and all
+   that).
+
+   Here is some sample code to send the email using "sendmail":
+#!/bin/bash
+
+# some variables
+# refactoring the script such that all these values are
+# passed from the outside as arguments should be easy
+
+from="sender@example.com"
+to="recipient@example.org"
+subject="Some fancy title"
+boundary="ZZ_/afg6432dfgkl.94531q"
+body="This is the body of our email"
+declare -a attachments
+attachments=( "foo.pdf" "bar.jpg" "archive.zip" )
+
+# Build headers
+{
+
+printf '%s\n' "From: $from
+To: $to
+Subject: $subject
+Mime-Version: 1.0
+Content-Type: multipart/mixed; boundary=\"$boundary\"
+
+--${boundary}
+Content-Type: text/plain; charset=\"US-ASCII\"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: inline
+
+$body
+"
+
+# now loop over the attachments, guess the type
+# and produce the corresponding part, encoded base64
+for file in "${attachments[@]}"; do
+
+  [ ! -f "$file" ] && echo "Warning: attachment $file not found, skipping" >&2 && continue
+
+  mimetype=$(get_mimetype "$file")
+
+  printf '%s\n' "--${boundary}
+Content-Type: $mimetype
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename=\"$file\"
+"
+
+  base64 "$file"
+  echo
+done
+
+# print last boundary with closing --
+printf '%s\n' "--${boundary}--"
+
+} | sendmail -t -oi   # one may also use -f here to set the envelope-from
+
+Using "mail"
+
+   There are a few implementations of "mail" (or, more correctly these days, "mailx"), with
+   slightly different syntax and capabilities.
+   The version that can do attachments is [16]heirloom-mailx.
+
+   Since a sistem where mailx is installed should generally also have a "sendmail" binary, one
+   may wonder why bother at all with "mail". Well, because it's simpler:
+#!/bin/bash
+
+# This needs heirloom-mailx
+from="sender@example.com"
+to="recipient@example.org"
+subject="Some fancy title"
+body="This is the body of our email"
+declare -a attachments
+attachments=( "foo.pdf" "bar.jpg" "archive.zip" )
+
+declare -a attargs
+for att in "${attachments[@]}"; do
+  attargs+=( "-a"  "$att" )
+done
+
+mail -s "$subject" -r "$from" "${attargs[@]}" "$to" <<< "$body"
+
+   Also we don't need to bother with MIME types because the program makes its own guesses
+   based on its MIME databases.
+
+   This version of mailx can also send using SMTP (the man has all the details), so it does
+   not necessarily need a local sendmail program:
+# ... everything as before...
+mail -s "$subject" -r "$from" -S smtp="smtp://${smtpserver}:${smtpport}" \
+                              -S smtp-auth=login \
+                              -S smtp-auth-user="$user" \
+                              -S smtp-auth-password="$password" \
+                              -S sendwait \
+                              "${attargs[@]}" "$to" <<< "$body"
+
+# use the correct value for smtp-auth, and also -S smtp-use-starttls to do TLS
+
+   As said, all the above needs heirloom-mailx; bsd-mailx cannot do (real) attachments.
+
+Other tools
+
+   Here are some other tools that can send email with attachments, but are somewhat less
+   commonly installed.
+
+Mutt
+
+   [17]Mutt can send emails both by invoking sendmail or by talking directly to a SMTP server.
+# send using sendmail
+$ mutt -e "set from=$from" -s "$subject" -a foo.pdf -a bar.jpg -- "$to" <<< "$body"   # also 'set us
+e_envelope_from=yes' if needed
+
+# send using smtp
+$ mutt -e "set from=$from" \
+       -e "set smtp_url=\"smtp://${user}@${smtpserver}:${smtpport}\"" \
+       -e "set smtp_pass=\"$password\"" -s "$subject" -a foo.pdf -a bar.jpg -- "$to" <<< "$body"
+
+# also 'set ssl_starttls=yes|no' to do/not do TLS
+
+   To simplify things, some of the settings above can be saved in mutt's configuration file to
+   avoid specifying them on the command line.
+
+sendEmail
+
+   Another one is [18]sendEmail, which is available packaged for many distibutions and
+   apparently can only send through SMTP (not sendmail):
+$ sendEmail -f "$from" -t "$to" -m "$body" -u "$subject" -s "${smtpserver}:${smtpport}" -xu "$user"
+-xp "$password" -a foo.pdf -a bar.jpg
+
+Swaks
+
+   [19]Swaks is the self-defined "Swiss Army Knife for SMTP", so it can, not surprisingly,
+   send emails.
+
+   Basic usage to send emails with attachments (via SMTP):
+# if MIME type application/octet-stream is fine
+$ swaks -s "${smtpserver}" -p "${smtpport}" -t "$to" -f "$from" --header "Subject: $subject" -S \
+      --protocol ESMTP -a -au "$user" -ap "$password" --body "$body" \
+      --attach foo.pdf  --attach bar.jpg
+
+# to manually specifiy MIME types
+$ swaks -s "${smtpserver}" -p "${smtpport}" -t "$to" -f "$from" --header "Subject: $subject" -S \
+      --protocol ESMTP -a -au "$user" -ap "$password" --body "$body" \
+      --attach-type "$(get_mimetype foo.pdf)" --attach foo.pdf \
+      --attach-type "$(get_mimetype bar.jpg)" --attach bar.jpg
+
+# yes, MIME type has to go before the file name.
+# To do SSL/TLS, see the various --tls* options
+
+   Swaks is smart about guessing whether the option arguments it's given represent files or
+   strings to take as-is (where applicable), wihch is good because the same sintax does it
+   all. It can also use plain SMTP, which is fine if neither authentication nor SSL/TLS are
+   needed.
+
+Metasend
+
+   Metasend (from metamail) uses sendmail, needs body text in a file and explicit MIME types:
+$ metasend -b -s "$subject" -S 100000000 -F "$from" -t "$to" -f "$bodyfile" -m text/plain -e 7bit \
+                                                          -n -f foo.pdf -m "$(get_mimetype foo.pdf)"
+ -e base64 \
+                                                          -n -f bar.jpg -m "$(get_mimetype bar.jpg)"
+ -e base64
+
+   After the textual body part, each new file to attach is introduced by the -n switch, and
+   for each file three pieces of informations are given: the file path with -f, its MIME type
+   with -m, and the encoding with -e.
+   By default metasend would split the message into multiple parts, because it assumes that
+   the receiver uses metamail which is able to reassemble them; since this is not always the
+   case, the -S option can be used to specify a message size under which no split will be
+   performed. Ideally, this has to be larger than the sum of all the encoded message parts. In
+   the example it's just some big number, but it can be calculated more accurately.
+
+Mpack
+
+   [20]mpack uses sendmail, only allows one attachment at a time and needs explicit MIME type
+   from user. Furthermore, the body text must be in a file, and it's not possible to specify a
+   sender address, so it seems to be the least powerful option:
+$ mpack -s "$subject" -c "$(get_mimetype "foo.pdf")" -d "$bodyfile" foo.pdf "$to"
+
+Conclusion
+
+   Some final remarks:
+     * As usual when sending mail, even when specifying a From: address (or the envelope "mail
+       from" where supported), local sendmail configuration or SMTP server configuration can
+       override that information, so it's not 100% sure that those fields will not be touched.
+     * When sending through SMTP, if authentication is not needed the relevant options can of
+       course be omitted.
+     * Even when the body text is expected to be in a file, if we have it in a variable the
+       program can probably be fooled using process substitution shell trickery, like eg
+       program ... -f <(echo "$body") ... or whatever the option is.

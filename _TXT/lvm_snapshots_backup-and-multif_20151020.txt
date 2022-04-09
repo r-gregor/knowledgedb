@@ -1,0 +1,661 @@
+filename: lvm_snapshots_backup-and-multif_20151020.txt
+https://fritshoogland.wordpress.com/2012/08/11/using-lvm-snapshots-for-backup-and-restore-of-filesystems/
+
+Using LVM snapshots for backup and restore of filesystems
+This post really is about using LVM (Logical Volume Manager; an abstraction layer for disk devices)
+snapshots. A snapshot is a frozen image of a logical volume, which simply means “filesystem”. It’s
+not really “frozen”, LVM2 snapshots are read/write by default. But you can freeze a filesystem in
+time with a LVM snapshot.
+The background of this really is Exadata (computing node) and upgrading, but has nothing unique to
+Exadata. So don’t let this bother you. But the idea of using LVM snapshots popped up when dealing with
+Exadata computing nodes and upgrades.
+First of all: LVM is in development, which mean different Linux versions have different LVM options
+available to them. I am using the Exadata X2 Linux version: RHEL/OL 5u7 x86_64. I guess OL6 has more
+and more advanced features inside LVM, but with X2, OL5u7 is what I have to use. So the steps in this
+blogpost are done with this version. Any comments are welcome!
+Second: if you want to experiment with this: most people allocate all space in the volume group to
+logical volumes upfront. A snapshot is a COW (Copy on Write) copy of a logical volume. This means a
+snapshot starts off with zero extra bytes (source and snapshot are equal), and grows as the source gets
+modified. This means you need to have free/available space in the volume group to facilitate the snapshot.
+Then there is another caveat: the ‘/boot’ filesystem cannot be in LVM, so is a normal partition on most
+systems (also on Exadata). This means snapshots do not help if you want a backup of that filesystem. You
+need to use another trick.
+Okay, here we go: you have a large modification upcoming and want to be able to restore your system to
+this moment in time.
+
+1. Backup /boot filesystem
+
+	[root@localhost ~]# df /boot
+	Filesystem	     1K-blocks	Used Available Use%
+	Mounted on /dev/sda1	248895 24037	212008	11% /boot
+	[root@localhost ~]# umount /boot
+	[root@localhost ~]# dd if=/dev/sda1 of=dev_sda1_backup
+	[root@localhost ~]# mount /boot
+
+2. Create snapshot of logical volumes
+In this example it’s only the root filesystem (which is a bit special, because this filesystem is set
+in grub.conf for the bootloader, and in /etc/fstab).
+	[root@localhost ~]# lvdisplay -v /dev/vg00/lv_root
+	Using logical volume(s) on command line
+	/dev/hdc: open failed: No medium found
+	--- Logical volume ---
+	LV Name /dev/vg00/lv_root
+	VG Name vg00
+	LV UUID wutwln-ffdB-QRlg-1LgL-XqKB-glvn-OpCowW
+	LV Write Access read/write
+	LV Status available # open 1
+	LV Size 3.91 GB
+	Current LE 125
+	Segments 1
+	Allocation inherit
+	Read ahead sectors auto
+	- currently set to 256
+	Block device 253:0
+
+lvdisplay displays the properties of the logical volume to be snapshotted, I use this to spot the number
+of LE’s.
+	[root@localhost ~]# lvcreate -l 125 -s /dev/vg00/lv_root -n lv_root_snap
+	/dev/hdc: open failed: No medium found
+	Logical volume "lv_root_snap" created
+
+The system now has been backed up in a way that we can revert to this situation.
+Next would be to do the O/S upgrade, software upgrade or whatever. It goes horribly wrong, and you need
+to restore the system to the previous situation.
+
+1. Rename current logical volume
+In this case, I rename my lv_root logical volume to lv_root_old:
+	[root@localhost ~]# lvrename /dev/vg00/lv_root /dev/vg00/lv_root_old
+	/dev/hdc: open failed: No medium found
+	Renamed "lv_root" to "lv_root_old" in volume group "vg00"
+
+The logical volume (which we currently use) has been renamed.
+
+2. Create new lv_root
+This is the logical volume we are going to use to put the snapshot in.
+	[root@localhost ~]# lvcreate -l 125 -n lv_root /dev/vg00
+	Logical volume "lv_root" created
+
+3. Populate the new lv_root with the snapshot contents
+	[root@localhost ~]# dd if=/dev/vg00/lv_root_snap of=/dev/vg00/lv_root
+	8192000+0 records in
+	8192000+0 records out
+	4194304000 bytes (4.2 GB) copied, 93.0858 seconds, 45.1 MB/s
+
+4. Restore the /boot filesystem
+	[root@localhost ~]# umount /boot
+	[root@localhost ~]# dd if=dev_sda1_backup of=/dev/sda1
+	[root@localhost ~]# mount /boot
+
+5. Reboot
+	[root@localhost ~]# shutdown -r now
+
+This sequence of events enabled me to restore my system to a post-modification situation. Of course you
+should test this very thoroughly for your own situation, but this offers an elegant way, which has little
+external dependencies.
+Post restore/cleaning up:
+When the system is reverted to its old situation, we are left with a logical volume and a snapshot which
+probably are not of use anymore. These can be cleaned up the following way:
+	[root@localhost ~]# lvremove /dev/vg00/lv_root_old
+	Do you really want to remove active logical volume lv_root_snap? [y/n]: y
+	Logical volume "lv_root_snap" successfully removed
+	Do you really want to remove active logical volume lv_root_old? [y/n]: y
+	Logical volume "lv_root_old" successfully removed
+
+
+---
+http://www.nextstep4it.com/lvm-snapshot-linux/
+
+LVM Snapshot : Backup & restore LVM Partition in linux
+BY NEXTSTEP4IT · OCTOBER 2, 2014
+
+An LVM snapshot is an exact mirror copy of an LVM partition which has all the data from the LVM volume
+from the time the snapshot was created. The main advantage of LVM snapshots is that they can  reduce the
+amount of time that your services / application  are down during backups because a snapshot is usually
+created in fractions of a second. After the snapshot has been created, we can back up the snapshot while
+our services and applications are in normal operation.
+LVM snapshot is the feature provided by LVM(Logical Volume Manager) in linux. While creating lvm snapshot
+, one of most common question comes to our mind is that what should be the size of snapshot ?
+“snapshot size can vary depending on your requirement but a minimum recommended size is 30% of the
+logical volume for which you are taking the snapshot but if you think that you might end up changing
+all the data in logical volume then make the snapshot size same as logical volume ”
+Scenario : We will take snapshot of /home  which  is LVM based parition.
+	[root@localhost ~]# df -h /home/
+	Filesystem	      Size  Used Avail Use% Mounted on
+	/dev/mapper/VolGroup-lv_home
+			     5.0G  139M  4.6G	3% /home
+	TAKING SNAPSHOT OF   ‘/DEV/MAPPER/VOLGROUP-LV_HOME’  PARTITION.
+
+LVM snapshot is created using lvcreate command , one must have enough free space in the volume group
+otherwise we can’t take the snapshot	, Exact syntax is given below :
+	# lvcreate -s  -n <Snapshot Name> -L <Size of snapshot> <lvm volume for which to take snapshot >
+
+Example :
+	[root@localhost ~]# lvcreate -s -n home_snap -L1G /dev/mapper/VolGroup-lv_home
+	Logical volume "home_snap" created
+
+Now verify the newly create LVM ‘home_snap’ using lvdisplay command
+
+LVM-Snapshot
+Now Create the mount point(directory ) and mount it
+	[root@localhost ~]# mkdir /mnt/home-backup
+	[root@localhost ~]# mount /dev/mapper/VolGroup-home_snap  /mnt/home-backup/
+	[root@localhost ~]# ls -l /mnt/home-backup/
+
+Above command will  show all directories and files that we know from our /home partition
+NOW TAKE THE BACKUP OF SNAPSHOT ON /OPT FOLDER .
+	[root@localhost ~]# tar zcpvf /opt/home-backup.tgz  /mnt/home-backup/
+
+If you want the bitwise  backup , then use the below command :
+	[root@localhost ~]# dd if=/dev/mapper/VolGroup-home_snap of=/opt/bitwise-home-backup
+	10485760+0 records in
+	10485760+0 records out
+	5368709120 bytes (5.4 GB) copied, 79.5741 s, 67.5 MB/s
+
+RESTORING SNAPSHOT BACKUP :
+If anything goes wrong with your /home file system , then you can restore the backup that we have taken
+in above steps.  You can also mount the lvm snapshot on /home folder.
+
+REMOVE LVM SNAPSHOT
+Once you are done with lvm snapshot backup and restore activity , you should umount and remove lvm
+snapshot partition using below commands as snapshot is consuming system resources like diskspace of
+respective voulme group.
+	[root@localhost ~]# umount /mnt/home-backup/
+	[root@localhost ~]# lvremove /dev/mapper/VolGroup-home_snap
+	Do you really want to remove active logical volume home_snap? [y/n]: y
+	Logical volume "home_snap" successfully removed
+
+
+---
+http://how-to.linuxcareer.com/create-and-restore-manual-logical-volume-snapshots
+
+Create and Restore manual Logical Volume Snapshots
+Share this post
+FaceBook  Twitter  Contents[Hide]
+1. Introduction
+2. Scenario
+3. Creating a Logical Volume
+3.1.  Logical Volume Manager Basics
+3.2. Create a partitions
+3.3. Create Physical Volumes
+3.4. Create Volume Group
+3.5. Creating Logical Volumes
+4. Logical Volume Snapshot
+4.1. Understanding Snaphosts
+4.2. Sample Data
+4.3. Revert Logical Volume Snapshot
+5. Conclusion
+1. Introduction
+By creating a Logical Volume snapshots you are able to freeze a current state of any of your logical
+volumes. This means that you can very easily create a backup and once needed rollback to a original
+logical volume state. This method is very similar to what you already know from using Virtualization
+software such as Virtualbox or VMware where you can simply take a snapshot of entire virtual machine
+and revert back in case something went wrong etc. Therefore, using LVM snapshots allows you to take a
+control of your system's logical volumes whether it is your personal laptop or server. This tutorial is
+self-contained as no previous experience with Logical Volume Manager is required.
+
+2. Scenario
+In this article we will explain how to manually create and restore logical volume snapshots. Since we
+do not assume any previous experience with Logical Volume Manager we will start from a scratch using a
+dummy physical hard drive /dev/sdb with size of 1073 MB. Here are all steps in nutshell:
+
+1First we will create two partitions on our /dev/sdb drive. These partitions will be of "8e Linux LVM"
+type and will be used to create a physical volumes
+2Once both partitions are created we use pvcreate command to create physical volumes
+3In this step we create a new Logical Volume Group and a single 300MB in size logical volume using
+ext4 filesystem
+4Mount our new logical volume and create some sample data
+5Take a snapshot and remove sample data
+6Rollback logical volume snapshot
+3. Creating a Logical Volume
+3.1.  Logical Volume Manager Basics
+Here is a quick start definition of logical volume manager:
+
+Logical volume manager allows you to create a Logical group consisting of multiple physical volumes. Physical
+volumes can be entire hard-drives or separate partitions.  Physical volumes can reside on a single
+or multiple hard-drives, partitions , USBs, SAN's etc. To increase a Logical Volume size you can add
+additional physical volumes. Once you create Logical volume group you can then create multiple Logical
+volumes and at the same time completely disregard a physical volume layer. Logical volume group can be
+resized at any time by adding more physical volumes so new logical volumes can created or resized.
+
+3.2. Create a partitions
+First, we need to create a partitions and mark them as physical volumes.  Here is our physical disk we
+are going to work with:
+
+# fdisk -l /dev/sdb
+
+Disk /dev/sdb: 1073 MB, 1073741824 bytes
+255 heads, 63 sectors/track, 130 cylinders, total 2097152 sectors
+Units = sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x335af99c
+
+   Device Boot	    Start	  End	   Blocks   Id	System
+
+Let's create two primary partitions. Here we are using fdisk to do tis job. Feel free to use any other
+partitioning tool to do this job such as cfdisk, parted etc.
+
+# fdisk /dev/sdb
+All command are highlighted in bold:
+
+Command (m for help): n
+Partition type:
+   p   primary (0 primary, 0 extended, 4 free)
+   e   extended
+Select (default p): p
+Partition number (1-4, default 1):
+Using default value 1
+First sector (2048-2097151, default 2048):
+Using default value 2048
+Last sector, +sectors or +size{K,M,G} (2048-2097151, default 2097151): +400M
+
+Command (m for help): n
+Partition type:
+   p   primary (1 primary, 0 extended, 3 free)
+   e   extended
+Select (default p): p
+Partition number (1-4, default 2): 2
+First sector (821248-2097151, default 821248):
+Using default value 821248
+Last sector, +sectors or +size{K,M,G} (821248-2097151, default 2097151): +200M
+
+Command (m for help): t
+Partition number (1-4): 1
+Hex code (type L to list codes): 8e
+Changed system type of partition 1 to 8e (Linux LVM)
+
+Command (m for help): t
+Partition number (1-4): 2
+Hex code (type L to list codes): 8e
+Changed system type of partition 2 to 8e (Linux LVM)
+
+Command (m for help): w
+The partition table has been altered!
+
+Calling ioctl() to re-read partition table.
+Syncing disks.
+
+ If you followed the above steps, your new partition table on the disk /dev/sdb will now look similar
+ to the one below:
+
+# fdisk -l /dev/sdb
+
+Disk /dev/sdb: 1073 MB, 1073741824 bytes
+255 heads, 63 sectors/track, 130 cylinders, total 2097152 sectors
+Units = sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x335af99c
+
+   Device Boot	    Start	  End	   Blocks   Id	System
+/dev/sdb1	     2048      821247	   409600   8e	Linux LVM
+/dev/sdb2	   821248     1230847	   204800   8e	Linux LVM
+
+3.3. Create Physical Volumes
+At this point we mark both partitions as physical volumes. Please note that you do not have to follow
+the same pattern as in this tutorial. For example you could simply partition entire disk with a single
+partition instead of two. Use pvcreate to create physical volumes:
+
+ # pvcreate /dev/sdb[1-2]
+  Writing physical volume data to disk "/dev/sdb1"
+  Physical volume "/dev/sdb1" successfully created
+  Writing physical volume data to disk "/dev/sdb2"
+  Physical volume "/dev/sdb2" successfully created
+
+3.4. Create Volume Group
+Now it is time to create a Volume Group. For this we use tool vgcreate. The new Volume Group will have
+a name "volume_group".
+
+# vgcreate volume_group /dev/sdb1 /dev/sdb2
+  Volume group "volume_group" successfully created
+
+After execution of the above command you will have a new volume group created named "volume_group". This
+new volume group will consist of two physical volumes:
+
+/dev/sdb1
+/dev/sdb2
+
+You can see the stats of your new volume group using vgdisplay command:
+
+# vgdisplay
+  --- Volume group ---
+  VG Name		volume_group
+  System ID
+  Format		lvm2
+  Metadata Areas	2
+  Metadata Sequence No	1
+  VG Access		read/write
+  VG Status		resizable
+  MAX LV		0
+  Cur LV		0
+  Open LV		0
+  Max PV		0
+  Cur PV		2
+  Act PV		2
+  VG Size		592.00 MiB
+  PE Size		4.00 MiB
+  Total PE		148
+  Alloc PE / Size	0 / 0
+  Free	PE / Size	148 / 592.00 MiB
+  VG UUID		37jef7-3q3E-FyZS-lMPG-5Jzi-djdO-BgPIPa
+
+3.5. Creating Logical Volumes
+If all went smoothly we can now finally create a logical volume.  The size of the logical volume must
+not exceed the size of your logical group. Let's create new logical volume called "volume1" of size 200
+MB and format it with ext4 filesystem.
+
+# lvcreate -L 200 -n volume1 volume_group
+  Logical volume "volume1" created
+
+You can see a definition of your new logical volume using lvdisplay command. Take a note of the LV Path
+value as you will need it when creating a filesystem on your new h"volume1" logical volume.
+
+# lvdisplay
+  --- Logical volume ---
+  LV Path		 /dev/volume_group/volume1
+  LV Name		 volume1
+  VG Name		 volume_group
+  LV UUID		 YcPtZH-mZ1J-OQQu-B4nj-MWo0-yC18-m77Vuz
+  LV Write Access	 read/write
+  LV Creation host, time debian, 2013-05-08 12:53:17 +1000
+  LV Status		 available
+  # open		 0
+  LV Size		 200.00 MiB
+  Current LE		 50
+  Segments		 1
+  Allocation		 inherit
+  Read ahead sectors	 auto
+  - currently set to	 256
+  Block device		 254:0
+Now you can create an ext4 filesystem on your logical volume:
+
+# mkfs.ext4 /dev/volume_group/volume1
+
+4. Logical Volume Snapshot
+Finally, we have come to the point where we can take a snapshot of our logical volume created in previous
+section. For this we will also need some sample data on our Logical Volume "volume1" so once we revert from
+the snapshot we can confirm entire process by comparing original data with data recovered from the snapshot.
+
+4.1. Understanding Snaphosts
+In order to understand how snapshots work we first need to understand what logical volume consists of and
+how data are stored. This concept is similar to well known symbolic links. When you create a symbolic
+link to a file you are not creating a copy of the actual file but instead you simply create only a
+reference to it. Logical volume stores data in a similar fashion and it consists of two essential parts:
+
+metadata pointers
+data block
+When a snapshot is created Logical Volume Manager simply creates a copy of all Metadata pointers to
+a separate logical volume. Metadata do not consume much space and therefore your are able to create
+snapshot of let's say 2GB logical volume to 5MB snapshot volume. The snapshot volume only starts grow
+once you start altering data of the original logical volume. Which means, that every time you remove or
+edit file on the original logical volume a copy of that file ( data ) is created on snapshot volume. For
+a simple changes you may need to create a snapshot volume of around 5-10% of the logical volume original
+size. If you are prepared to make many changes on your original logical volume then you will need lot
+more than 10%. Let's get started:
+
+4.2. Sample Data
+First, create a new mount point directory for "volume1" and mount it :
+
+# mkdir /mnt/volume1
+# mount /dev/volume_group/volume1 /mnt/volume1
+Enter "volume1" mount point and copy some sample data:
+
+# cd /mnt/volume1
+# cp -r /sbin/ .
+# du -s sbin/
+8264	sbin/
+
+Using previous commands we have copied entire /sbin directory into /mnt/volume1. The size of
+/mnt/volume1/sbin/ is currently 8264 KB.
+
+ Creating a Snapshot
+
+Now we are going to create a snapshot of logical volume "volume1". In the process Logical Volume Manager
+will create a new separate logical volume. This new logical volume will have size of 20MB and will be
+called "volume1_snapshot":
+
+# lvcreate -s -L 20M -n volume1_snapshot /dev/volume_group/volume1
+  Logical volume "volume1_snapshot" created
+
+Execute lvs command to confirm that new volume snapshot has been created:
+
+# lvs
+  LV		   VG		Attr	 LSize	 Pool Origin  Data%  Move Log Copy%  Convert
+  volume1	   volume_group owi-aos- 200.00m
+  volume1_snapshot volume_group swi-a-s-  20.00m      volume1	0.06
+
+Now that the snapshot has been created we can start altering data on "volume1" for  example by removing
+the entire content:
+
+# cd /mnt/volume1
+# rm -fr
+# rm -fr sbin/
+
+After this operation you can consult again lvs command and see that Data% on the volume1_snap is now
+increased. If you want to, you can now mount your snapshot volume to confirm that the original data from
+"volume1" still exists.
+
+4.3. Revert Logical Volume Snapshot
+Before we revert our logical volume snapshot, let's first confirm that our /mnt/volume1/sbin data are
+still missing:
+
+# du -s /mnt/volume1/sbin
+du: cannot access `/mnt/volume1/sbin': No such file or directory
+
+Recovering a Logical Volume snapshots consists of two steps:
+
+scheduling a  snapshot recovery after next logical volume activation
+deactivate and activate logical volume
+To schedule a snapshot rollback execute a following command:
+
+# lvconvert --merge /dev/volume_group/volume1_snapshot
+  Can't merge over open origin volume
+  Merging of snapshot volume1_snapshot will start next activation.
+
+After execution of the above command the logical volume "volume1" will rollback once it is
+activated. Therefore, what needs to be done next is to re-activate "volume1". First, make sure that you
+unmount your "volume1"
+
+# umount /mnt/volume1
+Deactivate and activate you volume:
+
+# lvchange -a n /dev/volume_group/volume1
+# lvchange -a y /dev/volume_group/volume1
+
+As a last step mount again your logical volume "volume1" and confirm that data all has been recovered:
+
+# mount /dev/volume_group/volume1 /mnt/volume1
+# du -s /mnt/volume1/sbin
+8264	/mnt/volume1/sbin
+
+5. Conclusion
+The above was a basic example of snapshot manipulation using Logical Volume Manager. The usefulness of
+logical volume snapshots is enormous and it will sure help you with your tasks whether you are system
+administrator or a developer. Although you can use the setup above to create a multiple snapshots for a
+backup recovery you also need to know the you backup will find its limits on within you Logical Volume
+Group therefore any low level physical volume problems may render your snapshot useless.
+
+
+---
+http://www.softpanorama.org/Internals/Unix_filesystems/snapshots.shtml
+
+Linux LVM-based Snapshots
+
+Introduction
+Snapshots are ``frozen'' images of a logical volume which can be used to back up the file system of some
+files on it (for example a database). A user command is used to initiate a snapshot at which point the
+current state of the LV is preserved and can be accessed through a special, additional, device node. It
+can be mounted and used iether read-only or read-write. For example, to take backup on a "live" volume
+you need to create a snapshot of it, mount it as read-only on some mount point, for example /snap_lv6
+and use this mounting point to take backup of all your data. They will not change during the backup as
+they are frozen. The file system or a database on it can continue running and making changes to actual
+file system while the backup takes place. Those changes will not be reflected in the backup you take.
+Availability of snapshots now is what distinguish good filesystem from a bad one. In some form they  are
+now available on all major OSes:
+
+AIX snapshots
+Solaris Snapshots (ZFS support snapshots natively)
+HP-UX snapshots
+Linux ext3/4 via LVM, Btrfs natively. Unlike modern Unix file systems, Ext3 does not have native support
+for snapshots - the ability to quickly capture the state of the filesystem at arbitrary times, instead
+relying on less space-efficient volume level snapshots provided by the Linux LVM.
+
+Linux LVM snapshots
+An LVM snapshot of logical volume generally requires only a fraction of the space of the original LV
+because only changed data needs new space. The actual size should be tuned according to the frequency
+of writes to the live volume and the life span of the snapshot volume. If write activity changes to the
+original volume after the snapshot has been taken, the snapshot size can be changed at run time. This is
+especially useful if too little space was allocated for the snapshot volume. For patching you generally
+need 2-3GB of additional space.
+A snapshot is created as a new LV in the same volume group as the target LV. The volume group must have
+free space available to allocate the snapshot LV. The name of the snapshot LV can be assigned by the
+user just as the name of any new LV.  One snapshot LV corresponds to one "real" LV.
+Snapshots are read/write by default. Read/write snapshots work like read-only snapshots, with the
+additional feature that if data is written to the snapshot, that block is marked in the exception table
+as used, and never gets copied from the original volume. This opens up many new possibilities that were
+not possible with LVM1's read-only snapshots.
+As in Linux you can remount partition to a new mount point and this feature can be used for swapping
+snapshot partition with the original
+
+mount --move olddir newdir
+
+The move operation.
+Since Linux 2.5.1 it is possible to atomically move a mounted tree to another place.
+
+The shared subtrees operations.
+Since Linux 2.6.15 it is possible to mark a mount and its submounts as shared, private, slave or
+unbindable. A shared mount provides ability to create mirrors of that mount such that mounts and umounts
+within any of the mirrors propagate to the other mirror. A slave mount receives propagation from its
+master, but any not vice-versa. A private mount carries no propagation abilities. A unbindable mount
+is a private mount which cannot cloned through a bind operation. Detailed semantics is documented in
+Documentation/sharedsubtree.txt file in the kernel source tree.
+To ensure that patches do not ruin your system you can:
+
+create snapshot of root volume (and possible other volumes that are involved in patching)
+boot from new snapshot volume
+Apply patches to snapshort volume
+Reboot.
+
+If system is OK then merge changes.
+If not simply discard snapshot and you return to your state before patching.
+From this point of view it makes sense to have on LVM root LV (in a single partition) all three key
+directories that are involved in patching:  /(root), /usr, and /var
+One example is to snapshot a volume, mount the snapshot, and try an experimental program that change
+files on that volume. If you don't like what it did, you can unmount the snapshot, remove it, and mount
+the original filesystem in its place.
+It is also useful for creating volumes for use with Xen. You can create a disk image, then snapshot it and
+modify the snapshot for a particular domU instance. You can then create another snapshot of the original
+volume, and modify that one for a different domU instance. Since the only storage used by a snapshot is
+blocks that were changed on the origin or the snapshot, the majority of the volume is shared by the domU's.
+
+Make backups with LVM Snapshots
+A consistent backup is achieved when no data is changed between the start and the end of the backup
+process. This can be hard to guarantee without stopping the system for the time required by the copy process.
+Linux LVM implements a feature called Snapshots which is similar to taking a picture of a logical volume
+at a given moment in time. With a Snapshot, you are provided with two copies of the same LV—one can
+be used for backup purposes while the other continues in operation.
+The two great advantages of Snapshots are:
+Snapshot creation is instantaneous; no need to stop a production environment.
+Two copies are made, but not at twice the size. A Snapshot volume space will use only for the files
+changed to accommodate the difference between the two LVs.
+At the end you can iether merge snapshot with the volume or abandon it.
+This functionality is accomplished by having an exception list that is updated every time something
+changes between the LVs (formally known as CoW, Copy-on-Write).
+
+Creating a new Snapshot
+In order to create a new Snapshot LV, use the same lvcreate command, specifying the -s parameter and
+an origin LV. The -L size in this case specifies the exception table size, which is how much difference
+the Snapshot will support before losing consistency.
+
+#create a Snapshot LV called 'snap' from origin LV 'test'
+lvcreate -s -L 2G -n snap /dev/vg0/snap
+Use lvdisplay to query special information like CoW-size and CoW-usage:
+
+How big and much space is now used
+
+lvdisplay /dev/vg0/snap
+  --- Logical volume ---
+  LV Name		 /dev/vg0/snap
+  VG Name		 vg00
+  LV UUID		 QHVJYh-PR3s-A4SG-s4Aa-MyWN-Ra7a-HL47KL
+  LV Write Access	 read/write
+  LV snapshot status	 active destination for /dev/vg0/test
+  LV Status		 available
+  # open		 0
+  LV Size		 4.00 GB
+  Current LE		 1024
+  COW-table size	 2.00 GB
+  COW-table LE		 512
+  Allocated to snapshot  54.16%
+  Snapshot chunk size	 8.00 KB
+  Segments		 1
+  Allocation		 inherit
+  Read ahead sectors	 0
+  Block device		 254:5
+
+In this case snapshot volume is 2GB large, 54.16 % of which is already used.
+For all intents and purposes, the Snapshot volume represents a copy of the original LV at the moment it
+was created. It can be mounted on a separate mounting point and used for backup or other purposes:
+
+# mount snapshot volume
+mount -o ro /dev/vg0/snap /mnt/snap
+
+In this snippet code, the ro flag to mount it is read-only. You can make it read-only at the LVM level
+by appending a -p r to the lvcreate command.
+Once the filesystem has been mounted, you can proceed with backup using tar, rsync, or whatever backup
+tool is desired. If the LV doesn't contain a filesystem, or if a raw backup is desired, it's also possible
+to use dd directly on the device node.
+Once the copy process finishes and the Snapshot is no longer needed, simply unmount and scrap it using
+lvremove:
+
+umount /mnt/snap
+lvremove /dev/vg0/snap
+
+For consistency, in case a database is on top of an LV and a consistent backup is desired, remember to
+flush tables and make the Snapshot volume while acquiring a read-lock (sample pseudo-code):
+
+SQL> flush tables read lock
+{create Snapshot}
+SQL> release read lock
+{start copy process from the snapshot LV}
+
+Sample backup script
+This is not intended for enterprise use—an incremental backup with history would make more sense
+there. The concept remains the same, though.
+
+#!/bin/sh
+
+# we need the dm-snapshot module
+modprobe dm-snapshot
+if [ -e /dev/vg00/home-snap ]
+then
+  # remove left-overs, if any
+  umount -f /mnt/home-snap && true
+  lvremove -f /dev/vg00/home-snap
+fi
+# create snapshot, 1GB CoW space
+# that should be sufficient for accommodating changes during copy
+lvcreate -vs -p r -n home-snap -L 1G /dev/vg00/home
+mkdir -p /mnt/home-snap
+# mount recently-created snapshot as read-only
+mount -o ro /dev/vg00/home-snap /mnt/home-snap
+# magical rsync command__rsync -avhzPCi --delete -e "ssh -i /home/klausk/.ssh/id_rsa" \
+      --filter '- .Trash/' --filter '- *~' \
+      --filter '- .local/share/Trash/' \
+      --filter '- *.mp3' --filter '- *Cache*' --filter '- *cache*' \
+      /mnt/home-snap/klausk klausk2@pokgsa.ibm.comThis e-mail address is being protected
+      from spam bots, you need JavaScript enabled to view it :bkp/
+# unmount and scrap snapshot LV
+umount /mnt/home-snap
+lvremove -f /dev/vg00/home-snap
+
+In special cases where the cycle can't be estimated or copy process times are long, a script could query
+the Snapshot CoW usage with lvdisplay and extend the LV on demand. In extreme cases, you could opt for
+a Snapshot the same size as the original LV—that way, changes can never be larger than the whole volume!
+Recent LVM2 developments allow a logical volume to sport high-availability features by having two or
+more mirrors each which can be placed under different physical volumes (or different devices). dmeventd
+can bring a PV offline without service prejudice when an I/O error is detected in the device. Refer to
+lvcreate(8), lvconvert(8), and lvchange(8) man pages for more info.
+For hardware that supports it, it's possible to use dm_multipath for using different channels to access
+a single device, having a fail-over possibility in case a channel goes down. Refer to the dm_multipath
+and multipathd documentation for more details.

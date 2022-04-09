@@ -1,0 +1,244 @@
+filename: python_scaling_apps_multif_20180213.txt
+https://julien.danjou.info/blog/2018/scaling-python-application-threads
+
+Scaling a polling Python application with parallelism
+
+A study case around threads
+23 January 2018
+
+   A few weeks ago, Alon contacted me and asked me the following:
+     It so happened that I'm currently working on scaling some Python app. Specifically, now I'm trying
+     to figure out the best way to scale SSH connections - when one server has to connect to thousands
+     (or even tens of thousands) of remote machines in a short period of time (say, several minutes).
+
+     How would you write an application that does that in a scalable way?
+
+   Alon is using such an application to gather information on the hosts it connects to, though that's
+   not important in this case.
+
+   In a series of blog post, I'd like to help Alon solve this problem! We're gonna write an application
+   that can manage millions of hosts.
+
+   Well, if you have enough hardware, obviously.
+
+The job
+   Writing a Python application that connects to a host by ssh can be done using, for example,
+   Paramiko. That will not be the focus of this blog post since it is pretty straightforward to do.
+
+   To keep this exercise simple, we'll just use a ping function that looks like this:
+import subprocess
+
+def ping(hostname):
+    p = subprocess.Popen(["ping", "-c", "3", "-w", "1", hostname],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    return p.wait() == 0
+
+   The function ping returns True if the host is reachable and alive, or False if an error occurs (bad
+   hostname, network unreachable, ping timeout, etc.). We're also not trying to make ping fast by
+   specifying a lower timeout or a smaller number of packets. The goal is to scale this task while
+   knowing it takes time to execute.
+
+   So ping is going to be the job to be executed by our application. It'll replace ssh in this example,
+   but you'll see it'll be easy to replace it with any other job you might have.
+
+   We're going to use this job to accomplish a bigger mission: determine which hosts in my home network
+   are up:
+for i in range(255):
+    ip = "192.168.2.%d" % i
+    if ping(ip):
+        print("%s is alive" % ip)
+
+   Running this program alone and pinging all 255 IP addresses takes more than 10 minutes.
+
+   It is pretty slow because each time we ping a host, we wait for the ping to succeed or timeout before
+   starting the next ping. So if you need 3 seconds to ping each host in average, then to ping 255 nodes
+   you'll need 5 seconds x 255 = 765 seconds and that's more than 12 minutes.
+
+The solution
+   If 255 hosts need 12 minutes to be pinged, you can imagine how long it's going to be when we're going
+   to test which hosts are alive on the IPv4 Internet - 4 294 967 296 addresses to ping!
+
+   Since those ping (or ssh) jobs are not CPU intensive, we can consider that one multi-processor host
+   is going to be powerful enough - at least for a beginning.
+
+   The real issue here currently is that those tasks are I/O intensive and executing them serially is
+   very long.
+
+   So let's run them in parallel!
+
+   To do this, we're going to use threads. Threads are not efficient in Python when your tasks are CPU
+   intensive, but in case of blocking I/O, they are good enough.
+
+Using concurrent.futures
+
+   With concurrent.futures, it's easy to manage a pool of threads and schedule the execution of tasks.
+   Here's how we're going to do it:
+import functools
+from concurrent import futures
+import subprocess
+
+def ping(hostname):
+    p = subprocess.Popen(["ping", "-q", "-c", "3", "-W", "1",
+                          hostname],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    return p.wait() == 0
+
+with futures.ThreadPoolExecutor(max_workers=4) as executor:
+    futs = [
+        (host, executor.submit(functools.partial(ping, host)))
+        for host in ("192.168.2.%d" % i for i in range(255))
+    ]
+
+    for ip, f in futs:
+        if f.result():
+            print("%s is alive" % ip)
+
+   The ThreadPoolExecutor is an engine, called executor, that allows us to submit tasks to it. Each task
+   submitted is put into an internal queue using the executor.submit method. This method takes a
+   function to execute as argument.
+
+   Then, the executor pulls jobs out of its queue and execute them. In order to execute them, it starts
+   a thread that is going to be responsible for the execution. The maximum number of threads to start is
+   controlled by the max_workers parameters.
+
+   executor.submit returns a Future object, that holds the future result of the submitted task. Future
+   objects expose methods to know if the task is finished or not; here we just use Future.result() to
+   get the result. This method will block until the result is ready.
+
+   There's no magic recipe to find how many max workers you should use. It really depends on the nature
+   of the tasks that are submitted. In this case, using a value of 4 brings down the execution time to 3
+   minutes â€“ roughly 12Â minutes divided by 4, which makes sense. Setting the max_workers to 255 (i.e.
+   the number of tasks submitted) will make all the pings started at the same time, producing a CPU
+   usage spike, but bringing down the total execution time to less than 5 seconds!
+
+   Obviously, you wouldn't be able to start 4 billion threads in parallel, but if your system is big and
+   fast enough, and your task using more I/O than CPU, you can use a pretty high value in this case. The
+   memory should also be taken into account â€“ in this case, it's very low since the ping task is not
+   using a lot of memory.
+
+Just a first step
+   As already said, this ping job does not use a lot of CPU time or I/O bandwidth, neither would the
+   original ssh case by Alon. However, if that would be the case, this method would be limited pretty
+   quickly. Threads are not always the best option to maximize your throughput, especially with Python.
+
+   These are just the first steps of the distribution and scalability mechanism that you can implement
+   using Python.
+
+
+---
+https://julien.danjou.info/blog/2018/scaling-python-application-asyncio
+
+Scaling a polling Python application with asyncio
+
+A study case around asyncio
+12 February 2018
+
+   This article is a follow-up of my previous blog post about scaling a large number of connections.
+   If you don't remember, I was trying to solve one of my followers' problem:
+
+     It so happened that I'm currently working on scaling some Python app. Specifically, now I'm trying
+     to figure out the best way to scale SSH connections - when one server has to connect to thousands
+     (or even tens of thousands) of remote machines in a short period of time (say, several minutes).
+
+     How would you write an application that does that in a scalable way?
+
+   In the first article, we wrote a program that could handle large scale of this problem by using
+   multiple threads. While this worked pretty well, this had some severe limitations. This time, we're
+   going to take a different approach.
+
+The job
+   The job has not changed and is still about connecting to a remote server via ssh. This time, rather
+   than faking it by using ping instead, we are going to connect for real to an ssh server. Once
+   connected to the remote server, the mission will be to run a single command. For the sake of this
+   example, the command that will be run here is just a simple "echo hello world".
+
+Using an event loop
+   This time, rather than leveraging threads, we are using asyncio. Asyncio is the leading Python
+   event loop system implementation. It allows executing multiple functions (named coroutines)
+   concurrently. The idea is that each time a coroutine performs an I/O operation, it yields back the
+   control to the event loop. As the input or output might be blocking (e.g., the socket has no data yet
+   to be read), the event loop will reschedule the coroutine as soon as there is work to do. In the
+   meantime, the loop can schedule another coroutine that has something to do â€“ or wait for that to
+   happen.
+
+   Not all libraries are compatible with the asyncio framework. In our case, we need an ssh library that
+   has support for asyncio. It happens that AsyncSSH is a Python library that provides ssh
+   connection handling support for asyncio. It is particularly easy to use, and the [14]documentation
+   has plenty of examples.
+
+   Here's the function that we're going to use to execute our command on a remote host:
+import asyncssh
+
+async def run_command(host, command):
+    async with asyncssh.connect(host) as conn:
+        result = await conn.run(command)
+        return result.stdout
+
+   The function run_command runs a command on a remote host once connected to it via ssh. It then
+   returns the standard output of the command. The function uses the keywords async and await that are
+   specific to PythonÂ 3 and asyncio. It indicates that the called functions are coroutine that might be
+   blocking, and that the control is yield back to the event loop.
+
+   As I don't own hundreds of servers where I can connect to, I will be using a single remote server as
+   the target â€“ but the program will connect to it multiple times. The server is at a latency of about
+   6Â ms, so that'll magnify a bit the results.
+
+   The first version of this program is simple and stupid. It'll run N times the run_command function
+   serially by providing the tasks one at a time to the asyncio event loop:
+loop = asyncio.get_event_loop()
+
+outputs = [
+    loop.run_until_complete(
+        run_command("myserver", "echo hello world %d" % i))
+    for i in range(200)
+]
+print(outputs)
+
+   Once executed, the program prints the following:
+$ time python3 asyncssh-test.py
+['hello world 0\n', 'hello world 1\n', 'hello world 2\n', ... 'hello world 199\n']
+python3 asyncssh-test.py  6.11s user 0.35s system 15% cpu 41.249 total
+
+   It took 41 seconds to connect 200 times to the remote server and execute a simple printing command.
+
+   To make this faster, we're going to schedule all the coroutines at the same time. We just need to
+   feed the event loop with the 200 coroutines at once. That will give it the ability to schedule them
+   efficiently.
+outputs = loop.run_until_complete(asyncio.gather(
+    *[run_command("myserver", "echo hello world %d" % i)
+      for i in range(200)]))
+print(outputs)
+
+   By using asyncio.gather, it is possible to pass a list of coroutines and wait for all of them to be
+   finished. Once run, this program prints the following:
+$ time python3 asyncssh-test.py
+['hello world 0\n', 'hello world 1\n', 'hello world 2\n', ... 'hello world 199\n']
+python3 asyncssh-test.py  4.90s user 0.34s system 35% cpu 14.761 total
+
+   This version only took â…“ of the original execution time to finish! As a fun note, the main
+   limitation here is that my remote server is having trouble to handle more than 150 connections in
+   parallel, so this program is a bit tough for it alone.
+
+Scalability
+   To show how great this method is, I've built a chart below that shows the difference of execution
+   time between the two approaches, depending on the number of hosts the application has to connect to.
+   [chart-asyncssh.png]
+
+   The trend lines highlight the difference of execution time and how important the concurrency is here.
+   For 10,000 nodes, the time needed for a serial execution would be around 40Â minutes whereas it would
+   be only 7Â minutes with a cooperative approach â€“ quite a difference. The concurrent approach allows
+   executing one command 205 times a day rather than only 36 times!
+
+That was the second step
+   [15][the-hacker-guide-to-scaling-python.png]
+
+   Using an event loop for tasks that can run concurrently due to their I/O intensive nature is really a
+   great way to maximize the throughput of a program. This simple changes made the program 6Ã— faster.
+
+   Anyhow, this is now the only way to scale Python program.
+
+   
+---
+   

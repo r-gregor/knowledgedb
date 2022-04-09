@@ -1,0 +1,129 @@
+filename: add-route-ip-command_20140919.txt
+http://www.thegeekstuff.com/2014/08/add-route-ip-command/
+
+How to Add Multiple Routes in Linux Using ip Command Examples
+
+   by Karthikeyan Sadhasivam on August 21, 2014
+
+   Apart from the default route, you can also configure additional routes.
+
+   For example, your server you might have 2 interfaces (eth0 and eth1). By default, all the traffic is
+   routed through interface eth0 irrespective of what IP address you have configured on eth1.
+
+   To route the incoming and outgoing traffic through eth1, other than the default route (eth0), you
+   also need to add additional routes for eth1 .
+   In this tutorial, let us use the following example:
+     * eth0 has been configured with IP address 19.86.101.54 with netmask 255.255.255.0 and default
+       gateway of 19.86.101.1
+     * eth1 has been configured with IP address 19.86.100.176 with netmask 255.255.255.0 and it's
+       gateway IP address is 19.86.100.1
+
+   You can view your current ip-address of your interface cards using [11]ifconfig command as shown
+   below.
+# ifconfig -a
+eth0      Link encap:Ethernet  HWaddr 00:50:56:8E:0B:EC
+          inet addr:19.86.101.54  Bcast:19.86.101.255  Mask:255.255.255.0
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:3735 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:336 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000
+          RX bytes:295679 (288.7 Kb)  TX bytes:50312 (49.1 Kb)
+
+eth1      Link encap:Ethernet  HWaddr 00:50:56:8E:27:0D
+          inet addr:19.86.100.176  Bcast:19.86.100.255  Mask:255.255.255.0
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:14 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000
+          RX bytes:840 (840.0 b)  TX bytes:0 (0.0 b)
+
+   Also, the [12]netstat command output indicates that the default gateway is pointing to eth0,
+# netstat -rn
+Kernel IP routing table
+Destination     Gateway         Genmask         Flags   MSS Window  irtt Iface
+0.0.0.0         19.86.101.1     0.0.0.0         UG        0 0          0 eth0
+19.86.100.0     0.0.0.0         255.255.255.0   U         0 0          0 eth1
+19.86.101.0     0.0.0.0         255.255.255.0   U         0 0          0 eth0
+127.0.0.0       0.0.0.0         255.0.0.0       U         0 0          0 lo
+169.254.0.0     0.0.0.0         255.255.0.0     U         0 0          0 eth0
+
+   With the above settings, you may be able to ping both the gateways and communicate with other devices
+   without any issues. But, remember that all the traffic is routed through eth0 by default.
+
+   When you ping the IP address 19.86.100.176 from outside your network you may notice that it will not
+   be pingable.
+
+   In order to implement this, you need a create a new policy in the routing table. The routing table is
+   located at /etc/iproute2/rt_tables. The initial rule file before configuration may look like the one
+   shown below.
+# cat /etc/iproute2/rt_tables
+#
+# reserved values
+#
+255     local
+254     main
+253     default
+0       unspec
+#
+# local
+#
+#1      inr.ruhep
+#
+
+   To view all the current rules, use the ip command as shown below:
+# ip rule show
+0:      from all lookup local
+32766:  from all lookup main
+32767:  from all lookup default
+
+   First, take a backup of the rt_Tables before making any changes.
+cd /etc/iproute2
+cp rt_tables rt_tables.orig
+
+   Next, create a new policy routing table entry in /etc/iproute2/rt_tables file:
+echo "1 admin" >> /etc/iproute2/rt_tables
+
+   Now add the routing entries in the admin table.
+ip route add 19.86.100.0/24 dev eth1 src 19.86.100.176 table admin
+ip route add default via 19.86.100.1 dev eth1 table admin
+
+   In the above example:
+     * In the first ip command, we are adding subnet 19.86.100.0 with a netmask 255.255.255.0 with the
+       source IP address 19.86.100.176 & device eth1 to the admin table.
+     * In the second ip command, we are adding the route 19.86.100.1 to the admin table. This way all
+       the rules defined in admin table routes traffic through device eth1.
+
+   Once the above commands are executed successfully, you need to instruct the OS how to use this table.
+
+   In the "ip rule show" you may noticed the line "32766: from all lookup main". This is the line that
+   instructs the OS to route all the traffic defined in "main" table which is the default gateway.
+
+   All the rules are executed in the ascending order. So, we will add rule entries above the "main"
+   table.
+ip rule add from 19.86.100.176/24 table admin
+ip rule add to 19.86.100.176/24 table admin
+ip route flush cache
+
+   In the above example:
+     * The first command adds the rule that all the traffic going to eth1's IP needs to use the "admin"
+       routing table instead of "main" one.
+     * The second command adds the rule that all the outgoing traffic from eth1's IP needs to use the
+       "admin" routing table instead of "main" one.
+     * The third command is used to commit all these changes in the previous commands
+
+   Finally, verify that your changes are made appropriately using the following command:
+# ip rule show
+0:      from all lookup local
+32764:  from all to 19.86.100.176/24 lookup admin
+32765:  from 19.86.100.176/24 lookup admin
+32766:  from all lookup main
+32767:  from all lookup default
+
+   At this point, you should be able to ping the IP address 19.86.100.176 from the outside network and
+   view all the traffic that is supposed to be using eth1 is working as expected.
+
+   To make these changes persistent across reboot, you can add these commands to /etc/init.d/boot.local
+   (for SUSE Linux), or /etc/rc.d/rc.local (for Redhat, CentOS).
+
+   If you want to configure one more IP address on a different subnet, repeat all of the above steps,
+   but use a different table name. Instead of "admin" table, use "admin-new" table.

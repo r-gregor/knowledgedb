@@ -1,0 +1,289 @@
+filename: perf_performance-assessment_20170322.txt
+http://krisman.be/blog/2017/03/10/performance-assessment-in-linux/
+
+Performance Analysis in Linux
+
+   Dynamic profilers are tools to collect data statistics about applications while they are running,
+   with minimal intrusion on the application being observed.
+
+   The kind of data that can be collected by profilers varies deeply, depending on the requirements of
+   the user. For instance, one may be interested in the amount of memory used by a specific application,
+   or maybe the number of cycles the program executed, or even how long the CPU was stuck waiting for
+   data to be fetched from the disks. All this information is valuable when tracking performance issues,
+   allowing the programmer to identify bottlenecks in the code, or even to learn how to tune an
+   application to a specific environment or workload.
+
+   In fact, maximizing performance or even understanding what is slowing down your application is a real
+   challenge on modern computer systems. A modern CPU carries so many hardware techniques to optimize
+   performance for the most common usage case, that if an application doesn't intentionally exploit
+   them, or worse, if it accidentally lies in the special uncommon case, it may end up experiencing
+   terrible results without doing anything apparently wrong.
+
+   Let's take a quite non-obvious way of how things can go wrong, as an example.
+
+Forcing branch mispredictions
+   Based on the example from
+[http://stackoverflow.com/questions/11227809/why-is-it-faster-to-process-a-sorted-array-than-an-unsorted-array]
+   here.
+
+   The code below is a good example of how non-obvious performance assessment can be. In this function,
+   the first for loop initializes a vector of size n with random values ranging from 0 to N. We can
+   assume the values are well distributed enough for the vector elements to be completely unsorted.
+
+   The second part of the code has a for loop nested inside another one. The outer loop, going from 0 to
+   K, is actually a measurement trick. By executing the inner loop many times, it stresses out the
+   performance issues in that part of the code. In this case, it helps to reduce any external factor
+   that may affect our measurement.
+
+   The inner loop is where things get interesting. This loop crawls over the vector and decides whether
+   the value should be accumulated in another variable, depending on whether the element is higher than
+   N/2 or not. This is done using an if clause, which gets compiled into a conditional branch
+   instruction, which modifies the execution flow depending on the calculated value of the condition, in
+   this case, if vec[i] >= N/2, it will enter the if leg, otherwise it will skip it entirely.
+   <code>
+int rand_partsum(int n)
+{
+  int i,k;
+  long sum = 0;
+  int *vec = malloc(n * sizeof(int));
+
+  for (i = 0; i < n; i++)
+    vec[i] = rand()%n;
+
+  for (k = 0; k < 1000000; k++)
+    for (i = 0; i < n; i++)
+      if (vec[i] > n/2)
+        sum += n[i];
+
+  return sum;
+}
+</code>
+
+   When executing the code above on an Intel Core i7-5500U, with a vector size of 5000 elements
+   (N=5000), it takes an average of 29.97 seconds. Can we do any better?
+
+   One may notice that this vector is unsorted, since each element comes from a call to rand(). What if
+   we sorted the vector before executing the second for loop? For the sake of the example, let's say we
+   add a call to the glibc implementation of QuickSort right after the initialization loop.
+
+   A naive guess would suggest that the algorithm got worse, because we just added a new sorting step,
+   thus raising the complexity of the entire code. One should assume this would result on a higher
+   execution time.
+
+   But, in fact, when executing the sorted version in the same machine, the average execution time drops
+   to 13.20 seconds, which is a reduction of 56% in execution time. Why does adding a new step actually
+   reduces the execution time? The fact is that pre-sorting the vector in this case, allows the cpu to
+   do a much better job at internally optimizing the code during execution. In this case, the issue
+   observed was a high number of branch mispredictions, which were triggered by the conditional branch
+   that implements the if clause.
+
+   Modern CPUs have quite deep pipelines, meaning that the instruction being fetched on any given cycle
+   is always a few instructions down the road than the instruction actually executed on that cycle. When
+   there is a conditional branch along the way, there are two possible paths that can be followed, and
+   the prefetch unit has no idea which one it should choose, until all the actual condition for that
+   instruction is calculated.
+
+   The obvious choice for the Prefetch unit on such cases is to stall and wait until the execution unit
+   decides the correct path to follow, but stalling the pipeline like this is very costly. Instead, a
+   speculative approach can be taken by a unit called Branch Predictor, which tries to guess which path
+   should be taken. After the condition is calculated, the CPU verifies the guessed path: if it got the
+   prediction right, in other words, if a branch prediction hit occurs, the execution just continues
+   without much performance impact, but if it got it wrong, the processor needs to flush the entire
+   pipeline, go back, and restart executing the correct path. The later is called a branch prediction
+   miss, and is also a costly operation.
+
+   In systems with a branch predictor, like any modern CPU, the predictor is usually based on the
+   history of the particular branches. If a conditional branch usually goes a specific way, the next
+   time it appears, the predictor will assume it will take the same route.
+
+   Back to our example code, that if condition inside the for loop does not have any specific pattern.
+   Since the vector elements are completely random, sometimes it will enter the if leg, sometimes it
+   will skip it entirely. That is a very hard situation for the branch predictor, who keeps guessing
+   wrong and triggering flushes in the pipeline, which keeps delaying the application.
+
+   In the sorted version, instead, it is very easy to guess whether it should enter the if leg or not.
+   For the first part of the vector, where the elements are mostly < N/2, the if leg will always be
+   skipped, while for the second part, it will always enter the if leg. The branch predictor is capable
+   of learning this pattern after a few iterations, and is able to do much better guesses about the
+   flow, reducing the number of branch misses, thus increasing the overall performance.
+
+   Well, pointing specific issues like this is usually hard, even for a simple code like the example
+   above. How could we be sure that the the program is hitting enough branch mispredictions to affect
+   performance? In fact, there are always many things that could be the cause of slowness, even for a
+   slightly more complex program.
+
+   Perf_events is an interface in the Linux kernel and a userspace tool to sample hardware and software
+   performance counters. It allows, among many other things, to query the CPU register for the
+   statistics of the branch predictor, i.e. the number of prediction hits and misses of a given
+   application.
+
+   The userspace tool, known as the perf command, is available in the usual channels of common distros.
+   In Debian, for instance, you can install it with:
+sudo apt install linux-perf
+
+   We'll dig deeper into the perf tool later on another post, but for now, let's use the, perf record
+   and perf annotate commands, which allow tracing the program and annotating the source code with the
+   time spent on each instruction, and the perf stat command, which allows to run a program and display
+   statistics about it:
+
+   At first, we can instruct perf to instrument the program and trace its execution:
+[krisman@dilma bm]$ perf record ./branch-miss.unsorted
+[ perf record: Woken up 19 times to write data ]
+[ perf record: Captured and wrote 4.649 MB perf.data (121346 samples) ]
+
+   The perf record will execute the program passed as parameter and collect performance information into
+   a new perf.data file. This file can then be passed to other perf commands. In this case, we pass it
+   to the perf annotate command, which crawls over each address in the program and prints the number of
+   samples that was collected while the program was executing each instruction. Instructions with a
+   higher number of samples indicates that the program spent more time in that region, indicating that
+   it is hot code, and a good part of the program to try to optimize. Notice that, for modern
+   processors, the exact position is an estimation, so this information must be used with care. As a
+   rule of thumb, one should be looking for hot regions, instead of single hot instructions.
+
+   Below is the output of perf annotate, when analyzing the function above. The output is truncated to
+   display only the interesting parts.
+[krisman@dilma bm]$ perf annotate
+
+        :
+        :      int rand_partsum()
+        :      {
+   0.00 :        74e:   push   %rbp
+   0.00 :        74f:   mov    %rsp,%rbp
+   0.00 :        752:   push   %rbx
+   0.00 :        753:   sub    $0x38,%rsp
+   0.00 :        757:   mov    %rsp,%rax
+   0.00 :        75a:   mov    %rax,%rbx
+
+   [...]
+
+   0.00 :        7ce:   mov    $0x0,%edi
+   0.00 :        7d3:   callq  5d0 <time@plt>
+   0.00 :        7d8:   mov    %eax,%edi
+   0.00 :        7da:   callq  5c0 <srand@plt>
+        :              for (i = 0; i < n; i++)
+   0.00 :        7df:   movl   $0x0,-0x14(%rbp)
+   0.00 :        7e6:   jmp    804 <main+0xb6>
+        :                      vec[i] = rand()%n;
+   0.00 :        7e8:   callq  5e0 <rand@plt>
+   0.00 :        7ed:   cltd
+   0.00 :        7ee:   idivl  -0x24(%rbp)
+   0.00 :        7f1:   mov    %edx,%ecx
+   0.00 :        7f3:   mov    -0x38(%rbp),%rax
+   0.00 :        7f7:   mov    -0x14(%rbp),%edx
+   0.00 :        7fa:   movslq %edx,%rdx
+   0.00 :        7fd:   mov    %ecx,(%rax,%rdx,4)
+        :              for (i = 0; i < n; i++)
+   0.00 :        800:   addl   $0x1,-0x14(%rbp)
+   0.00 :        804:   mov    -0x14(%rbp),%eax
+   0.00 :        807:   cmp    -0x24(%rbp),%eax
+   0.00 :        80a:   jl     7e8 <main+0x9a>
+
+   [...]
+
+         :              for (k = 0; k < 1000000; k++)
+    0.00 :        80c:   movl   $0x0,-0x18(%rbp)
+    0.00 :        813:   jmp    85e <main+0x110>
+         :                      for (i = 0; i < n; i++)
+    0.01 :        815:   movl   $0x0,-0x14(%rbp)
+    0.00 :        81c:   jmp    852 <main+0x104>
+         :                              if (vec[i] > n/2)
+    0.20 :        81e:   mov    -0x38(%rbp),%rax
+    6.47 :        822:   mov    -0x14(%rbp),%edx
+    1.94 :        825:   movslq %edx,%rdx
+   26.86 :        828:   mov    (%rax,%rdx,4),%edx
+    0.08 :        82b:   mov    -0x24(%rbp),%eax
+    1.46 :        82e:   mov    %eax,%ecx
+    0.62 :        830:   shr    $0x1f,%ecx
+    3.82 :        833:   add    %ecx,%eax
+    0.06 :        835:   sar    %eax
+    0.70 :        837:   cmp    %eax,%edx
+    0.42 :        839:   jle    84e <main+0x100>
+         :                                      sum += vec[i];
+    9.15 :        83b:   mov    -0x38(%rbp),%rax
+    5.91 :        83f:   mov    -0x14(%rbp),%edx
+    0.26 :        842:   movslq %edx,%rdx
+    5.87 :        845:   mov    (%rax,%rdx,4),%eax
+    2.09 :        848:   cltq
+    9.31 :        84a:   add    %rax,-0x20(%rbp)
+         :                      for (i = 0; i < n; i++)
+   16.66 :        84e:   addl   $0x1,-0x14(%rbp)
+    6.46 :        852:   mov    -0x14(%rbp),%eax
+    0.00 :        855:   cmp    -0x24(%rbp),%eax
+    1.63 :        858:   jl     81e <main+0xd0>
+         :              for (k = 0; k < 1000000; k++)
+
+   [...]
+
+   The first thing to notice is that the perf command tries to interleave C code with the Assembly code.
+   This feature requires compiling the test program with -g3 to include debug information.
+
+   The number before the ':' is the percentage of samples collected while the program was executing each
+   instruction. Once again, this is not an exact information, so you should be looking for hot regions,
+   and not specific instructions.
+
+   The first and second hunk are the function prologue, which was executed only once, and the vector
+   initialization. According to the profiling data, there is little point in attempting to optimize
+   them, because the execution practically didn't spend any time on it. The third hunk is the second
+   loop, where it spent almost all the execution time. Since that loop is where most of our samples
+   where collected, we can assume that it is a hot region, which we can try to optimize. Also, notice
+   that most of the samples were collected around that if leg. This is another indication that we should
+   look into that specific code.
+
+   To find out what might be causing the slowness, we can use the perf stat command, which prints a
+   bunch of performance counters information for the entire program. Let's take a look at its output.
+[krisman@dilma bm]$ perf stat ./branch-miss.unsorted
+
+ Performance counter stats for './branch-miss.unsorted:
+
+    29876.773720  task-clock (msec) #    1.000 CPUs utilized
+              25  context-switches  #    0.001 K/sec
+               0  cpu-migrations    #    0.000 K/sec
+              49  page-faults       #    0.002 K/sec
+  86,685,961,134  cycles            #    2.901 GHz
+  90,235,794,558  instructions      #    1.04  insn per cycle
+  10,007,460,614  branches          #  334.958 M/sec
+   1,605,231,778  branch-misses     #   16.04% of all branches
+
+   29.878469405 seconds time elapsed
+
+   perf stat will dynamically profile the program passed in the command line and report back a number of
+   statistics about the entire execution. In this case, let's look at the 3 last lines in the output.
+   The first one gives the rate of instructions executed per CPU cycle; the second line, the total
+   number of branches executed; and the third, the percentage of those branches that resulted in a
+   branch miss and pipeline flush.
+
+   Perf is even nice enough to put important or unexpected results in red. In this case, the last line,
+   Branch-Misses, was unexpectedly high, thus it was displayed in red in this test.
+
+   And now, let's profile the pre-sorted version. Look at the number of branch misses:
+[krisman@dilma bm]$ perf stat ./branch-miss.sorted
+
+ Performance counter stats for './branch-miss.sorted:
+
+    14003.066457  task-clock (msec) #    0.999 CPUs utilized
+             175  context-switches  #    0.012 K/sec
+               4  cpu-migrations    #    0.000 K/sec
+              56  page-faults       #    0.004 K/sec
+  40,178,067,584  cycles            #    2.869 GHz
+  89,689,982,680  instructions      #    2.23  insn per cycle
+  10,006,420,927  branches          #  714.588 M/sec
+       2,275,488  branch-misses     #    0.02% of all branches
+
+  14.020689833 seconds time elapsed
+
+   It went down from over 16% to just 0.02% of the total branches! This is very impressive and is likely
+   to explain the reduction in execution time. Another interesting value is the number of instructions
+   per cycle, which more than doubled. This happens because, once we reduced the number of stalls, we
+   make better use of the pipeline, obtaining a better instruction throughput.
+
+Wrapping up
+   As demonstrated by the example above, figuring out the root cause of a program slowness is not always
+   easy. In fact, it gets more complicated every time a new processor comes out with a bunch of shiny
+   new optimizations.
+
+   Despite being a short example code, the branch misprediction case is still quite non-trivial for
+   anyone not familiar with how the branch prediction mechanism works. In fact, if we just look at the
+   algorithm, we could have concluded that adding a sort algorithm would just add more overhead to the
+   algorithm. Thus, this example gives us a high-level view of how helpful profiling tools really are.
+   By using just one of the several features provided by the perf tool, we were able to draw major
+   conclusions about the program being examined.

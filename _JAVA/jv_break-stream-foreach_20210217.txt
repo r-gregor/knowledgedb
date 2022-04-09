@@ -1,0 +1,167 @@
+filename: jv_break-stream-foreach_20210217.txt
+https://www.baeldung.com/java-break-stream-foreach
+
+How to Break from Java Stream forEach
+April 24, 2020
+
+1. Overview
+       As Java developers, we often write code that iterates over a set of elements and performs an
+       operation on each one. The Java 8 streams library and its forEach method allow us to
+       write that code in a clean, declarative manner.
+       While this is similar to loops, we are missing the equivalent of the break statement to abort
+       iteration. A stream can be very long, or potentially infinite, and if we have no reason to
+       continue processing it, we would want to break from it, rather than wait for its last element.
+       In this tutorial, we're going to look at some mechanisms that allow us to simulate a break
+       statement on a Stream.forEach operation.
+
+2. Java 9's Stream.takeWhile()
+       Let's suppose we have a stream of String items and we want to process its elements as long as
+       their lengths are odd.
+       Let's try the Java 9 Stream.takeWhile method:
+
+Stream.of("cat", "dog", "elephant", "fox", "rabbit", "duck")
+	.takeWhile(n -> n.length() % 2 != 0)
+	.forEach(System.out::println);
+
+       If we run this, we get the output:
+cat
+dog
+       Let's compare this with the equivalent code in plain Java using a for loop and a break statement,
+       to help us see how it works:
+
+List<String> list = asList("cat", "dog", "elephant", "fox", "rabbit", "duck");
+for (int i = 0; i < list.size(); i++) {
+	String item = list.get(i);
+	if (item.length() % 2 == 0) {
+		break;
+	}
+    System.out.println(item);
+}
+
+       As we can see, the takeWhile method allows us to achieve exactly what we need.
+       But what if we haven't adopted Java 9 yet? How can we achieve a similar thing using Java 8?
+
+3. A Custom Spliterator
+       Let's create a custom Spliterator that will work as a decorator for a
+       Stream.spliterator. We can make this Spliterator perform the break for us.
+       First, we'll get the Spliterator from our stream, then we'll decorate it with our
+       CustomSpliterator and provide the Predicate to control the break operation. Finally, we'll create
+       a new stream from the CustomSpliterator:
+
+public static <T> Stream<T> takeWhile(Stream<T> stream, Predicate<T> predicate) {
+	CustomSpliterator<T> customSpliterator = new CustomSpliterator<>(stream.spliterator(), predicate);
+	return StreamSupport.stream(customSpliterator, false);
+}
+
+       Let's look at how to create the CustomSpliterator:
+
+public class CustomSpliterator<T> extends Spliterators.AbstractSpliterator<T> {
+
+	private Spliterator<T> splitr;
+	private Predicate<T> predicate;
+	private boolean isMatched = true;
+
+	public CustomSpliterator(Spliterator<T> splitr, Predicate<T> predicate) {
+		super(splitr.estimateSize(), 0);
+		this.splitr = splitr;
+		this.predicate = predicate;
+	}
+
+	@Override
+	public synchronized boolean tryAdvance(Consumer<? super T> consumer) {
+		boolean hadNext = splitr.tryAdvance(elem -> {
+			if (predicate.test(elem) && isMatched) {
+				consumer.accept(elem);
+			} else {
+				isMatched = false;
+			}
+		});
+		return hadNext && isMatched;
+	}
+}
+
+       So, let's take a look at the tryAdvance method. We can see here that the custom Spliterator
+       processes the elements of the decorated Spliterator. The processing is done as long as our
+       predicate is matched and the initial stream still has elements. When either of the conditions
+       becomes false, our Spliterator "breaks" and the streaming operation ends.
+       Let's test our new helper method:
+
+	@Test
+	public void whenCustomTakeWhileIsCalled_ThenCorrectItemsAreReturned() {
+		Stream<String> initialStream =
+			Stream.of("cat", "dog", "elephant", "fox", "rabbit", "duck");
+
+		List<String> result =
+			CustomTakeWhile.takeWhile(initialStream, x -> x.length() % 2 != 0)
+				.collect(Collectors.toList());
+
+		assertEquals(asList("cat", "dog"), result);
+	}
+
+       As we can see, the stream stopped after the condition was met. For testing purposes, we've
+       collected the results into a list, but we could also have used a forEach call or any of the other
+       functions of Stream.
+
+4. A Custom forEach
+       While providing a Stream with the break mechanism embedded can be useful, it may be simpler to
+       focus on just the forEach operation.
+       Let's use the Stream.spliterator directly without a decorator:
+
+public class CustomForEach {
+
+	public static class Breaker {
+		private boolean shouldBreak = false;
+
+		public void stop() {
+			shouldBreak = true;
+		}
+
+		boolean get() {
+			return shouldBreak;
+		}
+	}
+
+	public static <T> void forEach(Stream<T> stream, BiConsumer<T, Breaker> consumer) {
+		Spliterator<T> spliterator = stream.spliterator();
+		boolean hadNext = true;
+		Breaker breaker = new Breaker();
+
+		while (hadNext && !breaker.get()) {
+			hadNext = spliterator.tryAdvance(elem -> {
+				consumer.accept(elem, breaker);
+			});
+		}
+	}
+}
+
+       As we can see, the new custom forEach method calls a BiConsumer providing our code with both
+       the next element and a breaker object it can use to stop the stream.
+       Let's try this out in a unit test:
+
+	@Test
+	public void whenCustomForEachIsCalled_ThenCorrectItemsAreReturned() {
+		Stream<String> initialStream = Stream.of("cat", "dog", "elephant", "fox", "rabbit", "duck");
+		List<String> result = new ArrayList<>();
+
+		CustomForEach.forEach(initialStream, (elem, breaker) -> {
+			if (elem.length() % 2 == 0) {
+				breaker.stop();
+			} else {
+				result.add(elem);
+			}
+		});
+
+		assertEquals(asList("cat", "dog"), result);
+	}
+
+5. Conclusion
+       In this article, we looked at ways to provide the equivalent of calling break on a stream. We saw
+       how Java 9's takeWhile solves most of the problem for us and how to provide a version of that for
+       Java 8.
+       Finally, we looked at a utility method which can provide us with the equivalent of a break
+       operation while iterating on a Stream.
+       As always, the example code can be found over on GitHub.
+
+
+---
+

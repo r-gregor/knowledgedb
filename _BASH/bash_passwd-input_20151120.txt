@@ -1,0 +1,252 @@
+﻿filename: bash_passwd-input_20151120.txt
+
+https://www.ict.griffith.edu.au/anthony/info/crypto/passwd_input.txt
+
+-------------------------------------------------------------------------------
+Password Reading and Handling
+-------------------------------------------------------------------------------
+DIY Password reading...  (No GUI, and non-curses)
+
+From discussion on "password scripts"
+  http://www.linuxquestions.org/questions/showthread.php?p=4484096
+
+It is very easy just to read direct from a TTY with echo turned off,
+and let the system do the work for you.
+
+Version 0 - direct read from keyboard (very old bourne shells)
+=======8<--------
+#!/bin/sh
+if  tty >/dev/null;  then
+  echo -n "Password: "  >/dev/tty
+  stty_save=`stty -g`
+  stty -echo  # turn off echo
+  trap 'stty "$stty_save"; exit 1;' 1 2 3 15
+fi
+unset password
+read password
+if [ "$stty_save" ]; then
+  echo ''
+  stty "$stty_save"
+  trap '' 1 2 3 15
+fi
+
+echo "$password"
+exit
+=======8<--------
+
+Note how the above also checks if you are actually reading from a TTY, before
+using the "stty" command.
+
+Also that the prompt is not echoed if there is no TTY.  This allows other
+programs to pipe a password into this script (especially if it is part of
+a larger program.
+
+But you get no feedback that the computer is recieving characters or actually
+even working.
+
+
+Bash read also has a -s option that can be used to ensure no echo regardless
+of stty settings. and a -p to print a prompt if the input is from a TTY!  This
+means no need for the "stty" tests above.  But it does not work on older
+shells.
+
+If using bash you should also ALWAYS add -r to ensure correct handling of
+a final backslash.  This option is needed even when you are reading single
+characters!
+
+Version 1 - first attempt for password feedback
+=======8<--------
+#!/bin/bash
+PWORD=
+ANYKEY=0
+echo -n "Password:  "
+until [ -z "$ANYKEY" ]
+do
+    read -r -s -N 1 ANYKEY
+    echo -n "*"
+    PWORD="$PWORD$ANYKEY"
+done
+echo
+echo $PWORD
+exit
+=======8<--------
+
+You need to ensure that PWORD is not an enviroment variable or it will be
+visible in the process table.
+
+
+Version 2 - output stars for echo input character
+=======8<--------
+#!/bin/bash
+
+unset password    # ensure that password is NOT an environment variable
+prompt="Enter Password : "
+
+# Note read exits 'false' on EOF, or some signal (timeout or pipe)
+while IFS= read -p "$prompt" -r -n1 -s char
+do
+  # the read $char is empty if a NEWLINE or NULL has been recieved (EOL)
+  [[ "$char" == '' ]] && break
+  prompt='*'
+  password+="$char"
+done
+echo
+echo "Password=$password"
+echo "Password length = $(echo -n "$password" | wc -c)"
+exit
+=======8<--------
+
+Note how the "$prompt" is modified to control the user prompting and feedback.
+
+Setting IFS  needed to prevent white space from delimiting the sequence.  But
+if you use the option -N instead of -n, then a return will not mark the end of
+the sequence.  The alternative is to specify -d$'\r' as the delimeter
+(replacement for the IFS usage)
+
+
+As you are reading individual characters yourself (as in the above then YOU
+will need to handle normal terminal control characters such as backspace,
+delete, and ^U (kill input)
+
+Type this ab{delete}{delete}cd{enter}
+and you will see "cd" returned.
+
+Yes you could use such characters in a password, but typing them in most
+password readers just does not work very well. If you plan to use control
+characters in passwords, you may as will be giving your password in hex or
+base64, to make it more manageable.
+
+Version 3 - output stars and handle backspaces and kill line
+=======8<--------
+#!/bin/bash
+unset PWORD
+PWORD=
+echo -n 'password: ' 1>&2
+while IFS= read -r -n1 -s char; do
+  case "$( echo -n "$char" | od -An -tx1 )" in
+  '') break ;;   # EOL
+  ' 08'|' 7f')  # backspace or delete
+      if [ -n "$PWORD" ]; then
+        PWORD="$( echo "$PWORD" | sed 's/.$//' )"
+        echo -n $'\b \b' 1>&2
+      fi
+      ;;
+  ' 15') # ^U or kill line
+      #echo -n "$PWORD" | tr -c '\b' '\b' >&2
+      #echo -n "$PWORD" | tr -c ' '  ' '  >&2
+      #echo -n "$PWORD" | tr -c '\b' '\b' >&2
+      echo -n "$PWORD" | sed 's/./\cH \cH/g' >&2
+      PWORD=''
+      ;;
+  *)  PWORD="$PWORD$char"
+      echo -n '*' 1>&2
+      ;;
+  esac
+done
+echo
+echo $PWORD
+=======8<--------
+
+Ideally the current 'kill line' should be extracted from the "stty", in case
+the user changed it for some reason. Both backspace or delete should be
+handled as shown above, regardless of the current "stty" settings.
+
+It should also disable star processing when the input is not a TTY!  (just
+a straight pass-thru). version 2 did this via the read prompt handler.
+
+
+Security Concern for password reading with echoed stars...
+
+Note printing stars can be a security problem as people looking over someones
+shoulder can now see just how many characters the user has typed.
+
+As such each character should actually output some reandomised response
+or a randomised number of stars (with overflow prevention)
+Or perhaps some other response, like a changing ascii-art.
+As a minimum to security the script should erase all stars and
+replace them with a standard response such as "==password accepted==".
+
+-------------------------------------------------------------------------------
+Password Reading Programs.
+
+Why re-invent the wheel. There are lots of programs that have already been
+written for getting password from users, and which then pipe the result to
+stdout, ready to feed into the program that needs it, or to be buffered in
+a variable.
+
+Examples include...
+  /usr/libexec/openssh/x11-ssh-askpass
+  /usr/libexec/openssh/ssh-askpass
+  /usr/bin/ssh-askpass
+  /usr/libexec/openssh/gnome-ssh-askpass
+  /usr/lib/openssh/gnome-ssh-askpass
+  zenity --title=Program --entry --text=Password: --hide-text
+  Xdialog --title Program --stdout --password --inputbox "Password:" 0x0
+  { echo "SETDESC password:"; echo "GETPIN"; } | pinentry | sed -n 's/^D //p'
+
+And probably many many others that essentially does exactly what the above
+script is trying to do.  I have often written encrypting and mounting scripts
+that search to find at least one of these programs to use for user password
+input.
+
+For an example: the script "mount_encrypted" in my WWW software export looked
+for at least one of the programs listed above to get a password from the user.
+
+ http://www.ict.griffith.edu.au/anthony/software/#mount_encrypted
+
+Many systems actually specify the password reading program to use in the
+SSH_ASSPASS environment variable (set during system login).  This lets the
+user override the method by which passwords will be entered, and let them use
+other password control systems, and key rings. However few programs needing
+passwords will make use that environment variable :-(
+
+Of course if X windows is not enable you will need to fall back to some form
+of TTY method, or even a curses method such as "dialog".
+
+-------------------------------------------------------------------------------
+Curses solution (TTY only)...
+
+  dialog --stdout --insecure --passwordbox  "Password:" 0 0
+
+The --stdout causes the password out stdout and curse output to go direct to
+the TTY.
+
+The --insecure is needed due to the security concern given above.
+
+-------------------------------------------------------------------------------
+Passwords, using Variables and Pipelines...
+
+Generally you can assume variables are safe, as only someone with root access
+to your machine, or your working environment, has any chance of recovering the
+password, via process debuggers, or memory and swap searching.
+
+If you need to store a password in a variable it is still is better to store
+them in some less obvious but simple form of encryption.  Binary if the
+language allows (shell does not so use base64, or Hex encoding).
+
+Then when finished, clear the password, before unsetting the variable.  Note
+that some languages just allocate new memory rather than overwrite old memory,
+whcih can make clearing old password very difficult.  Check your language
+security notes if you are not sure.
+
+Also in shell never use anything other than a built-in commands such as
+bash "echo" and "printf" to feed that password (in quotes) to some other
+program, or it will appear in the process table.
+
+The better idea is not to store a password at all but pipe the password direct
+from your password input program/function to the program that will use it.  Of
+course if you need to use the password multiple times, then storing it in
+a variable may ba a lot easier than attempting some type of 'pipeline tee
+processing' methods
+
+Many commands that need a password will have options to read from a pipe or
+special file descriptor for the password to use.  Use it as it is about the
+safest way to use the password.
+
+If the program insists on reading from a TTY (user input only) used programs
+like "unbuffer" (from the "expect" package) to wrap the program in a TTY so
+you can pipe the password into the program.  I have also used the use "expect"
+directly for PTY wrappers, but the new method is to use the "socat" command (a
+advanced "netcat" replacement) to do PTY wrappers around commands.
+
+-------------------------------------------------------------------------------

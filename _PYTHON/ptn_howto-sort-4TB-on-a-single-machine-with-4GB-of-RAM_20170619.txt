@@ -1,0 +1,190 @@
+filename: python_howto-sort-4TB-on-a-single-machine-with-4GB-of-RAM_20170619.txt
+https://www.quora.com/What-is-the-most-efficient-way-to-sort-4TB-on-a-single-machine-with-4GB-of-RAM
+
+   What is the most efficient way to sort 4TB on a single machine with 4GB of RAM?
+
+***
+   I vote for an external merge sort that uses a local in-memory quick sort.
+   This approach assumes that the sort does not need to be done "in place". It also assumes that the
+   external store (such as a hard disk) does faster sequential access than random access (e.g. reading
+   off whole tracks in track order).
+   1. Break the 4TB into 1000 4GB data sets.
+   2. Load, quicksort, and write out each 4GB data set.
+   3. Merge the 1000 data sets in a single pass, writing out to a new store as you go.
+   Step #2 will involve one full sequential read and one full sequential write of the full 4 TB data
+   set. The quicksort steps will be "instantaneous" relative to external store read-write time.
+   Step #3 will involve one full semi-sequential read and one full sequential write of the 4 TB. The
+   read is semisequential in that whole blocks can be read and processed at once, but all 1000 lists
+   need to be read in parallel, which is close to random-access. To be smart about it, one can read 1000
+   separate 4MB sequential blocks to increase the amount of sequential reading.  Or, more cleverly, keep
+   1000 separate 4MB read buffers in memory and fill them strategically as they run low using an
+   elevator disk access algorithm.
+   This algorithm will perform > 2x faster if two hard disks are used instead of one. The reason is that
+   with two disks, the reading and writing can happen in parallel while substantially reducing
+   track-to-track head travel "thrashing".
+
+***
+   We can use an External Merge Sort to efficiently sort large data sets when we have memory
+   restrictions.
+   In this particular case.
+    1. Split the 4TB data set into 4GB chunks.
+    2. Read each 4GB chunk into memory one at a time and sort it using a conventional sorting algorithm,
+       such as Quicksort. Write each sorted chunk back to disk.
+    3. Read the first 200MB of each 4GB sorted chunk into memory. These will be our input buffers.
+       Totally, all the 200MB chunks will occupy 2GB of memory.
+    4. The remaining 2GB of memory will be our output buffer.
+    5. We perform an n-way merge on the 200MB chunks and store the result in our output buffer.
+    6. When our output buffer gets filled, we write it out to disk.
+    7. When a 200MB input buffer becomes empty, we read the next 200MB from the remaining part of the
+       original 4GB chunk.
+    8. When we've exhausted all our 4GB chunks and all the 200MB input buffers, we write out the 2GB
+       output buffer one final time to disk and we should now have a sorted 4TB data set.
+
+***
+   I think you should read my answer to the following question: [27]What would be an efficient algorithm
+   to sort millions of lines of strings/integers in a file?
+   In any case, as part of that answer, if you only have one data type, I believe that the best suited
+   algorithm is external mergesort, using [28]Two-way replacement selection as the run sorting
+   algorithm. This has proven to be the most efficient in terms of creating the largest runs, no matter
+   the data characteristics, reducing the fan in for merge sort.
+
+***
+   As an alternate to merging 1000 4GB lists in parallel, we can perform a k-way polyphase merge[1],
+   where k - 1 is the number input files containing the sorted runs. For the 4-way case we would
+   distribute the 1000 sorted 4GB runs into 3 input files using the Fibonacci series: create 220 dummy
+   empty runs and distribute the total 1220 runs as 233, 377 and 610 into the 3 input files. We then
+   load the runs from each input file into its respective 1GB input buffer and perform an in-memory
+   merge onto an 1GB output buffer. Both the read/write buffers can be intelligently managed through a
+   variety of techniques (ex: can use a naive async pre-fetching strategy during the merge process). On
+   each iteration of the algorithm, one of the input file will run out of runs and will be considered as
+   the output file for the next iteration.  In general given the number of runs and the number of input
+   files, we need to find the smallest number greater than the number of runs that could be expressed as
+   a sum of k - 1 consecutive Fibonacci numbers (we pad dummy runs as required) and distribute runs to
+   the k input files using those numbers (or) another way would be to find the smallest (k-1)-order
+   fibonacci number that is greater than the number of runs ..
+   [1][32]http://en.wikipedia.org/wiki/Pol...
+
+***
+Is this 4TB data of single data type, or composite type to be sorted?
+
+The idea here is when sorting is not done on the whole length of each element, it would worth extracting this
+information and see how much smaller the data will be. The extracted elements need to be found later, so
+indexing them to a separate location, data-store, and then sort this smaller extracted data.  At completion of
+this sort, each element can be looked up and re-associated with its origin, re-written if needed.
+
+Caveat, indexing can be also expensive on nearly 4TB data, so gain may be less or even loss.  Therefore, this
+presents the next series of problems.
+
+***
+As others have pointed out external sorting will be a good way to go
+
+External sorting is usually used when you need to sort files that are too large to fit into memory.
+
+The trick is to break the larger input file into k sorted smaller chunks and then merge the chunks into a
+larger sorted file. For the merge use a min heap. k will depend on your memory threshold.
+1.Read a certain number of records (depending on your memory threshold) from the input file and sort it using
+a standard in memory sorting algorithm. Save the records as a smaller file(chunk). Repeat this till you have
+chunkified the entire file.
+2.Read a certain number of records (depending on your memory threshold) from each chunk and put it in a queue
+per chunk.
+3.Pop the leftmost item (This will be the smallest item as the items in the queue will be sorted) from each
+queue and push it to the heap
+4.Pop the min item from the heap. Note what queue it came from
+5.Replenish the queue with the next item from it's corresponding chunk that is not in the queue
+6.Pop the left most item from the queue and push it to the heap
+7.Write the min item to the output file
+8.Continue the above 4 steps till the heap is empty
+
+Sample python code (Does not merge in place and only sorts integers)
+
+<code>
+import os
+import heapq
+import itertools
+import linecache
+from collections import deque
+import sys
+ 
+ 
+def external_sort(input_directory, input_file_name, output_file_name):
+    with open(os.path.expanduser(input_directory + '/' + output_file_name), 'w+') as f:
+        heap = []
+        pages = {}
+        next_line_numbers = {}
+        has_more_items = {}
+        chunk_file_paths, max_chunk_size = create_sorted_chunks(input_directory, input_file_name)
+        max_page_size = max_chunk_size // 10        
+        for chunk_file_path in chunk_file_paths:
+            pages[chunk_file_path] = populate_page(chunk_file_path, max_page_size)
+            next_line_numbers[chunk_file_path] = len(pages[chunk_file_path])
+            has_more_items[chunk_file_path] = True        
+        for chunk_file_path in chunk_file_paths:
+            heapq.heappush(heap, pages[chunk_file_path].popleft())
+        while heap:
+            item, chunk_file_path = heapq.heappop(heap)
+            f.write(str(item)+'\n')
+            if has_more_items[chunk_file_path]:
+                has_more_items[chunk_file_path] = append_next(pages, chunk_file_path, \
+next_line_numbers[chunk_file_path])
+
+                next_line_numbers[chunk_file_path] += 1 
+                if pages[chunk_file_path]:
+                    heapq.heappush(heap, pages[chunk_file_path].popleft())
+        
+        for chunk_file_path in chunk_file_paths:
+            os.remove(chunk_file_path)
+ 
+ 
+def populate_page(chunk_file_path, max_page_size):
+    chunk = deque()
+    with open(chunk_file_path, 'r') as f:
+        for line in itertools.islice(f, 0, max_page_size):
+            chunk.append((int(line), chunk_file_path))
+    return chunk
+ 
+ 
+def append_next(chunks, chunk_file_path, line_number):
+    chunk = chunks[chunk_file_path]
+    item = linecache.getline(chunk_file_path, line_number)
+    if item and len(item) > 0:
+        chunk.append((int(item), chunk_file_path))
+        has_more = True 
+    else:
+        has_more = False    
+    return has_more
+ 
+ 
+def create_sorted_chunks(input_file_directory, input_file_name):
+    input_file_path = os.path.expanduser(input_file_directory + '/' + input_file_name)
+    suffix = 1    begin, end, tot = 0, 0, 0    chunk_file_paths = []
+    with open(input_file_path, 'r') as f:
+        for line in f.readlines():
+            tot += 1    
+        end = tot//10
+        
+    while suffix <= 10:
+        buffer = []
+        chunk_file_name = 'temp' + str(suffix) + '.txt'
+        chunk_file_path = os.path.expanduser(input_file_directory + '/' + chunk_file_name)
+        if not os.path.isfile(chunk_file_path):
+            with open(os.path.expanduser(input_file_path), 'r') as f:
+                for line in itertools.islice(f, begin, end):
+                    buffer.append(int(line))
+            create_chunk(chunk_file_path, buffer)
+        suffix += 1        
+        begin = end
+        end += tot//10
+        chunk_file_paths.append(chunk_file_path)
+    return chunk_file_paths, tot//10
+ 
+ 
+def create_chunk(chunk_file_path, buffer):
+    buffer.sort()
+    with open(chunk_file_path, 'w+') as f:
+        for i in buffer:
+            f.write(str(i) + '\n')
+ 
+ 
+if __name__ == '__main__':
+    external_sort(sys.argv[1], sys.argv[2], sys.argv[3])
+</code>

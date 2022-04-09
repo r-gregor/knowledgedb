@@ -1,0 +1,1304 @@
+filename: go_learning-golang-through-webassembly-multif_20200306.txt
+https://www.aaron-powell.com/posts/2019-02-04-golang-wasm-1-introduction/
+
+Learning Golang through WebAssembly - Part 1, Introduction and setup
+Feb 4, 2019
+
+   This blog is part of a series I'm writing about learning how to write Go (Golang) by targeting what
+   I'm familiar with, web development. The series consists of the following parts:
+     * Part 1 - Introduction and setup (this post)
+     * Part 2 - Writing your first piece of Go
+     * Part 3 - Interacting with JavaScript from Go
+     * Part 4 - Sending a response to JavaScript
+     * Part 5 - Compiling Go with webpack
+     * Part 6 - Go, WASM, React and TypeScript
+
+Introduction
+   I've always liked tinkering with different technology and trying to stay abreast of things that look
+   interesting. One thing that's been on my radar for a while now is Go, aka Golang, but as someone
+   who predominately does web development in the browser I was never quite sure where Go could fit into
+   what I tend to build.
+
+   Another thing that I'd been meaning to pick up is Web Assembly, aka WASM, but again I've never
+   quite had the time to pick it up. If you're not familiar with WASM, it's a new component of the web
+   platform to allow developers to use high level languages like C, C++, Rust, Go, .NET, etc. in the
+   browser in a native way, rather than converted to JavaScript. I'm by no means a WASM expert, but
+   after a week of digging into things I've found some really interesting tidbits I'll share along the
+   way.
+
+   As I recently started a new Developer Relations job I decided that now was the perfect time for
+   me to start exploring these technologies.
+
+   And as it so happens Go's 1.11 release last year includes experimental WASM support, so it looks
+   like it's meant to be.
+
+   So I have decided to put together a series that looks at the experience of using Go, learning WASM
+   and how it all fits into the tool chain that we tend to use as web developers.
+
+   We won't build anything particularly complex, the Go support is experimental at best, but it should
+   give you enough of a starting point to work out where to go next.
+
+Getting Setup
+   The first thing you'll need to do is to setup a development environment. Go works on all major
+   operating systems and I've used Windows + Windows Subsystem for Linux (WSL). My colleague Scott
+   Coulton has written how to setup a WSL dev environment, including Go that I followed.
+
+   [DEL: One thing I will note is that I haven't managed to get code completion working in VSCode at the
+   moment, something seems incorrect in the way I've setup my GOPATH and GOROOT, but so far it hasn't
+   been too painful for me to work without code completion. :DEL] Once I got my GOPATH and GOROOT set
+   properly and defined as environment variables in both Windows and Linux (WSL) it worked fine.
+
+GOPATH, GOROOT, huh?
+   This is something that confused the heck out of me initially when I was getting setup, what these two
+   things are and what do they do.
+
+   By default when installing on Windows Go will want to install into C:\Go. I am not really a fan of
+   this, there should be 3 things at the C:\ level, Program Files (including the x86 folder), Users and
+   Windows (now in reality you'll have a few more things but they are all system-level things) so I
+   wanted to change it. As a result of setting up Docker + WSL I already had a Go folder at
+   C:\Users\<me>\go and figured that'd be a good place to install Go into.
+
+   And this is where things starting going wrong. Because of this I had both my GOPATH and GOROOT
+   pointing to the same folder, which seemed logical to me, after all, that's where Go was.
+
+   Nope, the Go commands kept throwing errors at me and this is because these two paths can't be
+   combined. The reason for this is that they represent two different concepts within Go:
+     * GOROOT - this is where Go is installed and where all of the Go system components are installed
+       to. I use C:\Users\<me>\goroot for that
+     * GOPATH - this is Go's user space, where packages you pull down end up (such as goexec which we'll
+       use in the next article). I use C:\Users\<me>\go for that
+
+   So if you were to combine them you'd run the potential of trashing the "core" of Go.
+
+Editors and Browsers
+   I use VS Code as my text editor and it has some great plugins for working with Go, but you can
+   use whatever you would like.
+
+   As for browsers, well WASM is still pretty new so you'll want an evergreen to make it work. I did
+   have some problems with Edge so I tended to stick to Chrome and Firefox, but with Edge moving to
+   Chromium shortly I see that problem going away. I have also been told that the demo we'll build
+   doesn't seem to work on iOS Safari or Chrome Android, but I think that might be related to this
+   issue, so stick to a desktop browser (also, you get dev tools there).
+
+   We will need Node.js eventually, but not first up, so go ahead and install it (I uses the latest
+   v11 release) if you don't already have Node.
+
+Conclusion
+
+   Ultimately this was pretty short post to set the stage for what we're about to undertake.
+
+   Don't worry if you've never written a line of Go, or you've never heard of WebAssembly, we'll take
+   this journey together.
+
+
+---
+https://www.aaron-powell.com/posts/2019-02-05-golang-wasm-2-writing-go/
+
+Learning Golang through WebAssembly - Part 2, Writing your first piece of Go
+Feb 5, 2019
+
+Hello WASM, Go style
+
+   You've got your Golang dev environment setup and now it's time to put it to good use.
+
+   We're going to start really basic and write what amounts to a Hello World code:
+package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("Hello WASM from Go!")
+}
+
+   Well... that's not particularly exciting, but let's break it down to understand just what we're doing
+   here (after all, I'm expecting this might be your first time looking at Go).
+package main
+
+   Here's how we initialise our Go application, we define a main package which becomes our entry point.
+   This is what the Go runtime will look for when it starts up so it knows where the beginning is. Think
+   of it like class Program in C# for a console application.
+
+   Side note: I just said "our Go application", and that's something that you need to think differently
+   about with Go + WASM, we're not just writing a bunch of random files that we talk to from the
+   browser, we're building an application that we compile specifically to run in the WASM virtual
+   machine. This will make a bit more sense as we go along.
+import "fmt"
+
+   This is how Go brings in external packages that we want to work with. In this case I'm pulling in the
+   fmt package from Go's standard library that gives us something to work with later on. It's like open
+   System in F#, using System in C#, or import foo from 'bar'; in JavaScript.
+
+   Like F# & C# we only open a package, we don't assign the exports of the package local variable if we
+   don't want to. If we wanted to import multiple packages we can either have multiple import statements
+   or write something like this:
+import (
+    "fmt"
+    "strconv"
+)
+
+   Side note: We're not ready to get too complex with packages, but if you want to know more check
+   out this article.
+
+   Finally we create a function:
+func main() {
+    fmt.Println("Hello WASM from Go!")
+}
+
+   We've named our function main and given it no arguments, which is important, because this is the
+   entry point function in our main package that the Go runtime looks for. Again, it's like static void
+   Main(string[] args) in a C# console application.
+
+   Next we're using the fmt package we imported and the public member of it Println to... print a string
+   to standard out.
+
+Run Go, Run!
+
+   It's time to test our code, we'll use the go run command for that:
+~/tmp> go run main.go
+Hello WASM from Go!
+
+   Yay we've created and run some Go code, but we've run it on a command line, not in a browser, and
+   after all, we're trying to make WASM, and for that we can't use go run, we'll need go build. But if
+   we were to just straight up run go build it will output a binary file for the OS/architecture you are
+   currently working with, which is OK if you're building an application to run on a device, but not for
+   creating WASM binaries. For that we need to override the OS and architecture that we're compiling
+   for.
+
+Building Go for WASM
+   Conveniently Go allows you to specify environment variables to override system defaults, and for that
+   we need to set GOOS=js and GOARCH=wasm to specify that the target OS is JavaScript and the
+   architecture is WASM.
+~/tmp> GOOS=js GOARCH=wasm go build -o main.wasm main.go
+
+   And now we'll have a file main.wasm that lives in the directory we output to.
+
+   But how do we use it?
+
+A Quick WebAssembly Primer
+   For over 20 years we've had JavaScript in the browser as a way to run code on the web. WASM isn't
+   meant to be a replacement for JavaScript, in fact you're really hard pressed to use it without
+   writing (or at least executing) a little bit of JavaScript.
+
+   This is because WebAssembly introduces a whole new virtual machine into the browser, something that
+   has a very different paradigm to JavaScript and is a lot more isolated from the browser, and
+   importantly user space. WebAssembly executed pre-compiled code and is not dynamic like JavaScript in
+   the way it can run.
+
+   Side note: There are some really great docs on MDN that covers WebAssembly, how it works, how to
+   compile C/C++/Rust to WASM, the WebAssembly Text Format and all that stuff. If you really want to
+   understand WASM have a read through that, in particular the WebAssembly Text Format is very good at
+   explaining how it works.
+
+   So before we can use our WASM binary we need to create a WASM module and instantiate the runtime
+   space that WASM will run within.
+
+   To do this we need to get the binary and instantiate it with WASM. MDN covers this in detail but
+   you can do it either synchronously or asynchronously. We'll stick with async for our approach as it
+   seems to be the recommended way going forward.
+
+   And the code will look like this:
+async function bootWebAssembly() {
+    let imports = {};
+    let result = await WebAssembly.instantiateStreaming(fetch('/path/to/file.wasm'), imports);
+    result.instance.exports.doStuff();
+}
+bootWebAssembly();
+
+   Don't worry about the imports piece yet, we'll cover that in our next chapter.
+
+   We've used fetch to download the raw bytes of our WASM file which is passed to WebAssembly and it
+   will create your runtime space. This then gives us an object that has an instance (the runtime
+   instance) that exports functions from our WebAssembly code (C/C++/Rust/etc).
+
+   At least, this is how works in an ideal world, it seems that Go's approach is a little different.
+
+Booting our Go WASM output
+   Now that we understand how to setup WebAssembly let's get our Go application going.
+
+   As I mentioned Go is a little different to the example above and that's because Go is more about
+   running an application than creating some arbitrary code in another language that we can execute from
+   JavaScript.
+
+   Instead with Go we have a bit of a runtime wrapper that ships with Go 1.11+ called wasm_exec.js and
+   you'll find it in:
+~/tmp> ls $"(go env GOROOT)/misc/wasm/wasm_exec.js"
+
+   Copy this file into the folder with you main.wasm, we're going to need it.
+
+   Next we'll create a webpage to run the JavaScript:
+<html>
+    <head>
+        <meta charset="utf-8">
+        <script src="wasm_exec.js"></script>
+        <script>
+            async function init() {
+                const go = new Go();
+                let result = await WebAssembly.instantiateStreaming(fetch("main.wasm"), go.importObject)
+                go.run(result.instance);
+            }
+            init();
+        </script>
+    </head>
+    <body></body>
+</html>
+
+   Finally we'll host the code somewhere, you can use any webserver that you want, goexec,
+   http-server, IIS, etc.
+
+   Note: Make sure your server supports the WASM mime type of application/wasm.
+
+   Fire it up, launch the browser and open the dev tools, now you should see the result of fmt.Println
+   there! Woo! Did you guess that we'd see it in the console? I bet you did, after all, that's the thing
+   most akin to standard out in the browser!
+
+Go's WASM Runtime
+   As you'll see in the little HTML snippet above the was we start WASM for Go is a little different,
+   first we create a Go runtime with new Go(), which is provided to us by wasm_exec.js.
+
+   This then provides us with an importObject to pass to the instantiateStreaming function and the
+   result we get back we pass back to the runtimes run method.
+
+   This is because Go does a bit of funky stuff to treat the WASM binary as an application rather than
+   arbitrary functions like others do. Over the rest of this series we'll explore this a bit more too.
+
+Conclusion
+   There you have it folks, we've created our first bit of WASM code using Go, created some browser
+   assets, executed it in the browser and seen an output message.
+
+   We've also learnt a little bit about how WASM works and how it's isolated from the JavaScript
+   environment, and what makes the approach with Go a little different to other WASM examples you'll
+   find on the web.
+
+   But our application is isolated, tune in next time and we'll start looking at how to interact with
+   JavaScript from WASM.
+
+
+---
+https://www.aaron-powell.com/posts/2019-02-06-golang-wasm-3-interacting-with-js-from-go/
+
+Learning Golang through WebAssembly - Part 3, Interacting with JavaScript from Go
+Feb 6, 2019
+
+Runtime interop
+   In the last post we wrote our first bit of Go and used it to write a message out to the dev tools
+   console, which is useful in terms of proving that something worked, but not really useful for an end
+   user. For that we really need to do something that allows the JavaScript and WASM runtimes to talk to
+   each other.
+
+   For this we're going to use a package called syscall/js which is part of Go 1.11 and provides us
+   with some basic functions to undertake interop.
+
+   And this is where we start seeing that Go's approach to WASM is quite different to other languages.
+
+Understanding syscall/js
+   Before we dive into anything too deep I want to look a bit at syscall/js so we know how it works.
+
+   As you'll see from the API docs that this is a very small package exposing a very small set of
+   features. The most important thing that is exposed from the package is the type Value which is
+   how Go represents data getting passed in from the JavaScript runtime, and how we request things in Go
+   from the JavaScript runtime. This is kind of a dynamic type because it could be an int or a string or
+   a function or an object, it really depends on how you use it, which does make it a little bit clunky
+   to use.
+
+Writing to the DOM
+   The first thing you might want to do is move away from writing to the console and instead write to
+   the DOM.
+
+   Site note: We'll use raw syscall/js but if you're doing serious DOM manipulation you might want to
+   look at something like dennwc/dom which is a wrapper syscall/js and gives a nicer interface.
+
+   Let's create an element and then write a message to it before adding it to the DOM.
+func main() {
+    document := js.Global().Get("document")
+    p := document.Call("createElement", "p")
+    p.Set("innerHTML", "Hello WASM from Go!")
+    document.Get("body").Call("appendChild", p)
+}
+
+   Compile this like we did in the last post and fire up your application to now see that you have a new
+   element in the DOM with a message, rather than something in the console.
+
+   Let's break it down, first we've got js.Global(), this is a call to access the JavaScript global
+   object, window or self, depending if it's browser or node. This returns you a js.Value object that,
+   through the magic of the Go runtime, will be the right thing.
+
+   I'm then using the Value.Get function to access a property of the global object, document and
+   then using the shorthand assignment := assigning that to a Go variable called document.
+
+   Since document is of type js.Value we can then interact with it, and in-tern interact with the DOM,
+   so I can use Value.Call to invoke a function of the object, createElement, passing in any
+   arguments, "p" which returns the result as a js.Value, which in this case is the newly created DOM
+   element, winding up in p.
+
+   On our new DOM element we can call Value.Set which will assign a property of the object,
+   innerHTML to our message.
+
+   Finally, we use Get to access body (from document) and Call the function appendChild, giving it p so
+   our new element appears in the DOM as we would expect.
+
+   Phew! See what I mean by it being a bit cumbersome? This is why I'd expect if you're really getting
+   serious about DOM interactions from Go that you'll use a wrapper package or write your to fit your
+   needs.
+
+Calling Go from JavaScript
+   We've looked at going from Go to JavaScript but what if we want to go the other way and call into Go
+   from JavaScript? After all, that's one of the big draw cards of WASM, compiling a native module that
+   would be overly complex to reproduce in JavaScript, but then using it from JavaScript just like any
+   other function.
+
+   And here is where we find the biggest problem I have with Go's approach to WASM relative to the
+   others (C/C++/Rust). Let's say I want to do this:
+const el = document.createElement('p');
+el.innerHTML = goRuntime.someFunction("hello");
+document.body.appendChild('el');
+
+   We're wanting to invoke a function, someFunction on the Go/WASM runtime from JavaScript. Ignoring the
+   trivial nature of the code, this is the kind of thing that you'd want to do.
+
+   Now in an ideal world of WASM we would get some exports provided to us (see the A Quick WebAssembly
+   Primer of the last post), but Go doesn't work that way, that's not how we export functions. Instead
+   we have to register them with the browser using Set and a FuncOf:
+js.Global().Set("someFunction", js.FuncOf(someFunction))
+
+   This will then create a global function called someFunction that you can invoke from JavaScript. Now
+   it doesn't have to be a global function, you could use js.Global().Get(...) and nest a bunch of Get's
+   to "namespace" your function, but you'd need to ensure that object exists in JavaScript first.
+
+   I find this quite ugly as it really feels like you're violating the encapsulation of WASM by not
+   using the instance.exports that you should when you startup WASM.
+
+Creating a callable function
+   Complaining aside, let's get back to our example. Rather than hard-coding a message, let's allow you
+   to send it from JavaScript. We'll create a new function for this and register the callback.
+package main
+
+import (
+    "syscall/js"
+)
+
+func printMessage(this js.Value, inputs []js.Value) interface{} {
+    message := inputs[0].String()
+
+    document := js.Global().Get("document")
+    p := document.Call("createElement", "p")
+    p.Set("innerHTML", message)
+    document.Get("body").Call("appendChild", p)
+}
+
+func main() {
+    js.Global().Set("printMessage", js.FuncOf(printMessage))
+}
+
+   The main addition to this is the printMessage function, it takes an array of js.Value for arguments
+   and doesn't return a value.
+
+   But why does it take an array? Well apart from the fact that js.FuncOf requires it to, it's because
+   JavaScript can have as many arguments provided to a function as you like, you just name the ones you
+   care about and handle the magic arguments (or define a spread) if you want more. And also, JavaScript
+   has a pretty weak type system compared to Go, so while you might want a string there's nothing
+   stopping the caller passing in a number or a function, so Go forces you to use this boxed struct in
+   js.Value and then you can unpack it as required using Value.String or Value.Int or whatever type you
+   want.
+
+   Now compile it, launch a browser, open the dev tools, call your globally declared function and you'll
+   get this error message:
+printMessage("")
+ wasm_exec.js:378 Uncaught Error: bad callback: Go program has already exited
+     at global.Go._resolveCallbackPromise (wasm_exec.js:378)
+     at wasm_exec.js:394
+     at <anonymous>:1:1
+
+   sad trombone
+
+Go + WASM is an Application, not a Library
+   If you've done much reading on WASM then you'll see that it's intended to be treated like a library
+   that you call out to, you use it to encapsulate functionality that would be hard to convert from
+   C/C++/Rust to JavaScript, so you just load that native library and invoke the functions it exports.
+
+   Go takes a different approach, Go treats this as an application, meaning that you start a Go runtime,
+   it runs, then exits and you can't interact with it. This, coincidentally, is the error message that
+   you're seeing, our Go application has completed and cleaned up.
+
+   To me this feels more closer to the .NET Console Application than it does to a web application. A web
+   application doesn't really end, at least, not in the same manner as a process.
+
+   And this leads us to a problem, if we want to be able to call stuff, but the runtime want to shut
+   down, what do we do?
+
+Introducing Channels
+   Basically we want to tell Go that we don't want it to exit until we tell it that we want it to exit
+   and the easiest way to do this is with a channel.
+
+   A channel is something that waits for data to be sent into it and will pause the execution until it
+   receives data on it.
+
+   First off we'll make the channel by adding this line into our main function:
+c := make(chan bool)
+
+   We're using the built-in make function, specifying the chan keyword with the type of data that we
+   expect over the channel. The type is somewhat arbitrary since we're never planning to push data over
+   the channel, I just chose bool for fun.
+
+   Now we need to tell the application to wait for the channel to receive data, we do this by adding
+   this line where we want execution to pause:
+<-c
+
+   This would make a main function look like so:
+func main() {
+    c := make(chan bool)
+    js.Global().Set("printMessage", js.FuncOf(printMessage))
+    <-c
+}
+
+   Now if you build and run your application you can execute the printMessage function as many times as
+   you like from the console!
+
+   As an aside, you can use channels for a lot more than stopping the application from quitting, such as
+   combining channels with goroutines but they are beyond the scope of what I'm covering at this
+   point.
+
+  Bonus - Using Channels to Kill You App
+
+   We're using a channel to "hold" out application open, but what if you did want to terminate it? Maybe
+   there's a scenario where you want to cleanup your WASM application, or maybe it's only intended to be
+   used for a short period of time before being shutdown?
+
+   Well we can leverage the channel for that.
+
+   Here's a slightly modified version of the demo code:
+package main
+
+import (
+    "syscall/js"
+)
+
+var c chan bool
+
+func init() {
+    c = make(chan bool)
+}
+
+func printMessage(this js.Value, inputs []js.Value) interface{} {
+    message := inputs[0].String()
+
+    document := js.Global().Get("document")
+    p := document.Call("createElement", "p")
+    p.Set("innerHTML", message)
+    document.Get("body").Call("appendChild", p)
+
+    c <- true
+}
+
+func main() {
+    js.Global().Set("printMessage", js.FuncOf(printMessage))
+    <-c
+    println("We are out of here")
+}
+
+   First thing you'll notice is that I've defined the channel as a package-scoped variable with var c
+   chan bool. This makes it available throughout this package, not just on the stack of the main
+   function.
+
+   Next I've introduced a function called init. We haven't talked about init yet, but init is a special
+   function that is called, if it exists, before the main function, allowing us to setup stuff that
+   might need to be setup. Here I'm using it to setup the channel that we're using.
+
+   Our main function still waits for our channel to receive data, and after it does it'll print out a
+   message to the console. But what you will also notice is that inside printMessage I do push data over
+   the channel on the last line I do:
+c <- true
+
+   This puts the value true into the channel, which then flows through to the main function and since
+   we're not really doing anything on receive it just continues through, prints a message, and our
+   application is done.
+
+   Pretty cool how you can control execution flow here with the channel.
+
+Conclusion
+   Today we looked at how we can start interacting with the DOM from our Go WASM application and then
+   how we can get JavaScript to interact with WASM. Sure, much of how we did our interaction was via the
+   dev tools to invoke the printMessage function we're defining, but you can see how we might be able to
+   make it a bit smarter and bind that to an event on the page instead.
+
+   We've also seen one of the painful parts of Go's approach to WASM, that it's treated like an
+   application not a library, and that we have to do something that feels a little dirty to ensure it is
+   always available within our JavaScript application. This does feel like a design choice of Go on how
+   to leverage WASM, but it still is quite jarring when you compare it to the rest of the WASM
+   information you'll find on the web.
+
+
+---
+https://www.aaron-powell.com/posts/2019-02-07-golang-wasm-4-response-to-javascript/
+
+Learning Golang through WebAssembly - Part 4, Sending a Response to JavaScript
+Feb 7, 2019
+
+Returning to JavaScript
+   We've learnt how we can use syscall/js to create and manipulate DOM elements from our Go functions,
+   but what if we want to treat Go like a library and execute a function to get a value back? Maybe we
+   have an image processing library we want to use that was written in Go, or we want to use some
+   functionality that our core business application has in it.
+
+   My first thought was to create a function that returns a value:
+func printMessage(inputs []js.Value) string {
+    message := inputs[0].String()
+
+    return "Did you say " + message
+}
+
+   And immediately we hit an error because js.FuncOf takes a signature of func(args []js.Value), meaning
+   it takes a function that doesn't return anything, a void function (if you were to C# it).
+
+   Right, back to the drawing board.
+
+Callback Time!
+   As JavaScript developers we are very use to things being asynchronously executed, or at least,
+   implied async, and we've always done this with a callback pattern.
+
+   In Node.js this is really prevalent:
+const fs = require('fs');
+fs.readFile('/path/to/file.txt', (err, data) => {
+    // do stuff
+});
+
+   We pass a function as the last argument that thats two arguments, and error object and the output of
+   the function executing successfully. We'd then test if err contained anything, throw if it does,
+   continue if it doesn't.
+
+   This then got me thinking, would it be so bad to implement that as a pattern when it comes to talking
+   to Go? It seems logical, because we're shelling out to another runtime, we shouldn't have to wait for
+   it to complete before we continue on in our application, we should treat it like an async operation.
+
+Preparing Go for callbacks
+
+   Let's start updating our Go code to handle the idea of this callback pattern. Since we're given an
+   array of js.Value we'll have to make an assumption about where the callback lives in that array. I'm
+   going to follow how Node.js has done it and make an assumption that the last argument passed in was
+   the callback function.
+func printMessage(inputs []js.Value) {
+    callback := inputs[len(inputs)-1:][0]
+    // todo
+}
+
+   This is the same as doing const callback = inputs.slice(inputs.length - 1) in JavaScript, we're using
+   the len Go function to take a subset of the array from the last item to the end (which will always be
+   1 item) and then grabbing that single value (since we get an array of length 1 and just need the
+   value). Alternatively, you could write inputs[len(inputs)-1], but I'm just experimenting with Go
+   syntax and trying to learn what things do.
+
+   You might want to do a Value.Type test against callback to make sure it is a JavaScript function
+   and then fail if it isn't, but I'm going to omit error handling for now.
+
+   Now that we have a js.Value that represents our JavaScript callback we can call it using
+   Value.Invoke, which is like Value.Call that we saw in the last post but for use when you have a
+   value that is a function, not an object that has a function.
+
+   Because I'm using the err/data style with the callback I'll pass null when there isn't an error (you
+   could also pass undefined, pick your poison).
+
+   This results in our Go function looking like so:
+func printMessage(inputs []js.Value) {
+    callback := inputs[len(inputs)-1:][0]
+    message := inputs[0].String()
+
+    callback.Invoke(js.Null(), "Did you say " + message)
+}
+
+Updating our JavaScript
+   With our Go code updated it's time to improve how we call it from JavaScript:
+printMessage('JS calling Go and back again!', (err, message) => {
+    if (err) {
+        console.error(err);
+        return;
+    }
+
+    console.log(message);
+});
+
+   Obviously I'm going pretty simplistic here and just writing a message to the console but you could be
+   pushing that into a DOM element you create via JavaScript, it could be sent as a fetch request, or do
+   anything else that you might want to do from a JavaScript application.
+
+Conclusion
+   We've now seen how we can really break down the barriers between Go and JavaScript and start treating
+   Go functions just like any other function we might use in a JavaScript application, whether they have
+   come from another JavaScript module, the browser or the runtime.
+
+   Treating it like an async operation and using the callback pattern really makes it feel like just any
+   old piece of JavaScript that you might be working with. It does become a bit cumbersome in the Go
+   side of things, but so far that's been my experience with Go's approach to WebAssembly, it's either
+   all in on Go or no Go (zing!).
+
+  Bonus - Promisifying Go
+   The callback pattern is fine, but it can lead to callback hell. It also means we can't use the sexy
+   new async/await keywords.
+
+   Let's just wrap it with a Promise!
+function printMessagePromise(msg) {
+    return new Promise((resolve, reject) => {
+        printMessage(msg, (err, message) => {
+            if (err) {
+                reject(err);
+                return;
+            }
+
+            resolve(message);
+        });
+    });
+}
+
+async function doStuff() {
+    let msg = await printMessagePromise('JS calling Go and back again!');
+
+    console.log(msg);
+}
+
+doStuff();
+
+   Alternatively you could pass in the resolve and reject callbacks and then Go makes a decision in
+   which to invoke, but I prefer the callback pattern as it introduces less decision trees in the Go
+   codebase.
+
+
+---
+https://www.aaron-powell.com/posts/2019-02-08-golang-wasm-5-compiling-with-webpack/
+
+Learning Golang through WebAssembly - Part 5, Compiling With Webpack
+Feb 8, 2019
+
+Bringing in a Web Devs Tool Chain
+   Up until now we've been writing our Go code and then using the go build command to generate our
+   WebAssembly bundle, and sure, this works fine, does what we need it to do, but it doesn't really fit
+   with how we web developers would be approaching it.
+
+   Us web developers are not shy of using a compiler step, or at least a build task, whether you're
+   converting from one language to another using TypeScript/Fable/Flow/etc., down-leveling ESNext to
+   ESNow or just doing bundling and minifying of multiple scripts into one, it's rare to find a
+   JavaScript application these days that it's using a tool like gulp, rollup, parcel or webpack.
+
+   I prefer webpack so I decided to look at incorporating it into my process by writing a custom
+   Loader.
+
+A Quick Intro to webpack
+   If you're unfamiliar with webpack you really should check out their docs as I won't do it justice
+   here. Instead I want to focus on the core part of webpack that we need to leverage and how it works.
+
+   Because webpack is designed to be a generic module bundler it doesn't understand how to deal with
+   different languages, whether that's JSX in React, TypeScript or in our case Go. For that we need to
+   bring in a Loader. A Loader is essentially a JavaScript function that takes the contents of the file
+   you're "loading" and expects you to return some JavaScript that can be run in the generated bundle.
+
+   This means that in our JavaScript file we can write the following:
+import foo from './bar.go';
+
+   And tell webpack to use the right loader when it finds a *.go file to hopefully generate what we need
+   it to generate.
+
+   Ultimately, our goal is to be able to write something like this:
+import wasm from './main.go';
+
+async function init() {
+    let result = await wasm.printMessage('Hello from Go, via WASM, using webpack');
+    console.log(result);
+}
+
+init();
+
+   Now let's look at how we achieve this.
+
+Creating a Loader
+   TL;DR: If you don't really want to see the process you can just check out the source code for the
+   loader and install it into your own project.
+
+   As I mentioned above, the loader that we create is just a JavaScript function that receives the
+   contents of the file we're loading passed into it, meaning we'll get our raw Go code, which is not
+   particularly helpful because we need to pass the file path to go build, not the file contents.
+
+   But never fear, the loader has a Loader API that we can leverage, and the first thing is that we
+   want to get resourcePath which gives us the full path to the file. Fantastic, now we are able to
+   send that over to go build!
+
+Generating WASM in our Loader
+   We're going to need to execute go build in our loader, and to do that we can use child_process to
+   spawn it.
+
+   But before that we'll need to find the path to the go binary and for that we'll use the GOROOT
+   environment variable (that we learnt about in the first post).
+
+   Finally we're going to use execFile which is asynchronous, and we'll have to tell webpack that
+   this loader is async.
+
+   Our loader is starting to look like this (note: I've chosen to write this with TypeScript rather than
+   plain ol' JavaScript):
+import * as webpack from "webpack";
+import { execFile } from "child_process";
+const getGoBin = (root: string) => `${root}/bin/go`;
+
+function loader(this: webpack.loader.LoaderContext, contents: string) {
+  const cb = this.async();
+
+  const opts = {
+    env: {
+      GOPATH: process.env.GOPATH,
+      GOROOT: process.env.GOROOT,
+      GOOS: "js",
+      GOARCH: "wasm"
+    }
+  };
+
+  const goBin = getGoBin(opts.env.GOROOT);
+  const outFile = `${this.resourcePath}.wasm`;
+  const args = ["build", "-o", outFile, this.resourcePath];
+
+  execFile(goBin, args, opts, (err) => {
+      //todo
+  });
+}
+
+export default loader;
+
+   I'm also creating the environment variables (in opts) that sets the appropriate GOOS and GOARCH for
+   WASM.
+
+   For the file that we generate, I'll just append .wasm to the end of the resource that we're
+   processing. This means that we should be fine writing to disk, but some error handling on the
+   writability of the disk could be useful...
+
+  Generating JavaScript for webpack
+
+   We're successfully generating our WASM file but it's a) dropped in what's likely our src folder, not
+   where the rest of the webpack bundles will go and b) we still have to write a bunch of code to use
+   it.
+
+   For our objective of it being just like any other piece of JavaScript we'll want to generate
+   something to give back to webpack. But what will we need to generate?
+
+   If we think about it there are two things we need in JavaScript to use a Go WASM binary:
+    1. wasm_exec.js
+    2. The WebAssembly loader
+
+   Well I think this is something that webpack should do for us, we don't want to have to write that
+   code ourselves!
+
+   We're going to build up a large string template to send back to webpack, starting with the
+   bootstrapper for WebAssembly:
+async function init() {
+  const go = new Go();
+  let result = await WebAssembly.instantiateStreaming(fetch(...), go.importObject);
+  go.run(result.instance);
+}
+init();
+
+   This code will be inserted into our bundle and used when we import wasm from './main.go', but that
+   only starts up the WASM runtime, what about accessing the stuff we registered?
+
+   I decided that I want to enforce the callback pattern from the last post, and that means we'll need
+   to return something, but what the heck should we return? We've got no idea what the names of the
+   functions from Go will be, so how do we know what to return to the import statement?!
+
+  JavaScript Proxies to the Rescue
+
+   If you've ever done programming with Ruby you may have come across the method_missing method on
+   BasicObject which you can use to do metaprogramming. In C# you can do a similar thing with
+   the DLR.
+
+   But if you haven't come across this, basically it's a special function that gets executed on an
+   object when there are no members of it that match, a last ditch attempt to handle an error before it
+   is thrown.
+
+   Unfortunately, JavaScript doesn't have such a method, but we do have Proxy.
+
+   A Proxy is a wrapper around an object that allows you to do interception of standard JavaScript
+   operations, get, set, etc. and with this we can simulate the method_missing from Ruby.
+
+   Here's a basic example:
+let base = {
+    foo: () => 'foo'
+};
+
+let baseProxy = new Proxy(base, {
+    get: (target, prop) => {
+        console.log(`captured call to ${prop}`);
+        if (target[prop]) {
+            return target[prop];
+        }
+        return () => 'method_missing';
+    }
+});
+
+console.log(baseProxy.foo());
+console.log(baseProxy.bar());
+
+   And we'll see:
+> "captured call to foo"
+> "foo"
+> "captured call to bar"
+> "method_missing"
+
+   So we can capture all calls and do something with them before, after or completely replace them.
+
+   And we're going to use that to wrap WASM with our callback pattern:
+let proxy = new Proxy(
+  {},
+  {
+    get: (_, key) => {
+      return (...args) => {
+        return new Promise((resolve, reject) => {
+          let cb = (err, ...msg) => (err ? reject(err) : resolve(...msg));
+          window[key].apply(undefined, [...args, cb]);
+        };
+      };
+    }
+  }
+);
+
+   Because we register stuff on the global object our proxy is actually of a blank object, since we
+   don't really want to proxy window, and anyway we can just ignore the target that the proxy receives
+   anyway.
+
+  Putting it all together
+
+   It's time to put together our template that we'll give back to webpack, and that will be executed
+   when you import a Go file:
+const proxyBuilder = (filename: string) => `
+let ready = false;
+
+const bridge = self || window || global;
+
+async function init() {
+  const go = new Go();
+  let result = await WebAssembly.instantiateStreaming(fetch("${filename}"), go.importObject);
+  go.run(result.instance);
+  ready = true;
+}
+
+function sleep() {
+  return new Promise(requestAnimationFrame);
+}
+
+init();
+
+let proxy = new Proxy(
+  {},
+  {
+    get: (_, key) => {
+      return (...args) => {
+        return new Promise(async (resolve, reject) => {
+          let run = () => {
+            let cb = (err, ...msg) => (err ? reject(err) : resolve(...msg));
+            bridge[key].apply(undefined, [...args, cb]);
+          };
+
+          while (!ready) {
+            await sleep();
+          }
+
+          if (!(key in bridge)) {
+            reject(\`There is nothing defined with the name "$\{key\}"\`);
+            return;
+          }
+
+          if (typeof bridge[key] !== 'function') {
+            resolve(bridge[key]);
+            return;
+          }
+
+          run();
+        });
+      };
+    }
+  }
+);
+
+export default proxy;`;
+
+   Ok, it's a little more advanced that the few snippets above, but let me explain some of the
+   additions:
+    1. Since we are asynchronously loading the WASM file using fetch there is the possibility that we'd
+       try and use an exported function before it's been made available. This would most likely happen
+       if you have a large bundle and/or a slow network connection, so I've introduced a sleep function
+       which uses requestAnimationFrame as a sleeper (so chucking stuff in the event loop) and waiting
+       until the WASM initialization function completes and sets ready to true
+    2. I've aliased the global that we're working with so you can use the generated code in Node.js or a
+       browser
+    3. I'm not exposing it as a callback pattern, instead I'm exposing it as a Promise, meaning you can
+       async/await with it
+    4. I added some error handling, if you call a function that can't be found the Promise is rejected
+    5. It also supports setting values not just functions from Go
+
+  Finishing our Loader
+
+   Template?
+
+   Generating WASM file?
+
+   Time to combine all of this together so that we can actually run the Loader.
+function loader(this: webpack.loader.LoaderContext, contents: string) {
+    // omitted for brevity
+
+    execFile(goBin, args, opts, (_, err) => {
+        if (err) {
+            cb(new Error(err));
+            return;
+        }
+
+        let out = readFileSync(outFile);
+        unlinkSync(outFile);
+        const emittedFilename = basename(this.resourcePath, ".go") + ".wasm";
+        this.emitFile(emittedFilename, out, null);
+
+        cb(
+            null,
+            [
+                "require('!",
+                join(__dirname, "..", "lib", "wasm_exec.js"),
+                "');",
+                proxyBuilder(emittedFilename)
+            ].join("")
+        );
+    });
+}
+
+   Remember how we generated the WASM file into the same location on disk as the original .go file? Well
+   that's fine to output as go build requires, but we actually want it to go with the rest of the
+   webpack output. To do this we use the emitFile method on the loader context, providing it the
+   contents of the file as a Buffer. That's why I use readFileSync to get the file into memory, then I
+   unlinkSync to delete it from disk, since the original output isn't needed anymore.
+
+   Finally I generate a require statement to the wasm_exec.js file that is bundled with the loader (I
+   had to make a minor change to it so it worked with webpack). You'll see this message in the debugging
+   console:
+../lib/wasm_exec.js 9:19-26
+Critical dependency: require function is used in a way in which dependencies cannot be statically extracted
+
+   This is because the wasm_exec.js file is being added as a require statement to webpack but we're not
+   explicitly exporting anything from it (since it just augments the global scope), meaning webpack is
+   unsure what we're actually using in there and it can't undertake tree shaking to remove unneeded
+   code (and thus optimise the application).
+
+Conclusion
+   All the code for the loader is on GitHub and I've published the loader on npm as
+   golang-wasm-async-loader. GitHub contains a (works on my machine) example of it in action if
+   you'd like to try it out.
+
+Bonus Round: Ditching Globals and Improving the Go Experience
+   The astute observer among you will have looked at the source code published to GitHub and noticed
+   it's not quite what I posted above.
+
+   One thing that's constantly irked me with the stuff I'd read from Go on how to work with WASM is that
+   everything seems to use js.Global as a dumping place for their functions/values/etc. and that is
+   rather unpleasant because you shouldn't pollute window/global/self.
+
+   I decided that I wanted my loader to address this and to also make it a little easier in Go to work
+   with this, removing the need to understand the JavaScript callback pattern.
+
+   So the loader's GitHub repository also contains a Go package called gobridge which gives you
+   helpers to register functions and values in Go to JavaScript.
+
+   This means I can write some code like so:
+//+ build js,wasm
+
+package main
+
+import (
+    "strconv"
+    "syscall/js"
+
+    "github.com/aaronpowell/webpack-golang-wasm-async-loader/gobridge"
+)
+
+func add(this js.Value, args []js.Value) (interface{}, error) {
+    ret := 0
+
+    for _, item := range args {
+        val, _ := strconv.Atoi(item.String())
+        ret += val
+    }
+
+    return ret, nil
+}
+
+func main() {
+    c := make(chan struct{}, 0)
+    println("Web Assembly is ready")
+    gobridge.RegisterCallback("add", add)
+    <-c
+}
+
+   And use gobridge.RegisterCallback and not worry about working with js.FuncOf or where to register it
+   in the JavaScript object graph.
+
+   And that latter part is important because I don't want to dump everything on global, I want to
+   namespace it.
+
+   Let's update the JavaScript we're generating in the Loader to include this:
+const g = self || window || global
+
+if (!g.__gobridge__) {
+  g.__gobridge__ = {};
+}
+
+const bridge = g.__gobridge__;
+
+   Now our Go code can use that, via the gobridge and we don't have to worry about trashing anything on
+   window in the browser!
+
+
+---
+https://www.aaron-powell.com/posts/2019-02-12-golang-wasm-6-typescript-react/
+
+Learning Golang through WebAssembly - Part 6, Go, WASM, TypeScript and React
+Feb 12, 2019
+
+Building an Application
+   Welcome to the final article in our little series, congratulations, you've made it this far!
+
+   So far we've looked at a lot of little pieces which would eventually make an application and it's
+   time to tackle that, it's time to build a web application.
+
+   I've decided that for this application we're going to piece together some other tools that you might
+   commonly use, we'll use React as a UI library and TypeScript as a compile-to-JavaScript language. But
+   there's no reason you couldn't replace React with Vue, Angular or any other UI library, and drop
+   TypeScript for 'plain old JavaScript'. You'll find the demo app on my GitHub.
+
+Setting up our Application
+   To get started we'll use create-react-app with TypeScript, I won't go over doing that setup, the
+   React documentation does a good job for me. You don't have to use create-react-app, it's just a
+   really easy way to bootstrap, but if you're confident without it, by all means skip this step.
+
+   Once you're created an application though we'll need to eject create-react-app because we need to
+   be able to modify the webpack.config.js file, which can only be done if you eject create-react-app.
+
+Getting all WASM-y
+
+   We'll start by adding the loader created in the last post using npm or yarn:
+npm install --save-dev golang-wasm-async-loader
+# or
+yarn add golang-wasm-async-loader
+
+   Then editing the configs/webpack.config.js file to add our loader (follow the instructions in the
+   file for where to put it):
+{
+    test: /\.go$/,
+    loader: 'golang-wasm-async-loader'
+},
+
+Adding our WASM
+   I'm going to make a little application that shows at least 2 number input fields and adds all the
+   values together to get a sum, to Go code for it will look like this:
+package main
+
+import (
+    "strconv"
+    "syscall/js"
+
+    "github.com/aaronpowell/webpack-golang-wasm-async-loader/gobridge"
+)
+
+func add(i ...js.Value) js.Value {
+    ret := 0
+
+    for _, item := range i {
+        val, _ := strconv.Atoi(item.String())
+        ret += val
+    }
+
+    return js.ValueOf(ret)
+}
+
+func main() {
+    c := make(chan struct{}, 0)
+    println("Web Assembly is ready")
+    gobridge.RegisterCallback("add", add)
+    <-c
+}
+
+   Pretty basic, we use range to go over the spread of js.Value, convert each one from a string to a
+   number, sum them up and return boxed in js.Value.
+
+   Next up in our input field, I've created a file NumberInput.tsx for that:
+import * as React from 'react';
+
+export interface NumberInputProps {
+    value: number
+    onChange: (value: number) => void
+}
+
+const NumberInput : React.SFC<NumberInputProps> = ({ value, onChange }) => (
+    <input type="number" value={value} onChange={(e) => onChange(parseInt(e.target.value, 10))} />
+);
+
+export default NumberInput;
+
+   It's a stateless component that receives two properties, a value for the input field and the callback
+   to execute on change of the input field.
+
+   Lastly we'll make our <App />:
+import * as React from 'react';
+import wasm from './main.go';
+import NumberInput from './NumberInput';
+
+const { add } = wasm;
+
+interface State {
+    value: number[]
+    result: string
+}
+
+class App extends React.Component<{}, State> {
+    constructor(props: {}) {
+        super(props);
+
+        this.state = {
+            value: [0, 0],
+            result: '0'
+        };
+    }
+
+    async updateValue(index: number, value: number) {
+    //todo
+    }
+
+    render() {
+        return (
+            <div>
+                <p>Enter a number in the box below, on change it will add all the numbers together. Click the button to add more input boxes.</p>
+                {this.state.value.map((value, index) =>
+                    <NumberInput key={index} value={value} onChange={i => this.updateValue(index, i)} />
+                )}
+                <button type="button" onClick={() => this.setState({ value: [...this.state.value, 0]})}>More inputs!</button>
+                <p>Value now is {this.state.result}</p>
+            </div>
+        );
+    }
+}
+
+export default App;
+   Ok, pretty basic, it's component with state (sorry, no redux or hooks here) where state contains
+   an array of input values and the current sum. The render will loop over the input values, create our
+   <NumberInput /> component with the value and give it a function that will call updateValue when done.
+   State it initialised to have 2 inputs, but you can add more with a button shown on screen.
+
+   At the top of the file you'll see that we're importing the main.go file from above and using
+   destructing assignment to get out the add function, or more accurately, a reference to it from
+   the Proxy the loader creates for us.
+
+   Now it's time to complete our updateValue method. But it turns out that using the add function could
+   be a bit tricky. Sure we can define it as an any property of the WASM, but what if we wanted to be
+   more intelligent in the way it is represented?
+async updateValue(index: number, value: number) {
+    let newValues = this.state.value.slice();
+    newValues[index] = value
+    let result = await add<number, string>(...newValues);
+    this.setState({ value: newValues, result });
+}
+
+Using Types with our Proxy
+   How do we make sure that TypeScript knows what type our arguments are that are to be passed into a
+   function that, well, doesn't exist? Ultimately we want to get away from an any, instead we want to
+   use TypeScript generics!
+
+   We can do this in one of two ways, the first is we just create a definition file that creates an
+   explicit interface for our WASM import:
+declare module "*.go" {
+    interface GoWrapper {
+    add: (...params: number[]) => Promise<string>
+    }
+
+    var _: GoWrapper
+    export default _
+}
+
+   I've created a file called definitions.d.ts that sits alongside the App.tsx file, and by declaring
+   the module for *.go it means that this declaration file works for any imports of Go files. We can
+   also drop the generic arguments, which is nice, but it is a problem it we want to start adding more
+   Go functions, we keep having to edit this file to include them.
+
+   So how about going crazy with generic!
+declare module "*.go" {
+    interface GoWrapper {
+        [K: string]: <T = any, R = any>(...params: T[]) => Promise<R>
+    }
+
+    var _: GoWrapper
+    export default _
+}
+
+   Now, stick with me as we break it down:
+     * We're saying we have keys of the type (GoWrapper) that are strings with [K: string]
+     * Each key has a type that takes two generic arguments, an input and an output, that's <T = any, R
+       = any>
+     * These go into a function with T being a params array, denoted by (...params: T[])
+     * The return type is a Promise using the specified return type, Promise<R>
+
+   So when we do add<number, string> it says that were passing in an indeterminate number of arguments
+   that are all numbers and it'll return a string asynchronously.
+
+   This forced type flow down from our state and back, all through the magic of TypeScript types!
+
+   If you were working with mixed types in the arguments to the function we could do something like:
+let result = await something<string | number, string>("hello", 1, "world");
+
+   Using the | tells TypeScript that the arguments into the function are a string or number type, but
+   not function, boolean, etc.. Pretty crazy right!
+
+Deploying our Application
+   We're done! It works locally! Now it's time to deploy it somewhere.
+
+   I'm going to use Azure DevOps Pipelines to build and then deploy it as an Azure Blob Static
+   Website.
+
+  Building
+   To build you'll need to run the following steps:
+     * Install our Go dependencies
+     * Install our npm packages
+     * Run webpack
+     * Copy the required files as a build artifact
+
+   I've created an Azure DevOps YAML build that is in the GitHub repo. It's modeled on the
+   standard Node.js pipeline but I've added the specific Go steps.
+
+   The things of note are that you'll need to install the appropriate Go packages with go get. To use
+   the gobridge I created for the loader you'll need to set the GOOS and GOARCH too:
+- script: |
+    GOOS=js GOARCH=wasm go get "github.com/aaronpowell/webpack-golang-wasm-async-loader/gobridge"
+  displayName: 'install gobridge'
+
+   You'll also need to make sure that GOPATH and GOROOT are environment variables available to the
+   loader. By default these aren't set as environment variables in the agent, I just did it inline:
+- script: |
+    npm install
+    GOPATH=$(go env GOPATH) GOROOT=$(go env GOROOT) npm run build
+  displayName: 'npm install, run webpack'
+
+   Alternatively, you can create them for all tasks:
+variables:
+  GOBIN:  '$(GOPATH)/bin' # Go binaries path
+  GOROOT: '/usr/local/go1.11' # Go installation path
+  GOPATH: '$(system.defaultWorkingDirectory)/gopath' # Go workspace path
+
+   Here's a completed build! (ignore all the failed ones before it)
+
+Release
+   At the time of writing we don't have support for releases in the YAML file for Azure DevOps
+   Pipelines. I use the Azure File Copy task to copy all the files into the storage account I'm
+   running in, followed by the Azure CLI task to set the WASM content type on the WASM file,
+   otherwise it won't be served correctly:
+az storage blob update --container-name "$web" --name "hello.wasm" --content-type "application/wasm" \
+--account-name gowasm
+
+   Remember to change hello.wasm to whatever your filename is!
+
+   Here's a completed release!
+
+Conclusion
+   And we are done folks! Starting with no idea what WebAssembly is or how to write Go we've gone
+   through a bunch of exploration into how it all works, what makes Go's approach to WebAssembly a
+   little tricky as a web developer and ultimately how we can introduce Go into the tool chain that we
+   are familiar with these days building web applications.
+
+   I do hope you've enjoyed this series as we've gone along. If you build anything exciting with Go and
+   WASM please let me know!
+
+
+---

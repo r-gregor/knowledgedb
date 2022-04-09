@@ -1,0 +1,404 @@
+filename: ptn_signal-handlers-and-exceptions_20181218.txt
+https://anonbadger.wordpress.com/2018/12/15/python-signal-handlers-and-exceptions/
+
+Python, signal handlers, and exceptions
+
+   Never ever, ever raise a regular exception in a Python signal handler.
+
+   This is probably the best advice that I had never heard. But after looking into an initial
+   analysis of a timeout decorator bug it’s advice that I wish was prominently advertised. So I'm
+   publishing this little tale to let others know about this hidden gotcha so that, just maybe, when you
+   have an opportunity to do this, a shiver will run down your spine, your memory will be tickled, and
+   you'll be able to avoid the pitfalls that I've recorded here.
+
+When will I need to be reminded of this?
+   Signals are a means provided by an operating system to inform programs of events that aren't part of
+   their normal program flow. If you're on a UNIX-like operating system and hit Control-C to cancel a
+   program running in the shell, you've used a signal. Control-C in the shell sends a SIGINT
+   (Interrupt) signal to the program. The program receives the SIGINT and a signal handler (a function
+   which is written to take appropriate action when a signal is received) is invoked to handle it. In
+   most cases, for SIGINT, the signal handler tries to complete any pressing work (for instance, to
+   finish writing data to a file so that the file isn't left in a half-written state) and then causes
+   the program to exit.
+
+   Python provides a signal library which is very similar to the C API underneath Python. Python
+   does a little bit of behind the scenes work to make sure that signals appear to be interacting with
+   Python code rather than interfering with the interpreter's implementation (meaning that signals will
+   appear to happen between Python's byte code instructions rather than leaving a Python instruction
+   half-completed).
+
+Your mission: exit when a signal occurs
+   If you search the internet for how to implement a timeout in Python, you'll find tons of examples
+   using signals, including one from the standard library documentation and one which is probably
+   where the design for our original decorator came from. So let's create some quick test code to
+   show how the signal works to implement a timeout
+import signal
+import time
+
+def handler(signum, frame):
+    print('Signal handler called with signal',
+          signum)
+    raise OSError("timeout exceeded!")
+
+def long_function():
+    time.sleep(10)
+
+# Set the signal handler and a 1-second alarm
+old_handler = signal.signal(signal.SIGALRM,
+                            handler)
+signal.alarm(1)
+# This sleeps for longer than the alarm
+start = time.time()
+try:
+    long_function()
+except OSError as e:
+    duration = time.time() - start
+    print('Duration: %.2f' % duration)
+    raise
+finally:
+    signal.signal(signal.SIGALRM, old_handler)
+    signal.alarm(0) # Disable the alarm
+
+   This code is adapted from the example of implementing a timeout in the standard library
+   documentation. We first define a signal handler named handler() which will raise an OSError when
+   it's invoked. We then define a function, long_function() which is designed to take longer to run than
+   our timeout. The we hook everything together:
+     * On lines 13-14 we register the handler to be invoked when a SIGALRM occurs.
+     * On line 15 we tell Python to emit SIGALRM after 1 second.
+     * On line 19 we call long_function()
+     * On line 20-23, we specify what happens when a timeout occurs
+     * In the finally block on lines 24-26, we undo our signal handler by first re-registering the prior
+       SIGALARM handler as the function to invoke if a new SIGALRM occurs and then disabling the alarm
+       that we had previously set.
+
+   When we run the code we see that the signal handler raises the OSError as expected:
+$ /bin/time -p python3 test.py
+Signal handler called with signal 14
+Duration: 1.00
+Traceback (most recent call last):
+  File "test.py", line 18, in
+    long_function()
+  File "test.py", line 11, in long_function
+    time.sleep(2)
+  File "test.py", line 8, in handler
+    raise OSError("timeout exceeded!")
+OSError: timeout exceeded!
+real 1.04
+
+   Although long_function() takes 10 seconds to complete, the SIGALRM fires after 1 second. That causes
+   handler() to run which raises the OSError with the message timeout exceeded!. The exception
+   propagates to our toplevel where it is caught and prints Duration: 1.00 before re-raising so we can
+   see the traceback. We see that the output of /bin/time roughly agrees with the duration we
+   calculated within the program… just a tad over 1 second to run the whole thing.
+
+Exceptions seem to be working…?
+
+   It's time to make our long_function code a little less trivial.
+import signal
+import time
+
+def handler(signum, frame):
+    print('Signal handler called with signal',
+signum)
+    raise OSError("timeout exceeded!")
+
+def long_function():
+    try:
+        with open('/etc/passwd', 'r') as f:
+            data = f.read()
+            # Simulate reading a lot of data
+            time.sleep(10)
+    except OSError:
+        # retry once:
+        with open('/etc/passwd', 'r') as f:
+            data = f.read()
+            time.sleep(10)
+
+# Set the signal handler and a 5-second alarm
+old_handler = signal.signal(signal.SIGALRM,
+handler)
+signal.alarm(1)
+start = time.time()
+# This sleeps for longer than the alarm
+try:
+    long_function()
+except OSError as e:
+    duration = time.time() - start
+    print('Duration: %.2f' % duration)
+    raise
+finally:
+    signal.signal(signal.SIGALRM, old_handler)
+    signal.alarm(0)        # Disable the alarm
+
+
+   We've changed long_function(), lines 9-20, to do two new things:
+    1. It now reads from a file. We still have time.sleep(), but that's just to simulate a long read
+       operation which will trigger our timeout.
+    2. Open() and read() can raise a variety of exceptions. If open() or read() raise an OSError
+       exception, we want to retry reading the file once before we give up.
+
+   So what happens when we run this version?
+$ /bin/time -p python3 test.py
+Signal handler called with signal 14
+real 11.07
+
+That was unexpected…
+
+   As you can see from the output, our program still fired the SIGALRM. And the signal handler still
+   ran. But after it ran, everything else seems to be different. Apparently, the OSError didn't
+   propagate up the stack to our toplevel so we didn't print the duration. Furthermore, we ended up
+   waiting for approximately 10 seconds in addition to the 1 second we waited for the timeout. What
+   happened?
+
+   The key to understanding this is to understand that when the signal handler is invoked, Python adds
+   the call to the signal handler onto its current call stack (The call stack roughly represents the
+   nesting of functions that lead up to where the code is currently executing. So, in our example,
+   inside of the signal handler, the call stack would start with the module toplevel, then
+   long_function(), and finally handler(). If you look at the traceback from the first example, you can
+   see exactly that call stack leading you through all the function calls to the point where the
+   exception was raised.)  When the signal handler raises its exception, Python unwinds the call stack
+   one function at a time to find an exception handler (not to be confused with our signal handler)
+   which can handle the exception.
+
+   Where was the program waiting when SIGALRM was emitted?  It was on line 14, inside of
+   long_function(). So Python acts as though handler() was invoked directly after that line. And when
+   handler() raises its OSError exception, Python then unwinds the call stack from handler() to
+   long_function() and sees that on line 15, there's an except OSError: and so Python lets it catch the
+   signal handler's OSError instead of propagating it up the stack further. And in our code, that
+   exception handler decides to retry reading the file which is where there is a second 10 second delay
+   as we read the file. Since the SIGALRM was already used up, the timeout doesn't fire this time. So
+   the rest of the bug progresses from there: long_function() now waits the full 10 seconds before
+   returning because there's no timeout to stop it. It then returns normally to its caller. The caller
+   doesn't receive an OSError exception. So it doesn't fire its own OSError exception handler which
+   would have printed the Duration.
+
+Okay, this isn't good. Can it get worse?
+
+   There are even less intuitive ways that this bug can be provoked. For instance:
+def long_function():
+    time.sleep(0.8)
+    try:
+        time.sleep(0.1)
+        time.sleep(0.1)
+        time.sleep(0.1)
+    except Exception:
+        pass
+
+   In this version, we don't have the context clue that we're raising OSError in the signal handler and
+   mistakenly catching it in long_function(). An experienced Python coder will realize that except
+   Exception is sufficiently broad to be catching OSError, but in the clutter of other function calls
+   and without the same named exception to provoke their suspicions initially, they might not realize
+   that the occasional problems with the timeout not working could be triggered by this late exception
+   handler.
+
+   This is also problematic if the programmer is having to orient themselves off of a traceback. That
+   would lead them to look inside of long_function() for the source of a OSError. They won't find it
+   there because it's inside of the signal handler which is outside of the function.
+import zipfile
+def long_function():
+    time.sleep(0.9)
+    zipfile.is_zipfile('my_file.zip')
+
+   In this case, there's no exception handling in our code to clue us in. If you look at the
+   implementation of zipfile.is_zipfile(), though, you'll see that there's an except OSError: inside of
+   there. If the timeout's alarm ends up firing while you are inside of that code, is_zipfile() will
+   just as happily swallow the OSError as an exception handler inside of long_function() would have.
+
+So I think I can solve this if I….
+
+   There are ways to make the timeout functionality more robust. For instance, let's define our handler
+   like this:
+import functools
+
+class OurTimeout(BaseException):
+    pass
+
+def handler(timeout, signum, frame):
+    print('Signal handler called with signal',
+          signum)
+    signal.alarm(timeout)
+    raise OurTimeout("timeout exceeded!")
+
+# toplevel code:
+one_second_timeout = functools.partial(handler, 1)
+old_handler = signal.signal(signal.SIGALRM, one_second_timeout)
+signal.alarm(1)
+try:
+    long_function()
+except OurTimeout:
+    print('Timeout from our timeout function)
+
+   The first thing you can see is that this now raises a custom timeout which inherits from
+   BaseException. This is more robust than using standard timeouts which are rooted at Exception because
+   well written Python code won't catch exceptions inheriting directly from BaseException. It's not
+   foolproof, however, because it's only convention that prevents someone from catching BaseException.
+   And no matter how good a Python programmer you are, I'm sure you've been lazy enough to write code
+   like this at least once:
+def long_function():
+    try:
+        with open('/etc/passwd', 'r') as f:
+            f.read()
+    except:
+        # I'll fix the possible exception classes later
+        rollback()
+
+   Bare except: catches any exception, including BaseException so using a bare except will still break
+   this timeout implementation.
+
+   The second thing this implementation changes is to reset the alarm inside of the signal handler. This
+   is helpful as it means that the code will be able to timeout multiple times to get back to the
+   toplevel exception handler. In our retry example, Both the initial attempt and the retry attempt
+   would timeout so long_function() would end up taking only two seconds and fail due to our timeout in
+   the end. However, there are still problems. For instance, this code ends up taking timeout * 3
+   seconds instead of just timeout seconds because the exception handler prevents us from hitting the
+   break statement so we'll have to keep hitting the timeout:
+def long_function():
+    for i in range(0, 3):
+        try:
+            time.sleep(10)
+        except OSError:
+            pass
+        else:
+            break
+
+   The following code, (arguably buggy because you *should* disable the alarm as the first thing in the
+   recovery code instead of the last) can end up aborting the toplevel code's recovery effort if timeout
+   is too short:
+try:
+    long_function()
+except OSError:
+   rollback_partial_long_function()
+   signal.alarm(0)
+
+   So even though this code is better than before, it is still fragile, error prone, and can do the
+   wrong thing even with code that isn't obviously wrong.
+
+Doctor, is there still hope?
+
+   When I was looking at the problem with the timeout decorator in Ansible what struck me was that
+   when using the decorator, the decorator was added outside of a function telling it to timeout but the
+   timeout was occurring and potentially being processed inside of the function. That meant that it
+   would always be unintuitive and error prone to someone trying to use the decorator:
+@timeout.timeout(1)
+def long_function():
+    try:
+        time.sleep(10)
+    except:
+        # Try an alternative
+        pass
+
+try:
+    long_function()
+except timeout.TimeoutError:
+    print('long_function did not complete')
+
+   When looking at the code, the assumption is that on the inside there's long_function, then outside of
+   it, the timeout code, and outside of that the caller. So the expectation is that an exception raised
+   by the timeout code should only be processed by the caller since exceptions in Python only propagate
+   up the call stack. Since the decorator's functionality was implemented via a signal handler, though,
+   that expectation was disappointed.
+
+   To solve this, I realized that the way signals and exceptions interact would never allow exceptions
+   to propagate correctly. So I switched from using a signal to using one thread for the timeout and one
+   thread for running the function. Simplified, that flow looks like this (You can look at the code for
+   the new decorator in Ansible if you're okay with the GPLv3+ license. The following code is all
+   mine in case you want to re-implement the idea without the GPLv3+ restrictions:
+import multiprocessing
+import multiprocessing.pool
+
+def timeout(seconds=10):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            pool = multiprocessing.pool.ThreadPool(processes=1)
+            results = pool.apply_async(func, args, kwargs)
+            pool.close()
+            try:
+                return results.get(seconds)
+            except multiprocessing.TimeoutError:
+                raise OSError('Timeout expired after: %s' % seconds)
+        return wrapper
+    return decorator
+
+@timeout(1)
+def long_func():
+    try:
+        time.sleep(10)
+    except OSError:
+        print('Failure!')
+    print('end of long_func')
+
+try:
+    long_func()
+except OSError as e:
+    print('Success!')
+    raise
+
+   As you can see, I create a multiprocessing.pool.ThreadPool with a single thread in it. Then I run the
+   decorated function in that thread. I use res.get(timeout) with the timeout we set to get the results
+   or raise an exception if the timeout is exceeded. If the timeout was exceeded, then I throw the
+   OSError to be like our first example.
+
+   If all goes well, the exception handling inside of long_func won't have any effect on what happens.
+   Let's see:
+$ python2 test.py
+Success!
+Traceback (most recent call last):
+  File "test.py", line 49, in
+    long_func()
+  File "test.py", line 35, in wrapper
+    raise OSError('Timeout expired after: %s' % seconds)
+OSError: Timeout expired after: 1
+
+   Yep, as you can see from the stack trace, the OSError is now being thrown from the decorator, not
+   from within long_func(). So only the toplevel exception handler has a chance to handle the exception.
+   This leads to more intuitive code and hopefully less bugs down the road.
+
+So are there ever times when a signal handler is the right choice?
+
+   Signal handlers can be used for more than just timeouts. And they can do other things besides trying
+   to cancel an ongoing function. For instance, the Apache web server has a signal handler for the HUP
+   (HangUP) signal. When it receives that, it reloads its configuration from disk. If you take care to
+   catch any potential exceptions during that process, you shouldn't run across these caveats because
+   these problems only apply to raising an exception from the signal handler.
+
+   When you do want to exit the function via a signal handler, I would be a little hesitant because you
+   can never entirely escape from the drawbacks above and threading provides a more intuitive interface
+   for the called and calling code. I think that a few practices make it more robust, however. As
+   mentioned above:
+     * Use a custom exception inheriting directly from BaseException to reduce the likelihood that
+       unexpected code will catch it.
+     * If you are doing it for a timeout, remember to reset the alarm inside of the signal handler in
+       case something does catch your custom exception. At least then you'll continue to hit timeouts
+       until you finally escape the code.
+
+   And one that wasn't mentioned before:
+
+   It's better to make an ad hoc exception-raising signal handler that handles a specific problem inside
+   of a function rather than attempting to place it outside of the function. For instance:
+def timeout_handler():
+    raise BaseException('Timeout')
+
+def long_function():
+    try:
+        old_handler = signal.signal(signal.SIGALRM,
+                                    timeout_handler)
+        signal.alarm(1)
+        time.sleep(10)   # Placeholder for the real,
+                         # potentially blocking code
+    except BaseException:
+        print('Timed out!')
+    finally:
+        signal.signal(signal.SIGALRM, old_handler)
+        signal.alarm(0)
+
+long_function()
+
+   Why is it better to do it this way? If you do this, you localize the exception catching due to the
+   signal handler with the code that could potentially raise the exception. It isn't foolproof as you
+   are likely still going to call helper functions (even in the stdlib) which could handle a conflicting
+   exception but at least you are more clearly aware of the fact that the exception could potentially
+   originate from any of your code inside this function rather than obfuscating all of that behind a
+   function call.
+
+
+---

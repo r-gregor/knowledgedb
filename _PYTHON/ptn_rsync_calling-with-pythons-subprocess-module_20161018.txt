@@ -1,0 +1,353 @@
+filename: rsync_calling-with-pythons-subprocess-module_20161018.txt
+https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/
+
+Calling rsync with Python’s Subprocess module
+
+   I was recently trying to script multiple file transfers via rsync, but unfortunately, I was unable to
+   control file names.  I chose to use python and issue commands to the OS to initiate transfer.
+   Initially, everything was working great, but as soon as I encountered a space or parenthesis, the
+   script blew up!
+
+   In this tuturial, I’m showing how to transfer a single file, but rsync is a very powerful tool
+   capable of much more.  The principles discussed in this post can be adapted with other uses of rsync,
+   but I’m considering rsync usage to be out of scope here.  There is a very good online man page here:
+   (http://linux.die.net/man/1/rsync).  I’ve chosen to initiate transfers one file at a time, so I
+   can easily have multiple connection streams running vs a single connection stream that transmits all
+   files in sequence.  It is much faster this way with my current ISP, as I suspect they shape my
+   traffic.  Also note, these methods can be applied to scp file transfers as well.
+
+   We will start with a very basic rsync command to copy /tmp/test.txt from a remote location to my
+   local pc.  Before starting, I’ve set up public key authentication between my home pc and the remote
+   server.  I initiate the connection from my home pc, as I don’t care to put private keys in remote
+   locations that could provide access to my home network.
+/usr/bin/rsync -va myusername@host.domain.com:/tmp/test.txt
+
+   This works very well, but what happens when the file has a space? With most commands, we can just
+   wrap quotes around it, and it works.
+rsync myusername@host.domain.com:'/tmp/with space.txt' '/tmp/with space.txt'
+rsync: link_stat "/tmp/with" failed: No such file or directory (2)
+rsync: link_stat "/home/myusername/space.txt" failed: No such file or directory (2)
+rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1637) [Receiver=3
+.1.0]
+
+   Unfortunately, in this case, the remote system sees “/tmp/with space.txt” as two separate files,
+   /tmp/with and $HOME/space.txt. What we need to do for the remote location is both wrap it with quotes
+   and escape it.  We could also double escape the filename, but I chose to keep things looking a little
+   bit sane.
+/usr/bin/rsync myusername@host.domain.com:'/tmp/with space.txt' '/tmp/with space.txt'
+
+   That is fine, but we need a good way to do this on the fly when we are given file names in bulk.
+   There are three key libraries I like to use when doing this:
+     * subprocess – This is an extremely powerful library for spawning processes on the OS.
+     * os.path – This submodule of os contains very useful tools for manipulating filesystem object
+       strings.
+     * re – Regular expression operations provides an easy to use escape function.
+
+   In a nutshell, here is the operation that needs to happen to create the command and execute it:
+import re
+import subprocess
+
+full_remote_path = "/tmp/filename with space.txt"
+full_local_path = "/tmp/filename with space.txt"
+remote_username = "myusername"
+remote_hostname = "host.domain.com"
+
+# Here we use re.escape to escape the paths.
+escaped_remote = re.escape(full_remote_path)
+escaped_local = re.escape(full_local_path)
+
+# I've chosen to just escape the local path and leave off the quotes.
+cmd = "/usr/bin/rsync -va %s@%s:'%s' %s" % (remote_username, remote_hostname, escaped_remote, escaped_local)
+print cmd
+
+p = subprocess.Popen(cmd, shell=True).wait()
+
+   Here is the rsync command that is sent to the os:
+/usr/bin/rsync -va myusername@host.domain.com:'/tmp/filename with space.txt' /tmp/filename with space.txt
+
+   Now that we have this working, now, I get to explain how os.path fits in.  Should you be copying
+   /tmp/mydirectory/afile.txt on the remote system to /tmp on your local system, but /tmp/mydirectory
+   does not exist, you will receive an error:
+rsync -qv myusername@host.domain.com:/tmp/test.txt /tmp/mydirectory/test.txt
+rsync: change_dir#3 "/tmp/mydirectory" failed: No such file or directory (2)
+rsync error: errors selecting input/output files, dirs (code 3) at main.c(694) [Receiver=3.1.0]
+
+   The easiest way to do this would be to run a simple mkdir -p command on /tmp/mydirectory before
+   beginning.  Should the directory exist, the command does nothing.  Should it be missing, it will be
+   created with the necessary parent directories.  In a case where you are copying a file to a remote
+   machine, you can pass this command to the remote machine via ssh.
+
+   To do this in python, I like to take the full filename, and split it to receive the complete
+   directory path.
+import os
+import re
+import subprocess
+
+local = "/tmp/mydirectory/test.txt"
+
+localdir = os.path.split(local)[0]
+localdir = "%s/" % localdir
+localdir = re.escape(localdir)
+
+mkdir_cmd = '/bin/mkdir -p %s' % localdir
+p = subprocess.Popen(mkdir_cmd, shell=True).wait()
+
+   Here is my full example code that I created to test and demo this technique:
+#! /usr/bin/python
+
+import subprocess
+import os
+import re
+
+def do_rsync(rh, ru, rd, rf, ld):
+
+ # The full file path is the directory plus file.
+ remote = os.path.join(rd, rf)
+
+ # escape all characters in the full file path.
+ remote = re.escape(remote)
+
+ # here we format the remote location as 'username@hostname:'location'
+ remote = "%s@%s:'%s'" % (ru, rh, remote)
+
+ # here we define the desired full path of the new file.
+ local = os.path.join(ld, rf)
+
+ # This statement will provide the containing directory of the file
+ # this is useful in case the file passed as rf contains a directory
+ localdir = os.path.split(local)[0]
+
+ # os.path.split always returns a directory without the trailing /
+ # We add it back here
+ localdir = "%s/" % localdir
+
+ # escape all characters in the local filename/directory
+ local = re.escape(local)
+ localdir = re.escape(localdir)
+
+ # before issuing the rsync command, I've been running a mkdir command
+ # Without this, if the directory did not exist, rsync would fail.
+ # If the directory exists, then the mkdir command does nothing.
+ # If you are copying the file to the remote directoy, the mkdir command can be passed by ssh
+ mkdir_cmd = '/bin/mkdir -p %s' % localdir
+
+ # create the rsync command
+ rsync_cmd = '/usr/bin/rsync -va %s %s' % (remote, local)
+
+ # Now we run the commands.
+ # shell=True is used as the excaped characters would cause failures.
+ p1 = subprocess.Popen(mkdir_cmd, shell=True).wait()
+ p2 = subprocess.Popen(rsync_cmd, shell=True).wait()
+ print ""
+ return 0
+
+rh = "host.domain.com"
+ru = "myusername"
+rd = "/tmp"
+rf = "test.txt"
+ld = "/tmp"
+
+print "Here we do a simple test with test.dat"
+do_rsync(rh, ru, rd, rf, ld)
+
+rf = "this is a filename - with (stuff) in it.dat"
+
+print "Here is a filename with a bit more character."
+do_rsync(rh, ru, rd, rf, ld)
+
+exit()
+
+   A function like this could be put into place very easily, but a few changes would be necessary in
+   order to make this production ready.  The rsync cleanup can be minimized by changing the -v to a -q,
+   but in doing this, you will want to check the exit status using subprocess to determine if the
+   transfer was successful.  In my case, I chose to use the process and queue functions from the
+   multiprocessing module to manage multiple streams.
+
+Share this:
+
+     * Click to share on Twitter (Opens in new window)
+     * Click to share on Facebook (Opens in new window)
+     * Click to share on Google+ (Opens in new window)
+     *
+
+   Posted in Linux, Python, Tech, Tutorials and tagged linux, os, os.path,
+   python, re, rsync, subprocess on March 8, 2014 by Ryan. Leave a comment
+   ← Safe SCP and Delete MariaDB master-master configuration over ssh tunnel →
+
+Leave a Reply Cancel reply
+
+   Your email address will not be published. Required fields are marked *
+
+   Comment
+   _____________________________________________
+   _____________________________________________
+   _____________________________________________
+   _____________________________________________
+   _____________________________________________
+   _____________________________________________
+   _____________________________________________
+   _____________________________________________
+
+   Name * ______________________________
+
+   Email * ______________________________
+
+   Website ______________________________
+
+   Post Comment
+
+   [ ] Notify me of follow-up comments by email.
+
+   [ ] Notify me of new posts by email.
+
+   Search for: ____________________ Search
+
+Recent Posts
+
+     * WordPress performance with caching
+     * I switched my host provider!
+     * MariaDB master-master configuration over ssh tunnel
+     * Calling rsync with Python’s Subprocess module
+     * Safe SCP and Delete
+
+Tags
+
+   active-active apache benchmark cache camera cleverbot database
+   digitalocean DIY gamertagops google voice host linux mariadb
+   master-master master-slave mysql MySQLdb os os.path performance php
+   projects pycleverbot pygooglevoice python raspberry pi raspbian re
+   replication rsync scp ssh subprocess textbot tunnel Ubuntu
+   WP-Syntax xbox live
+
+Archives
+
+     * February 2016
+     * January 2016
+     * July 2014
+     * March 2014
+     * September 2013
+     * August 2013
+     * May 2013
+     * February 2013
+     * April 2012
+     * March 2011
+     * February 2011
+     * October 2010
+     * September 2010
+     * August 2010
+
+Meta
+
+     * Register
+     * Log in
+     * Entries RSS
+     * Comments RSS
+     * WordPress.org
+
+   Proudly powered by WordPress · Theme: Suits by Theme Weaver
+
+References
+
+   1. https://ryanveach.com/feed/
+   2. https://ryanveach.com/comments/feed/
+   3. https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/feed/
+   4. https://ryanveach.com/203/safe-scp-and-delete/
+   5. https://ryanveach.com/253/mariadb-master-master-configuration-over-ssh-tunnel/
+   6. https://ryanveach.com/wp-json/oembed/1.0/embed?url=https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/
+   7. https://ryanveach.com/wp-json/oembed/1.0/embed?url=https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/&format=xml
+   8. https://ryanveach.com/
+   9. https://ryanveach.com/about-2/
+  10. https://ryanveach.com/links/
+  11. http://linux.die.net/man/1/rsync
+  12. http://docs.python.org/2/library/subprocess.html
+  13. http://docs.python.org/2/library/os.path.html
+  14. http://docs.python.org/2/library/re.html
+  15. https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/?share=twitter
+  16. https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/?share=facebook
+  17. https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/?share=google-plus-1
+  18. https://ryanveach.com/category/tech/linux-tech/
+  19. https://ryanveach.com/category/tech/python-tech/
+  20. https://ryanveach.com/category/tech/
+  21. https://ryanveach.com/category/tutorials/
+  22. https://ryanveach.com/tag/linux/
+  23. https://ryanveach.com/tag/os/
+  24. https://ryanveach.com/tag/os-path/
+  25. https://ryanveach.com/tag/python-2/
+  26. https://ryanveach.com/tag/re/
+  27. https://ryanveach.com/tag/rsync/
+  28. https://ryanveach.com/tag/subprocess/
+  29. https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/
+  30. https://ryanveach.com/author/ryan/
+  31. https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/#respond
+  32. https://ryanveach.com/203/safe-scp-and-delete/
+  33. https://ryanveach.com/253/mariadb-master-master-configuration-over-ssh-tunnel/
+  34. https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/#respond
+  35. https://ryanveach.com/314/wordpress-performance-with-caching/
+  36. https://ryanveach.com/280/i-switched-my-host-provider/
+  37. https://ryanveach.com/253/mariadb-master-master-configuration-over-ssh-tunnel/
+  38. https://ryanveach.com/233/calling-rsync-with-pythons-subprocess-module/
+  39. https://ryanveach.com/203/safe-scp-and-delete/
+  40. https://ryanveach.com/tag/active-active/
+  41. https://ryanveach.com/tag/apache/
+  42. https://ryanveach.com/tag/benchmark/
+  43. https://ryanveach.com/tag/cache/
+  44. https://ryanveach.com/tag/camera/
+  45. https://ryanveach.com/tag/cleverbot/
+  46. https://ryanveach.com/tag/database/
+  47. https://ryanveach.com/tag/digitalocean/
+  48. https://ryanveach.com/tag/diy/
+  49. https://ryanveach.com/tag/gamertagops/
+  50. https://ryanveach.com/tag/google-voice/
+  51. https://ryanveach.com/tag/host/
+  52. https://ryanveach.com/tag/linux/
+  53. https://ryanveach.com/tag/mariadb-2/
+  54. https://ryanveach.com/tag/master-master/
+  55. https://ryanveach.com/tag/master-slave/
+  56. https://ryanveach.com/tag/mysql-2/
+  57. https://ryanveach.com/tag/mysqldb/
+  58. https://ryanveach.com/tag/os/
+  59. https://ryanveach.com/tag/os-path/
+  60. https://ryanveach.com/tag/performance/
+  61. https://ryanveach.com/tag/php-2/
+  62. https://ryanveach.com/tag/projects-2/
+  63. https://ryanveach.com/tag/pycleverbot/
+  64. https://ryanveach.com/tag/pygooglevoice/
+  65. https://ryanveach.com/tag/python-2/
+  66. https://ryanveach.com/tag/raspberry-pi-2/
+  67. https://ryanveach.com/tag/raspbian/
+  68. https://ryanveach.com/tag/re/
+  69. https://ryanveach.com/tag/replication/
+  70. https://ryanveach.com/tag/rsync/
+  71. https://ryanveach.com/tag/scp/
+  72. https://ryanveach.com/tag/ssh/
+  73. https://ryanveach.com/tag/subprocess/
+  74. https://ryanveach.com/tag/textbot/
+  75. https://ryanveach.com/tag/tunnel/
+  76. https://ryanveach.com/tag/ubuntu/
+  77. https://ryanveach.com/tag/wp-syntax/
+  78. https://ryanveach.com/tag/xbox-live/
+  79. https://ryanveach.com/date/2016/02/
+  80. https://ryanveach.com/date/2016/01/
+  81. https://ryanveach.com/date/2014/07/
+  82. https://ryanveach.com/date/2014/03/
+  83. https://ryanveach.com/date/2013/09/
+  84. https://ryanveach.com/date/2013/08/
+  85. https://ryanveach.com/date/2013/05/
+  86. https://ryanveach.com/date/2013/02/
+  87. https://ryanveach.com/date/2012/04/
+  88. https://ryanveach.com/date/2011/03/
+  89. https://ryanveach.com/date/2011/02/
+  90. https://ryanveach.com/date/2010/10/
+  91. https://ryanveach.com/date/2010/09/
+  92. https://ryanveach.com/date/2010/08/
+  93. https://ryanveach.com/wp-login.php?action=register
+  94. https://ryanveach.com/wp-login.php
+  95. https://ryanveach.com/feed/
+  96. https://ryanveach.com/comments/feed/
+  97. https://wordpress.org/
+  98. http://wordpress.org/
+  99. http://www.themeweaver.net/
+
+
+---
+

@@ -1,0 +1,146 @@
+filename: python_safely-and-atomically-write-to-a-file_20180117.txt
+http://code.activestate.com/recipes/579097-safely-and-atomically-write-to-a-file/
+
+Safely and atomically write to a file (Python recipe) by Steven D'Aprano
+
+   ActiveState Code (http://code.activestate.com/recipes/579097/)
+
+   Saving the user's data is risky. If you write to a file directly, and an error occurs during the
+   write, you may corrupt the file and lose the user's data. One approach to prevent this is to write to
+   a temporary file, then only when you know the file has been written successfully, over-write the
+   original. This function returns a context manager which can make this more convenient.
+
+   Update: this now uses os.replace when available, and hopefully will work better on Windows.
+
+<code>
+import contextlib
+import os
+import stat
+import sys
+import tempfile
+
+
+@contextlib.contextmanager
+def atomic_write(filename, text=True, keep=True,
+                 owner=None, group=None, perms=None,
+                 suffix='.bak', prefix='tmp'):
+    """Context manager for overwriting a file atomically.
+
+    Usage:
+
+    >>> with atomic_write("myfile.txt") as f:  # doctest: +SKIP
+    ...     f.write("data")
+
+    The context manager opens a temporary file for writing in the same
+    directory as `filename`. On cleanly exiting the with-block, the temp
+    file is renamed to the given filename. If the original file already
+    exists, it will be overwritten and any existing contents replaced.
+
+    (On POSIX systems, the rename is atomic. Other operating systems may
+    not support atomic renames, in which case the function name is
+    misleading.)
+
+    If an uncaught exception occurs inside the with-block, the original
+    file is left untouched. By default the temporary file is also
+    preserved, for diagnosis or data recovery. To delete the temp file,
+    pass `keep=False`. Any errors in deleting the temp file are ignored.
+
+    By default, the temp file is opened in text mode. To use binary mode,
+    pass `text=False` as an argument. On some operating systems, this make
+    no difference.
+
+    The temporary file is readable and writable only by the creating user.
+    By default, the original ownership and access permissions of `filename`
+    are restored after a successful rename. If `owner`, `group` or `perms`
+    are specified and are not None, the file owner, group or permissions
+    are set to the given numeric value(s). If they are not specified, or
+    are None, the appropriate value is taken from the original file (which
+    must exist).
+
+    By default, the temp file will have a name starting with "tmp" and
+    ending with ".bak". You can vary that by passing strings as the
+    `suffix` and `prefix` arguments.
+    """
+    t = (uid, gid, mod) = (owner, group, perms)
+    if any(x is None for x in t):
+        info = os.stat(filename)
+        if uid is None:
+            uid = info.st_uid
+        if gid is None:
+            gid = info.st_gid
+        if mod is None:
+            mod = stat.S_IMODE(info.st_mode)
+    path = os.path.dirname(filename)
+    fd, tmp = tempfile.mkstemp(suffix=suffix, prefix=prefix, dir=path, text=text)
+    try:
+        replace = os.replace  # Python 3.3 and better.
+    except AttributeError:
+        if sys.platform == 'win32':
+            # FIXME This is definitely not atomic!
+            # But it's how (for example) Mercurial does it, as of 2016-03-23
+            # https://selenic.com/repo/hg/file/tip/mercurial/windows.py
+            def replace(source, destination):
+                assert sys.platform == 'win32'
+                try:
+                    os.rename(source, dest)
+                except OSError as err:
+                    if err.winerr != 183:
+                        raise
+                    os.remove(dest)
+                    os.rename(source, dest)
+        else:
+            # Atomic on POSIX. Not sure about Cygwin, OS/2 or others.
+            replace = os.rename
+    try:
+        with os.fdopen(fd, 'w' if text else 'wb') as f:
+            yield f
+        # Perform an atomic rename (if possible). This will be atomic on
+        # POSIX systems, and Windows for Python 3.3 or higher.
+        replace(tmp, filename)
+        tmp = None
+        os.chown(filename, uid, gid)
+        os.chmod(filename, mod)
+    finally:
+        if (tmp is not None) and (not keep):
+            # Silently delete the temporary file. Ignore any errors.
+            try:
+                os.unlink(tmp)
+            except:
+                pass
+</code>
+
+   When saving data to an existing file, we may want to guarantee that the file contents are consistent:
+   either the save operation succeeded, completely replacing the old contents with the new, or it did
+   not modify the file. The alternative is to risk losing data. Consider this naive approach:
+<code>   
+with open("myfile.txt", "w") as f:
+   # At this point, myfile has been opened for writing,
+   # deleting all existing content.
+   f.write(newdata)
+</code>
+
+   If an error occurs while writing the new data, the old data has been lost, but the new data may be in
+   a corrupt, inconsistent, or incomplete state. Likewise if an error occurs when the file is closed.
+
+   Using the atomic_write function, we can be sure that either the re-write will succeed completely, or
+   it won't occur at all:
+<code>   
+with atomic_write("myfile.txt", "w") as f:
+   f.write(newdata)
+</code>
+
+   The trick is to write to a temporary file, and only if that succeeds do we replace the original with
+   the temporary file using the os.rename function. rename is guaranteed to be atomic on POSIX systems
+   such as Linux and Unix (with a few provisos that are not important here). On other operating systems,
+   such as Windows, it may or may not actually be atomic. By "atomic", I mean that during the renaming
+   there is never a time where new does not exist.
+
+   UPDATE: This will now use the os.replace call in preference to os.rename if it is available (Python
+   3.3 or higher). This should be atomic for all support operating systems, including Windows.
+
+   One side-effect of this is that it will disrupt hard links. If "yourfile" is a hard link to
+   myfile.txt, then after the atomic write completes, the link will be broken: yourfile will continue to
+   contain the old contents of the file, and myfile the new. (This is how hard links work.)
+
+   If an error occurs after renaming the file, but before the file permissions can be reset, you may
+   have to manually reset the file permissions.

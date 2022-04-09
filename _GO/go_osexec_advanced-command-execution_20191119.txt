@@ -1,0 +1,356 @@
+filename: go_osexec_advanced-command-execution_20191119.txt
+https://blog.kowalczyk.info/article/wOYk/advanced-command-execution-in-go-with-osexec.html
+
+Advanced command execution in Go with os/exec
+
+   Go has excellent support for executing external programs. Let's start at the beginning.
+   In our examples we'll be running ls -lah command as it produces an output. There is no ls on Windows
+   so you can change that to e.g. tasklist.
+
+Running a command
+    cmd := exec.Command("ls", "-lah")
+    if runtime.GOOS == "windows" {
+        cmd = exec.Command("tasklist")
+    }
+    err := cmd.Run()
+    if err != nil {
+        log.Fatalf("cmd.Run() failed with %s\n", err)
+    }
+
+   If you run it, nothing seems to happen. Fear not, the command has actually been executed.
+   If we were running ls -lah in the shell, the shell would copy programs' stdout and stderr to console,
+   so that we can see it.
+   We're executing the program via Go standard library function and by default stdout and stderr are
+   discarded.
+
+Running a command and showing output
+   To let the human see the output, we can connect the output (cmd.Stdout and cmd.Stderr) of the program
+   we're executing to os.Stdout and os.Stderr, which is the output of our program:
+    cmd := exec.Command("ls", "-lah")
+    cmd.Stdout = os.Stdout
+    cmd.Stderr = os.Stderr
+    err := cmd.Run()
+    if err != nil {
+        log.Fatalf("cmd.Run() failed with %s\n", err)
+    }
+
+   cmd.Stdout and cmd.Stderr are declared as io.Writer interface so we can set them to any type that
+   implements Write() method, like os.File or an in-memory buffer bytes.Buffer.
+   io.Reader and io.Writer are very simple, yet very powerful, abstractions.
+
+Running a command and capturing the output
+   The above examples allows human to see the output but sometimes we want to capture the output and
+   analyze it:
+func main() {
+    cmd := exec.Command("ls", "-lah")
+    out, err := cmd.CombinedOutput()
+    if err != nil {
+        log.Fatalf("cmd.Run() failed with %s\n", err)
+    }
+    fmt.Printf("combined out:\n%s\n", string(out))
+}
+
+   CombinedOutput runs a command and returns combined stdout and stderr.
+
+Behind the scenes of CombinedOutput
+   The good thing about Go is that it's open source so we can peek at how a given functionality is
+   implemented.
+   Another good thing is that most of the code in the standard library is simple. Here's how
+   CombinedOutput is implemented:
+func (c *Cmd) CombinedOutput() ([]byte, error) {
+    if c.Stdout != nil {
+        return nil, errors.New("exec: Stdout already set")
+    }
+    if c.Stderr != nil {
+        return nil, errors.New("exec: Stderr already set")
+    }
+    var b bytes.Buffer
+    c.Stdout = &b
+    c.Stderr = &b
+    err := c.Run()
+    return b.Bytes(), err
+}
+
+   Notice that it's almost as simple as our second example. Instead of setting cmd.Stdout and cmd.Stderr
+   to standard output, we set them to a single in-memory buffer.
+   When program finishes, we returned everything written to that buffer.
+   Don't be afraid to peruse the code of standard library.
+
+Capture stdout and stderr separately
+   What if you want to do the same but capture stdout and stderr separately?
+func main() {
+    cmd := exec.Command("ls", "-lah")
+    var stdout, stderr bytes.Buffer
+    cmd.Stdout = &stdout
+    cmd.Stderr = &stderr
+    err := cmd.Run()
+    if err != nil {
+        log.Fatalf("cmd.Run() failed with %s\n", err)
+    }
+    outStr, errStr := string(stdout.Bytes()), string(stderr.Bytes())
+    fmt.Printf("out:\n%s\nerr:\n%s\n", outStr, errStr)
+}
+
+
+Capture output but also show progress
+
+   What if the command takes a long time to finish?
+   It would be nice to see its progress on the console as it happens in addition to capturing
+   stdout/stderr.
+   It's a little bit more involved, but not terribly so.
+   First, a helper function that copies from reader to a writer and also captures copied data:
+func copyAndCapture(w io.Writer, r io.Reader) ([]byte, error) {
+    var out []byte
+    buf := make([]byte, 1024, 1024)
+    for {
+        n, err := r.Read(buf[:])
+        if n > 0 {
+            d := buf[:n]
+            out = append(out, d...)
+            _, err := w.Write(d)
+            if err != nil {
+                return out, err
+            }
+        }
+        if err != nil {
+            // Read returns io.EOF at the end of file, which is not an error for us
+            if err == io.EOF {
+                err = nil
+            }
+            return out, err
+        }
+    }
+}
+
+   Handling errors from Read is subtle. An error io.EOF means that we've read everything. It's not an
+   actual error so we turn io.EOF into nil.
+   The meat of the code:
+func main() {
+  cmd := exec.Command("ls", "-lah")
+
+    var stdout, stderr []byte
+    var errStdout, errStderr error
+    stdoutIn, _ := cmd.StdoutPipe()
+    stderrIn, _ := cmd.StderrPipe()
+    err := cmd.Start()
+    if err != nil {
+        log.Fatalf("cmd.Start() failed with '%s'\n", err)
+    }
+
+    // cmd.Wait() should be called only after we finish reading
+    // from stdoutIn and stderrIn.
+    // wg ensures that we finish
+    var wg sync.WaitGroup
+    wg.Add(1)
+    go func() {
+        stdout, errStdout = copyAndCapture(os.Stdout, stdoutIn)
+        wg.Done()
+    }()
+
+    stderr, errStderr = copyAndCapture(os.Stderr, stderrIn)
+
+    wg.Wait()
+
+    err = cmd.Wait()
+    if err != nil {
+        log.Fatalf("cmd.Run() failed with %s\n", err)
+    }
+    if errStdout != nil || errStderr != nil {
+        log.Fatal("failed to capture stdout or stderr\n")
+    }
+    outStr, errStr := string(stdout), string(stderr)
+    fmt.Printf("\nout:\n%s\nerr:\n%s\n", outStr, errStr)
+}
+
+   We have two outputs to copy. To avoid serializing them, we'll read one in a goroutine.
+   As documentation of StdoutPipe warns, Wait will close the pipes when the process finishes. This might
+   lead to losing some output if we haven't finished reading it.
+   To prevent that we use sync.WaitGroup to ensure that the gorutine handling os.Stdout finishes reading
+   before we call cmd.Wait.
+   I encourage you to read the implementation of cmd.StdoutPipe. You'll be surprised by how short it is.
+
+Capture output but also show progress #2
+   Previous solution works but copyAndCapture looks like we're re-implementing io.Copy. Thanks to Go's
+   use of interfaces we can re-use io.Copy.
+   We'll write CapturingPassThroughWriter struct implementing io.Writer interface. It'll capture
+   everything that's written to it and also write it to underlying io.Writer.
+// CapturingPassThroughWriter is a writer that remembers
+// data written to it and passes it to w
+type CapturingPassThroughWriter struct {
+    buf bytes.Buffer
+    w io.Writer
+}
+
+// NewCapturingPassThroughWriter creates new CapturingPassThroughWriter
+func NewCapturingPassThroughWriter(w io.Writer) *CapturingPassThroughWriter {
+    return &CapturingPassThroughWriter{
+        w: w,
+    }
+}
+
+func (w *CapturingPassThroughWriter) Write(d []byte) (int, error) {
+    w.buf.Write(d)
+    return w.w.Write(d)
+}
+
+// Bytes returns bytes written to the writer
+func (w *CapturingPassThroughWriter) Bytes() []byte {
+    return w.buf.Bytes()
+}
+
+func main() {
+    cmd := exec.Command("ls", "-lah")
+
+    var errStdout, errStderr error
+    stdoutIn, _ := cmd.StdoutPipe()
+    stderrIn, _ := cmd.StderrPipe()
+    stdout := NewCapturingPassThroughWriter(os.Stdout)
+    stderr := NewCapturingPassThroughWriter(os.Stderr)
+    err := cmd.Start()
+    if err != nil {
+        log.Fatalf("cmd.Start() failed with '%s'\n", err)
+    }
+
+    var wg sync.WaitGroup
+    wg.Add(1)
+
+    go func() {
+        _, errStdout = io.Copy(stdout, stdoutIn)
+        wg.Done()
+    }()
+
+    _, errStderr = io.Copy(stderr, stderrIn)
+    wg.Wait()
+
+    err = cmd.Wait()
+    if err != nil {
+        log.Fatalf("cmd.Run() failed with %s\n", err)
+    }
+    if errStdout != nil || errStderr != nil {
+        log.Fatalf("failed to capture stdout or stderr\n")
+    }
+    outStr, errStr := string(stdout.Bytes()), string(stderr.Bytes())
+    fmt.Printf("\nout:\n%s\nerr:\n%s\n", outStr, errStr)
+}
+
+
+Capture output but also show progress #3
+   Turns out Go's standard library implements [12]io.MultiWriter, which is a more generic version of
+   CapturingPassThroughWriter. Let's use that instead:
+func main() {
+    cmd := exec.Command("ls", "-lah")
+
+    var stdoutBuf, stderrBuf bytes.Buffer
+    stdoutIn, _ := cmd.StdoutPipe()
+    stderrIn, _ := cmd.StderrPipe()
+
+    var errStdout, errStderr error
+    stdout := io.MultiWriter(os.Stdout, &stdoutBuf)
+    stderr := io.MultiWriter(os.Stderr, &stderrBuf)
+    err := cmd.Start()
+    if err != nil {
+        log.Fatalf("cmd.Start() failed with '%s'\n", err)
+    }
+
+    var wg sync.WaitGroup
+    wg.Add(1)
+
+    go func() {
+        _, errStdout = io.Copy(stdout, stdoutIn)
+        wg.Done()
+    }()
+
+    _, errStderr = io.Copy(stderr, stderrIn)
+    wg.Wait()
+
+    err = cmd.Wait()
+    if err != nil {
+    log.Fatalf("cmd.Run() failed with %s\n", err)
+    }
+    if errStdout != nil || errStderr != nil {
+        log.Fatal("failed to capture stdout or stderr\n")
+    }
+    outStr, errStr := string(stdoutBuf.Bytes()), string(stderrBuf.Bytes())
+    fmt.Printf("\nout:\n%s\nerr:\n%s\n", outStr, errStr)
+
+}
+
+   It's good to be able to write the code ourselves, but it's even better to know standard library well!
+
+Writing to program's stdin
+   We know how to read program's stdout but we can also write to its stdin.
+   There is no Go library to do bzip2 compression (only decompression is available in standard library).
+   We can use bzip2 to do the compression by: * writing the data to a temporary file * call bzip2 -c
+   ${file_in} and capture its stdout
+   It would be even better if we didn't have to create a temporary file.
+   Most compression programs accept data to compress/decompress on stdin.
+   To do that on command-line we would use the following command: bzip2 -c <${file_in} >${file_out}.
+   Here's the same thing in Go:
+// compress data using bzip2 without creating temporary files
+func bzipCompress(d []byte) ([]byte, error) {
+    var out bytes.Buffer
+    // -c : compress
+    // -9 : select the highest level of compresion
+    cmd := exec.Command("bzip2", "-c", "-9")
+    cmd.Stdin = bytes.NewBuffer(d)
+    cmd.Stdout = &out
+    err := cmd.Run()
+    if err != nil {
+        return nil, err
+    }
+    return out.Bytes(), nil
+}
+
+   We can also call cmd.StdinPipe(), which returns io.WriteCloser. It's more complicated but gives more
+   control over writing.
+
+Changing environment of executed program
+
+   Things to know about environment variables in Go:
+     * os.Environ() returns []string where each string is in form of FOO=bar, where FOO is the name of
+       environment variable and bar is the value
+     * os.Getenv("FOO") returns the value of environment variable FOO.
+
+   Sometimes you need to modify the environment of the executed program.
+   Go supports that by setting Env member of exec.Cmd. cmd.Env has the same format as os.Environ().
+   If Env is not set, the process inherits environment of the calling process.
+   Usually, you don't want to construct a completely new environment from scratch but pass a modified
+   version of an environment of the current process. Here's how to add a new variable:
+    cmd := exec.Command("programToExecute")
+
+    additionalEnv := "FOO=bar"
+    newEnv := append(os.Environ(), additionalEnv))
+    cmd.Env = newEnv
+
+    out, err := cmd.CombinedOutput()
+    if err != nil {
+        log.Fatalf("cmd.Run() failed with %s\n", err)
+    }
+    fmt.Printf("%s", out)
+
+   Things get more complicated if you want to delete an environment or to ensure you're not setting the
+   same variable twice. Package [16]shurcooL/go/osutil offers an easier way of manipulating environment
+   variables.
+
+Check early that a program is installed
+   Imagine you wrote a program that takes a long time to run. At the end, you call executable foo to
+   perform an essential task.
+   If foo executable is not present, the call will fail.
+   It's a good idea to detect lack of executable foo at the beginning and fail early with descriptive
+   error message.
+   You can do it using exec.LookPath.
+func checkLsExists() {
+    path, err := exec.LookPath("ls")
+    if err != nil {
+        fmt.Printf("didn't find 'ls' executable\n")
+    } else {
+        fmt.Printf("'ls' executable is in '%s'\n", path)
+    }
+}
+
+   Another way to check if a program exists is to try to execute it in a no-op mode (e.g. many programs
+   support --help option).
+   Code for this chapter: [18]https://github.com/kjk/go-cookbook/tree/master/advanced-exec
+
+
+---

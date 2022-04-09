@@ -1,0 +1,1333 @@
+filename: go_modules_introduction-multyf_20200202.txt
+https://www.ardanlabs.com/blog/2019/10/modules-01-why-and-what.html
+
+Modules Part 01: Why And What
+October 10, 2019
+
+Introduction
+   Modules provide an integrated solution for three key problems that have been a pain point
+   for developers since Go's initial release:
+     * Ability to work with Go code outside of the GOPATH workspace.
+     * Ability to version a dependency and identify the most compatible version to use.
+     * Ability to manage dependencies natively using the Go tooling.
+
+   With the release of Go 1.13, these three problems are a thing of the past. It has taken a
+   lot of engineering effort from the Go team over the past 2 years to get everyone here. In
+   this post, I will focus on the transition from GOPATH to modules and the problems modules
+   are solving. Along the way, I will provide just enough of the semantics so you can have a
+   better understanding of how modules work at a high level. Maybe more importantly, why they
+   work the way they do.
+
+GOPATH
+   The use of GOPATH to provide the physical location on disk where your Go workspace exists
+   has served Go developers well. Unfortunately, it's been a bottleneck for non Go developers
+   who might need to work on a Go project from time to time and don't have a Go workspace
+   setup. One problem the Go team wanted to solve was allowing a Go repository (repo) to be
+   cloned anywhere on disk (outside of GOPATH) and have the tooling be able to locate, build
+   and test the code.
+
+   [img]Figure 1
+
+   Figure 1 shows the GitHub repo for the conf package. This repo represents a single
+   package that provides support for handling configuration in applications. Before modules,
+   if you wanted to use this package, you would use go get to clone a copy of the repo inside
+   your GOPATH using the canonical name of the repo as its exact location on disk. The
+   canonical name being a combination of the root of the remote repository and the name for
+   the repo.
+
+   As an example before modules, if you ran go get github.com/ardanlabs/conf, the code would
+   be cloned on disk at $GOPATH/src/github.com/ardanlabs/conf. Thanks to GOPATH and knowing
+   the canonical name for the repo, the Go tooling can find the code regardless of where any
+   developer chooses to place the workspace on their machine.
+
+Resolving Imports
+
+   Listing 1
+   github.com/ardanlabs/conf/blob/master/conf_test.go
+01 package conf_test
+02
+03 import (
+...
+10     "github.com/ardanlabs/conf"
+...
+12 )
+
+   Listing 1 shows a partial version of the import section of the conf_test.go test file from
+   the conf repo. When a test uses the _test naming convention in the package name (like you
+   see on line 01) this means the test code exists in a different package from the code being
+   tested and the test code must import the package like any external user of the package. You
+   can see how this test file imports the conf package on line 10 using the canonical name of
+   the repo. Thanks to the GOPATH mechanics, this import can be resolved on disk and the
+   tooling can locate, build and test the code.
+
+   How will any of this work when GOPATH no longer exists and the folder structure doesn't
+   match the canonical name of the repo any longer?
+
+   Listing 2
+import "github.com/ardanlabs/conf"
+
+// GOPATH mode: Physical location on disk matches the GOPATH
+// and Canonical name of the repo.
+$GOPATH/src/github.com/ardanlabs/conf
+
+
+// Module mode: Physical location on disk doesn't represent
+// the Canonical name of the repo.
+/users/bill/conf
+
+   Listing 2 shows the problem of cloning the conf repo in any location you wish. When the
+   developer has the option to clone the code anywhere they want, all the information to
+   resolve the same import back to physical disk is gone.
+
+   The solution to this problem was to have a special file that contained the canonical name
+   for the repo. The location of this file on disk is used as a substitute for GOPATH and
+   having the canonical name for the repo defined inside the file allows the Go tooling to
+   resolve the import, regardless of where the repo is cloned.
+
+   It was decided to name this special file go.mod and the canonical name for the repo
+   defined inside the file would represent this new entity called a module.
+
+   Listing 3
+   github.com/ardanlabs/conf/blob/v1.1.0/go.mod
+01 module github.com/ardanlabs/conf
+02
+...
+06
+
+   Listing 3 shows the first line of the go.mod file inside the conf repo. This line defines
+   the name of the module which represents the canonical name developers are expected to use
+   for referencing any code inside the repo. Now it doesn't matter where the repo is cloned
+   since the Go tooling can use the module file location and module name to resolve any
+   internal import, such as the import in the test file.
+
+   With the concept of a module allowing code to be cloned anywhere on disk, the next problem
+   to solve is support for code to be bundled together and versioned.
+
+Bundling and Versioning
+   Most VCSs provide the ability to tag a label to your repo at any commit point. These tags
+   are typically used to release new features (v1.0.0, v2.3.8, etc.) and are typically treated
+   as immutable.
+
+   [img]Figure 2
+
+   Figure 2 shows that the author of the conf package has tagged three distinct versions of
+   the repo. These tagged versions adhere to the Semantic Versioning format.
+
+   Using VCS tooling, a developer can clone any particular version of the conf package to disk
+   by referencing a specific tag. However, there are a couple of questions that need to be
+   answered first:
+     * Which version of the package should I use?
+     * How do I know which version is compatible with all the code I am writing and using?
+
+   Once you answer those two questions, you have a third question to answer:
+     * Where do I clone the repo so the Go tooling can find and access it?
+
+   Then it gets worse. You can't use a version of the conf package in your own project unless
+   you also clone all the repos for the packages that conf depends on. This is a problem for
+   all of your project's transitive dependencies.
+
+   When operating in GOPATH mode, the solution was to use go get to identify and clone all the
+   repos for all the dependencies into your GOPATH workspace. However, this wasn't a perfect
+   solution since go get only knows how to clone and update the latest code from the master
+   branch for each dependency. Pulling code from the master branch for each dependency might
+   be fine when you write your initial code. Eventually after a few months (or years) of
+   dependencies evolving independently, the dependencies' latest master code is likely to no
+   longer be compatible with your project. This is because your project is not respecting the
+   version tags so any upgrade might contain a breaking change.
+
+   When operating in the new module mode, the option for go get to clone the repos for all the
+   dependencies into a single well defined workspace is no longer preferred. Plus, you need to
+   find a way of referencing a compatible version of each dependency that would work for the
+   entirety of the project. Then there is supporting the use of different major semantic
+   versions of the same dependency within your project incase your dependencies are importing
+   different major versions of the same package.
+
+   Although some solutions to these problems already existed in the form of
+   community-developed tooling (dep, godep, glide, ...), Go needed an integrated solution. The
+   solution was to reuse the module file to maintain a list of direct and sometimes indirect
+   dependencies by version. Then treat any given version of a repo as a single immutable
+   bundle of code. This versioned immutable bundle is called a module.
+
+Integrated Solution
+
+   [image]Figure 3
+
+   Figure 3 shows the relationship between a repo and a module. It shows how an import can
+   reference a package that is stored inside a given version of a module. In this case, code
+   inside module conf at version 1.1.0 can import the package cmp from module go-cmp at
+   version 0.3.1. Since the dependency information is listed inside the conf module (via the
+   module file), the Go tooling can fetch the selected version of any module so a successful
+   build can take place.
+
+   Once you have modules, a lot of engineering opportunities begin to present themselves:
+     * You could provide support (with some exceptions) to build, retain, authenticate,
+       validate, fetch, cache, and reuse modules for use by Go developers all over the world.
+     * You could build proxy servers that would front the different VCSs and provide some of
+       the aforementioned support.
+     * You could verify a module (for any given version) always contains the same exact code
+       known to exist in the module, regardless of how many times it's built, where it's
+       fetched from, and by whom.
+
+   The best part about what could be supported with modules, is that the Go team engineered
+   much of this support already in version 1.13 of Go.
+
+Conclusion
+   This post attempted to lay down the groundwork for understanding what a module is and how
+   the Go team ended up with this solution. There is still much left to talk about, such as:
+     * How is a particular version of a module selected for use?
+     * How is a module file structured and what options do you have to control module
+       selection?
+     * How is a module built, fetched, and cached locally to disk to resolve imports?
+     * How is a module validated for the social contract of Semantic Versioning?
+     * How should modules be used in your own projects and what are the best practices?
+
+   In future posts, I plan to provide an understanding to these questions and much more. For
+   now, make sure you understand the relationship between repos, packages and modules. If you
+   have any questions, don't hesitate to find me on Slack. There is a great channel called
+   #modules where people are always ready to help.
+
+Module Documentation
+
+   There is a lot of Go documentation that has been written. Here are some of the posts
+   published by the Go team.
+
+   [https://github.com/golang/go/wiki/Modules]Modules The Wiki
+   [https://golang.org/doc/go1.13#modules]1.13 Go Release Notes
+   [https://blog.golang.org/module-mirror-launch]Go Blog: Module Mirror and Checksum Database Launched
+   [https://blog.golang.org/publishing-go-modules]Go Blog: Publishing Go Modules
+   [https://go.googlesource.com/proposal/+/master/design/25530-sumdb.md]Proposal: Secure the Public Go Module Ecosystem
+   [https://www.youtube.com/watch?v=KqTySYYhPUE]GopherCon 2019: Katie Hockman - Go Module Proxy: Life of a Query
+
+
+---
+https://www.ardanlabs.com/blog/2019/12/modules-02-projects-dependencies-gopls.html
+
+Modules Part 02: Projects, Dependencies and Gopls
+December 2, 2019
+
+Introduction
+
+   Modules is the system integrated into Go to provide support for dependency management. This
+   means modules touch just about anything related to working with source code, including
+   editor support. To provide editors with support for modules (and for other reasons), the Go
+   team built a service named gopls which implements the language server protocol
+   (LSP). LSP was originally developed by Microsoft for VS Code and has become an open
+   standard. The idea of the protocol is to provide editors with support for language features
+   such as auto complete, go to definition, and find all references.
+
+   When you are using modules and VS Code, hitting save in your editor will no longer run the
+   go build command directly. Now what happens is that a request is sent to gopls, and gopls
+   runs the appropriate Go commands and associated API's to provide editor feedback and
+   support. Gopls can also send information to the editor without the need of a request. There
+   are times where it appears the editor is lagging or out of sync with a code change due to
+   the nature of LSP or the inherent latencies in running Go commands. The Go team is working
+   hard to reach a v1.0 of gopls to handle these edge cases so you can have the smoothest
+   possible editor experience.
+
+   In this post, I will walk through the basic workflow for adding and removing dependencies
+   from within your projects. This post is using the VS Code editor, version 0.2.0 of gopls
+   and version 1.13.3 of Go.
+
+Module Cache
+   To help speed up builds and keep dependency changes in your projects up to date quickly, Go
+   maintains a cache of all the modules that it has ever downloaded on your local machine.
+   That cache can be found at $GOPATH/pkg. If you don't have a GOPATH setup, the default
+   GOPATH is at $HOME/go.
+
+   Note: There is a proposal to provide an environmental variable to allow a user to
+   control the location of the module cache. $GOPATH/pkg will be the default if not changed.
+
+   Listing 1
+$HOME/code/go/pkg
+$ ls -l
+total 0
+drwxr-xr-x  11 bill  staff  352 Oct 16 15:53 mod
+drwxr-xr-x   3 bill  staff   96 Oct  3 16:49 sumdb
+
+   Listing 1 shows what my current $GOPATH/pkg folder looks like. You can see there are two
+   folders, mod and sumdb. If you look inside the mod folder you can learn more about the
+   module cache layout.
+
+   Listing 2
+$HOME/code/go/pkg
+$ ls -l mod/
+total 0
+drwxr-xr-x   5 bill  staff   160 Oct  7 10:37 cache
+drwxr-xr-x   3 bill  staff    96 Oct  3 16:55 contrib.go.opencensus.io
+drwxr-xr-x  40 bill  staff  1280 Oct 16 15:53 github.com
+dr-x------  26 bill  staff   832 Oct  3 16:50 go.opencensus.io@v0.22.1
+drwxr-xr-x   3 bill  staff    96 Oct  3 16:56 golang.org
+drwxr-xr-x   4 bill  staff   128 Oct  7 10:37 google.golang.org
+drwxr-xr-x   7 bill  staff   224 Oct 16 15:53 gopkg.in
+drwxr-xr-x   7 bill  staff   224 Oct 16 15:53 k8s.io
+drwxr-xr-x   5 bill  staff   160 Oct 16 15:53 sigs.k8s.io
+
+   Listing 2 shows the top level structure of my current module cache. You can see how the
+   first part of the URL associated with the module's name is used as a top level folder in
+   the module cache. If I navigate into github.com/ardanlabs, I can show you two actual
+   modules.
+
+   Listing 3
+$HOME/code/go/pkg
+$ ls -l mod/github.com/ardanlabs/
+total 0
+dr-x------  13 bill  staff  416 Oct  3 16:49 conf@v1.1.0
+dr-x------  18 bill  staff  576 Oct 12 10:08 service@v0.0.0-20191008203700-49ed4b4f1088
+
+   Listing 3 shows two modules and their version that I am using from ArdanLabs. The first one
+   is the conf module and the other module is associated with the service project that I use
+   to teach kubernetes and services.
+
+   The gopls server also maintains a module cache that is kept in memory. The moment you start
+   VS Code and you are in module mode, a gopls server is started to support that editor
+   session. The internal gopls module cache is then synced with what is currently on disk.
+   It's this internal module cache that gopls uses to handle editor requests.
+
+   For this post, I am going to clear out my module cache before I begin so I have a clean
+   working environment. I'm also going to setup my project before I start a VS Code editor.
+   This will allow me to show you how to handle situations when the module you need hasn't
+   been downloaded yet to your local module cache or is updated in the gopls internal module
+   cache.
+
+   Note: Clearing out your module cache is something you should never need to do in any normal
+   workflow.
+
+   Listing 4
+$ go clean -modcache
+
+   Listing 4 shows how to clear the local module cache on disk. The go clean command has been
+   traditionally used to clean your local GOPATH working directory and GOPATH bin folder. Now
+   with the new -modcache flag, the command can be used to clean the module cache.
+
+   Note: This command will not clear the internal cache of any running gopls instance.
+
+New Project
+   I am going to start a new project outside of my GOPATH and in the process of writing code,
+   I will walk through the basic workflows of adding and removing dependencies.
+
+   Listing 5
+$ cd $HOME
+$ mkdir service
+$ cd service
+$ mkdir cmd
+$ mkdir cmd/sales-api
+$ touch cmd/sales-api/main.go
+
+   Listing 5 shows commands to set up the working directory, create the initial project
+   structure and add the main.go file.
+
+   The first step when working with modules is to initialize the root of your project's source
+   tree. This is done by using the go mod init command.
+
+   Listing 6
+$ go mod init github.com/ardanlabs/service
+
+   Listing 6 shows the call to go mod init, passing the name of the module as a parameter. As
+   discussed in the first post, the name of the module allows internal imports to be
+   resolved inside the module. It's idiomatic to name the module after the URL of the repo
+   hosting the code. For this post, I will pretend this module will be associated with the
+   service repo under Ardan Labs in Github.
+
+   Once the call to go mod init is complete, a go.mod file is created in the current working
+   directory. This file will denote the root of the project.
+
+   Listing 7
+01 module github.com/ardanlabs/service
+02
+03 go 1.13
+
+   Listing 7 shows the contents of the initial module file for this project. With that in
+   place, the project is ready for coding.
+
+   Listing 8
+$ code .
+
+   Listing 8 shows the command to launch an instance of VS Code. This will in turn start an
+   instance of the gopls server to support this editor instance.
+
+   [img]Figure 1:
+    cmd/
+        sales-api/
+        main.go
+    go.mod
+
+   Figure 1 shows what the project in my VS Code editor looks like after running all of the
+   commands. Just to make sure you are using the same settings as I am, I'll list my current
+   VS Code settings.
+
+   Listing 9
+{
+    // Important Settings
+    "go.lintTool": "golint",
+    "go.goroot": "/usr/local/go",
+    "go.gopath": "/Users/bill/code/go",
+
+    "go.useLanguageServer": true,
+    "[go]": {
+        "editor.snippetSuggestions": "none",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": true
+        }
+    },
+    "gopls": {
+        "usePlaceholders": true,    // add parameter placeholders when completing a function
+        "completeUnimported": true, // autocomplete unimported packages
+        "deepCompletion": true,     // enable deep completion
+    },
+    "go.languageServerFlags": [
+        "-rpc.trace", // for more detailed debug logging
+    ],
+}
+
+   Listing 9 shows my current VS Code settings. If you follow along and don't see the same
+   behavior, check these settings against yours. If you would like to see the current
+   recommended VS Code settings they are here [**1]https://github.com/golang/tools/blob/master/gopls/doc/vscode.md.
+
+Application Code
+   I'm going to start with this initial set of code for the application.
+
+   Listing 10
+   https://play.golang.org/p/c8kGx7I9HJH
+01 package main
+02
+03 func main() {
+04     if err := run(); err != nil {
+05         log.Println("error :", err)
+06         os.Exit(1)
+07     }
+08 }
+09
+10 func run() error {
+11     return nil
+12 }
+
+   Listing 10 shows the first 12 lines of code I'm adding to main.go. It sets up the ability
+   for the application to have a single point of exit and logging for any errors on start-up
+   or shutdown. Once these 12 lines of code are saved to the file, the editor will
+   automagically (thanks to gopls) include the imports required from the standard library.
+
+   Listing 11
+   https://play.golang.org/p/x3hBA6PuW3R
+03 import (
+04     "log"
+05     "os"
+06 )
+
+   Listing 11 shows the changes to the source code on lines 03 through 06 thanks to the editor
+   integration with gopls.
+
+   Next, I will add support for configuration.
+
+   Listing 12
+   https://play.golang.org/p/4hFXLJj4yT_Z
+17 func run() error {
+18     var cfg struct {
+19         Web struct {
+20             APIHost         string        `conf:"default:0.0.0.0:3000"`
+21             DebugHost       string        `conf:"default:0.0.0.0:4000"`
+22             ReadTimeout     time.Duration `conf:"default:5s"`
+23             WriteTimeout    time.Duration `conf:"default:5s"`
+24             ShutdownTimeout time.Duration `conf:"default:5s"`
+25         }
+26     }
+27
+28     if err := conf.Parse(os.Args[1:], "SALES", &cfg); err != nil {
+29         return fmt.Errorf("parsing config : %w", err)
+30     }
+
+   Listing 12 shows the code that was added to the run function on lines 18 through 30 to
+   support configuration. When this code is added to the source file and I hit save, the
+   editor properly includes the fmt and time package to the set of imports. Unfortunately,
+   since gopls doesn't have any information about the conf package currently inside its
+   internal module cache, gopls can't direct the editor to add an import for conf or provide
+   the editor with package information.
+
+   [img]Figure 2
+
+   Figure 2 shows how the editor is making it clear that it can't resolve any information
+   related to the conf package.
+
+Adding A Dependency
+   In order to resolve the import, the module that contains the conf package needs to be
+   retrieved. One way this can be done is by adding the import to the top of the source code
+   file and letting the editor and gopls do the work.
+
+   Listing 13
+01 package main
+02
+03 import (
+04     "fmt"
+05     "log"
+06     "os"
+07     "time"
+08
+09     "github.com/ardanlabs/conf"
+10 )
+
+   In listing 13, I add the import for the conf package on line 09. Once I hit save, the
+   editor reaches out to gopls and then gopls finds, downloads and extracts the module for
+   this package using the Go command and associated API's. These calls also update the Go
+   module files to reflect this change.
+
+   Listing 14
+~/code/go/pkg/mod/github.com/ardanlabs
+$ ls -l
+total 0
+drwxr-xr-x   3 bill  staff    96B Nov  8 16:02 .
+drwxr-xr-x   3 bill  staff    96B Nov  8 16:02 ..
+dr-x------  13 bill  staff   416B Nov  8 16:02 conf@v1.2.0
+
+   Listing 14 shows how the Go command did its job and downloaded the conf module using
+   version 1.2.0. The code we need to resolve the import is now in my local module cache.
+
+   [img]Figure 3
+
+   Figure 3 shows how the editor still can't resolve information about the package. Why is the
+   editor not able to resolve this information? Unfortunately, the gopls internal module cache
+   is out of sync with the local module cache. The gopls server isn't aware of the changes the
+   Go command just made. Since gopls uses its internal cache, gopls can't provide the editor
+   with the information it needs.
+
+   Note: This shortcoming is currently being worked on and will be fixed in an upcoming
+   release. You can track the issue here. (https://github.com/golang/go/issues/31999)
+
+   A quick way to get the gopls internal module cache back in sync with the local module cache
+   is to reload the VS Code editor. This will restart the gopls server and reset its internal
+   module cache. In VS Code, there is a special command called reload window to do just this.
+Ctrl + Shift + P and run  > Reload Window
+
+   [img]Figure 4
+
+   Figure 4 shows the dialog box that comes up in VS Code after using Ctrl + Shift + P and
+   type reload window.
+
+   After running this quick command, any messages associated with the import will be resolved.
+
+Transitive Dependencies
+   From the Go tooling's point of view, all the code that is needed to build this application
+   is now present in the local module cache. However, the conf package has a dependency on the
+   Google go-cmp package for its tests.
+
+   Listing 15
+module github.com/ardanlabs/conf
+
+go 1.13
+
+require github.com/google/go-cmp v0.3.1
+
+   Listing 15 shows the module file for version 1.2.0 of the conf module. You can see conf
+   depends on version 0.3.1 of go-cmp. This module is not listed in the service's module file
+   because it would be redundant to do so. The Go tooling can follow the path of module files
+   to get a complete picture of all the modules needed to build or test code.
+
+   At this point, this transitive module has not been found, downloaded and extracted to my
+   local module cache yet. Since this module is not needed when building the code, the Go
+   build tool hasn't found the need to download it yet. If I run go mod tidy on the command
+   line, then the Go tooling will take the time to bring the go-cmp module into my local
+   cache.
+
+   Listing 16
+$ go mod tidy
+go: downloading github.com/google/go-cmp v0.3.1
+go: extracting github.com/google/go-cmp v0.3.1
+
+   In listing 16 shows how the go-cmp module has been found, downloaded and extracted. This
+   call to go mod tidy won't change the module file for the project since this is not a direct
+   dependency. It will update the go.sum file so there is a record of the module's hash to
+   maintain a durable and reproducible build. I will talk about the checksum database in a
+   future post.
+
+   Listing 17
+github.com/ardanlabs/conf v1.2.0 h1:2IntiqlEhRk+sYUbc8QAAZdZlpBWIzNoqILQvV6Jofo=
+github.com/ardanlabs/conf v1.2.0/go.mod h1:ILsMo9dMqYzCxDjDXTiwMI0IgxOJd0MOiucbQY2wlJw=
+github.com/google/go-cmp v0.3.1 h1:Xye71clBPdm5HgqGwUkwhbynsUJZhDbS20FvLhQ2izg=
+github.com/google/go-cmp v0.3.1/go.mod h1:8QqcDgzrUqlUb/G2PQTWiueGozuR1884gddMywk6iLU=
+
+   Listing 17 shows what the checksum file looks like after running go mod tidy. There are two
+   records for each module associated with the project.
+
+Downloading Modules
+   If you are not ready to use a particular module inside your code base but want to download
+   the module into your local module cache, one option is to manually add the module to the
+   projects go.mod file and then run go mod tidy outside the editor.
+
+   Listing 18
+01 module github.com/ardanlabs/service
+02
+03 go 1.13
+04
+05 require (
+06     github.com/ardanlabs/conf v1.2.0
+07     github.com/pkg/errors latest
+08 )
+
+   In listing 18 you see how I manually added line 07 in the module file for the latest
+   version of the errors module. The important part of manually adding the required module is
+   using the latest tag. Once I run go mod tidy against this change, it will tell Go to find
+   the latest version of the errors module and download it into my cache.
+
+   Listing 19
+$HOME/service
+$ go mod tidy
+go: finding github.com/pkg/errors v0.8.1
+
+   Listing 19 shows how version 0.8.1 of the errors module was found, downloaded and
+   extracted. Once the command is done running, the module is removed from the module file
+   since the module is not being used by the project. However, the module is listed in the
+   checksum file.
+
+   Listing 20
+github.com/ardanlabs/conf v1.2.0 h1:2IntiqlEhRk+sYUbc8QAAZdZlpBWIzNoqILQvV6Jofo=
+github.com/ardanlabs/conf v1.2.0/go.mod h1:ILsMo9dMqYzCxDjDXTiwMI0IgxOJd0MOiucbQY2wlJw=
+github.com/google/go-cmp v0.3.1 h1:Xye71clBPdm5HgqGwUkwhbynsUJZhDbS20FvLhQ2izg=
+github.com/google/go-cmp v0.3.1/go.mod h1:8QqcDgzrUqlUb/G2PQTWiueGozuR1884gddMywk6iLU=
+github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
+
+   Listing 20 shows how a hash for the module file for the errors module is now listed in the
+   checksum file. It's important to remember that the checksum file isn't a canonical record
+   of all the dependencies being used by the project. It can contain more modules and this is
+   absolutely fine.
+
+   I like this approach to downloading new modules over using go get because go get can also
+   attempt to upgrade dependencies in the dependency graph (direct and indirect) for the
+   project if you're not careful. It's important to know when version upgrades are happening
+   over just downloading a new module you want. In a future post, I will talk about using go
+   get to update existing module dependencies.
+
+Removing Dependencies
+   What happens if I decide I don't want to use the conf package any longer? I can remove any
+   code using the package.
+
+   Listing 21
+   https://play.golang.org/p/x3hBA6PuW3R
+01 package main
+02
+03 import (
+04     "log"
+05     "os"
+06 )
+07
+08 func main() {
+09     if err := run(); err != nil {
+10         log.Println("error :", err)
+11         os.Exit(1)
+12     }
+13 }
+14
+15 func run() error {
+16     return nil
+17 }
+
+   Listing 21 shows the removal of the code referencing the conf package from the main
+   function. Once I hit save, the editor removes the import for conf from the import set.
+   However, the module file hasn't been updated to reflect the change.
+
+   Listing 22
+01 module github.com/ardanlabs/service
+02
+03 go 1.13
+04
+05 require github.com/ardanlabs/conf v1.1.0
+06
+
+   Listing 22 shows that the conf package is still considered to be required. To fix this, I
+   need to leave the editor and run go mod tidy once again.
+
+   Listing 23
+$HOME/service
+$ go mod tidy
+
+   Listing 23 shows the running of go mod tidy once more. This time there is no output. Once
+   this command finishes, the module file is accurate again.
+
+   Listing 24
+$HOME/services/go.mod
+
+01 module github.com/ardanlabs/service
+02
+03 go 1.13
+04
+
+   Listing 24 shows that the conf module has been removed from the module file. This time the
+   go mod tidy command cleared out the checksum file and it will be empty. It's important
+   before you commit any changes into your VCS for your project to run go mod tidy and make
+   sure your module files are accurate and consistent with the dependencies you are using.
+
+Conclusion
+   In the near future, some of the workarounds I have shared like reloading the window will no
+   longer be necessary. The Go team is aware of this and other shortcomings that exist today
+   and they are actively working on fixing all of them. They do appreciate any and all
+   feedback on the Go issue tracker so if you discover an issue please report it. No issue is
+   too big or small. As a community let's work with the Go team to resolve these remaining
+   issues quickly.
+
+   One core feature being worked on now is the ability of gopls to watch the filesystem and
+   see project changes for itself. This is going to help with gopls keeping its internal
+   module cache in sync with the local module cache on disk. Once this is in place, the need
+   to reload the window should go away. Plans are in the works as well to provide visual cues
+   that work is being done in the background.
+
+   Overall I am happy with the current set of tooling and the reload window workaround. I hope
+   you consider to start using modules if you're not already. Modules are ready for use and
+   the more projects that begin to use it, the better the Go ecosystem will be for everyone.
+
+
+---
+https://www.ardanlabs.com/blog/2019/12/modules-03-minimal-version-selection.html
+
+Modules Part 03: Minimal Version Selection
+December 18, 2019
+
+Introduction
+   Every dependency management solution has to solve the problem of picking a version of a dependency.
+   Many of the version selection algorithms that exist today attempt to identify the "latest greatest"
+   version of any dependency. This makes sense if you believe semantic versioning will be applied
+   correctly and the social contract will be respected. In these cases, the "latest greatest" version of
+   a dependency should be the most stable and secure version and should have backwards compatibility
+   with earlier versions. At least in the same major version dependency tree.
+
+   Go decided to take a different approach and Russ Cox has spent a lot of time and energy writing
+   and talking about the Go team's approach to version selection which is called Minimal Version
+   Selection or MVS. Essentially, the Go team believes that MVS provides Go programs with the best
+   opportunity for durable and reproducible builds over the long haul. I recommend reading this post
+   to understand why the Go team believes this.
+
+   In this post, I will do my best to explain the MVS semantics and show a real-world example of Go and
+   the MVS algorithm in action.
+
+MVS Semantics
+   Naming Go's selection algorithm "minimal version selection" is a bit of a misnomer, but once you
+   learn how it works you will see the name comes really close. As I stated before, many selection
+   algorithms select the "latest greatest" version of a dependency. I like to think of MVS as an
+   algorithm that selects the "latest non-greatest" version. It's not that MVS can't select the "latest
+   greatest", it's just that if the "latest greatest" is not required by any dependency in the project,
+   that version isn't needed.
+
+   To better understand this, let's create a situation where several modules (A, B and C) are depending
+   on the same module (D) but each require a different version.
+
+   [img]Figure 1
+   [  A  ] -------------------------------> [  D v1.0.6  ]
+   [  B  ] -------------------------------> [  D v1.2.0  ]
+   [  C  ] -------------------------------> [  D v1.3.2  ]
+
+   Figure 1 shows how modules A, B and C all independently require module D and each require a different
+   version of the module.
+
+   If I start a project that requires module A, then in order to build the code I also require module D.
+   There could be many versions of module D to choose from. For example, imagine module D represents the
+   logrus module from sirupsen. I can ask Go to provide me a list of all the versions that have been
+   tagged for module D.
+
+   Listing 2
+$ go list -m -versions github.com/sirupsen/logrus
+
+github.com/sirupsen/logrus v0.1.0 v0.1.1 v0.2.0
+v0.3.0 v0.4.0 v0.4.1 v0.5.0 v0.5.1 v0.6.0 v0.6.1
+v0.6.2 v0.6.3 v0.6.4 v0.6.5 v0.6.6 v0.7.0 v0.7.1
+v0.7.2 v0.7.3 v0.8.0 v0.8.1 v0.8.2 v0.8.3 v0.8.4
+v0.8.5 v0.8.6 v0.8.7 v0.9.0 v0.10.0 v0.11.0 v0.11.1
+v0.11.2 v0.11.3 v0.11.4 v0.11.5 v1.0.0 v1.0.1 v1.0.3
+v1.0.4 v1.0.5 v1.0.6 v1.1.0 v1.1.1 v1.2.0 v1.3.0
+v1.4.0 v1.4.1 v1.4.2
+
+   Listing 2 shows all the versions that exist for module D which shows the "latest greatest" version to
+   be v1.4.2.
+
+   Which version of module D should be selected for the project? There are really two choices. The first
+   choice is to select the "latest greatest" version (in this line of major version 1 releases) which
+   would be version v1.4.2. The second choice is to select the version that module A requires which is
+   version v1.0.6.
+
+   A dependency tool like dep would select version v1.4.2 and work under the assumption of semantic
+   versioning and the social contract being respected. However, for reasons defined by Russ in this
+   post, Go is going to respect module A's requirements and select version v1.0.6. Go is selecting
+   the "minimal" version that is currently in the set of required versions for all the dependencies in
+   the project that require the module. In other words, right now only module A requires module D and
+   module A has specified it requires version v1.0.6, so that is the version of module D that will be
+   selected.
+
+   What if I introduce new code that requires the project to import module B? Once module B is imported
+   into the project, Go upgrades the version of module D for the project from v1.0.6 to v.1.2.0. Once
+   again selecting the "minimal" version of module D that is currently in the set of required versions
+   (v1.0.6 and v.1.2.0) for all the dependencies (modules A and B) in the project that require module D.
+
+   What if I introduce new code once more that requires the project to import module C? Then Go will
+   choose the latest version (v1.3.2) from the set of required versions (v1.0.6, v1.2.0, v1.3.2). Note
+   that version v1.3.2 is still a "minimal" version and not the "latest greatest" version of module D
+   (v1.4.2).
+
+   Lastly, what if I remove the code I just added for module C? Go will lock the project into version
+   v1.3.2 for module D. To downgrade back to version v1.2.0 would be a bigger change and Go knows
+   version v1.3.2 works and is stable, so version v1.3.2 remains the "latest non-greatest" or "minimal"
+   version of module D for the project. Plus, the module files only maintain a snapshot and are not a
+   log. There is no information for historical undoing or downgrading.
+
+   This is why I like to think of MVS as an algorithm that picks the "latest non-greatest" version of a
+   module. Hopefully you now understand why Russ chose the name "minimal" when naming the algorithm.
+
+Example Project
+   With this foundation in place, I will put together a project so you can see Go and the MVS algorithm
+   in action. In this project, module D will represent the logrus module and the project will
+   directly depend on the rethinkdb-go (module A) and golib (module B) modules. The rethinkdb-go
+   and golib modules directly depend on the logrus module and each require a different version that is
+   not the "latest greatest" version of logrus.
+
+   [img]Figure 2
+    +------------------------+                              +------------------------+
+    |            A           |                              |      D v1.0.6          |
+    | github.com/rethinkdb/  |  ------------------------->  | github.com/sirupsen/   |
+    | rethinkdb-go           |                              | logrus                 |
+    +------------------------+                              +------------------------+
+
+    +------------------------+                              +------------------------+
+    |            B           |                              |      D v1.2.0          |
+    | github.com/Bhinneka/   |  ------------------------->  | github.com/sirupsen/   |
+    | golib                  |                              | logrus                 |
+    +------------------------+                              +------------------------+
+
+   Figure 2 shows the independent relationship between the three modules. To start, I will create the
+   project, initialize modules, and then load VS Code.
+
+   Listing 2
+$ cd $HOME
+$ mkdir app
+$ mkdir app/cmd
+$ mkdir app/cmd/db
+$ touch app/cmd/db/main.go
+$ cd app
+$ go mod init app
+$ code .
+
+   Listing 2 shows all the commands to run. After running those commands, the following should appear in
+   VS Code.
+
+   [img]Figure 3
+cmd/
+    db/
+        main.go
+go.mod
+
+=> go.mod <=
+    module app
+
+    go 1.13
+
+   Figure 3 shows what the project structure and module file should contain. With this in place, it's
+   time to add code that will use the rethinkdb-go module.
+
+   Listing 3
+   https://play.golang.org/p/bc5I0Afxhvc
+01 package main
+02
+03 import (
+04     "context"
+05     "log"
+06
+07     db "gopkg.in/rethinkdb/rethinkdb-go.v5"
+08 )
+09
+10 func main() {
+11     c, err := db.NewCluster([]db.Host{{Name: "localhost", Port: 3000}}, nil)
+12     if err != nil {
+13         log.Fatalln(err)
+14     }
+15
+16     if _, err = c.Query(context.Background(), db.Query{}); err != nil {
+17         log.Fatalln(err)
+18     }
+19 }
+
+   Listing 3 introduces major version 5 of the rethinkdb-go module. After adding and saving this code,
+   Go finds, downloads and extracts the module, updating the go.mod and go.sum files.
+
+   Listing 4
+01 module app
+02
+03 go 1.13
+04
+05 require gopkg.in/rethinkdb/rethinkdb-go.v5 v5.0.1
+
+   Listing 4 shows the go.mod file requiring the rethinkdb-go module as a direct dependency selecting
+   version v5.0.1, which is the "latest greatest" version of that module.
+
+   Listing 5
+...
+github.com/sirupsen/logrus v1.0.6 h1:hcP1GmhGigz/O7h1WVUM5KklBp1JoNS9FggWKdj/j3s=
+github.com/sirupsen/logrus v1.0.6/go.mod h1:pMByvHTf9Beacp5x1UXfOR9xyW/9antXMhjMPG0dEzc=
+...
+
+   Listing 5 shows two lines from the go.sum file that introduces version v1.0.6 of the logrus module.
+   At this point you can see that the MVS algorithm has selected the "minimal" version of the logrus
+   module needed to satisfy the requirement specified by the rethinkdb-go module. Remember the "latest
+   greatest" version of the logrus module is 1.4.2.
+
+   Note: The go.sum file should be considered an opaque reliability artifact and it shouldn't be used to
+   understand your dependencies. What I am doing above to determine versions is wrong and shortly I will
+   show you the right way to determine what version is being used for your project.
+
+   [img]Figure 4
+   +--------------+               +------------------------+               +------------------------+
+   |              |               |            A           |               |      D v1.0.6          |
+   | APPLICATION  |  ---------->  | github.com/rethinkdb/  |  ---------->  | github.com/sirupsen/   |
+   |              |               | rethinkdb-go           |               | logrus                 |
+   +--------------+               +------------------------+               +------------------------+
+
+   Figure 4 shows a visual of which version of the logrus module Go will use to build the code in the
+   project.
+
+   Next I will add code that introduces a dependency on the golib module.
+
+   Listing 6
+   https://play.golang.org/p/h23opcp5qd0
+01 package main
+02
+03 import (
+04     "context"
+05     "log"
+06
+07     "github.com/Bhinneka/golib"
+08     db "gopkg.in/rethinkdb/rethinkdb-go.v5"
+09 )
+10
+11 func main() {
+12     c, err := db.NewCluster([]db.Host{{Name: "localhost", Port: 3000}}, nil)
+13     if err != nil {
+14         log.Fatalln(err)
+15     }
+16
+17     if _, err = c.Query(context.Background(), db.Query{}); err != nil {
+18         log.Fatalln(err)
+19     }
+20
+21     golib.CreateDBConnection("")
+22 }
+
+   Listing 6 added lines 07 and 21 to the program. Once Go finds, downloads and extracts the golib
+   module, the following changes appear in the go.mod file.
+
+   Listing 7
+01 module app
+02
+03 go 1.13
+04
+05 require (
+06     github.com/Bhinneka/golib v0.0.0-20191209103129-1dc569916cba
+07     gopkg.in/rethinkdb/rethinkdb-go.v5 v5.0.1
+08 )
+
+   Listing 7 shows the go.mod file has been modified to include the dependency on the golib module for
+   the "latest greatest" version of that module, which happens to not have a semantic version tag.
+
+   Listing 8
+...
+github.com/sirupsen/logrus v1.0.6 h1:hcP1GmhGigz/O7h1WVUM5KklBp1JoNS9FggWKdj/j3s=
+github.com/sirupsen/logrus v1.0.6/go.mod h1:pMByvHTf9Beacp5x1UXfOR9xyW/9antXMhjMPG0dEzc=
+github.com/sirupsen/logrus v1.2.0 h1:juTguoYk5qI21pwyTXY3B3Y5cOTH3ZUyZCg1v/mihuo=
+github.com/sirupsen/logrus v1.2.0/go.mod h1:LxeOpSwHxABJmUn/MG1IvRgCAasNZTLOkJPxbbu5VWo=
+...
+
+   Listing 8 shows four lines from the go.sum file that now include versions v1.0.6 and v1.2.0 of the
+   logrus module. Seeing both versions listed in the go.sum file brings up two questions:
+    1. Why are both versions listed in the go.sum file?
+    2. Which version is going to be used when Go performs a build?
+
+   The reason both versions are listed in the go.sum file is better answered by Bryan Mills from the Go
+   team.
+
+   "The go.sum file still includes the older version (1.0.6) because its transitive requirements may
+   affect the selected versions of other modules. We really only need the checksum for the go.mod file,
+   since that is what declares those transitive requirements, but we end up retaining the checksum for
+   the source code too because go mod tidy is not as precise as it ought to be."
+   golang.org/issue/33008
+
+   This still leaves the question of which version of the logrus module will be used when building the
+   project. To correctly identify which modules and their version will be used don't look at the go.sum
+   file, but rather use the go list command.
+
+   Listing 9
+$ go list -m all | grep logrus
+
+github.com/sirupsen/logrus v1.2.0
+
+   Listing 9 shows that version v1.2.0 of the logrus module will be used when building the project. The
+   -m flag directs go list to list modules instead of packages.
+
+   Looking at the module graph will provide more insight into the requirements the project has on the
+   logrus module.
+
+   Listing 10
+$ go mod graph | grep logrus
+
+github.com/sirupsen/logrus@v1.2.0 github.com/pmezard/go-difflib@v1.0.0
+github.com/sirupsen/logrus@v1.2.0 github.com/stretchr/objx@v0.1.1
+github.com/sirupsen/logrus@v1.2.0 github.com/stretchr/testify@v1.2.2
+github.com/sirupsen/logrus@v1.2.0 golang.org/x/crypto@v0.0.0-20180904163835-0709b304e793
+github.com/sirupsen/logrus@v1.2.0 golang.org/x/sys@v0.0.0-20180905080454-ebe1bf3edb33
+gopkg.in/rethinkdb/rethinkdb-go.v5@v5.0.1 github.com/sirupsen/logrus@v1.0.6
+github.com/sirupsen/logrus@v1.2.0 github.com/konsorten/go-windows-terminal-sequences@v1.0.1
+github.com/sirupsen/logrus@v1.2.0 github.com/davecgh/go-spew@v1.1.1
+github.com/Bhinneka/golib@v0.0.0-20191209103129-1dc569916cba github.com/sirupsen/logrus@v1.2.0
+github.com/prometheus/common@v0.2.0 github.com/sirupsen/logrus@v1.2.0
+
+   Listing 10 shows the relationships the logrus module has in the project. I will extract the lines
+   that show the dependency requirements on logrus directly.
+
+   Listing 11
+gopkg.in/rethinkdb/rethinkdb-go.v5@v5.0.1 github.com/sirupsen/logrus@v1.0.6
+github.com/Bhinneka/golib@v0.0.0-20191209103129-1dc569916cba github.com/sirupsen/logrus@v1.2.0
+github.com/prometheus/common@v0.2.0 github.com/sirupsen/logrus@v1.2.0
+
+   In listing 11, these lines show that three modules (rethinkdb-go, golib, common) all require the
+   logrus module. Thanks to the go list command, I know that the minimal version required is version
+   v1.2.0.
+
+   [img]Figure 5
++--------------+              +------------------------+
+|              |              |            C           |
+|              |       +----> | github.com/prometheus/ | -----+
+|              |       |      | common                 |      |
+|              |       |      +------------------------+      |
+|              |       |                                      |
+|              |       |      +------------------------+      |       +----------------------+
+|              |       |      |            B           |      |       |      D v1.2.0        |
+| APPLICATION  | ------+----> | github.com/Bhinneka/   | -----+-----> | github.com/sirupsen/ |
+|              |       |      | golib                  |      |       | logrus               |
+|              |       |      +------------------------+      |       +----------------------+
+|              |       |                                      |
+|              |       |      +------------------------+      |
+|              |       |      |            A           |      |
+|              |       +----> | github.com/rethinkdb/  | -----+
+|              |              | rethinkdb-go           |
++--------------+              +------------------------+
+
+
+   Figure 5 shows a visual of which version of the logrus module Go will now use to build the code in
+   the project for all dependencies that require the logrus module.
+
+Go Mod Tidy
+   Before you commit/push code back to the repo, run go mod tidy to make sure your module files are
+   current and accurate. The code you've been building, running or testing locally will affect what Go
+   decides at any time to update in the module files. Running go mod tidy will guarantee the project has
+   an accurate and complete snapshot of what is needed and this will help others on your team and your
+   CI/CD environments.
+
+   Listing 12
+$ go mod tidy
+
+go: finding github.com/Bhinneka/golib latest
+go: finding github.com/bitly/go-hostpool latest
+go: finding github.com/bmizerany/assert latest
+
+   Listing 12 shows the output from running go mod tidy. You can see two new dependencies show up in the
+   output. This changes the module files.
+
+   Listing 13
+01 module app
+02
+03 go 1.13
+04
+05 require (
+06     github.com/Bhinneka/golib v0.0.0-20191209103129-1dc569916cba
+07     github.com/bitly/go-hostpool v0.0.0-20171023180738-a3a6125de932 // indirect
+08     github.com/bmizerany/assert v0.0.0-20160611221934-b7ed37b82869 // indirect
+09     gopkg.in/rethinkdb/rethinkdb-go.v5 v5.0.1
+10 )
+
+   Listing 13 shows that the go-hostpool and assert modules are listed as indirect modules required to
+   build the project. They are being listed here because those projects are not currently compliant with
+   modules. In other words, a go.mod file does not exist in the repo for any tagged version or the
+   "latest greatest" version in master for these projects.
+
+   Why were these modules included after running go mod tidy? I can use the go mod why command to find
+   out.
+
+   Listing 14
+$ go mod why github.com/hailocab/go-hostpool
+
+# github.com/hailocab/go-hostpool
+app/cmd/db
+gopkg.in/rethinkdb/rethinkdb-go.v5
+github.com/hailocab/go-hostpool
+
+------------------------------------------------
+
+$ go mod why github.com/bmizerany/assert
+
+# github.com/bmizerany/assert
+app/cmd/db
+gopkg.in/rethinkdb/rethinkdb-go.v5
+github.com/hailocab/go-hostpool
+github.com/hailocab/go-hostpool.test
+github.com/bmizerany/assert
+
+   Listing 14 shows why these modules are indirectly required for the project. The rethinkdb-go module
+   requires the go-hostpool module and the go-hostpool module requires the assert module.
+
+Upgrading Dependencies
+   The project has three dependencies each requiring the logrus module where version v1.2.0 of the
+   logrus module is currently being selected. At some point in the lifecycle of the project it will
+   become important to upgrade the direct and indirect dependencies to make sure the required code for
+   the project is current and can take advantage of new features, bug fixes and security patches. To
+   apply upgrades, Go provides the go get command.
+
+   Before you run go get to upgrade the project's dependencies, there are several options that need to
+   be considered.
+
+   Upgrade Only Required Direct and Indirect Dependencies Using MVS
+
+   It's my recommendation to start with this kind of upgrade until you learn more about your project and
+   modules. This is the most conservative form of go get.
+
+   Listing 15
+$ go get -t -d -v ./...
+
+   Listing 15 shows how to perform an upgrade that will only focus on required dependencies using the
+   MVS algorithm. Here are the definitions for the flags.
+     * -t flag: Consider modules needed to build tests.
+     * -d flag: Download the source code for each module but do not build or install them.
+     * -v flag: Provide a verbose output.
+     * ./... : Perform these operations across the entire source tree and only update dependencies that
+       are required.
+
+   Running this command against the current project will cause nothing to change since the project is
+   already up to date with the minimal versions required to build and test the project. That's because I
+   just ran go mod tidy and the project is new.
+
+   Upgrade Only Required Direct and Indirect Dependencies Using Latest Greatest
+
+   This kind of upgrade will raise the dependencies from "minimal" to "latest greatest" across the
+   entire project. All that is required is adding the -u flag to the command line.
+
+   Listing 16
+$ go get -u -t -d -v ./...
+
+go: finding golang.org/x/net latest
+go: finding golang.org/x/sys latest
+go: finding github.com/hailocab/go-hostpool latest
+go: finding golang.org/x/crypto latest
+go: finding github.com/google/jsonapi latest
+go: finding gopkg.in/bsm/ratelimit.v1 latest
+go: finding github.com/Bhinneka/golib latest
+
+   Listing 16 shows the output from running the go get command with the -u flag. This output doesn't
+   tell the real story. What happens if I ask the go list command which version of the logrus module is
+   now being used to build the project?
+
+   Listing 17
+$ go list -m all | grep logrus
+
+github.com/sirupsen/logrus v1.4.2
+
+   Listing 17 shows how the "latest greatest" version of logrus is now being selected. To put this
+   selection in stone, a change was made to the go.mod file.
+
+   Listing 18
+01 module app
+02
+03 go 1.13
+04
+05 require (
+06     github.com/Bhinneka/golib v0.0.0-20191209103129-1dc569916cba
+07     github.com/bitly/go-hostpool v0.0.0-20171023180738-a3a6125de932 // indirect
+08     github.com/bmizerany/assert v0.0.0-20160611221934-b7ed37b82869 // indirect
+09     github.com/cenkalti/backoff v2.2.1+incompatible // indirect
+10     github.com/golang/protobuf v1.3.2 // indirect
+11     github.com/jinzhu/gorm v1.9.11 // indirect
+12     github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
+13     github.com/sirupsen/logrus v1.4.2 // indirect
+14     golang.org/x/crypto v0.0.0-20191206172530-e9b2fee46413 // indirect
+15     golang.org/x/net v0.0.0-20191209160850-c0dbc17a3553 // indirect
+16     golang.org/x/sys v0.0.0-20191210023423-ac6580df4449 // indirect
+17     gopkg.in/rethinkdb/rethinkdb-go.v5 v5.0.1
+18 )
+
+   Listing 18 shows on line 13 that version v1.4.2 is now the selected version for the logrus module in
+   the project. This line in the module file is what is respected by Go when building the project. Even
+   if code is removed that changes the dependency on the logrus module, version v1.4.2 is now locked in
+   stone for this project. Remember, to downgrade would be a bigger change than leaving version v.1.4.2
+   moving forward.
+
+   What changes can be seen in the go.sum file?
+
+   Listing 19
+github.com/sirupsen/logrus v1.0.6/go.mod h1:pMByvHTf9Beacp5x1UXfOR9xyW/9antXMhjMPG0dEzc=
+github.com/sirupsen/logrus v1.2.0 h1:juTguoYk5qI21pwyTXY3B3Y5cOTH3ZUyZCg1v/mihuo=
+github.com/sirupsen/logrus v1.2.0/go.mod h1:LxeOpSwHxABJmUn/MG1IvRgCAasNZTLOkJPxbbu5VWo=
+github.com/sirupsen/logrus v1.4.2 h1:SPIRibHv4MatM3XXNO2BJeFLZwZ2LvZgfQ5+UNI2im4=
+github.com/sirupsen/logrus v1.4.2/go.mod h1:tLMulIdttU9McNUspp0xgXVQah82FyeX6MwdIuYE2rE=
+
+   Listing 19 shows how all three versions of logrus are now represented in the go.sum file. As
+   explained by Bryan above, this is because transitive requirements may affect the selected versions of
+   other modules.
+
+   [img]Figure 6
+   +--------------+              +------------------------+
+   |              |              |            C           |
+   |              |       +----> | github.com/prometheus/ | -----+
+   |              |       |      | common                 |      |
+   |              |       |      +------------------------+      |
+   |              |       |                                      |
+   |              |       |      +------------------------+      |       +----------------------+
+   |              |       |      |            B           |      |       |      D v1.4.2        |
+   | APPLICATION  | ------+----> | github.com/Bhinneka/   | -----+-----> | github.com/sirupsen/ |
+   |              |       |      | golib                  |      |       | logrus               |
+   |              |       |      +------------------------+      |       +----------------------+
+   |              |       |                                      |
+   |              |       |      +------------------------+      |
+   |              |       |      |            A           |      |
+   |              |       +----> | github.com/rethinkdb/  | -----+
+   |              |              | rethinkdb-go           |
+   +--------------+              +------------------------+
+
+   Figure 6 shows a visual of which version of the logrus module Go will now use to build the code in
+   the project for all dependencies that require the logrus module.
+
+   Upgrade All Direct and Indirect Dependencies Using Latest Greatest
+
+   You can substitute the ./... option for all to upgrade and include all the direct and indirect
+   dependencies including the ones you don't need to build the project.
+
+   Listing 20
+$ go get -u -t -d -v all
+
+go: downloading github.com/mattn/go-sqlite3 v1.11.0
+go: extracting github.com/mattn/go-sqlite3 v1.11.0
+go: finding github.com/bitly/go-hostpool latest
+go: finding github.com/denisenkom/go-mssqldb latest
+go: finding github.com/hailocab/go-hostpool latest
+go: finding gopkg.in/bsm/ratelimit.v1 latest
+go: finding github.com/google/jsonapi latest
+go: finding golang.org/x/net latest
+go: finding github.com/Bhinneka/golib latest
+go: finding golang.org/x/crypto latest
+go: finding gopkg.in/tomb.v1 latest
+go: finding github.com/bmizerany/assert latest
+go: finding github.com/erikstmartin/go-testdb latest
+go: finding gopkg.in/check.v1 latest
+go: finding golang.org/x/sys latest
+go: finding github.com/golang-sql/civil latest
+
+   Listing 20 shows how many more dependencies are now found, downloaded and extracted for the project.
+
+   Listing 21
+Added to Module File
+   cloud.google.com/go v0.49.0 // indirect
+   github.com/denisenkom/go-mssqldb v0.0.0-20191128021309-1d7a30a10f73 // indirect
+   github.com/google/go-cmp v0.3.1 // indirect
+   github.com/jinzhu/now v1.1.1 // indirect
+   github.com/lib/pq v1.2.0 // indirect
+   github.com/mattn/go-sqlite3 v2.0.1+incompatible // indirect
+   github.com/onsi/ginkgo v1.10.3 // indirect
+   github.com/onsi/gomega v1.7.1 // indirect
+   github.com/stretchr/objx v0.2.0 // indirect
+   google.golang.org/appengine v1.6.5 // indirect
+   gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
+   gopkg.in/yaml.v2 v2.2.7 // indirect
+
+Removed from Module File
+   github.com/golang/protobuf v1.3.2 // indirect
+
+   Listing 21 shows the changes to the go.mod file. Many more modules were added and one module was
+   removed.
+
+   Note: If you are vendoring, the go mod vendor command strips out test files from the vendor folder.
+
+   As a general guideline, don't use the all option or the -u flag when upgrading dependencies using go
+   get for your projects. Stick to just the modules you need and to using the MVS algorithm to select
+   those modules and their versions. Manually override specific module versions when necessary. Manual
+   overrides can be done by manually editing the go.mod file which I will show you in a future post.
+
+Resetting Dependencies
+   If at any time you are not comfortable with the modules and the versions being selected, you can
+   always reset the selections by removing the module files and running go mod tidy again. This is more
+   of an option when the project is young and things are not stable. Once a project is stable and
+   released, I would hesitate to reset the dependencies. As I mentioned above, module versions over time
+   may get set and you want durable and reproducible builds over the long haul.
+
+   Listing 22
+$ rm go.*
+$ go mod init <module name>
+$ go mod tidy
+
+   Listing 22 shows the commands you can run to allow MVS to perform all the selections again from
+   scratch. I have been doing this throughout the writing of this post to reset the project and provide
+   the listings for the post.
+
+Conclusion
+   In this post I explained the MVS semantics and showed a real-world example of Go and the MVS
+   algorithm in action. I also showcased some of the Go commands that can provide you information if you
+   get stuck or run into unknown issues. There are edge cases that you can run into as you add more and
+   more dependencies to your projects. This is because the Go ecosystem is 10 years old and it will take
+   more time for all of the existing projects to become module compliant.
+
+   In future posts I will talk about using dependencies of different major versions in the same project
+   and how to manually retrieve and lock down specific versions of a dependency. For now, I hope you can
+   trust modules and the Go tooling even more and that you have a clearer idea of how MVS is selecting
+   versions over time. If you run into any problems, there is a community of people available on Gopher
+   Slack in the #module group ready and willing to help.
+
+
+---
+[**1]https://github.com/golang/tools/blob/master/gopls/doc/vscode.md
+
+tools/gopls/doc/vscode.md
+
+VSCode
+
+   Use the VSCode-Go plugin, with the following configuration:
+"go.useLanguageServer": true,
+"[go]": {
+    "editor.snippetSuggestions": "none",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+        "source.organizeImports": true,
+    }
+},
+"gopls": {
+    "usePlaceholders": true, // add parameter placeholders when completing a function
+
+    // Experimental settings
+    "completeUnimported": true, // autocomplete unimported packages
+    "deepCompletion": true,     // enable deep completion
+}
+
+   VSCode will complain about the "gopls" settings, but they will still work. Once we have a consistent
+   set of settings, we will make the changes in the VSCode plugin necessary to remove the errors.
+
+   If you encounter problems with import organization, please try setting a higher code action timeout
+   (any value greater than 750ms), for example:
+"[go]": {
+  "editor.codeActionsOnSaveTimeout": 3000
+}
+
+   To enable more detailed debug information, add the following to your VSCode settings:
+"go.languageServerFlags": [
+    "-rpc.trace", // for more detailed debug logging
+    "serve",
+    "--debug=localhost:6060", // to investigate memory usage, see profiles
+],
+
+   See the section on command line arguments for more information about what these do, along with
+   other things like --logfile=auto that you might want to use.
+
+   You can disable features through the "go.languageServerExperimentalFeatures" section of the config.
+   An example of a feature you may want to disable is "documentLink", which opens [70]godoc.org links
+   when you click on import statements in your file.
+
+VSCode Remote Development with gopls
+   You can also make use of gopls with the VSCode Remote Development extensions to enable
+   full-featured Go development on a lightweight client machine, while connected to a more powerful
+   server machine.
+
+   First, install the Remote Development extension of your choice, such as the Remote - SSH
+   extension. Once you open a remote session in a new window, open the Extensions pane (Ctrl+Shift+X)
+   and you will see several different sections listed. In the "Local - Installed" section, navigate to
+   the Go extension and click "Install in SSH: hostname".
+
+   Once you have reloaded VSCode, you will be prompted to install gopls and other Go-related tools.
+   After one more reload, you should be ready to develop remotely with VSCode and the Go extension.
+
+
+---

@@ -1,0 +1,176 @@
+filename: bash_working-with-command-arguments_20160530.txt
+http://www.linuxjournal.com/content/working-command-arguments
+
+Working with Command Arguments
+
+   Sat, 05/28/2016 - 12:15 — [6]Dave Taylor
+
+   In this article, I want to cover a more fundamental aspect of shell scripting: working with command
+   arguments. I suspect that most shell scripts go through an evolution with their command flags,
+   actually starting out with none, then maybe one or two parsed in a sloppy fashion, finally upgraded
+   to a proper implementation of getopt, and then, perhaps, even being completely rewritten as a C++ or
+   Ruby program as the complexity keeps inexorably increasing.
+
+   The really easy way to parse a starting flag, of course, is just to use a conditional statement:
+
+if [ "$1" = "-a" ]; then
+  flaga=1
+fi
+
+There are a couple problems with this approach, however, not the least
+of which is that it ends up taking a fair amount of space in the code.
+Because to be proper, the full sequence also would include flaga=0 before
+the conditional, because (repeat after me) you never can assume that the
+shell will correctly instantiate the value of a newly defined variable.
+
+The other problem is that after this code sequence, the command parameters
+are out of sync: $1 is still either possibly the starting flag value
+(-a) or another argument or value that the user has specified.
+
+To make this a bit more logical, let's imagine a shell script
+that's a wrapper to something like the terrific curl: give
+it a URL, and it'll grab that content and save it to the local
+directory as a file. Add the imagined -a flag, and it'll also
+include progress information.
+So, a typical usage might look like this:
+
+getpage.sh -a http://www.linuxjournal.com/index.html
+
+   In this situation, a number of command parameter variables are going to be instantiated as the shell
+   script is invoked, notably $# = 2, $0 = getpage.sh, $1 = -a and $2 =
+   http://www.linuxjournal.com/index.html.
+
+   Where I always get tripped up is that $# is the number of arguments, not the total number of words in
+   the command. Therefore, if this script is invoked without any arguments at all, $# seems like it
+   should be 1 (what about the command name?), but actually it's 0.
+
+   This goes back to the dawn of UNIX development actually, and it's known as the "0 index problem". In
+   arrays, the first value is referenced as being in slot 0, or array[0]. For some developers, that
+   makes complete sense, and for others, it can be confusing. Indeed, I've seen C programs where the
+   writer ignores the first slot entirely and indexes starting at 1, not 0.
+
+   With that in mind, after the conditional has been used to check for the -a flag in the first variable
+   space ($1), what really needs to happen is that all the positional variables above this one (for
+   example, $2, $3 and so on) need to shift down a spot. Ideally, after the conditional, $1 contains the
+   URL value regardless of whether the starting flag was specified.
+
+   That way, the next statement block in the script safely can assume that $1 will be the URL and not
+   have to test redundantly to see if it's still -a.
+
+   This is done with the shift command, and so, here's the proper way to test conditionally for an
+   optional variable in a shell script:
+
+flaga=0
+if [ "$1" = "-a" ]; then
+  flaga=1
+  shift
+fi
+
+   That works exactly as you'd hope, but leads to the next question: what happens if the flag has an
+   optional value that the user can specify? In the case of this curl script, perhaps the flag is
+   something like -o output file.
+
+   That's actually an easy addition to the above code:
+
+outputspecified=0
+if [ "$1" = "-o" ]; then
+  outputspecified=1
+  outputfilename="$2"
+  shift 2
+fi
+
+   As you can see, shift takes a single numeric argument that reflects how many slots you want to have
+   everything cascade. It's easy to see if you consider the positional values before and after the above
+   code block:
+
+$ sh getpage.sh -0 test.html SomeURL
+$# = 3
+$1 = -a
+$2 = test.html
+$3 = SomeURL
+-----
+$# = 1
+$1 = SomeURL
+$2 =
+$3 =
+
+   Initially, all three positional variables are set, and the arg count ($#) is 3, as makes sense given
+   the command invocation. But after the shift 2, everything's moved down two slots, and the arg count
+   also is decremented two, as you can see above.
+
+   Now, what if your development of the script hits a juncture where you realize that it'd be useful to
+   have three different starting arguments, one of which indeed takes an argument?
+
+Dealing with Lots of Starting Flags
+   Even two flags can be a pain, because it'd be terrible code that would force the user to specify them
+   in order, but without that, -a, -c and -o could require you to test for all three, parse and shift,
+   then test for all three again, parse and shift, then test for all three one more time. That would be
+   a nightmare, and I haven't even mentioned how those pesky users have a tendency to combine flags too,
+   so would your script properly parse -ac -o or -oc -a too?
+
+   Enter getopt.
+
+   The getopt command is going to become your best friend if you're building complex user-facing
+   scripts, no question. It basically works by extracting all the optional flags and parameters, then
+   lets you parse through them in a uniform manner.
+
+   The standard usage is to break down combined args with an invocation of getopt, then use the set
+   command to replace the existing starting flags with the new, neater args, then run through a loop,
+   parsing them one by one.
+
+   Yes, this is easier just to demonstrate, so let me show you the command flag parsing segment from a
+   different production script. This particular command has three possible starting flags, -n, -p and
+   -t.
+
+   The first step in the script is to have getopt normalize whatever the user has specified:
+
+args=$(getopt np:t $*)
+
+   Comparing this statement with the usage error below, you can see that arg 1 to getopt is a list of
+   all acceptable flags, with : denoting those flags that have a required additional argument if the
+   flag is specified—easy enough.
+
+   Now the status variable $? can be tested: if it's non-zero, there was an error in parsing the flags,
+   and in most scripts, it's time to fail out with a usage statement:
+
+if [ $? != 0] ; then
+  echo \
+    "Usage: $(basename $0) {-p SFX} {-n} {-t} PTN NEWPTN"
+  echo "    -n   sequentially number matching files"
+  echo "    -p   use specified suffix SFX for filenames"
+  echo "    -t   test only - don't execute resultant cmds"
+  exit 0
+fi
+
+   You'll often see scripts that have the usage sequence pushed into a separate function to keep the
+   code clean. Also, note the use of $(basename $0) in the first echo. That's a handy trick to
+   compensate for the fact that most of the time $0 is going to be the full name of the script,
+   including path. So tapping basename is just for aesthetics!
+
+   Finally, the statement that does the real work:
+
+set -- $args
+
+   Now all the positional parameters are neatly organized and ready to parse, something that's
+   traditionally done with a case statement wrapped in a for loop (no difference from an enigma wrapped
+   in a dilemma, of course). It looks like this:
+
+for i
+do
+  case "$i"
+  in
+   -n ) renumber=1 ; shift ;;
+   -p ) fixpng=1   ; sfx=$2 ; shift 2 ;;
+   -t ) doit=0     ; shift ;;
+ esac
+done
+
+   I have a particular style with the semicolons in my case statements, mostly just to ensure that I use
+   the needed ;; sequence to terminate each of the individual conditionals, but otherwise, it should be
+   easy to understand.
+
+   The only thing missing from this code fragment is something I alluded to earlier. What is it?
+
+   And, that's it for this article. Now, go back to your latest shell script, and just for practice, go
+   ahead and add some optional starting flags and parse them with getopt.
+

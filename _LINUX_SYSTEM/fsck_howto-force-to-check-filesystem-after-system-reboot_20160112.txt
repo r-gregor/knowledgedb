@@ -1,0 +1,124 @@
+filename: fsck_howto-force-to-check-filesystem-after-system-reboot_20160112.txt
+http://linuxconfig.org/how-to-force-fsck-to-check-filesystem-after-system-reboot-on-linux
+
+How to force fsck to check filesystem after system reboot on Linux
+
+This article will explain a procedure on how to force fsck to perform a filesystem check on the next
+system reboot or force filesystem check for any desired number of system reboots whether it is root or
+non-root mount point.
+
+Let's start with discussion about some tools which can be used to obtain filesystem information and
+configurations which control filesystem check after system reboot. The tool which we are going to discuss
+is tune2fs filesystem managing utility. Using tune2fs we can export some important information related
+to filesystem health check. The following command will tell as when was the last time the filesystem
+/dev/sdX was checked:
+# tune2fs -l /dev/sdbX | grep Last\ c
+Last checked:             Sun Dec 13 09:14:22 2015
+
+Anther useful information which can be retrieved by tune2fs command relates to how many times our /dev/sdX
+filesystem was mounted:
+# tune2fs -l /dev/sdbX | grep Mount
+Mount count:              157
+
+and lastly how many mounts are allowed to pass before filesystem check is forced:
+# tune2fs -l /dev/sdbX | grep Max
+Maximum mount count:      -1
+
+From the above outputs we can establish the following information summary. The /dev/sdbX filesystem was
+last checked on Sun Dec 13 09:14:22 2015. Since the last check, this filesystem was mounted 157 times
+and maximum amount of mounts before next filesystem fsck check. In the above case the value -1 means
+that fsck is disabled.
+
+Now, that we have learned about some tune2fs basics let's discuss PASS system configuration option found
+in /etc/fstab file containing all on boot mountable partitions and their relevant mount options.
+# blkid | grep sdb1
+/dev/sdb1: UUID="c6e22f63-e63c-40ed-bf9b-bb4a10f2db66" TYPE="ext2"
+# grep c6e22f63-e63c-40ed-bf9b-bb4a10f2db66 /etc/fstab
+UUID=c6e22f63-e63c-40ed-bf9b-bb4a10f2db66 /mnt            ext2    errors=remount-ro 0      0
+
+We have used blkid command to retrieve UUID for a given partition and then used the retrieved partition
+UUID to get a relevant information related to /dev/sdb1 partition from /etc/fstbab. The last column that
+is a column 6, aka fsck PASS column is used by fsck to determine whether fsck should check filesystem
+before it is mounted and in which order given partitions in /etc/fstab should be checked. Possible
+entries for fstab PASS column are 0,1 and 2.
+
+0 - disabled, that is do not check filesystem
+1 - partition with this PASS value has a higher priority and is check first. This value is usually set
+	to root / partition
+2 - partitions with this PASS value will be checked last
+
+The connection between fstab PASS value, last checked value and number of mounts value is as follows:
+During the system boot the first value which is checked is fstab PASS value. If this value is 0 that not
+other values are checked ( exemption .. see "Force fsck for root partition" below ) and the fsck will
+NOT perform filesystem check. If the PASS value found in /etc/fstab is any other than 0, that is 1 or
+2 then values of maximum mounts and total mounts are checked. If the value of maximum mounts is greater
+or equal to total number of mounts value then fsck's filesytem check will be performed. Few examples:
+FSCK DISABLED
+fstab PASS: 1
+Maximum mount count:      -1
+Mount count:              157
+----
+FSCK DISABLED
+fstab PASS: 0
+Maximum mount count:      -1
+Mount count:              157
+----
+FSCK ON NEXT REBOOT
+fstab PASS: 1 or 2
+Maximum mount count:      1
+Mount count:              157
+----
+FSCK DISABLED
+fstab PASS: 0
+Maximum mount count:      1
+Mount count:              1
+----
+FSCK ON NEXT REBOOT
+fstab PASS: 1 or 2
+Maximum mount count:      1
+Mount count:              1
+----
+NO FSCK ON NEXT REBOOT
+fstab PASS: 1 or 2
+Maximum mount count:      200
+Mount count:              157
+
+1. Force fsck for root partition
+The simplest way to force fsck filesystem check on a root partition eg. /dev/sda1 is to create an empty
+file called forcefsck in the partition's root directory.
+# touch /forcefsck
+
+This empty file will temporarily override any other settings and force fsck to check the filesystem on the
+next system reboot. Once the filesystem is checked the forcefsck file will be removed thus next time you
+reboot your filesystem will NOT be checked again. To enable more permanent solution and force filesystem
+check on every reboot we need to manipulate filesystem's "Maximum mount count" parameter. The following
+command will ensure that filesystem /dev/sdb1 is checked every time your Linux system reboots. Please
+note that for this to happen the fsck's PASS value in /etc/fstab must be set to a positive integer as
+discussed above.
+# tune2fs -c 1 /dev/sdb1
+
+alternatively we can set fsck after every 10 reboots:
+# tune2fs -c 10 /dev/sdb1
+
+2. Force fsck for all other non-root partitions
+As oppose to root partition creating empty forcefsck file will NOT trigger partition check on reboot. The
+only way to force fsck on all other non-root partitions is to manipulate filesystem's "Maximum mount
+count" parameter and PASS value within /etc/fstab configuration file. To force filesystem check on
+non-root partition change fsck's PASS value in /etc/fstab to value 2. For example:
+UUID=c6e22f63-e63c-40ed-bf9b-bb4a10f2db66 /mnt            ext2    errors=remount-ro 0      2
+
+and change maximum mounts filesystem parameter to a positive integer, depending on how many times you
+wish to allow a specified filesystem to be mounted without being checked. Force fsck on every reboot:
+# tune2fs -c 1 /dev/sdb1
+
+alternatively we can set fsck to check filesystem after every 5 reboots:
+# tune2fs -c 5 /dev/sdb1
+
+To disable fsck run:
+# tune2fs -c 0 /dev/sdb1
+
+OR
+# tune2fs -c -1 /dev/sdb1
+
+Which will set the filesystem's "Maximum mount count" parameter to -1
+

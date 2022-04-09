@@ -1,0 +1,447 @@
+filename: build-an-sd-card-image-without-an-sd-card_20150520.txt
+http://superuser.com/questions/830733/how-to-build-an-sd-card-image-without-an-sd-card
+
+[25]How to build an sd card image, without an sd card?
+
+   up vote 1 down vote [26]favorite
+
+   We have a scripted process that builds up an embedded install of Debian Jesse on an sd card. The
+   relevant parts of the script look like this:
+export DISK=/dev/sdb
+umount ${DISK}1   # make sure no partitions mounted at the moment
+umount ${DISK}2   # ditto
+dd if=/dev/zero of=${DISK} bs=1M count=16   # zero partition table zone, overkill
+sfdisk --in-order --Linux --unit M ${DISK} <<-__EOF__    # make partitions
+    1,48,0xE,*
+    ,,,-
+__EOF__
+
+mkfs.vfat -F 16 ${DISK}1 -n boot    # install file systems
+mkfs.ext4 ${DISK}2 -L rootfs
+
+   After that, the auto mounter seems to kick in and get the sd card remounted, so we can do things
+   like:
+cp -v ${DIR}/u-boot/spl/u-boot-spl.bin /media/$username/boot/BOOT.BIN
+cp -v ${DIR}/u-boot/u-boot.img /media/$username/boot/
+cp -v ${DIR}/u-boot/uEnv.txt /media/$username/boot/
+rsync -axHAX --progress ${DIR}/jessieRoot/ /media/$username/rootfs/
+
+   After one of us does that, then we can use dd to copy the contents of the card and share it with each
+   other, making more sd cards using dd.
+
+   THE PROBLEM with this is twofold: 1) It's very Ubuntu/machine specific right now (assumes card is at
+   sdb, etc 2) It needs an actual card, so doesn't lend itself to a build machine.
+
+   Is there a way to do the above without a card?
+
+   I tried using dd to just make an 8G file and then ran sfdisk on that (everything's a file, right?)
+   and that part worked. But it's not clear how I'd run the mkfs parts to work, they seem to want to
+   work on block device files, not sub regions of a single file that has a partition table embedded in
+   it. And then I have the problem of mounting it. I assume I use some incantation of mount -o loop, but
+   again, not sure how to do that on the sub region of the virtual image file, I've always just down
+   that with .iso files.
+
+   (Feel free to be pedantic, I am not an expert (obviously) with this kind of stuff. I get some of it,
+   and other parts seem a bit magic...)
+
+
+1 Answer 1
+
+   [35]active [36]oldest [37]votes
+   up vote 2 down vote accepted
+
+   I think [38]this page has everything you need.
+     * instead of sdb make use of loopback device
+     * instead of actual card make use of virtual filesystem
+     * you are in the right track making use of dd to create a file for the virtual filesystem.
+     * you are in the right track using loopback device. The trick is mounting the loopback device in
+       the offsets where the partitions are.
+
+   This is the article.
+
+     A virtual filesystem is filesystem that exists in a file, which in turn exists on a physical disk.
+     There's a lot of great things you can do with virtual file systems; the reason I was messing with
+     them was to configure a virtual machine on a linux host. Other uses include encrypting filesystems
+     without encrypting entire disks; Mac OS X's File Vault encrypts users home directories this way.
+     Maybe you went ahead and made yourself one giant partition and then realized for one reason or
+     another that you want multiple partitions! Virtual filesystems can help (to some extent) with that
+     as well.
+
+     So how do you make a virtual file system? Easy. The first thing you need to do is make a file for
+     the filesystem to live in. This is where 'dd' starts to come in. Consider, for example, the
+     following command:
+
+     dd if=/dev/zero of=~/myFileSystem.img bs=1024 count=1048576
+
+     This command will read 1,048,576 blocks from /dev/zero and write them to ~/myFileSystem.img; each
+     block is 1024 bytes, resulting in a 1 gigabyte file containing all zeroes. The actual values that
+     you use for the blocksize (bs) and count aren't really important, the key is to get your math
+     right: bs * count = imageSize.
+
+     So now you have your file; great. It's time to make a file system! this part is even easier...
+     we'll create an EXT2 filesystem, using the following command:
+
+     mke2fs myFileSystem.img
+
+     You may notice a warning prompt, saying that myFileSystem.img is not a block device, would you
+     like to proceed? We'll get to that in just a second, for now, go ahead and say yes. Everything
+     should go smooth, it'll look just as if you'd created a filesystem on an actual disk drive. You
+     now have a virtual file system! The only thing left to do is mount your filesystem so you can
+     access it...
+
+     mkdir /mnt/virtual
+
+     mount -o loop ~/myFileSystem.img /mnt/virtual
+
+     Now any file you put into /mnt/virtual is actually being put directly into myFileSystem.img!
+     Wasn't that easy?
+
+     Fantastic. Now that you know how to make a virtual filesytsem, why not make a while virtual disk
+     image? What's the difference you ask? A disk image is going to have a partition table that defines
+     some number of partitions, and each partition contains its own filesystem; so a virtual filesystem
+     is essentially a "virtual partition" of a virtual disk image; the virtual disk image contains
+     multiple virtual filesystems, and a virtual partition table that describes where the bounds of
+     each partition are.
+
+     Creating a virtual disk image starts out the same; the first thing you need is a big empty file,
+     just you created above. This time, though, instead of making a file system, we'll want to
+     partition the file using fdisk. To make things a little nicer though, we're going to throw
+     loopback devices into the mix. You should make sure you have loopback device support enabled in
+     your kernel (most distributions do by default; but if you're a kernel compiling linux junky, you
+     might wanna check ). So we'll create a big file, and attach it to a loopback device, as follows:
+
+     dd if=/dev/zero of=~/myDisk.img bs=1024 count=1048576
+
+     losetup /dev/loop0 ~/myDisk.img
+
+     By attaching the disk image to the loopback device, we can use /dev/loop0 the same way we would
+     use ~/myDisk.img; the main difference is that /dev/loop0 is a what's known as a "block device".
+     You'd have to ask someone with more experience than I've got what precisely this gets you, but
+     what I do know is that the filesystem utilities work better with block devices than they do with
+     the flat files. Plus, it's fun.
+
+     So good, we've got a big empty file attached to a loopback device (/dev/loop0)... now it's time to
+     create partitions in the disk image. To do this, we'll run fdisk on our loopback device:
+
+     fdisk /dev/loop0
+
+     Lets create three partitions... if you're following this, you should already be familiar with
+     fdisk, so go ahead and create the following: Device Boot Start End Blocks Id System
+
+     /dev/loop0p1 1 17 136521 83 Linux
+
+     /dev/loop0p2 18 80 506047+ 82 Linux swap
+
+     /dev/loop0p3 81 130 401625 83 Linux
+
+     Once you've made your partitions, write your changes and quit fdisk. What we'll need to do next is
+     create filesystems on each partition. Remember how easy that was back with Virtual Filesystems?
+     Not quite so much anymore...
+
+     Not to panic though... the trouble is that "mkfs" can't "reach into" our virtual disk image and
+     make a filesystem just on individual partition. Infact, if you try, you'll probably wind up wiping
+     our your virtual disk image and having to rerun fdisk . So what to do... what to do?? Loopback
+     devices to the rescue. What we'll do is attach a loopback device to the myDisk.img file at the
+     specific offsets where each partition begins.
+
+     It's helpful then to look at the partitions in terms of blocks. Execute the following command:
+
+     fdisk -ul /dev/loop0
+
+     should look (hopefully exactly) like this:
+
+     Disk /dev/loop0: 1073 MB, 1073741824 bytes
+
+     255 heads, 63 sectors/track, 130 cylinders, total 2097152 sectors
+
+     Units = sectors of 1 * 512 = 512 bytes
+  Device Boot      Start         End      Blocks   Id  System
+
+     /dev/loop0p1 63 273104 136521 83 Linux
+
+     /dev/loop0p2 273105 1285199 506047+ 82 Linux swap
+
+     /dev/loop0p3 1285200 2088449 401625 83 Linux
+
+     These numbers are important for the math... we'll use the losetup command like we did before, only
+     this time we'll reach in specifically to the start of each of the three partitions. losetup takes
+     offsets as the number of bytes to skip at the beginning of the file. The output from fdisk -ul
+     /dev/loop0 shows us that the first partition starts at block 63, and that each block is 512 bytes.
+     So partition 1 starts at byte 32,256
+
+     losetup -o 32256 /dev/loop1 /dev/loop0
+
+     That command reaches 32,256 bytes into /dev/loop0 and mounts it at /dev/loop1. Remember that since
+     /dev/loop0 is attached the myDisk.img file, this is the same as reaching 32,256 bytes into that
+     file... follow? Ok, good. Same logic for partitions 2 and 3:
+
+     losetup -o 139829760 /dev/loop2 /dev/loop0
+
+     losetup -o 658022400 /dev/loop3 /dev/loop0
+
+     So now we have four loopback devices set up; /dev/loop0 is attached to the myDisk.img file.
+     /dev/loop1 is the first partition of the virtual disk represented by /dev/loop0; /dev/loop2 is the
+     2_nd, and /dev/loop3 is the 3_rd.
+
+     Now it's finally time to make those file systems! This is now just as easy as making a regular
+     filesystem, since that's all we're doing. Remember, mkfs doesn't know the device isn't a physical
+     device! We'll make three kinds of file systems, an ext2 file system for partition 1, a swap
+     filesystem for partition 2, and an XFS fileystem for partition 3:
+
+     mkfs /dev/loop1
+
+     mkswap /dev/loop2
+
+     mkfs.xfs /dev/loop3
+
+     Since loop1, loop2, and loop3 are tied directly to loop0, and loop0 is ~/myDisk.img, everything
+     that we just did to loop1, loop2, and loop3 affected myDisk.img directly! We can now mount
+     /dev/loop3, for instance, on /mnt/virtual as an XFS file system, and use it as a regular file
+     system!
+
+     So I hope you found that helpful... you can do some pretty neat things with virtual file systems
+     and virtual disk images; and loopback devices make a world of difference for making things go
+     smooth.
+
+
+
+---
+http://web2.clarkson.edu/projects/itl/honeypot/ddtutorial.txt
+
+A virtual filesystem is filesystem that exists in a file, which in turn exists on a physical disk. There's a
+lot of great things you can do with virtual file systems; the reason I was messing with them was to configure
+a virtual machine on a linux host. Other uses include encrypting filesystems without encrypting entire disks;
+Mac OS X's File Vault encrypts users home directories this way. Maybe you went ahead and made yourself one
+giant partition and then realized for one reason or another that you want multiple partitions! Virtual
+filesystems can help (to some extent) with that as well.
+
+
+So how do you make a virtual file system? Easy. The first thing you need to do is make a file for the
+filesystem to live in. This is where 'dd' starts to come in. Consider, for example, the following command:
+
+dd if=/dev/zero of=~/myFileSystem.img bs=1024 count=1048576
+
+This command will read 1,048,576 blocks from /dev/zero and write them to ~/myFileSystem.img;
+each block is 1024 bytes, resulting in a 1 gigabyte file containing all zeroes. The actual values that you
+use for the blocksize (bs) and count aren't really important,
+the key is to get your math right: bs * count = imageSize.
+
+So now you have your file; great. It's time to make a file system! this part is even easier... we'll create
+an EXT2 filesystem, using the following command:
+
+mke2fs myFileSystem.img
+
+You may notice a warning prompt, saying that myFileSystem.img is not a block device, would you like to
+proceed? We'll get to that in just a second, for now, go ahead and say yes. Everything should go smooth,
+it'll look just as if you'd created a filesystem on an actual disk drive. You now have a virtual file system!
+The only thing left to do is mount your filesystem so you can access it...
+
+
+mkdir /mnt/virtual
+
+mount -o loop ~/myFileSystem.img /mnt/virtual
+
+
+Now any file you put into /mnt/virtual is actually being put directly into myFileSystem.img! Wasn't that easy?
+
+Fantastic. Now that you know how to make a virtual filesytsem, why not make a while virtual disk image? What's
+the difference you ask? A disk image is going to have a partition table that defines some number of partitions,
+and each partition contains its own filesystem; so a virtual filesystem is essentially a "virtual partition"
+of a virtual disk image; the virtual disk image contains multiple virtual filesystems, and a virtual partition
+table that describes where the bounds of each partition are.
+
+Creating a virtual disk image starts out the same; the first thing you need is a big empty file, just you
+created above. This time, though, instead of making a file system, we'll want to partition the file using
+fdisk. To make things a little nicer though, we're going to throw loopback devices into the mix. You should
+make sure you have loopback device support enabled in your kernel (most distributions do by default; but if
+you're a kernel compiling linux junky, you might wanna check ). So we'll create a big file, and attach it to
+a loopback device, as follows:
+
+
+dd if=/dev/zero of=~/myDisk.img bs=1024 count=1048576
+
+losetup /dev/loop0 ~/myDisk.img
+
+
+By attaching the disk image to the loopback device, we can use /dev/loop0 the same way
+we would use ~/myDisk.img; the main difference is that /dev/loop0 is a what's known as a "block device".
+You'd have to ask someone with more experience than I've got what precisely this gets you, but what I do
+know is that the filesystem utilities work better with block devices than they do with the flat files.
+Plus, it's fun.
+
+So good, we've got a big empty file attached to a loopback device (/dev/loop0)... now it's time to create
+partitions in the disk image. To do this, we'll run fdisk on our loopback device:
+
+fdisk /dev/loop0
+
+Lets create three partitions... if you're following this, you should already be familiar with fdisk, so go
+ahead and create the following:
+      Device Boot      Start         End      Blocks   Id  System
+
+/dev/loop0p1               1          17      136521   83  Linux
+
+/dev/loop0p2              18          80      506047+  82  Linux swap
+
+/dev/loop0p3              81         130      401625   83  Linux
+
+Once you've made your partitions, write your changes and quit fdisk. What we'll need to do next is create
+filesystems on each partition. Remember how easy that was back with Virtual Filesystems? Not quite so much
+anymore...
+
+Not to panic though... the trouble is that "mkfs" can't "reach into" our virtual disk image and make a
+filesystem just on individual partition. Infact, if you try, you'll probably wind up wiping our your virtual
+disk image and having to rerun fdisk . So what to do... what to do?? Loopback devices to the rescue. What
+we'll do is attach a loopback device to the myDisk.img file at the specific offsets where each partition begins.
+
+It's helpful then to look at the partitions in terms of blocks. Execute the following command:
+
+fdisk -ul /dev/loop0
+
+ should look (hopefully exactly) like this:
+
+Disk /dev/loop0: 1073 MB, 1073741824 bytes
+
+255 heads, 63 sectors/track, 130 cylinders, total 2097152 sectors
+
+Units = sectors of 1 * 512 = 512 bytes
+
+
+        
+
+      Device Boot      Start         End      Blocks   Id  System
+
+/dev/loop0p1              63      273104      136521   83  Linux
+
+/dev/loop0p2          273105     1285199      506047+  82  Linux swap
+
+/dev/loop0p3         1285200     2088449      401625   83  Linux
+
+These numbers are important for the math... we'll use the losetup command like we did before, only this time
+we'll reach in specifically to the start of each of the three partitions. losetup takes offsets as the number
+of bytes to skip at the beginning of the file. The output from fdisk -ul /dev/loop0 shows us that the first
+partition starts at block 63, and that each block is 512 bytes. So partition 1 starts at byte 32,256
+
+losetup -o 32256 /dev/loop1 /dev/loop0
+
+That command reaches 32,256 bytes into /dev/loop0 and mounts it at /dev/loop1.
+Remember that since /dev/loop0 is attached the myDisk.img file, this is the same as reaching 32,256 bytes
+into that file... follow? Ok, good. Same logic for partitions 2 and 3:
+
+losetup -o 139829760 /dev/loop2 /dev/loop0
+
+losetup -o 658022400 /dev/loop3 /dev/loop0
+
+So now we have four loopback devices set up; /dev/loop0 is attached to the myDisk.img file. /dev/loop1 is the
+first partition of the virtual disk represented by /dev/loop0; /dev/loop2 is the 2_nd,
+and /dev/loop3 is the 3_rd.
+
+ Now it's finally time to make those file systems! This is now just as easy as making a regular filesystem,
+ since that's all we're doing. Remember, mkfs doesn't know the device isn't a physical device! We'll make
+ three kinds of file systems, an ext2 file system for partition 1, a swap filesystem for partition 2,
+ and an XFS fileystem for partition 3:
+
+mkfs /dev/loop1
+
+mkswap /dev/loop2
+
+mkfs.xfs /dev/loop3
+
+Since loop1, loop2, and loop3 are tied directly to loop0, and loop0 is ~/myDisk.img, everything that we just
+did to loop1, loop2, and loop3 affected myDisk.img directly! We can now mount /dev/loop3, for instance,
+on /mnt/virtual as an XFS file system, and use it as a regular file system!
+
+So I hope you found that helpful... you can do some pretty neat things with virtual file systems and virtual
+disk images; and loopback devices make a world of difference for making things go smooth.
+
+
+---
+http://www.andremiller.net/content/mounting-hard-disk-image-including-partitions-using-linux
+
+Mounting a hard disk image including partitions using Linux
+
+   [12]January 22, 2008 [13]andre [14]63 Comments
+
+   A while ago I thought it would be a good idea to make a backup of my Linux server by just dumping the
+   complete disk to a file. In retrospect, it would have been much easier had I just dumped the
+   individual filesystems.
+
+   When I finally got around to using this backup, long after the 10GB disk had perished I realized that
+   to use the loopback device to mount a filesystem it actually needs a filesystem to mount. What I had
+   was a disk image, including partition table and individual partitions. To further complicate matters
+   the data partition was also not the first partition inside this image.
+
+   For reference, I created this image using the Unix ‘dd’ tool:
+# dd if=/dev/hda of=hda.img
+30544113+0 records in
+30544113+0 records out
+# ls -lh
+-rw-r--r-- 1 root    root  9.6G 2008-01-22 14:12 hda.img
+
+   I followed the instructions on http://www.trekweb.com/~jasonb/articles/linux_loopback.html to try and
+   mount the partitions inside the disk image, but ran into two problems.
+
+   To mount a partition inside the disk image you need to calculate the offset of where the partition
+   starts. You can use fdisk to show this information to you, but you need to specify the number of
+   cylinders if you are using a disk image.
+
+   You then also need to multiply the start and end numbers with the calculated sectors to get a byte
+   offset.
+
+   I found another tool more useful for this task, called parted. If you are using Ubuntu, you can
+   install it with ‘apt-get install parted’
+# parted hda.img
+GNU Parted 1.7.1
+Using /data/rabbit/disk_image/test2
+Welcome to GNU Parted! Type 'help' to view a list of commands.
+(parted) unit
+Unit?  [compact]? B
+(parted) print
+Disk /data/rabbit/disk_image/test2: 10262568959B
+Sector size (logical/physical): 512B/512B
+Partition Table: msdos
+Number  Start        End           Size         Type     File system  Flags
+1      32256B       106928639B    106896384B   primary  ext3         boot
+2      106928640B   1184440319B   1077511680B  primary  linux-swap
+3      1184440320B  10256924159B  9072483840B  primary  ext3
+(parted) quit
+
+   Now we have the offsets and we can use those to mount the filesystems using the loopback device:
+#mount -o loop,ro,offset=32256 hda.img /mnt/rabbit
+
+   That mounted the first partition, the ‘boot’ partition, but this didn’t have the data on it that I
+   was looking for. Lets try to mount partition number 3.
+#umount /mnt/rabbit
+#mount -o loop,ro,offset=1184440320 test2 /mnt/rabbit
+#mount: wrong fs type, bad option, bad superblock on /dev/loop0,
+missing codepage or helper program, or other error
+In some cases useful info is found in syslog - try
+dmesg | tail  or so
+
+   Oops, that doesn’t look right. According the article referred to above if you are using a util-linux
+   below v2.12b then you cannot specify an offset higher than 32bits. I’m using util-inux 2.13 which
+   shouldn’t have that problem, and besides, my offset is well below the 32bit limit.
+
+   The article also offers an alternative loopback implementation that supports mounting partitions
+   within an image, but that requires patching and recompiling your kernel which I would rather not do.
+
+   Instead I decided to extra ct the filesystem from the image which would then allow me to mount it
+   without specifying an offset.
+   Doing this is quite straightforward with ‘dd’. You need to give ‘dd’ a skip count, or, how far into
+   the source to start copying, and a count, how much to copy.
+   Here you can either use the single byte offsets retrieved with parted or divide them by 512 and let
+   ‘dd’ use 512 byte blocks. Copying just one byte at a time takes a very long time, so I suggest using
+   a larger block size.
+
+   Here is the command I used to extract my filesystem. Skip is 2313360 (1184440320/512) and Count is
+   17719695 (9072483840/4)
+#dd if=hda.img of=hda3.img bs=512 skip=2313360 count=17719695
+17719695+0 records in
+17719695+0 records out
+9072483840 bytes (9.1 GB) copied, 485.679 seconds, 18.7 MB/s
+
+   After extracting the filesystem I was able to mount it without any problems.
+# mount -o loop hda3.img /mnt/rabbit/
+# df -h /mnt/rabbit
+Filesystem            Size  Used Avail Use% Mounted on
+/data/rabbit/image/hda3.img
+8.4G  6.3G  1.7G  80% /mnt/rabbit

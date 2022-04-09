@@ -1,0 +1,195 @@
+filename: what_copying-a-file_20161017.txt
+https://www.quora.com/What-happens-when-a-file-is-being-copied-Does-the-computer-just-copy-the-block-file-or-does-it-copy-it-piece-by-piece-then-reconstruct-it-to-the-destination-location
+
+Computer Programming
+
+What happens when a file is being copied? Does the computer just copy the block file, or does it copy it
+piece by piece then reconstruct it to the destination location?
+
+4 Answers
+
+***
+Greg Kemnitz, wrote the innards of "the world's smallest (SQL-capable) database"
+The vast majority of copy programs operate in user space and just copy the file byte-by-byte (or more
+typically nbytes to nbytes for speed) to the new target.  The bytes are read using a FS "read" function in C
+or some other user-space language and are written using a simple "write" function.
+
+Rarely are they so clever to do stuff like link and materialize-on-write (which requires FS support which
+isn't always there) or such things.
+
+Related QuestionsMore Answers Below
+  * How is the copy of any file made in the computer?
+  * What exactly happens while copying any type of file?
+  * How can I copy an 8GB file to another computer?
+  * What's the algorithm behind copying files on a computer system and what's the story of TeraCopy?
+  * What happens if I make a new file in a folder while it's being copied?
+
+***
+Sam Rose, Google SRE. Wannabe artist.
+Let's do this empirically :)
+First we'll create a file of 1 megabyte in size:
+	$ dd bs=1024 count=1024 if=/dev/zero of=/tmp/zeroes
+	1024+0 records in
+	1024+0 records out
+	1048576 bytes (1.0 MB) copied, 0.00184454 s, 568 MB/s
+
+This command is saying copy 1024 blocks of size 1024 bytes from /dev/zero to /tmp/zeroes. So we're going to
+get a 1 megabyte (1024 * 1024) file filled with zero bytes (\0).
+
+Now what we're going to do is strace the cp command. strace shows you what system calls are being made by a
+program. Because to copy a file you fundamentally have to execute some system calls, this should tell us
+exactly how the file is copied.
+
+	$ strace -- cp /tmp/zeroes /tmp/cpzeroes
+
+	[truncated output]
+	open("/tmp/zeroes", O_RDONLY)           = 3
+	fstat(3, {st_mode=S_IFREG|0644, st_size=1048576, ...}) = 0
+	open("/tmp/cpzeroes", O_WRONLY|O_CREAT|O_EXCL, 0644) = 4
+	fstat(4, {st_mode=S_IFREG|0644, st_size=0, ...}) = 0
+	fadvise64(3, 0, 0, POSIX_FADV_SEQUENTIAL) = 0
+	mmap(NULL, 139264, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f35abd32000
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "", 131072)                     = 0
+	close(4)                                = 0
+	close(3)                                = 0
+
+I've trimmed the output down a lot because strace outputs a lot of startup and shutdown system calls for a
+process that we're not interested in here (though it's good fun to read and try to figure out what's going
+on).
+
+Let's start from the top:
+	open("/tmp/zeroes", O_RDONLY)           = 3
+	fstat(3, {st_mode=S_IFREG|0644, st_size=1048576, ...}) = 0
+	open("/tmp/cpzeroes", O_WRONLY|O_CREAT|O_EXCL, 0644) = 4
+	fstat(4, {st_mode=S_IFREG|0644, st_size=0, ...}) = 0
+
+We open the file /tmp/zeroes and get back the file handle ID 3. I believe the first fstat is to figure out
+how large the file being copied is.
+
+Then we open /tmp/cpzeroes, sending some interesting flags. O_WRONLY is write only, O_CREAT means create the
+file if it does not exist and O_EXCL means that if the file does already exist, the call to open will fail
+(we don't want cp to trash any of our files by mistake!). We get the file handle ID 4 back from the open
+call.
+
+And then another fstat call, but I'm not 100% sure why this one is done.
+	fadvise64(3, 0, 0, POSIX_FADV_SEQUENTIAL) = 0
+	mmap(NULL, 139264, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f35abd32000
+
+The fadvise64 call tells the operating system that we intend to read from file handle 3 sequentially (from
+start to finish). This doesn't need to be done, but doing it helps the operating system optimise our read
+calls. Because we're doing sequential reads, the operating system is likely to read in large chunks because
+we told it we're going to use them. Why is reading in large chunks better than reading in small ones? There's
+a lot of overhead involved in asking the hard drive to do something for us. In traditional spinning disks, we
+have to wait for the read head to get to the right place on the platter, something that could take
+milliseconds (a long time for a computer!). So reading as much as we can while the read head is in the right
+place is a good thing.
+
+The mmap call is probably how the implementation of malloc handles large allocations on the system I've run
+this on. The MAP_ANONYMOUS flag tells mmap not to back this mapping by a file (so it essentially just becomes
+a large allocation in memory). Notice also that the allocation is 139264 bytes in size, this will be an
+important thinking point later.
+
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	read(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+	write(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 131072) = 131072
+
+This is the bit that actually answers your question. A series of 8 reads and writes, each 131072 (128 * 1024,
+or 128kb) in size. So the file is indeed being copied in chunks, not all at the same time.
+
+Why are the reads done in chunks of 131072 when the buffer we allocated with mmap is 139264 bytes in size? My
+guess is that the allocator implementation has decided on this size for the buffer for one of any number of
+reasons. Allocators tend to resize allocations to avoid "heap fragmentation". Allocators that do this are
+called "slab allocators". It's possible that the call to malloc in cp did indeed ask for a buffer of size
+131072.
+
+Why are the reads done in chunks of 131072 anyway? My guess for this one was the "block size" of the hard
+drive. Block size is a bit like page size in operating systems. Files on the physical disk have to be a
+multiple of the block size in size.
+	$ blockdev --getbsz /dev/sda1
+	4096
+
+Nope. Hmm. In which case, I'm not sure. Perhaps the operating knows something about the disk that we don't,
+and chose 128kb because it knows that will be faster.
+
+Why is there loads of strings of zero bytes in the read and write calls? In the documentation for mmap, it is
+mentioned that by default the buffer you get back is zeroed if you supply the argument MAP_ANONYMOUS (which
+we did). That explains the first one. The rest are explained by the file we're copying being filled entirely
+by zeroes, and the same buffer being reused for all of the calls to read and write.
+	read(3, "", 131072)                     = 0
+	close(4)                                = 0
+	close(3)                                = 0
+
+The last read (because the return value is less than the number of bytes requested, indicting that we reached
+the end of the file) and then standard file cleanup.
+
+I hope this answers your question :)
+
+***
+Sankarson Banerjee
+Both are possible, depending on the file copy program used and the operating system.
+
+Most file copy programs copy the whole file - especially if the copy is being made locally. Typically, a file
+is made of storage blocks on disk - the operating system will duplicate the blocks (one by one or in parallel
+depending on hardware capabilities) and then once all blocks are copied make an entry in the file table
+indicating the copy is complete and usable. This process is usually very quick in local storage, so files are
+either fully copied or not copied at all. Any temporary storage created is usually not a file visible to
+users. Interrupted copies (say an accidental reboot) usually create orphaned file system blocks visible only
+to system cleanup tools; the copy itself must be started again.
+
+However, things are more complicated with remote copies, or copying very large files locally. Here' the copy
+may take a long time and potentially be interrupted, so the ability to restart from the middle is important.
+All or nothing copying can lead to repeated tries, every failure forcing you to start from the beginning.
+Remote copying protocols such as FTP, therefore, to take this into account today but even a decade ago this
+used to be a challenge.
+
+There are two cases here - one where even a partial copy is usable, as in the case of music or movies and one
+where only the whole file is useful, such as an application. In the first case, the copying program typically
+creates a file entry for the copy immediately, and this is available for use by other programs even while
+copying is still not complete. A piece of music, for instance, can be listened to as soon as say 5% is
+copied, and the remaining is still being copied - indeed if the copy speed is faster than playback speed this
+will be invisible to the user. Ripping a CD or downloading an MP3 usually involves this.
+
+In the second case, where only the whole file is useful, the copy program usually creates a temporary file.
+The copy protocol being used has to have a restart command, and the copying program will know where in the
+original to restart copying and keep appending to the temporary file. It will rename the file to its
+permanent name when all parts of the original are copied. However, unlike the previous case this temporary
+file is an actual file, not a collection of orphaned blocks since the partial copy needs to be useful to the
+copy program even after (say) a reboot. This is technique can be used even locally, if the file is very large
+and takes a long time to copy.
+
+***
+George Gonzalez, I I worked as an EE for a year and somehow fooled everybody.
+
+You really ahouldnt care how it is done, just care about the result.  Actually a smart OS would not even copy
+the file, it could just make a new file entry and mark it "copy on write".   So if you just read from the
+file there is no space or time wasted copying.  If you change the second file then the OS has to copy or
+point to some changes so the file looks changed.

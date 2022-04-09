@@ -1,0 +1,819 @@
+filename: usb-ext-hdd-for-backups-with-linux_20140327.txt
+http://www.basicallytech.com/blog/?/archives/73-Using-a-USB-external-hard-disk-for-backups-with-Linux.html
+
+Using a USB external hard disk for backups with Linux
+
+   In this article, I show how I set up a recently purchased USB external hard disk drive as a
+   backup drive for my Linux desktop PC. I'll delete the default FAT32 partition, create a new
+   partition, make a reiserfs filesystem, and show how to use rsync to backup your important
+   data.
+     * [47]Why backup with Linux?
+     * [48]Considerations
+          + [49]What to backup?
+          + [50]Backup as root or a normal user?
+          + [51]Leave backup partition mounted or unmount after each backup?
+          + [52]What backup software to use?
+     * [53]Getting the hardware working
+     * [54]Partition the disk
+     * [55]Creating a new filesystem
+     * [56]The mountpoint
+     * [57]Running the backup (/home)
+          + [58]Exclude list format
+     * [59]Running the restore (/home)
+     * [60]Running the backup (/etc)
+     * [61]Automating the backup
+     * [62]Other options
+
+Why backup with Linux?
+
+   The question should really be "Why backup with Linux instead of Windows, if I have a dual
+   boot PC?" Personally, I don't dual boot, so for me the question never arises. However, I
+   can think of a number of reasons why I would use Linux as my OS for running backups.
+     * Windows cannot read your Linux partitions without third-party addons.
+     * Conversely, Linux can (natively) read your FAT32 and NTFS partitions.
+     * It is straightforward to create a backup script which mounts those partitions, backs
+       them up, then unmounts them.
+     * Backing up to Linux renders any virus-infected files inert.
+     * Would you leave a Windows PC running overnight, unattended?
+
+Considerations
+
+What to backup?
+
+   The old school attitude is to backup everything, the whole system. As they say, "There's no
+   school like the old school", and that really is the safest approach. It's not really a
+   space issue to run full system backups since a fully installed system might take up a few
+   gig, perhaps 3-10 GB including system logs and other stuff.
+
+   On a desktop system I'm not convinced this is necessary. My distro of choice ([63]Arch
+   Linux), and many popular distros today such as the many [64]Debian-[65]based distros,
+   incorporate a rolling release. Installing and updating such systems is pretty easy (as well
+   as being a useful learning experience). I'm not sure how much time you would save by
+   running a full system backup.
+
+   You might want to backup some essential directories like /etc and parts of /var. /root may
+   be useful, it depends how you run your system.
+
+   It will also be useful to have a list of all the installed packages on your system. pacman
+   -Qi will provide this for Arch, dpkg --list will provide similar for Debian & Co. Redirect
+   the output to a file in your home directory. If you're going to do this, cron it to run
+   daily.
+
+   The important stuff for most desktop systems will be in /home; documents, e-mails, mp3s,
+   movies, photos, etc., so backing up /home is what I'll be concentrating on for this
+   article.
+
+Backup as root or normal user?
+
+   A sensible rule is to try and run as much as possible without using the root account.
+   Backup your system files as root, and your home directory seperately using your normal user
+   account. This makes it a little easier to restore your normal user account data, since it
+   will be easily accessible as yourself rather than root.
+
+Leave backup partition mounted or unmount after each backup?
+
+   You should try to ensure that your backup partition is unmounted after each backup. This
+   will help prevent data corruption in the event of power surges or outages.
+
+   Only use your backup disk for backups. Don't be tempted to store live data on it. If your
+   backup disk fails, then you've lost everything on it. If it was only storing your backups,
+   you can get a replacement and press it into service quickly. If it also had live data on
+   there, then that live data is gone.
+
+What backup software to use?
+
+   This article focuses on [66]rsync. I like rsync. It has some very clever features, which
+   include:
+     * Internal pipelining reduces latency for multiple files.
+     * If a file has changed, it sends just the differences in the files to the new location.
+     * It can used over a network; I used to use rsync with SSH to backup to a test machine I
+       have at home. This test machine is sometimes off (electricity is getting expensive;
+       it's hard to justify having all these machines on all the time, it puts extra load on
+       my UPS, it's noisy, etc), and so sometimes several days would go by before the backup
+       got run. The USB connection is faster and is always on, so I never miss a backup now
+       ;-) .
+
+Getting the hardware working
+
+   This varies according to which external USB HDD you've purchased. Read the documentation
+   which comes with your kit. Before you start, run tail -f /var/log/messages.log in a
+   seperate terminal (as root). This shouldn't really be needed, and is just to demonstrate
+   that your system recognises the USB drive, which it should unless you have a very old (or
+   perhaps a self-compiled) kernel. The basic steps probably involve something like:
+     * Connect the USB drive to your system.
+     * Attach power cables.
+     * Power up.
+
+   Once you've got your drive connected and powered up, you should be able to see it on your
+   system.
+
+   Your terminal running tail should display something like:
+Apr 16 23:17:40 aquilonia usb 1-7: new high speed USB device using ehci_hcd and address 7
+Apr 16 23:17:40 aquilonia usb 1-7: configuration #1 chosen from 1 choice
+Apr 16 23:17:40 aquilonia scsi4 : SCSI emulation for USB Mass Storage devices
+Apr 16 23:17:40 aquilonia scsi 4:0:0:0: Direct-Access     SAMSUNG  HD400LD          WQ10 PQ: 0 ANSI:
+ 0
+Apr 16 23:17:40 aquilonia SCSI device sda: 781422768 512-byte hdwr sectors (400088 MB)
+Apr 16 23:17:40 aquilonia sda: Write Protect is off
+Apr 16 23:17:40 aquilonia SCSI device sda: 781422768 512-byte hdwr sectors (400088 MB)
+Apr 16 23:17:40 aquilonia sda: Write Protect is off
+Apr 16 23:17:40 aquilonia sda: sda1
+Apr 16 23:17:40 aquilonia sd 4:0:0:0: Attached scsi disk sda
+
+   We can see here that the new USB disk drive is presented as SCSI device /dev/sda with a
+   single partition /dev/sda1
+
+   Ctrl-c to close your tail command.
+
+   Your newly visible partition will probably be a FAT32 filesystem. If you're okay with that,
+   you can make an entry in /etc/fstab something like this to access it:
+# <file system>        <dir>         <type>    <options>          <dump> <pass>
+...
+/dev/sda1              /mnt/usb  vfat      user,noauto,rw          0      0
+
+   The options mean respectively that any user can mount the filesystem, but only the user
+   that mounted the filesystem can unmount it (user), the filesystem will not mount at boot
+   time (noauto), and the filesystem will be mounted with read and write access (rw).
+
+   You can test your new hard disk as a normal user:
+
+   $ mount /mnt/usb
+   $ df -k
+Filesystem           1K-blocks      Used Available Use% Mounted on
+...
+/dev/sda1            390610848        64 390610784   1% /mnt/usb
+
+   The default FAT32 filesystem is convenient in that is already there, ready to be used. The
+   disadvantages are:
+     * Fragmentation.
+     * No journaling/poor recovery in the event of a power failure etc.
+     * Poor security - FAT32 files automatically belong to whoever mounts the filesystem.
+
+Partition the disk
+
+   I prefer reiserfs (Reiser 3). I know I'll never need to backup a Windows machine since I
+   don't do Windows, so putting up with the inadequacies of FAT32 is simply not required. You
+   may wish to rethink which fileystem to go for, or perhaps a different partitioning strategy
+   if you have a seperate Windows PC. I'm going to go for a single large Reiser 3 partition.
+   To do this, I first need to use cfdisk to delete the old partition and create a new one.
+   You will probably need root access or sudo for this, depending on how your system is
+   configured.
+
+   # cfdisk /dev/sda
+                                  cfdisk 2.12r
+
+                              Disk Drive: /dev/sda
+                       Size: 400088457216 bytes, 400.0 GB
+             Heads: 255   Sectors per Track: 63   Cylinders: 48641
+
+    Name        Flags      Part Type  FS Type          [Label]        Size (MB)
+ ------------------------------------------------------------------------------
+    sda1                    Primary   W95 FAT32                       400085.85
+
+
+
+
+
+
+
+
+
+
+
+     [Bootable]  [ Delete ]  [  Help  ]  [Maximize]  [ Print  ]
+     [  Quit  ]  [  Type  ]  [ Units  ]  [ Write  ]
+
+                 Toggle bootable flag of the current partition
+
+   A FAT32 partition. Let's get rid of it and then see what we have left. Select [ Delete ]
+   from the menu.
+                                  cfdisk 2.12r
+
+                              Disk Drive: /dev/sda
+                       Size: 400088457216 bytes, 400.0 GB
+             Heads: 255   Sectors per Track: 63   Cylinders: 48641
+
+    Name        Flags      Part Type  FS Type          [Label]        Size (MB)
+ ------------------------------------------------------------------------------
+    sda1                    Primary   W95 FAT32                       400085.85
+
+
+
+
+
+
+
+
+
+
+
+     [Bootable]  [ Delete ]  [  Help  ]  [Maximize]  [ Print  ]
+     [  Quit  ]  [  Type  ]  [ Units  ]  [ Write  ]
+
+                          Delete the current partition
+
+                                  cfdisk 2.12r
+
+                              Disk Drive: /dev/sda
+                       Size: 400088457216 bytes, 400.0 GB
+             Heads: 255   Sectors per Track: 63   Cylinders: 48641
+
+    Name        Flags      Part Type  FS Type          [Label]        Size (MB)
+ ------------------------------------------------------------------------------
+                            Pri/Log   Free Space                      400085.85
+
+
+
+
+
+
+
+
+
+
+
+     [  Help  ]  [  New   ]  [ Print  ]  [  Quit  ]  [ Units  ]
+     [ Write  ]
+
+                               Print help screen
+
+   Right, nothing left. Time to create a new partition. This will be a primary partition, and
+   I'll only make one - this whole disk is for backups. Select [  New   ], [Primary] to create
+   a new primary partition. Accept the default size offered, which should be all the disk
+   space available.
+                                  cfdisk 2.12r
+
+                              Disk Drive: /dev/sda
+                       Size: 400088457216 bytes, 400.0 GB
+             Heads: 255   Sectors per Track: 63   Cylinders: 48641
+
+    Name        Flags      Part Type  FS Type          [Label]        Size (MB)
+ ------------------------------------------------------------------------------
+    sda1                    Primary   Linux                           400085.85
+
+
+
+
+
+
+
+
+
+
+
+     [Bootable]  [ Delete ]  [  Help  ]  [Maximize]  [ Print  ]
+     [  Quit  ]  [  Type  ]  [ Units  ]  [ Write  ]
+
+                 Toggle bootable flag of the current partition
+
+   Now write the new partition table to disk.
+                                  cfdisk 2.12r
+
+                              Disk Drive: /dev/sda
+                       Size: 400088457216 bytes, 400.0 GB
+             Heads: 255   Sectors per Track: 63   Cylinders: 48641
+
+    Name        Flags      Part Type  FS Type          [Label]        Size (MB)
+ ------------------------------------------------------------------------------
+    sda1                    Primary   Linux                           400085.85
+
+
+
+
+
+
+
+
+
+
+
+     [Bootable]  [ Delete ]  [  Help  ]  [Maximize]  [ Print  ]
+     [  Quit  ]  [  Type  ]  [ Units  ]  [ Write  ]
+
+            Write partition table to disk (this might destroy data)
+
+                                  cfdisk 2.12r
+
+                              Disk Drive: /dev/sda
+                       Size: 400088457216 bytes, 400.0 GB
+             Heads: 255   Sectors per Track: 63   Cylinders: 48641
+
+    Name        Flags      Part Type  FS Type          [Label]        Size (MB)
+ ------------------------------------------------------------------------------
+    sda1                    Primary   Linux                           400085.85
+
+
+
+
+
+
+
+
+
+
+
+     Are you sure you want to write the partition table to disk? (yes or no):
+
+                 Warning!!  This may destroy data on your disk!
+
+   Type yes and enter to continue.
+                                  cfdisk 2.12r
+
+                              Disk Drive: /dev/sda
+                       Size: 400088457216 bytes, 400.0 GB
+             Heads: 255   Sectors per Track: 63   Cylinders: 48641
+
+    Name        Flags      Part Type  FS Type          [Label]        Size (MB)
+ ------------------------------------------------------------------------------
+    sda1                    Primary   Linux                           400085.85
+
+
+
+
+
+
+
+
+
+
+
+     [Bootable]  [ Delete ]  [  Help  ]  [Maximize]  [ Print  ]
+     [  Quit  ]  [  Type  ]  [ Units  ]  [ Write  ]
+      No primary partitions are marked bootable. DOS MBR cannot boot this.
+                 Toggle bootable flag of the current partition
+
+   You should now be able to [  Quit  ].
+
+   So to recap, I've created a single primary Linux partition, using all the available disk
+   space on my USB drive.
+
+Creating a new filesystem
+
+   Now to create our filesystem of choice. I'll be using reiserfs, you can choose ext3 or
+   whichever you want.
+
+   # /sbin/mkreiserfs /dev/sda1
+mkreiserfs 3.6.20
+Copyright (C) 2001-2005 by Hans Reiser, licensing governed by reiserfsprogs/COPYING.
+A pair of credits:
+Continuing core development of ReiserFS is  mostly paid for by Hans Reiser from
+money made selling licenses  in addition to the GPL to companies who don't want
+it known that they use ReiserFS  as a foundation for their proprietary product.
+And my lawyer asked 'People pay you money for this?'. Yup. Life is good. If you
+buy ReiserFS, you can focus on your value add rather than reinventing an entire
+FS.
+
+Vladimir Saveliev started as the most junior programmer on the team, and became
+the lead programmer.  He is now an experienced highly productive programmer. He
+wrote the extent  handling code for Reiser4,  plus parts of  the balancing code
+and file write and file read.
+
+
+Guessing about desired format.. Kernel 2.6.20-ARCH is running.
+Format 3.6 with standard journal
+Count of blocks on the device: 97677200
+Number of blocks consumed by mkreiserfs formatting process: 11192
+Blocksize: 4096
+Hash function used to sort names: "r5"
+Journal Size 8193 blocks (first block 18)
+Journal Max transaction length 1024
+inode generation number: 0
+UUID: 19cfe77a-8913-4aed-bc25-775b42c9ce88
+ATTENTION: YOU SHOULD REBOOT AFTER FDISK!
+   ALL DATA WILL BE LOST ON '/dev/sda1'!
+Continue (y/n):y
+Initializing journal - 0%....20%....40%....60%....80%....100%
+Syncing..ok
+
+Tell your friends to use a kernel based on 2.4.18 or later, and especially not a
+kernel based on 2.4.9, when you use reiserFS. Have fun.
+
+ReiserFS is successfully created on /dev/sda1.
+
+   Because this is an external hard disk being used for backups only, we can ignore the bit
+   about rebooting.
+
+The mountpoint
+
+   I'm going to create a new, more appropriately named mount point at /mnt/backup:
+
+   # mkdir /mnt/backup
+
+   Now we need to make an entry in /etc/fstab:
+# <file system>        <dir>         <type>    <options>          <dump> <pass>
+...
+/dev/sda1              /mnt/backup reiserfs user,noauto,rw         0      0
+
+   Lets mount the filesystem as our normal user (we need to be able to access it). Exit from
+   any root shell you might be in.
+
+   $ mount /mnt/backup
+   $ df -h
+Filesystem            Size  Used Avail Use% Mounted on
+...
+/dev/sda1             373G   33M  373G   1% /mnt/backup
+
+   Remember that this is a Linux filesystem. FAT32 is somewhat relaxed when it comes to
+   ownership of filesystems. We need to change ownership of the new fileystem to our normal
+   user (you'll only need to do this once):
+
+   $ su -
+   # cd /mnt
+   # chown -R rob:rob backup
+   # exit
+   $ cd /mnt/backup
+   Now the specifics of how you go about this are down to you. I like to create a directory
+   named for the host I'm backing up (aquilonia in this example), just in case I want to
+   backup more than one host (I might have a laptop as well as a desktop, for example).
+
+   $ mkdir /mnt/backup/aquilonia
+
+Running the backup (/home)
+
+   Finally we need some software to backup our data. As I mentioned earlier, I'm going to use
+   rsync. Install it if required.
+
+   One of the many things I like about rsync is the ability to use include or exclude lists.
+   An include list allows you to specify exactly what you want to be backed up, while an
+   exclude list allows you to specify exactly what you don't want to be backed up.
+
+   I prefer the exclude list approach, since if I forget to add a file or directory to the
+   list, it just gets backed up. If I later decide I don't want it, I can add it to the
+   exclude list and delete it from the backup archive. If you forget to add something to an
+   include list, the first time you'll find out that you wanted that file is probably when you
+   try to run a restore!
+
+   The command I now use for backing up my home directory (/home/rob) is:
+
+   (This section has been edited. See the [67]comments by Allen below this article for the
+   reasons.)
+
+   $ rsync -vrlptg /home/rob/ /mnt/backup/aquilonia/home/rob
+   --exclude-from=/home/rob/.rsync/exclude
+
+   Running through this quickly, the rsync options and parameters I've used are as follows:
+     * -v   verbose output
+     * -r   recurse into directories
+     * -l   copy symlinks as symlinks
+     * -p   preserve permissions
+     * -t   preserve times
+     * -g   preserve group
+     * /home/rob/   source: my home directory (note the trailing slash)
+     * /mnt/backup/aquilonia/home/rob   destination: the backup archive location
+     * --exclude-from=   use an exclude list
+     * /home/rob/.rsync/exclude   read exclude patterns from this file
+
+Exclude list format
+
+   The format of the exclude list is fairly straightforward. Mine mainly consists of dot files
+   put there by applications. Wild cards can be used. If you get the rsync command right
+   (thanks Allen!), you can place a leading slash in front of each entry in your exclude list.
+   If you don't put a leading slash in front of an entry, for example putting tmp in the
+   exclude list rather than /tmp, then you will end up excluding all files and directories
+   which are named "tmp" within your hierarchy of files to be backed up, rather than excluding
+   just ~/tmp. (This could be useful for an entry like core.)
+
+   Here is a heavily abridged example.
+/.adobe
+/.aspell.en.prepl
+/.aspell.en.pws
+/.backup_fsck_last_run
+/.bash_history
+/.cddb
+/.cddbslave
+/.config
+/.dbus
+/download/gkrellm/plugins
+/.gconf
+/.gconfd
+/.gimp-2.2
+/.gkrellm2
+/.mozilla
+/.nautilus
+/.openoffice.org2
+/paniclog
+/.qf
+/.qt
+/.realplayerrc
+/.recently-used
+/.sane
+/.serverauth.*
+/tmp
+/.viminfo
+/.Xauthority
+/.xsession-errors
+
+   If you're going to be using rsync, I would recommend reading the rsync manpage. There are
+   lots of options which you may find useful.
+
+   My first backup (most of my home directory) ran at 21.5 MB/s which is 172 Mb/s, not quite
+   the 480 Mb/s it says on the tin, but much faster than my home Ethernet connection.
+
+   Having run the backup, you can now navigate to your backup archive and see what's been
+   backed up. You'll see a very familiar file structure (a replica of your home directory,
+   with all the bits you don't want missing!), which can be easily navigated, and from which
+   you can easily copy files and directories as required.
+
+Running the restore (/home)
+
+   In the event of a disk failure or other catastrophe, you can restore the whole of your home
+   directory (what's been backed up, anyway :-) ) with a single command.
+
+   $ rsync -vrlptg /mnt/backup/aquilonia/home/rob /home
+
+   The options are the same as before, except the source is the backup archive
+   (/mnt/backup/aquilonia/home/rob) and the destination is your home directory. You are only
+   need to specify /home as the destination because you've already specified the rob
+   sub-directory as part of the archive source. rsync will expect /home/rob to be present and
+   to be owned (or at least writeable) by the account running the command.
+
+Running the backup (/etc)
+
+   Very briefly (as root):
+
+   # rsync -av /etc /mnt/backup/aquilonia
+
+   This will create /mnt/backup/aquilonia/etc and copy the contents of /etc into it. You'll
+   notice that file ownership and permissions are maintained, which is a good thing for
+   security. Keep that USB hard disk safe!
+
+   If you're going to be backing up your system files with rsync, the manpage is your friend.
+   Check your options. You can replace /etc in the command above with /var or /root as
+   required, and you can always use exclude lists if you want.
+
+Automating the backup
+
+   Your backup should be automated. An automated backup will work best if your PC is on all
+   the time.
+
+   I recommend that you write a script if you're going to automate your backups. You can then
+   run the script regularly using cron. Ideally, this script should:
+     * check if your backup disk is mounted / mount it if required / if it can't be mounted,
+       fail gracefully
+     * run the backup
+     * unmount the backup disk
+     * log the output of the backup somewhere
+
+   I'll leave that as an exercise for you!
+
+Other options
+
+   If you don't have a USB hard drive, there are other options available to you. All of these
+   can be used with rsync.
+     * Backup to a second internal hard disk drive
+          + pro: faster
+          + con: more hassle setting up or transferring to another machine
+     * Backup to a Network Attached Storage (Samba or NFS)
+     * Backup to a networked host using rsync with SSH
+     * Backup to an External hard disk drive (esata)
+
+   I hope this has been helpful. Happy backing up.
+   Posted by [68]Rob Newcater in [69]technical Comments: [70](24) Trackbacks: [71](0)
+   [72]Bookmark Using a USB external hard disk for backups with Linux at del.icio.us
+   [73]Digg Using a USB external hard disk for backups with Linux       [74]Bookmark Using a
+   USB external hard disk for backups with Linux at Furl.net       [75]Bookmark Using a USB
+   external hard disk for backups with Linux at reddit.com       [76]Bookmark Using a USB
+   external hard disk for backups with Linux at Simpy.com       [77]Submit Using a USB
+   external hard disk for backups with Linux to StumbleUpon
+   Trackbacks
+   [78]Trackback specific URI for this entry
+   No Trackbacks
+   Comments
+   Display comments as ([79]Linear | Threaded)
+   Anonymous said,
+
+   Tuesday, April 24. 2007 at [80]00:49 ([81]Reply)
+   Would also consider rsnapshot as your backup mechanism, works very well.
+   [82]JohnnyBoyClub said,
+
+   Tuesday, June 22. 2010 at [83]07:33 ([84]Reply)
+   The thing is that is not that good to use a usb external hdd to backup when you can store
+   all the data online on some servers.
+   Example , you can use a free software called http://www.dmailer.com/dmailer-backup.html to
+   backup your data and if you want you can store it online on their servers.
+   Is a easy to use software so you shouldn't have any problems with it
+   Rob Newcater said,
+
+   Tuesday, July 13. 2010 at [85]21:46 ([86]Link) ([87]Reply)
+   The supplied Dmailer software is only for Windows or Mac, only allows 2GB before you have
+   to start paying, and if you have poor bandwidth, backup will take ages. Also, you have to
+   trust that they will look after your data. And you will have to encrypt it if you have
+   privacy concerns.
+   Anonymous said,
+
+   Tuesday, April 24. 2007 at [88]10:15 ([89]Reply)
+   Nice post.
+   I recommend the following article to you:
+   http://www.halfgaar.net/backing-up-unix
+   scribe63 said,
+
+   Tuesday, April 24. 2007 at [90]15:41 ([91]Link) ([92]Reply)
+   Good and very useful article.
+   May i suggest Unison, it's a good tool for doing backups/file synchronization also.
+   1. Local or Remote
+   2. Command line or GUI
+   3. Cross platform Linux/UNIX/Windows
+   4. An optimized version of rsync protocol is utilized for slow links.
+   5. It's a user-level program.
+   http://www.cis.upenn.edu/~bcpierce/unison/
+   Franck said,
+
+   Tuesday, April 24. 2007 at [93]22:41 ([94]Reply)
+   I think rsync and unison aren't backups tools, but files synchronizers.
+   They can't compress datas for space saving, crypt datas for security, keep history of
+   files, make slices for burning etc ...
+   I use "dar" (http://dar.linux.free.fr/) for backups, ans rsync for files sync.
+   [95]Allen said,
+
+   Wednesday, August 1. 2007 at [96]21:44 ([97]Reply)
+   Thanks for the informative article.
+   I'm puzzled, though, why you didn't use a leading slash in the exclude file entries.
+   Consider your 'tmp' line. Your intent, I presume, is to exlude ~/tmp/ but, from reading the
+   man page, I think your line will also exclude any tmp file or folder found in your folder
+   hierachy.
+   Rob said,
+
+   Wednesday, August 1. 2007 at [98]22:51 ([99]Reply)
+   Hi Allen,
+   I must admit, the man page confuses me! The exclude file example I gave is an abridged
+   example of the one I actually use, and it came about after some trial-and-error testing.
+   The "tmp" entry in the sample exclude list prevents the directory ~/tmp from being backed
+   up. I tried a leading slash (i.e. "/tmp") when testing my backups, but ~/tmp was still
+   backed up. A trailing slash would probably be clearer, although the man page still insists
+   that it will match all directories named tmp/ anywhere within the hierarchy of files, and
+   this does actually seem to be the case.
+   Either way, the leading slash thing doesn't seem to work, it seems to be relative paths
+   only, but then we have this filename-matching restriction.
+   I wonder if the fact I'm only using an exclude file (rather than trying to specify includes
+   and excludes with +/-) has anything to do with this? I'll experiment a bit more.
+   Regards,
+   Rob
+   [100]Allen said,
+
+   Thursday, August 2. 2007 at [101]01:44 ([102]Reply)
+   I think it has to do with rsync's sensitivity to the trailing slash on the source argument.
+   If you change your example from:
+   $ rsync -vrlptg /home/rob /mnt/backup/aquilonia/home
+   --exclude-from=/home/rob/.rsync/exclude
+   #file: exclude
+   tmp
+   to:
+   $ rsync -vrlptg /home/rob/ /mnt/backup/aquilonia/home/rob
+   --exclude-from=/home/rob/.rsync/exclude
+   #file: exclude
+   /tmp
+   it will work as desired: only your '~/tmp' will be excluded; any file or directory named
+   'tmp' further down in your hierarchy will be included.
+   The reason is that with a source of '/home/rob', the leading slash in your excludes means
+   the '/home/' directory. Whereas, using '/home/rob/' the leading slash in your excludes
+   means '/home/rob/'.
+   An alternative fix for your original example would be to prefix all your exclude entries
+   with '/rob/', e.g., '/rob/tmp'.
+   Regards,
+   Allen
+   Rob said,
+
+   Thursday, August 2. 2007 at [103]10:54 ([104]Reply)
+   Hi Allen,
+   Both of these options work. The first is neater, I think. I'll edit the article to reflect
+   these changes.
+   Thanks for your help.
+   Regards,
+   Rob
+   [105]nandish ratkal said,
+
+   Thursday, October 18. 2007 at [106]14:39 ([107]Reply)
+   hi,
+   i was gifted a western digital passport, 160gb usb hard drive, my computer is an old
+   machine, pentium 4, 2ghz, SDRAM (does not suppost DDR RAM), and only usb 1.1; I am running
+   Fedora core 7 moonshine. I tried plugging in this device and running the tail command and
+   here is what it says:
+   [root@localhost ~]# tail /var/log/messages
+   Oct 18 19:03:25 localhost kernel: usb 4-3: new high speed USB device using ehci_hcd and
+   address 54
+   Oct 18 19:03:25 localhost kernel: usb 4-3: device not accepting address 54, error -71
+   Oct 18 19:03:47 localhost kernel: usb 4-3: new high speed USB device using ehci_hcd and
+   address 56
+   Oct 18 19:03:47 localhost kernel: usb 4-3: configuration #1 chosen from 1 choice
+   Oct 18 19:03:47 localhost kernel: scsi25 : SCSI emulation for USB Mass Storage devices
+   Oct 18 19:03:47 localhost kernel: usb 4-3: USB disconnect, address 56
+   Oct 18 19:04:09 localhost kernel: usb 4-3: new high speed USB device using ehci_hcd and
+   address 57
+   Oct 18 19:04:09 localhost kernel: usb 4-3: configuration #1 chosen from 1 choice
+   Oct 18 19:04:09 localhost kernel: scsi26 : SCSI emulation for USB Mass Storage devices
+   Oct 18 19:04:09 localhost kernel: usb 4-3: USB disconnect, address 57
+   is my hardware incompatible with this? what should i do now?
+   Rob Newcater said,
+
+   Thursday, October 18. 2007 at [108]16:53 ([109]Link) ([110]Reply)
+   Hi Nandish,
+   I'm not sure what the problem is, I don't use Fedora. Have you tried the Fedora forums? A
+   quick google found this related issue, maybe it'll help you.
+   http://www.mail-archive.com/linux-usb-users@lists.sourceforge.net/msg17583.html
+   Regards,
+   Rob
+   [111]Grant said,
+
+   Tuesday, October 30. 2007 at [112]21:00 ([113]Reply)
+   I use rsync for backup and keep multiple copies (1 per day rotating over 5 days)
+   At the start of your cron script rotate (rename) the previous backups.
+   Use the --link-dest option to compare current files with the previous backup. If they are
+   the same a hard link is created and therefore only new files are backed up.
+   Will swap my scripts for a small script that checks the ext drive is mounted :-) Haven't
+   got that one working yet and had a failure that filled the system disk and crashed the
+   server.. ouch!
+   [114]brent said,
+
+   Friday, December 7. 2007 at [115]15:49 ([116]Link) ([117]Reply)
+   (if you need to respond, just leave a comment on my blog because i probably won't check
+   this one)
+   have you tried doing something like...
+   #!/bin/bash
+   echo 'mount | grep '
+   (if it's in your fstab, or always mounts in the same place)
+   or even
+   #!/bin/bash
+   mount | grep ext3
+   ;-)
+   and then possibly even adding an if statement or two in there to take the desired action (i
+   don't know what you wanted to do with it after it finding it)
+   [118]Rob Agar said,
+
+   Sunday, May 25. 2008 at [119]14:16 ([120]Link) ([121]Reply)
+   thanks for posting this, Rob - finally I have some form of back up in place :-)
+   a simple mount/backup/log/unmount script is up here for anyone else that needs one:
+   http://www.robagar.com/2008/05/backup-to-external-drive-script/
+   [122]Graham Goater said,
+
+   Sunday, April 4. 2010 at [123]09:27 ([124]Reply)
+   A really useful article. Well structured and very clearly explained. I had been struggling
+   with command line back-ups in Linux, but this is an easy method that takes you through the
+   whole process.
+   I think the some of the other user comments about rsync not being a backup program is
+   simply splitting hairs and a little pendantic. Your instructions (a) work (b) are easy to
+   follow (c) provide a complete rsync'd backup which is easily restored.
+   Your page is definitely bookmarked. Many thanks for your time in putting it together.
+   Graham, Cambridge, UK
+   [125]Simon said,
+
+   Saturday, July 10. 2010 at [126]09:29 ([127]Reply)
+   Good article, but you don't verify that the backup is readable after it is written. So if
+   the external disk is bad, or developing faults, you may not see them and discover the
+   back-up is not readable when the time comes to use it.
+   [128]Rob Newcater said,
+
+   Tuesday, July 13. 2010 at [129]21:49 ([130]Reply)
+   rsync always verifies that each transferred file was correctly reconstructed on the
+   receiving side by checking a whole-file checksum that is generated as the file is
+   transferred.
+   [131]Simon said,
+
+   Tuesday, July 13. 2010 at [132]22:53 ([133]Link) ([134]Reply)
+   That validates it was good before it was written to disk, not that it is now readable from
+   disk. I believe that is only sufficient if the disk offers some sort of read after write
+   verification, and I suspect most external USB drives don't but I can't find any clear
+   documentation.
+   [135]Charles said,
+
+   Monday, August 2. 2010 at [136]10:51 ([137]Reply)
+   Really great page. Just to say thanks a lot!!!.
+   Very easily explained and very precise.
+   Thanks again.
+   Anonymous said,
+
+   Saturday, August 28. 2010 at [138]03:59 ([139]Reply)
+   This is the rsync command part of my bash script that backs up the entire system to my USB
+   1TB...it seems to do what I want:
+   rsync --dry-run -aHzhxu --progress --delete \
+   --log-file=$LOG_FILE \
+   --exclude-from=$EXCLUDE_FROM \
+   / $BACKUP_TO
+   [140]Mike said,
+
+   Monday, January 24. 2011 at [141]09:37 ([142]Reply)
+   Hello!
+   First of all, thank you for the great article !!!
+   I am quiet new to rsync and linux and need some help (hopefully someone can provide) with
+   my cron script.
+   I need a cron script for automated back up of multiple directories onto my external USB
+   drive but I don't know how this script needs to be written.
+   Perhaps someone can post an example script with some explanation of how it works and where
+   I need to write/place this script.
+   Basically what I would need is a script that checks if my USB disk is mounted (mounts it if
+   it is not), then backs-up the required directories (6 in total) and unmounts the USB disk
+   again. This script should run automatically every day at 02:15am.
+   Any help is greatly appreciated !!!
+   Thank you!
+   rupesh said,
+
+   Friday, September 16. 2011 at [143]04:48 ([144]Reply)
+   Thx. Great stuff.
+   [145]chax said,
+
+   Monday, January 16. 2012 at [146]17:21 ([147]Reply)
+   Been looking to get an external hard drive to use with Linux (running Kubuntu 10.04LTS on a
+   Toshiba Satellite Pro, 2GhZ + 2Gb RAM. Dual boot with Win XP Pro) but not sure which one to
+   get.
+   Have heard that some makes of hard drive are not compatible for use with Linux. So don't
+   want to buy one if its no use!
+   Anyone know of a list of suitable drives?

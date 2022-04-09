@@ -1,0 +1,321 @@
+filename: coreutils-gotchas_20151207.txt
+http://www.pixelbeat.org/docs/coreutils-gotchas.html#1448773898
+
+We make very careful considerations about the interface and operation of the GNU coreutils, but unfortunately
+due to backwards compatibility reasons, some behaviours or defaults of these utilities can be confusing.
+This information will continue to be updated and overlaps somewhat with the coreutils FAQ, with this
+list focusing on less frequent potential issues.
+
+chmod
+chmod -R is redundant and tricky. If for example you copy a dir from VFAT and want to turn off executable
+bits on files using chmod -R 644, that will fail to recurse as it removes the executable bits from
+dirs. This is achievable in various ways:
+find -type f -print0 | xargs -r0 chmod 644 # Traditional method
+find -type f -exec chmod 644 {} + # Newer POSIX equivalent
+
+chmod -R a-x,a+X # Using GNU extensions to in-tool recursion
+
+cut
+cut doesn't work with fields separated by arbitrary whitespace. It's often better to use awk or even
+join -a1 -o1.$field $file /dev/null
+
+cut -s only suppresses lines without delimiters. Therefore if you have a line with a missing field but
+it does contain some delimiters, a blank line is output
+
+Similarly, if you want to output a blank line when there are no delimiters one needs to append a
+delimiter like:
+printf '%s\n' a:b c d:e | sed '/:/!s/$/:/' | cut -d: -f2-
+
+dd
+dd iflag=fullblock is usually what you want because when reading from a fifo/pipe you often get a
+short read, which means you get too little data if you specify "count", or too much data if you specify
+"sync". For example:
+$ dd status=none count=1 if=/dev/random bs=512 | wc -c
+78
+
+Note we do warn in certain cases since version 8.10, but not with count=1 above as short reads are often
+used with count=1 as an idiom to "consume available data", though perhaps dd iflag=nonblock would be a
+more direct and general way to do that?
+dd conv=noerror really also needs conv=sync so that if reading from failing disk, one gets correctly
+aligned data, with unreadable bits replaced with NULs. Note if there is a read error anywhere in a block,
+the whole block will be discarded. So one needs to balance between speed (bigger) and minimized data loss
+(smaller). This is simpler and more dynamic in a more dedicated tool like ddrescue.
+
+df
+For full portability the -P option is needed when parsing the output from df. Line wrapping is avoided,
+though df will no longer wrap lines since version 8.11 (Apr 2011) to help avoid this gotcha. Also if
+one needs to parse the header, the -P option will use more standardised (but ambiguous) wording. See
+also the Block size issue.
+
+du
+If two or more hard links point to the same file, only one of the hard links is counted. The FILE argument
+order affects which links are counted, and changing the argument order may change the numbers that du
+outputs. Note this also impacts specified directories which is confusing:
+$ cd git/coreutils
+$ du -s ./ ./tests
+593120  ./
+
+$ du -s ./tests ./  # depth first gets items listed (though counted independently)
+10036   ./tests
+583084  ./
+
+# Note order is significant even with implicit independence
+$ du -s --separate-dirs ./tests ./
+128     ./tests
+16268   ./
+
+$ du -s --separate-dirs ./ ./tests
+16268   ./
+
+Note du doesn't handle reflinked files specially, and thus will count all instances of a reflinked file.
+
+echo
+echo is non portable and its behaviour diverges between systems and shell builtins etc. One should really
+consider using printf instead. This shell session illustrates some inconsistencies. Where you see env
+being used, that is selecting the coreutils standalone version:
+$ echo -e -n # outputs nothing
+$ echo -n -e
+$ echo -- -n # option terminator outputted
+-- -n
+$ POSIXLY_CORRECT=1 env echo -e -n
+-e -n
+$ POSIXLY_CORRECT=1 env echo -n -e # no output either ‽
+
+expr
+The exit status of expr is a confusing gotcha. POSIX states that exit status of 1 is used if "the
+expression evaluates to null or zero", which you can see in these examples:
+$ expr 2 - 1; echo $?
+1
+0
+
+$ expr 2 - 2; echo $?
+0
+1
+
+$ expr substr 01 1 1; echo $?
+0
+1
+
+$ expr ' ' : '^ *$'; echo $?
+1
+0
+
+$ expr '' : '^ *$'; echo $?
+0
+1
+
+The string matching above is especially confusing, though does conform to POSIX, and is consistent across
+solaris, FreeBSD and GNU utils.
+
+As for changing the behaviour, it's probably not possible due to backwards compatibility issues. For
+example the '^..*$' case would need to change the handling of the '*' in the expression, which would
+break a script like:
+printf '%s\n' 1 2 '' 3 |
+while read line; do
+  expr "$line" : '^[0-9]*$' >/dev/null || break # at first blank line
+  echo process "$line"
+done
+
+Note, using a leading ^ in the expression is redundant and non portable.
+
+ls
+ls -lrt will also reverse sort names for files with matching timestamps (common in /dev/ and /proc/
+etc.) This is as per POSIX but probably not what the user wanted. There is no way to reverse by time
+and normal by name.
+
+ln
+ln -nsf is needed to update symlinks, though note that this will overwrite existing files, and cause
+links to be created within existing directories.
+
+*sum
+The checksum utilities like md5sum, sha1sum etc. add backslashes to the output names if those names contain
+'\n' or '\' characters. Also '*' is added to the output where O_BINARY is significant (CYGWIN). Therefore
+automatic processing of these utilities require one to unescape first.
+
+rm
+rm -rf does not mean "delete as much as posible". It only avoids prompts. For example with a non writeable
+dir, you will not be able to remove any contents. Therefore this is sometimes necessary to:
+find "$dir" -depth -type d -exec chmod +wx {} + && rm -rf "$dir"
+
+sort
+A very common issue encountered is with the default ordering of the sort utility. Usually what is
+required is a simple byte comparison, though by default the collation order of the current locale is
+used. To use the simple comparison logic you can LC_ALL=C sort ... as detailed in the FAQ.
+equal comparisons
+
+As well as being slower, the locale based ordering can often be surprising. For example some character
+representations, like the full width forms of latin numbers, compare equal to each other.
+$ printf '%s\n' ２ １ | ltrace -e strcoll sort
+sort->strcoll("\357\274\222", "\357\274\221") = 0
+２
+１
+
+$ printf '%s\n' ２ １ | sort -u
+２
+
+The equal comparison issue with --unique can even impact in the "C" locale, for example with --numeric-sort
+dropping items unexpectedly. Note this example also demonstrates that --unique implies --stable, to
+select the first encountered item in the matching set.
+$ printf "%s\n" 1 zero 0 .0 | sort -nu
+zero
+1
+
+i18n patch issues
+Related to locale ordering, there is the i18n patch on Fedora/RHEL/SUSE which has its own issues. Note
+disabling the locale specific handling as described above effectively avoids these issues.
+Example 1: leading space are mishandled with --human-numeric-sort:
+$ printf ' %s\n' 4.0K 1.7K | sort -s -h
+ 4.0K
+ 1.7K
+ 
+Example 2: case folding results in incorrect ordering:
+$ printf '%s\n' Dániel Dylan | sort
+Dániel
+Dylan
+
+$ printf '%s\n' Dániel Dylan | sort -f
+Dylan
+Dániel
+
+field handling
+whitespace handling for fields with --ignore-leading-blanks is very confusing.
+If specified like -k1,1b it only applies to end char count
+If specified like -b -k1,1.2n -k2,2 then it's not used for the first field
+If specified like -n -k1,1b -k2,2 then -n not used for the first field
+In general you usually want -b with -k, but it's off by default
+sort -k1,1.endpos only works for fixed width fields (spans multiple fields)
+
+Empty fields are problematic
+These issues -b issues along with others are so confusing, the sort --debug option was added in version
+8.6 to highlight consequences of the various options.
+--random-sort
+sort -R does randomize the input similarly to the shuf command, but also ensures that matching keys are
+grouped together. shuf also provides optimizations when outputting a subset of the input.
+
+tac
+tac like wc has issues dealing with files without a last '\n' character.
+$ printf "1\n2" | tac
+21
+
+tail
+tail -F is probably what you want rather than -f as the latter doesn't follow log rotations etc.
+
+wc
+wc -l on a file in which the last line doesn't end with '\n' character will return a value of one-less
+than might be expected as wc is standardised to just count '\n' characters. POSIX in fact doesn't consider
+a file without a '\n' as the last character to be a text file at all.
+$ printf "hello\nworld" | wc -l
+1
+
+wc -L counts the maximum display width for a line, considering only valid, printable characters, but
+not terminal control codes.
+# invalid UTF-8 sequence not counted:
+$ printf "\xe2\xf2\xa5" | wc -l
+0
+
+# unprintable characters even in the C locale are not counted:
+$ printf "\xe2\x99\xa5" | LC_ALL=C wc -L
+0
+
+# Bytes can be counted using sed:
+$ printf "\xe2\x99\xa5" | LC_ALL=C sed 's/././g' | wc -L
+3
+
+# Terminal control chars are not handled specially:
+$ printf '\x1b[33mf\bred\x1b[m\n' | tee /dev/tty | wc -L
+red
+10
+
+Unit representations
+The df, du, ls --block-size option is unusual in that appending a B to the unit, changes it from binary
+to decimal. I.E. KB means 1000, while K means 1024.
+In general the units representations in coreutils are unfortunate, but an accident of history. POSIX
+species 'k' and 'b' to mean 1024 and 512 respectively. Standards wise 'k' should really mean 1000 and
+'K' 1024. Then extending from that we now have (which we can't change for compatibility reasons):
+
+k=K=kiB=KiB=1024
+kb=KB=1000
+M=MiB=10242
+MB=10002
+...
+Note there is new flexibility to consider when controlling the output of numeric units, by leveraging
+the numfmt utility. For example to control the output of du you could define a function like:
+ du() { env du -B1 "$@" | numfmt --to=iec-i --suffix=B; }
+ 
+Timezones
+Discussed separately at Time zone ambiguities
+© Nov 29 2015
+
+
+
+---
+http://www.pixelbeat.org/docs/linux_timezones/
+
+Time zone Ambiguities
+I was asked recently to organize a meeting with someone in the "UTC-7" time zone (US mid west). This is
+a common way to represent a time zone, but is not definitive, as can be seen in the highlighted zone below.
+
+Notice the different colors which vary depending on time of year. and particular location within
+the band. In particular, yellow (Arizona) is always UTC-7 as it doesn't observe DST, but New Mexico
+or California are only in UTC-7 for (opposite) half of the year. It gets even more complicated in the
+Navajo nation within Arizona, which does observe DST, but the Hopi reservation within that doesn't!
+POSIX time zone ambiguities
+In addition to the general confusion above, POSIX adds its own layer of obtuseness, as one refers to the
+"UTC-7" zone as "UTC+7".
+$ TZ=UTC+7 date +%z
+-0700
+
+The '+' offset format specified by POSIX is reversed from common sense and from all other formats,
+including all `date` output formats as can be seen above. Note the "UTC" above is not significant¹,
+and only used to identify the zone in any output, so the offset "indicates the value added to the local
+time to arrive at Coordinated Universal Time.". See man timezone for details of the $TZ formats.
+I guess as an extension to POSIX, libc could treat "UTC" or "GMT" in $TZ specially, and reverse the sense
+of any offset. But that would add another inconsistency and also one would have to use the offset like
+"-0700" above, in the output, rather than "UTC".
+
+Note the "UTC" portion above can be significant, which is another reason to avoid these abbreviated
+timezone specifications. Consider the following (some of which match entries in /usr/share/zoneinfo/)
+confusing output:
+
+$ TZ=CEST date       # No match
+Tue Sep 27 18:03:05 CEST 2011
+$ TZ=CET date        # Match and change
+Tue Sep 27 20:03:09 CEST 2011
+$ TZ=GB-Eire+1 date  # No zone reported
+Tue Sep 27 22:02:49  2011
+$ TZ=CET+1 date      # Zone reported (no offset)
+Tue Sep 27 20:03:16 CET 2011
+$ TZ=Japan+1 date    # Match and no change
+Tue Sep 27 21:02:54 Japan 2011
+$ TZ=Japan date      # Match and change
+Wed Sep 28 07:03:53 JST 2011
+$ TZ=Asia/Japan date # No match (Tokyo required)
+Wed Jun 20 07:53:15 Asia 2012
+
+Note `date` doesn't warn about unmatched zones because there is no portable API to know if a TZ is not
+matched. This applies to the following TZ format too.
+
+Location based zones
+So due to the ambiguity of the "offset based" time zones described above, it's better to use a "location
+based" zone, which are not specified by POSIX but are available on GNU/Linux. For example one can specify
+TZ=America/Los_Angeles which will take daylight savings time into account (which happens at different
+times in various places, if at all). To select from the available locations, use the tzselect utility. The
+following example uses this format to show the local time in Phoenix corresponding to 7PM in Dublin.
+$ TZ="America/Phoenix" date -R --date='TZ="Europe/Dublin" 19:00 tomorrow'
+Tue, Jun  7 11:00:00 -0700
+
+Other time zone gotchas
+Even when not directly specifying TZ, one must still be aware of its effects. For example, consider a
+script that needs to exit unless it's the last day of the month:
+[ $(date -d tomorrow +%d) = '01' ] || exit
+
+The above is susceptible to DST fuzzing, with the behavior, on the day of the DST transition, depending
+on when the script is run. To make it independent of when the script is run, you might think you could use:
+[ $(date -d '12:00 +1 day' +%d) = '01' ] || exit
+
+However the +1 is taken as a timezone associated with the time. Thus what you really want is:
+[ $(date -d '12:00 today +1 day' +%d) = '01' ] || exit
+
+Also note that time zone peculiarities can be introduced by higher level components in the system. For
+example see this excellent article on Dealing with Timezones in Python.
+© Jul 12 2011

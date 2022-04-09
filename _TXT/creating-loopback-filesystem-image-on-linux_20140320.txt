@@ -1,0 +1,1283 @@
+filename: creating-loopback-filesystem-image-on-linux_20140320.txt
+http://wiki.osdev.org/Loopback_Device
+
+Loopback Device
+
+   A Loopback Device is a mechanism used to interpret files as real devices. The main
+   advantage of this method is that all tools used on real disks can be used with a loopback
+   device.
+
+   Note: This article only covers UNIX environments (including [5]Cygwin). For information on
+   how to use loopback devices on Windows, see [6]diskpart.
+
+Contents
+
+     * [7]1 Loopback Device under Linux
+          + [8]1.1 Floppy Disk Images With GRUB and EXT2
+          + [9]1.2 Floppy Disk Images With FAT16
+          + [10]1.3 Hard Disk Images
+               o [11]1.3.1 Creating an image
+               o [12]1.3.2 Partitioning
+               o [13]1.3.3 Mounting
+               o [14]1.3.4 Formatting the partition
+               o [15]1.3.5 Mount Partition
+               o [16]1.3.6 Unmount, Detach
+               o [17]1.3.7 Making it Easier
+               o [18]1.3.8 The End
+     * [19]2 Loopback Device under FreeBSD
+          + [20]2.1 FreeBSD 4.x
+          + [21]2.2 FreeBSD 5.x
+     * [22]3 Loopback Device under OpenBSD
+
+Loopback Device under Linux
+
+   The linux loopback device can be used by root only, and needs to be enabled in the kernel
+   before use.
+
+Floppy Disk Images With GRUB and EXT2
+
+   First, lets create a empty image.
+dd if=/dev/zero of=floppy.img bs=512 count=2880
+
+   Now, lets set it up for mounting.
+losetup /dev/loop0 floppy.img
+
+   Now lets make it EXT2 formatted.
+mkfs -t ext2 /dev/loop0
+
+   Mount!
+mount -t ext2 /dev/loop0 /mnt/myfloppy
+
+   Create GRUB directory.
+cd /mnt/myfloppy
+mkdir grub
+
+   Copy GRUB's second stage files. (GRUB stage[12] could also be located in /usr/lib/grub/)
+cp /lib/grub/i386-pc/stage[12] /mnt/myfloppy/grub
+
+   Create a device mapping for the GRUB installation. You need quotations around the first
+   part.
+echo "(fd0) /dev/loop0" > /mnt/myfloppy/grub/device.map
+
+   Start GRUB console for installation into the boot record.
+grub --device-map=/mnt/myfloppy/grub/device.map /dev/loop0
+
+   In the GRUB console:
+root (fd0)
+setup (fd0)
+
+   NOTE: You must unmount /mnt/myfloppy before using a emulator to directly read /dev/loop0,
+   such as:
+qemu -fda /dev/loop0
+
+   NOTE: When deleting the loop device, the original floppy.img file will be saved with the
+   modified contents.
+
+Floppy Disk Images With FAT16
+
+   Create an empty image.
+dd if=/dev/zero of=floppy.img bs=512 count=2880
+
+   Set it up for mounting.
+losetup /dev/loop0 floppy.img
+
+   Make it MSDOS formatted.
+mkdosfs /dev/loop0
+
+   Mount!
+mount -t msdos /dev/loop0 /mnt/myfloppy
+
+Hard Disk Images
+
+   A hard disk image contains an MBR, then a number of partitions, but the 'mount' instruction
+   in Linux works with disk partitions, not full disks. To mount a partition contained in our
+   disk image, we need to make sure the 'mount' command only sees our partition, not the whole
+   disk.
+
+Creating an image
+
+   First create the empty file that we will use for our disk image. We will assume a disk
+   geometry of #cylinders, 16 heads, 63 sectors/track, 512 bytes/sector, which means that each
+   cylinder contains 516096 bytes (16*63*512). Decide how large you want your disk image to
+   be, and choose an appropriate number of cylinders (I’ll be using #cylinders throughout).
+
+   Example: If I want a 500Mb disk, I would choose 1000 cylinders (approximation of
+   (500*1000*1024)/516096).
+
+   Write the disk image (I'll assume the filename c.img throughout):
+dd if=/dev/zero of=/path/to/c.img bs=516096c count=#cylinders
+
+   Explanation:
+   dd Linux command for copy and convert a file
+   if=/dev/zero Source file is /dev/zero which is...*drumroll*...an infinite source of zeros
+   of=/path/to/c.img Destination file is our disk image (dd will create the file if it doesn't
+   exist)
+   bs=516096c Means read and write 516096 bytes at a time (This is just here to keep things
+   simple)
+   count=#cylinders Copy this number of blocks. Since we have set bs to 516096 bytes each
+   block is one cylinder long
+
+   That leaves us with a nice sized file full of zeros that we'll use for our disk image.
+
+Partitioning
+
+   Now to create the MBR and partition table on the disk image (Usually you need to be root).
+fdisk -u -C#cylinders -S63 -H16 /path/to/c.img
+
+   Explanation:
+   fdisk          Linux DOS partition maintenance program.
+   -u             Display units in sectors not cylinders (We will need this).
+   -C#cylinders   Set the cylinders of disk to our value.
+   -S63           Set the sectors/track to 63.
+   -H16           Set the heads/track to 16.
+   /path/to/c.img fdisk is capable of partitioning image files directly.
+
+   Within fdisk use the following commands:
+o - Create a new empty DOS partition table.
+n - Create a new partition (For simplicity just make 1 primary partition covering the whole disk).
+a - Toggle the bootable flag (Optional).
+p - Print the partition table.
+
+   You should end up with a screen that looks something like this:
+Disk /path/to/c.img: 516 MB, 516096000 bytes
+16 heads, 63 sectors/track, 1000 cylinders, total 1008000 sectors
+Units = sectors of 1 * 512 = 512 bytes
+
+      Device    Boot      Start         End      Blocks   Id  System
+/path/to/c.img1   *          63     1007999      503968+  83  Linux
+
+   Obviously the cylinder count, partition end and blocks will be different depending on the
+   size of your image.
+
+   Make a note of the start sector (63 here) and the block count (503968 here).
+
+   Note: If you are intending to format the partition to something other than ext2fs then
+   change the partition id here using the t command. I should also point out that disk
+   manufacturers and programmers don't agree on how many bytes are in a megabyte.
+w - Write partition table to our 'disk' and exit.
+
+   Ignore any errors about rereading the partition table. Since it's not a physical device we
+   really don't care.
+
+   We now have a partition table on our disk image.
+
+   Unfortunately this also means that from here on out we have to account for the fact that
+   our partition does not start at byte 0 of the image.
+
+Mounting
+
+   Ok, now we attach the file to the loopback device, in such a way that we skip everything
+   before the start of our partition.
+losetup -o32256 /dev/loop0 /path/to/c.img
+
+   Explanation
+   -o32256 Move the start of data 32256 bytes into the file
+
+   The reason we move 32256 bytes into the file is this is where the partition starts.
+   Remember I said to note the start sector of the partition (63 is usual)? Well, since each
+   sector is 512 bytes long we therefore know the starting byte of the partition is 32256
+   (63*512) bytes into the file. The reason behind this gap is that most (there is no real
+   standard) fdisk programs don't use the first track for anything but the MBR. That space
+   isn't always wasted though, some bootloaders (Eg GRUB) use it to store parts of their
+   program.
+
+   Note: If you aren't using the suggested geometry then you'll have to calculate this for
+   yourself.
+
+   We now have a device (/dev/loop0) which we can use in a similar fashion to a normal one for
+   a partition (eg /dev/hda1).
+
+Formatting the partition
+
+   For ext2fs, use:
+mke2fs -b1024 /dev/loop0 #blocks
+
+   Explanation:
+   mke2fs     Create an ext2 filesytem
+   -b1024     Use block size of 1024
+   /dev/loop0 Device to make the filesystem on (Here /dev/loop0 is our 'partition')
+   #blocks    Remember I said to note the number of blocks from the fdisk section? This is why.
+
+   This gives us a clean ext2 formatted partition.
+
+   Note: mke2fs is smart enough to figure out block size and #blocks for itself, but if you
+   ever want to use multiple partitions you'll need to know how to use those values.
+
+   For FAT32, use:
+mkdosfs -F32 /dev/loop0 #blocks
+
+   Explanation:
+   mkdosfs Create a DOS filesystem (This may be absent on some Linux systems, search for the
+   dosfstools package if it is)
+   -F32 FAT 32 allocation tables (It should be obvious how to use FAT12/FAT16)
+   /dev/loop0 Same as for the ext2fs version
+   #blocks Same as for the ext2fs version
+
+   This gives us a clean FAT32 formatted partition (Ignore the floppy warning).
+
+   Note: The reason for #blocks is the same as for ext2fs, ie possible multiple partitions.
+
+Mount Partition
+
+   You should now be able to mount the partition (Because it is still setup on the loopback
+   device).
+
+   Command:
+mount -text2 /dev/loop0 /mnt/wherever
+
+   or:
+mount -tvfat /dev/loop0 /mnt/wherever
+
+   Explanation:
+   mount           Linux command to mount a filesystem
+   -text2 / -tvfat Filesystem being used, Linux can usually figure this out on its own.
+   /dev/loop0      The device representing our partition
+   /mnt/wherever   A directory to mount the partition on.
+
+   This should leave you with a nicely mounted partition. If you run df -Th you should end up
+   with a line similar to:
+Filesystem    Type    Size  Used Avail Use% Mounted on
+/dev/loop0    vfat    492M  4.0K  492M   1% /mnt/wherever
+
+   ...or for ext2fs:
+Filesystem    Type    Size  Used Avail Use% Mounted on
+/dev/loop0    ext2    477M   13K  452M   1% /mnt/wherever
+
+   (Yup, these are for the same disk image. By default ext2fs reserves/uses quite a bit of
+   space even empty.)
+
+Unmount, Detach
+
+   Ok, unmount the partition and detach the loopback device.
+
+   Command:
+umount /dev/loop0
+losetup -d /dev/loop0
+
+   Explanation:
+   umount     Linux command to unmount a filesystem.
+   /dev/loop0 The device that was mounted
+
+Making it Easier
+
+   One final thing to do, which is to simplify mounting and unmounting that partition.
+
+   Mounting:
+mount -text2 -oloop=/dev/loop0,offset=32256 /path/to/c.img /mnt/wherever
+
+   Unmounting:
+umount /path/to/c.img
+
+   This is essentially a combination of the losetup and mount commands we used previously when
+   formatting the partition. If used it also means we lose access to the raw 'disk' or
+   'partition' through /dev/loop0.
+
+   See also [23]http://www.pixelbeat.org/scripts/lomount.sh
+
+   Finally, if you have to mount and umount that image very frequently and you're too lazy to
+   type the sudo password each time, just add to /etc/fstab:
+/path/to/c.img    /mnt/wherever    ext2    user,loop    0 0
+
+   now you can just call:
+mount /mnt/wherever
+umount /mnt/wherever
+
+The End
+
+   That's it, you now know how to handle hard disk images under Linux. Whilst mounted you can
+   use it in exactly the same way you use a normal disk partition. Multiple partitions are an
+   extension of this, just change the offset of the losetup command according to the partition
+   you want to use (And format using the correct number of blocks).
+
+   Things to remember:
+     * losetup type command will give you the equivalent of a raw disk device (Eg /dev/hda)
+     * losetup -o type command will give you the equivalent of a raw partition device (Eg
+       /dev/hda1)
+
+   Don't forget to flush the filesystem buffers when manipulating with files on mounted disk
+   image. On a Unix-like system, this can be simply done by executing the sync program in your
+   shell.
+
+Loopback Device under FreeBSD
+
+   FreeBSD 4.x uses vnconfig FreeBSD 5.x uses mdconfig
+
+   First, use DD to create an empty floppy image (1.44mb in size)
+
+FreeBSD 4.x
+
+dd if=/dev/zero of=floppy.img bs=512 count=2880
+vnconfig vn0 floppy.img
+newfs_msdos -f 1440 /dev/vn0
+mount -t msdosfs /dev/vn0 /mnt/myfloppy
+
+   To shut and image down, unmount and unconfigure it.
+umount /mnt/myfloppy
+vnconfig -c /dev/vn0
+
+
+FreeBSD 5.x
+
+   Memdisks are allocated dynamically, and the name is displayed after the mdconfig command.
+   This assumes that "md0" is printed.)
+
+   To mount:
+dd if=/dev/zero of=floppy.img bs=512 count=2880
+mdconfig -a -t vnode -f floppy.img
+newfs_msdos -f 1440 /dev/md0
+mount -t msdosfs /dev/md0 /mnt/myfloppy
+
+   To unmount:
+umount /mnt/myfloppy
+mdconfig -d -u md0
+
+Loopback Device under OpenBSD
+
+   OpenBSD has used [24]vnconfig(8) since version 2.2 (perhaps earlier..).
+
+   As root or using su/sudo, Here is an example scenario for configuring a vnode pseudo disk
+   device.
+
+   Creating the floppy.img file using dd:
+dd if=/dev/zero of=/path/to/floppy.img bs=512 count=2880
+
+   Configuring the vnd0 device:
+vnconfig vnd0 /path/to/floppy.img
+
+   Listing configured devices:
+vnconfig -l
+
+Output:
+   vnd0: covering floppy.img on wd0a, inode 270473
+   vnd1: not in use
+   vnd2: not in use
+   vnd3: not in use
+
+   Creating a FAT12 file system and then mounting the device:
+newfs_msdos -F 12 -f 1440 /dev/rvnd0c
+mount -t msdos /dev/vnd0i /mnt/floppy
+
+   Removing the device mount and uninstalling the vnd0 device:
+umount /mnt/floppy
+vnconfig -u vnd0
+
+
+
+---
+http://www.walkernews.net/2007/07/01/create-linux-loopback-file-system-on-disk-file/
+
+[10]Create Linux Loopback File System On Disk File
+
+   Copyright © [11]Walker 01 Jul 2007 00:19
+   Powerful, free-of-charge, open-source Linux operating system. Can you create a [12]Linux
+   file system without using partition DIRECTLY – sort of file system within file system
+   management?
+   The answer is certainly YES!
+   With a loopback device in Linux (a feature that’s not natively available in [13]Windows
+   Vista and its predecessors) one can easily create a Linux loopback file system on a regular
+   disk file, and not directly using a disk partition!
+   How to create a Linux loopback file system with a regular disk file?
+   To complete this Linux tricks, you need to login with a root user ID for all the steps
+   given below
+    1. Type dd if=/dev/zero of=/virtualfs bs=1024 count=30720 to create a 30MB disk file
+       (zero-filled) called virtualfs in the root (/) directory
+
+    2. Type losetup /dev/loop0 to confirm that the current system is not using any loopback
+       devices. Replace /dev/loop0 with /dev/loop1, /dev/loop2, etc, until a free Linux
+       loopback device is found. In this case, let’s assume that /dev/loop0 is free for usage
+
+    3. Tpye losetup /dev/loop0 /virtualfs to attach the first Linux loopback device
+       (/dev/loop0) with regular disk file (/virtualfs) created in step 1
+
+    4. Type echo $? to confirm the previous step is completed successfully without error – a
+       zero will be returned to indicate success. Alternative, type losetup /dev/loop0 to
+       confirm
+
+    5. Type mkfs -t ext3 -m 1 -v /dev/loop0 to create a Linux EXT3 file system with 1%
+       [14]reserved block count on the loopback device that’s currently associated with a
+       regular disk file. Hence, we are creating a file system within file system, or creating
+       a file system (mkfs) without using a disk partition directly
+
+    6. Type mkdir /mnt/vfs to create a directory (as mount point) in /mnt
+
+    7. Type mount -t ext3 /dev/loop0 /mnt/vfs to mount the loopback device (regular disk file)
+       to /mnt/vfs as a “regular” Linux EXT3 file system! Now, all the Linux file
+       system-related commands can be act on this unusual Linux file system. For example, you
+       can type df -h to confirm its “disk usage”, type tune2fs -l /dev/loop0 to print its
+       file system settings, create / remove files or directories, etc.
+
+    8. To un-mount the loopback file system, type umount /mnt/vfs follow with losetup -d
+       /dev/loop0 to effectively remove the loopback file system and release loopback device
+       subsequently.
+
+ 
+    1. Guillaume 18-01-08@17:14
+       That’s a good tip !
+       It is really helpful but I notice that there is a fastest way to find the first unused
+       Linux loopback device :
+       losetup -f
+    2. Walker 19-01-08@12:28
+       Hi Guillaume, thank you for reminding me this command option.
+       Good work!
+    3. The Bomb Of Adsense Junk Makes Blog Suck – Walker News 23-01-08@23:57
+       [...] useful; some readers also really kind to share more info on the topic that I’ve
+       made – e.g. Guillaume, Johnny, Brian, CityShaman, Mroids…(Thank you!) However, the
+       no-so-good WalkerNews.net [...]
+    4. How To Read ISO Image File In Linux – Walker News 06-07-08@15:11
+       [...] build in loopback device that allows user to easily mount and access CD image
+       files. No complicated installation or [...]
+    5. Mastaus 23-10-08@23:48
+       Is it possible to do the same in Windows XP or Vista ? and how ?
+    6. Scooter 06-11-08@22:38
+       Anyone know why sometimes, even after a umount of the mounted file, losetup -d
+       /dev/loop returns “LOOP_CLR_FD: Device or resource busy” ?
+    7. Scooter 06-11-08@22:46
+       Just to avoid any confusion, my loop device is 2, I just typo’d above. /dev/loop2.
+    8. palak 10-02-09@05:19
+       how can i retain the data in my loopback files even after reboot?
+    9. Walker 10-02-09@22:01
+       I don’t think the data in loopback file will lost after reboot, unless you’ve recreated
+       the loopback file (especial step 1 to step 6) after a reboot.
+   10. palak 17-02-09@22:12
+       where is the data of loopback files stored after reboot..??
+       is it in some image file?
+   11. Michael Hampton 19-07-09@20:26
+       All that losetup junk is wholly unnecessary.
+       Just do:
+       mount -o loop myimage.img /mnt/whatever
+       The loopback device is automagically handled.
+   12. tubs 31-10-09@16:06
+       how do you create a disk file.
+   13. Andrei 27-02-10@23:54
+       Actually i found the losetup junk very useful :)
+       I didn’t go too much into the file systems specifics however I needed to mount an ext4
+       partition clone (created with partclone) and if the partition was being restored as a
+       plain image file on hdd the automagic of the loopback device wouldn’t work on that
+       file.
+       However, if I would restore the partition clone on a loopback device created as shown
+       above by Walker, I could then mount it and restore access to my precious files :)
+       Thank you, Walker! This was a really useful tip for me
+   14. Jonny Waterlake 09-04-10@22:28
+       This is awesome! Thanks!
+   15. paul 25-04-10@02:20
+       I have trouble visualizing what a loopback actually is and why it’s called that. I’m
+       very new to linux and have trouble picturing this idea in my mind.
+   16. toro 09-07-10@08:01
+       In electronics, the term loopback is generally used to describe methods of routing
+       electronic signals or digital data streams, from their originating device quickly back
+       to the same source without processing or modification.
+       In Unix-like operating systems, a loop device, is a pseudo-device that makes a file
+       accessible as a block device. Block devices correspond to devices through which the
+       system moves data in the form of blocks. These device nodes often represent addressable
+       devices such as CD-ROM drives.
+       The two concepts are similar, so it was not a big stretch of the imagination for Linux
+       to also use the term loopback originally used in electronics.
+   17. David C. 31-07-10@00:09
+       That’s a great explanation, toro -
+       In order to picture it in your mind, paul, the situation is fairly analogous to owning
+       a large, old house.
+       You decide that the entire house is too large and, considering modern lifestyles, you
+       can reduce the amount of house needed to make a home. (Or for whatever reason.)
+       You begin segregating one side of the house from the other (closing off doors,
+       rerouting HVAC and electrical, water, sewer, etc.) until you have created a duplex.
+       Each side of the house has its own utilities, entrances, parking, etc. allowing the
+       former entire house to now function as two complete houses.
+       Using a loopback filesystem, you segregate off a portion of your original filesystem so
+       that you wind up with two (or more) filesystems available on your one physical hard
+       drive. No extra room is created – the original hard drive still has the same overall
+       capacity – but the essential functionality of a file storage system is now doubled.
+       I hope this helps!
+       /David C.
+   18. David C. 31-07-10@00:13
+       Scooter wrote:
+       “Anyone know why sometimes, even after a umount of the mounted file, losetup -d
+       /dev/loop returns “LOOP_CLR_FD: Device or resource busy” ?”
+       Someone or some process has a file open on the device . . .
+   19. David C. 31-07-10@00:23
+       Mastaus wrote:
+       “Is it possible to do the same in Windows XP or Vista ? and how ?”
+       Yes it is possible. Right-click your My Computer (or simply Computer in Vista/W7) icon
+       and choose Manage from the pop-up menu.
+       Go to Storage -> Disk Management where you can do all kinds of scary things to your
+       disks, including creating a new partition. Right-click the (C:) portion of Disk 0 and
+       choose to Shrink Volume. Once that process has completed (first you have to make some
+       decisions, etc.), right-click the newly vacated space and choose to create a new
+       partition. The system will assign a drive letter and you can now use it by accessing
+       that drive letter in Windows Explorer. Otherwise, it’s just like using a loop-back file
+       system on Linux.
+       I hope this helps -
+       /David C.
+   20. Bluechip 26-09-10@09:03
+       If you want the virtual-fs remounted automatically at boot time …add this to the botto
+       of /etc/fstab :
+       /virtualfs /mnt/vfs ext3 loop,auto 0 0
+       …obviously change the fliename[1], mountpoint[6] and filesystem[5] as you require :)
+       You can test this by un-mounting the current system :
+       umount /mnt/vfs
+       …and remounting it with the “mount all” command (as used during boot):
+       mount -a
+       …Thnaks for the great tutorial :)
+   21. Padam 26-09-10@23:17
+       I have created a ntfs image file in Linux . I am able to mount it successfully in linux
+       and add and delete data. But i dont know how can i use this image file in wondows ?
+       Thanks for help
+   22. Klepto 11-11-10@02:01
+       @Dave C
+       What you are describing is creating another partition on a disk, this is NOT the same
+       as a loopback filesystem.
+   23. CocoChristopher 14-07-11@09:19
+       I have found the free IMDISK driver will allow using a filesystem within a host file on
+       Windows.
+       It can be found here:
+       [17]http://www.ltr-data.se/opencode.html/#ImDisk
+   24. Archie 19-01-12@19:48
+       I get the concept of loopback file system now after reading everyones comments. The one
+       question I have is whether this can be achieved on a file system where there is limited
+       disk space, e.g. an embedded system with limited resources. From what I understand
+       here, you have a file system, you then create a file and turn it into another file
+       system. I then need to copy the original file system into this pseudo file system
+       structure in order to trick some application software into thinking its running on a
+       different file system. Do I need twice the disk space of the first file system?
+
+
+
+---
+http://www.root9.net/2012/07/creating-loopback-file-system-image.html
+
+Creating a loopback file-system image with partitions
+
+   With building the OpenELEC images for Raspberry Pi - I ran into an odd problem with
+   creating system images for people to download.
+   The first image I made was DD'd from an 8GB SD card that I had already created and tested.
+   I formatted the SD card, tested in the Pi and then took an image with DD. Then, rewrote it
+   to the card and tested again. All good. Then a few people commented that the image was
+   slightly too large to fit on other 8GB cards which is when I checked and my card it was
+   indeed a few sectors large than some others. So how do you create images which are useful
+   for more people without going out and buying an army of various sized SD cards? The answer
+   is creating loopback devices which are basically file-systems in a single file (which is
+   what you create when you DD a working image from an SD card, for example).
+   1. Decide what size you would like your image to be. For this example and the OpenELEC
+   image I posted previously, I used 1GB.
+   2. Create your empty container file using DD. You can replace the expression after seek
+   with 1024000000 if you prefer - this is the size of your image in bytes.
+ dd if=/dev/zero of=~/1gb_file_image.img bs=1024 count=0 seek=$[1000*1000]
+
+   3. Mount this device as a loopback device
+ sudo losetup /dev/loop0 ~/1gb_file_image.img
+
+   4. This will give you a loopback block device under /dev/loop0. You can now create your
+   partitions using fdisk / parted. I've used the examples from the [5]OpenELEC wiki here.
+ sudo parted -s /dev/loop0 mklabel msdos
+ sudo parted -s /dev/loop0 unit cyl mkpart primary fat32 -- 0 16
+ sudo parted -s /dev/loop0 set 1 boot on
+ sudo parted -s /dev/loop0 unit cyl mkpart primary ext2 -- 16 -2
+ sudo mkfs.vfat -n System /dev/loop0p1
+ sudo mkfs.ext4 -L Storage /dev/loop0p2
+
+   5. Now you have a filesystem in a file with two partitions. Things can get a little tricky
+   here when you need to mount them individually. You need to umount the current loopback
+   device so you can remount it with some sector offsets and size limits. If you search and go
+   by the scraps of mailing lists that mention this, it can be a little daunting but it's not
+   as bad as it seems. Lets look at an fdisk output of our new filesystem in a file.
+ sudo fdisk -l ~/1gb_file_image
+ Disk 1gb_file_image.img: 1024 MB, 1024000000 bytes
+ 255 heads, 63 sectors/track, 124 cylinders, total 2000000 sectors
+ Units = sectors of 1 * 512 = 512 bytes
+ Sector size (logical/physical): 512 bytes / 512 bytes
+ I/O size (minimum/optimal): 512 bytes / 512 bytes
+ Disk identifier: 0xd00251a6
+ Device              Boot Start    End     Blocks Id  System
+ 1gb_file_image.img1 *    2048     264191  131072 c   W95 FAT32 (LBA)
+ 1gb_file_image.img2      264192   1999999 867904 83  Linux
+
+   What we need to note here are the start and end sectors as we will use these to calculate
+   the offset and sizelimit parameters to pass to losetup when mounting the partitions in the
+   file. Taking the first partition as an example (shown as an actual file with a different
+   number at the end, that's just how fdisk rolls I guess). We have a starting sector of 2048
+   and and end sector of 264191. We need to multiply each of these by 512 to get the total
+   amount of bytes instead of sectors (bytes per sector is in the output - line 4 above). So,
+   our starting offset becomes 1048576, and the size being  (end - start, multiplied by 512
+   again) 134217216.
+   We'll add these to our next command.
+   6. Mount the loopback image file again, specifying the offset and sizelimit for the first
+   partition.
+ sudo losetup /dev/loop0 ~/1gb_image_file.img -o 1048576 --sizelimit 134217216
+
+   7. Now, you can mount this loopback device as a block device with the standard mount
+   command
+ sudo mount /dev/loop0 /mnt/my_mount_point
+
+   This should give you the first FAT partition (if you used the OpenELEC example anyway)
+   mounted under /mnt/my_mount_point (make sure it exists first!). Then you can copy files
+   into your loopback device to populate your image. To mount the second partition, follow the
+   same procedure as in steps 5-7 but use a new loopback device (/dev/loop1 is a good starting
+   point) and calculate the new offsets and sizelimits based on the start and end sectors of
+   the second partition. When you're finished, make sure to unmount the loop devices, then
+   detach the loopback devices with
+ sudo losetup -d /dev/loop0
+ sudo losetup -d /dev/loop1
+
+   It can be a finicky procedure, but once you've got it nailed it's pretty handy. Let me know
+   if any parts don't work as advertised (especially seeing as it took several attempts to get
+   mine right too!).
+
+8 comments:
+
+    1. [openid36-rounded.png]
+       [21]blog[22]1 September 2012 12:40
+       Following your guidance here I got a modified version of the create_sdcard script
+       working with the loop0 device. Having moved it to another machine I now find that
+       although fdisk shows /dev/loop0p1 and /dev/loop0p2 after partitioning they're not
+       appearing in /dev (even after doing partprobe /dev/loop0). Do you have any ideas why
+       this might be happening?
+       I think I can fix things by using offsets in losetup and then formatting the whole
+       device (rather than just a partition), but that seems messy.
+       [23]Reply[24]Delete
+       [25]Replies
+         1. [openid36-rounded.png]
+            [26]blog[27]1 September 2012 14:54
+            I'm starting to suspect that this is down to the device handling on the VM service
+            provider I'm using, and I've worked around this by creating an empty partitioned
+            and formatted image on a machine that does work properly then using that for the
+            later stages of the image creation process.
+            [28]Delete
+         2. [rinzler.png]
+            [29]Stuart[30]2 September 2012 15:34
+            Hey - I had a few problems with partitions not appearing too and I think it was
+            mostly down to certain tools not recognising the partitions on a loopback device
+            (ie ,they only read the first 512bytes). I gave in and used the offsets which is a
+            bit of a faff but seems to be more robust.
+            [31]Delete
+         3. [Snapshot%2Bof%2Bme%2B3.jpg]
+            [32]Agócs[33]26 August 2013 17:23
+            Hello folks,
+            I'm facing the same problem, missing the partition devices :-/ So I can't make an
+            ext4 to my loop partitiions, because mkfs can't find the dev. Can you describe me
+            how you managed this issue using the offsets? Thanks in advance!
+            [34]Delete
+         4. [Snapshot%2Bof%2Bme%2B3.jpg]
+            [35]Agócs[36]26 August 2013 21:10
+            Ok, I found the solution: 'kpartx' does the mapping for the partitions to
+            /dev/mapped/loop0pX devices.
+            I learned something new today :)
+            [37]Delete
+         5. [rinzler.png]
+            [38]Stuart[39]31 August 2013 19:49
+            Sounds interesting, will have to check that out. Thanks for sharing!
+            [40]Delete
+            [41]Reply
+    2. [b36-rounded.png]
+       [42]Jim Moyle[43]27 June 2013 23:24
+       Unfortunately when using sudo parted -s /dev/loop0 unit cyl mkpart primary fat32 -- 0
+       16 I get the following error:
+       Error: Error informing the kernel about modifications to partition /dev/loop0 --
+       Invalid argument. This means Linux won't know about any changes you made to /dev/loop0
+       until you reboot -- so you shouldn't mount it or use it in any way before rebooting.
+       I get a similar result with fdisk, is this what you mean by partitions not appearing?
+       [44]Reply[45]Delete
+    3. [rinzler.png]
+       [46]Stuart[47]28 June 2013 19:28
+       It sounds familiar yes, have you tried running 'sudo partprobe /dev/loop0' to update
+       manually?
+       [48]Reply[49]Delete
+
+
+
+---
+http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS-1.html
+
+1. Introduction
+
+1.1 Copyright
+
+   The Loopback Root Filesystem HOWTO Copyright (C) 1998,99 Andrew M. Bishop
+   (amb@gedanken.demon.co.uk).
+
+   This documentation is free documentation; you can redistribute it and/or modify it under
+   the terms of the GNU General Public License as published by the Free Software Foundation;
+   either version 2 of the License, or (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+   without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+   See the GNU General Public License for more details.
+
+   The GNU General Public License is available from [5]http://www.fsf.org/ or, write to the
+   Free Software Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111 USA
+
+1.2 Revision History
+
+   Version 1.0.0
+          Initial Version (June 1998)
+
+   Version 1.0.1-1.0.3
+          Slight Modifications, kernel version changes, typos etc. (1998 - July 1999)
+
+   Version 1.1
+          Added Copyright Information and Re-Submitted (September 1999)
+
+References
+
+   1. http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS-2.html
+   2. http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS.html#toc1
+   3. http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS-2.html
+   4. http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS.html#toc1
+   5. http://www.fsf.org/
+   6. http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS-2.html
+   7. http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS.html#toc1
+
+
+---
+http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS-2.html
+
+2. Principles of Loopback Devices and Ramdisks
+
+   First I will describe some of the general principles that are used in the setting up of a
+   loopback filesystem as the root device.
+
+2.1 Loopback Devices
+
+   A loopback device in Linux is a virtual device that can be used like any other media
+   device.
+
+   Examples of normal media devices are hard disk partitions like /dev/hda1, /dev/hda2,
+   /dev/sda1, or entire disks like the floppy disk /dev/fd0 etc. They are all devices that can
+   be used to hold a files and directory structures. They can be formatted with the filesystem
+   that is required (ext2fs, msdos, ntfs etc.) and then mounted.
+
+   The loopback filesystem associates a file on another filesystem as a complete device. This
+   can then be formatted and mounted just like any of the other devices listed above. To do
+   this the device called /dev/loop0 or /dev/loop1 etc is associated with the file and then
+   this new virtual device is mounted.
+
+2.2 Ramdisk Devices
+
+   In Linux it is also possible to have another type of virtual device mounted as a
+   filesystem, this is the ramdisk device.
+
+   In this case the device does not refer to any physical hardware, but to a portion of memory
+   that is set aside for the purpose. The memory that is allocated is never swapped out to
+   disk, but remains in the disk cache.
+
+   A ramdisk can be created at any time by writing to the ramdisk device /dev/ram0 or
+   /dev/ram1 etc. This can then be formatted and mounted in the same way that the loopback
+   device is.
+
+   When a ramdisk is used to boot from (as is often done on Linux installation disks or rescue
+   disks) then the disk image (the entire contents of the disk as a single file) can be stored
+   on the boot floppy in a compressed form. This is automatically recognised by the kernel
+   when it boots and is uncompressed into the ramdisk before it is mounted.
+
+2.3 The Initial Ramdisk Device
+
+   The initial ramdisk device in Linux is another important mechanism that we need to be able
+   to use a loopback device as a the root filesystem.
+
+   When the initial ramdisk is used the filesystem image is copied into memory and mounted so
+   that the files on it can be accessed. A program on this ramdisk (called /linuxrc) is run
+   and when it is finished a different device is mounted as the root filesystem. The old
+   ramdisk is still present though and is mounted on the directory /initrd if present or
+   available through the device /dev/initrd.
+
+   This is unusual behaviour since the normal boot sequence boots from the designated root
+   partition and keeps on running. With the initial ramdisk option the root partition is
+   allowed to change before the main boot sequence is started.
+
+2.4 The Root Filesystem
+
+   The root filesystem is the device that is mounted first so that it appears as the directory
+   called / after booting.
+
+   There are a number of complications about the root filesystem that are due to the fact that
+   it contains all files. When booting the rc scripts are run, these are either the files in
+   /etc/rc.d or /etc/rc?.d depending on the version of the /etc/init program.
+
+   When the system has booted it is not possible to unmount the root partition or change it
+   since all programs will be using it to some extent. This is why the initial ramdisk is so
+   useful because it can be used so that the final root partition is not the same as the one
+   that is loaded at boot time.
+
+2.5 The Linux Boot Sequence
+
+   To show how the initial ramdisk operates in the boot sequence, the order of events is
+   listed below.
+
+    1. The kernel is loaded into memory, this is performed by LILO or LOADLIN. You can see the
+       Loading... message as this happens.
+    2. The ramdisk image is loaded into memory, again this is performed by LILO or LOADLIN.
+       You can see the Loading... message again as this happens.
+    3. The kernel is initialised, including parsing the command line options and setting of
+       the ramdisk as the root device.
+    4. The program /linuxrc is run on the initial ramdisk.
+    5. The root device is changed to that specified in the kernel parameter.
+    6. The init program /etc/init is run which will perform the user configurable boot
+       sequence.
+
+   This is just a simplified version of what happens, but is sufficient to explain how the
+   kernel starts up and where the initial ramdisk is used.
+
+
+
+---
+http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS-3.html
+
+3. How To Create a Loopback Root Device
+
+   Now that the general principles are explained the method of creating the loopback device
+   can be explained.
+
+3.1 Requirements
+
+   To create the loopback root device will require a number of things.
+
+     * A working Linux system.
+     * A way to copy large files onto the target DOS partition.
+
+   Most important is access to an installed Linux system. This is because the loop device can
+   only be created under Linux. This will mean that it is not possible to bootstrap a working
+   system from nothing. The requirements of the Linux system that you use is that you can
+   compile a kernel on it.
+
+   Once the loopback device is created it will be a large file. I have used an 80 MB files,
+   but while this was sufficient for an X terminal it may not be enough if you want to use it
+   for much else. This file must be copied onto the DOS partition, so either a network or a
+   lot of floppy disks must be used.
+
+   The software that you will require includes
+
+     * LOADLIN version 1.6 or above
+     * A version of mount that supports loopback devices
+     * A version of the kernel that supports the required options.
+
+   All of these should be standard for recent Linux installations.
+
+3.2 Creating the Linux Kernel
+
+   I created the loopback device using Linux kernel version 2.0.31, other versions should also
+   work, but they must have at least the options listed below.
+
+   The kernel options that you will need to enable are the following:
+     * RAM disk support (CONFIG_BLK_DEV_RAM).
+     * Initial RAM disk (initrd) support (CONFIG_BLK_DEV_INITRD).
+     * Loop device support (CONFIG_BLK_DEV_LOOP).
+     * fat fs support (CONFIG_FAT_FS).
+     * msdos fs support (CONFIG_MSDOS_FS).
+
+   The first two are for the RAM disk device itself and the initial ram disk device. The next
+   one is the loop back filesystem option. The last two are the msdos filesystem support which
+   is required to mount the DOS partitition.
+
+   Compiling a kernel without modules is the easiest option, although if you do want modules
+   then it should be possible although I have not tried it. If modules are used then you
+   should make sure that you have the options above compiled in and not as modules themselves.
+
+   Depending on the kernel version that you have you may need to apply a kernel patch. It is a
+   very simple one that allows the loopback device to be used as the root filesystem.
+     * Kernel versions before 2.0.0; I have no information about these.
+     * Kernel version 2.0.0 to 2.0.34; you need to apply the kernel patch for 2.0.x kernels as
+       shown below.
+     * Kernel version 2.0.35 to 2.0.x; no kernel patch is required.
+     * Kernel version 2.1.x; you need to apply the kernel patch for 2.0.x or 2.2.x kernels as
+       shown below, depending on the exact 2.1.x version.
+     * Kernel version 2.2.0 to 2.2.10; you need to apply the kernel patch for 2.2.x kernels as
+       shown below.
+     * Kernel version 2.3.x; you need to apply the kernel patch for 2.2.x kernels as shown
+       below.
+
+   For 2.0.x kernels the file /init/main.c needs to have a single line added to it as shown by
+   the modified version below. The line that says "loop", 0x0700 is the one that was added.
+
+static void parse_root_dev(char * line)
+{
+        int base = 0;
+        static struct dev_name_struct {
+                const char *name;
+                const int num;
+        } devices[] = {
+                { "nfs",     0x00ff },
+                { "loop",    0x0700 },
+                { "hda",     0x0300 },
+
+...
+
+                { "sonycd",  0x1800 },
+                { NULL, 0 }
+        };
+
+...
+
+}
+
+   For 2.2.x kernels the file /init/main.c needs to have three lines added to it as shown by
+   the modified version below. The line that says "loop", 0x0700 and the ones either side of
+   it are the ones that were added.
+
+static struct dev_name_struct {
+        const char *name;
+        const int num;
+} root_dev_names[] __initdata = {
+#ifdef CONFIG_ROOT_NFS
+        { "nfs",     0x00ff },
+#endif
+#ifdef CONFIG_BLK_DEV_LOOP
+        { "loop",    0x0700 },
+#endif
+#ifdef CONFIG_BLK_DEV_IDE
+        { "hda",     0x0300 },
+
+...
+
+        { "ddv", DDV_MAJOR << 8},
+#endif
+        { NULL, 0 }
+};
+
+   Once the kernel is configured it should be compiled to produce a zImage file (make zImage).
+   This file will be arch/i386/boot/zImage when compiled.
+
+3.3 Creating the Initial Ramdisk Device
+
+   The initial ramdisk is most easily created as a loopback device from the start. You will
+   need to do this as root, the commands that you need to execute are listed below, they are
+   assumed to be run from root's home directory (/root).
+
+mkdir /root/initrd
+dd if=/dev/zero of=initrd.img bs=1k count=1024
+mke2fs -i 1024 -b 1024 -m 5 -F -v initrd.img
+mount initrd.img /root/initrd -t ext2 -o loop
+cd initrd
+[create the files]
+cd ..
+umount /root/initrd
+gzip -c -9 initrd.img > initrdgz.img
+
+   There are a number of steps to this, but they can be described as follows.
+    1. Create a mount point for the initial ramdisk (an empty directory).
+    2. Create an empty file of the size required. Here I have used 1024kB, you may need less
+       or more depending on the contents, (the size is the last parameter).
+    3. Make an ext2 filesystem on the empty file.
+    4. Mount the file onto the mount point, this uses the loopback device.
+    5. Change to the mounted loopback device.
+    6. Create the files that are required (see below for details).
+    7. Move out of the mounted loopback device.
+    8. Unmount the device.
+    9. Create a compressed version for use later.
+
+   Contents Of The Initial Ramdisk
+
+   The files that you will need on the ramdisk are the minimum requirements to be able to
+   execute any commands.
+
+     * /linuxrc The script that is run to mount the msdos file system (see below).
+     * /lib/* The dynamic linker and the libraries that the programs need.
+     * /etc/* The cache used by the dynamic linker (not strictly needed, but does stop it
+       complaining).
+     * /bin/* A shell interpreter (ash because it is smaller than bash. The mount and losetup
+       programs for handling the DOS disk and setting up the loopback devices.
+     * /dev/* The devices that will be used. You need /dev/zero for ld-linux.so, /dev/hda* to
+       mount the msdos disk and /dev/loop* for the lopback device.
+     * /mnt An empty directory to mount the msdos disk on.
+
+   The initial ramdisk that I used is listed below, the contents come to about 800kB when the
+   overhead of the filesystem are taken into account.
+
+total 18
+drwxr-xr-x   2 root     root         1024 Jun  2 13:57 bin
+drwxr-xr-x   2 root     root         1024 Jun  2 13:47 dev
+drwxr-xr-x   2 root     root         1024 May 20 07:43 etc
+drwxr-xr-x   2 root     root         1024 May 27 07:57 lib
+-rwxr-xr-x   1 root     root          964 Jun  3 08:47 linuxrc
+drwxr-xr-x   2 root     root        12288 May 27 08:08 lost+found
+drwxr-xr-x   2 root     root         1024 Jun  2 14:16 mnt
+
+./bin:
+total 168
+-rwxr-xr-x   1 root     root        60880 May 27 07:56 ash
+-rwxr-xr-x   1 root     root         5484 May 27 07:56 losetup
+-rwsr-xr-x   1 root     root        28216 May 27 07:56 mount
+lrwxrwxrwx   1 root     root            3 May 27 08:08 sh -> ash
+
+./dev:
+total 0
+brw-r--r--   1 root     root       3,   0 May 20 07:43 hda
+brw-r--r--   1 root     root       3,   1 May 20 07:43 hda1
+brw-r--r--   1 root     root       3,   2 Jun  2 13:46 hda2
+brw-r--r--   1 root     root       3,   3 Jun  2 13:46 hda3
+brw-r--r--   1 root     root       7,   0 May 20 07:43 loop0
+brw-r--r--   1 root     root       7,   1 Jun  2 13:47 loop1
+crw-r--r--   1 root     root       1,   3 May 20 07:42 null
+crw-r--r--   1 root     root       5,   0 May 20 07:43 tty
+crw-r--r--   1 root     root       4,   1 May 20 07:43 tty1
+crw-r--r--   1 root     root       1,   5 May 20 07:42 zero
+
+./etc:
+total 3
+-rw-r--r--   1 root     root         2539 May 20 07:43 ld.so.cache
+
+./lib:
+total 649
+lrwxrwxrwx   1 root     root           18 May 27 08:08 ld-linux.so.1 -> ld-linux.so.1.7.14
+-rwxr-xr-x   1 root     root        21367 May 20 07:44 ld-linux.so.1.7.14
+lrwxrwxrwx   1 root     root           14 May 27 08:08 libc.so.5 -> libc.so.5.3.12
+-rwxr-xr-x   1 root     root       583795 May 20 07:44 libc.so.5.3.12
+
+./lost+found:
+total 0
+
+./mnt:
+total 0
+
+   The only complex steps about this are the devices in dev. Use the mknod program to create
+   them, use the existing devices in /dev as a template to get the required parameters.
+
+   The /linuxrc file
+
+   The /linuxrc file on the initial ramdisk is required to do all of the preparations so that
+   the loopback device can be used for the root partition when it exits.
+
+   The example below tries to mount /dev/hda1 as an msdos partition and if it succeeds then
+   sets up the files /linux/linuxdsk.img as /dev/loop0 and /linux/linuxswp.img as /dev/loop1.
+
+#!/bin/sh
+
+echo INITRD: Trying to mount /dev/hda1 as msdos
+
+if /bin/mount -n -t msdos /dev/hda1 /mnt; then
+
+   echo INITRD: Mounted OK
+   /bin/losetup /dev/loop0 /mnt/linux/linuxdsk.img
+   /bin/losetup /dev/loop1 /mnt/linux/linuxswp.img
+   exit 0
+
+else
+
+   echo INITRD: Mount failed
+   exit 1
+
+fi
+
+   The first device /dev/loop0 will become the root device and the second one /dev/loop1 will
+   become the swap space.
+
+   If you want to be able to write to the DOS partition as a non-root user when you have
+   finished then you should use mount -n -t msdos /dev/hda1 /mnt -o
+   uid=0,gid=0,umask=000,quiet instead. This will map all accesses to the DOS partition to
+   root and set the permissions appropriately.
+
+3.4 Creating The Root Device
+
+   The root device that you will be using is the file linuxdsk.img. You will need to create
+   this in the same way that the initial ramdisk was created, but bigger. You can install any
+   Linux installation that you like onto this disk.
+
+   The easiest way might be to copy an existing Linux installation into it. An alternative is
+   to install a new Linux installation onto it.
+
+   Assuming that you have done this, there are some minor changes that you must make.
+
+   The /etc/fstab file must reference the root partition and the swap using the two loopback
+   devices that are setup on the initial ramdisk.
+
+/dev/loop0     /      ext2   defaults 1 1
+/dev/loop1     swap   swap   defaults 1 1
+
+   This will ensure that when the real root device is used the kernel will not be confused
+   about where the root device is. It will also allow the swap space to be added in the same
+   way a swap partition is normally used. You should remove any other reference to a root disk
+   device or swap partition.
+
+   If you want to be able to read the DOS partition after Linux has started then you will need
+   to make a number of extra small changes.
+
+   Create a directory called /initrd, this is where the initial ramdisk will be mounted once
+   the loopback root filesystem is mounted.
+
+   Create a symbolic link called /DOS that points to /initrd/mnt where the real DOS parition
+   will be mounted.
+
+   Add a line into the rc file that mounts the disks. This should run the command mount -f -t
+   msdos /dev/hda1 /initrd/mnt, this will create a 'fake' mount of the DOS partition so that
+   all programs (like df) will know that the DOS partition is mounted and where to find it. If
+   you used different options in the /linuxrc file that obviously you should use them here
+   also.
+
+   There is no need to have a Linux kernel on this root device since that is already loaded
+   earlier. If you are using modules however then you should include them on this device as
+   normal.
+
+3.5 Creating the Swap Device
+
+   The root device that you will be using is the file linuxswap.img. The swap device is very
+   simple to create. Create an empty file as was done for the initial ramdisk and then run
+   mkswap linuxswap.img to intialise it.
+
+   The size of the swap space will depend on what you plan to do with the installed system,
+   but I would recommend between 8MB and the amount of RAM that you have.
+
+3.6 Creating the MSDOS Directory
+
+   The files that are going to be used need to be moved onto the DOS partition.
+
+   The files that are required in the DOS directory called C:\LINUX are the following:
+
+     * LINUXDSK.IMG The disk image that will become the root device.
+     * LINUXSWP.IMG The swap space.
+
+3.7 Creating the Boot Floppy
+
+   The boot floppy that is used is just a normal DOS format bootable floppy.
+
+   This is created using format a: /s from DOS.
+
+   Onto this disk you will need to create an AUTOEXEC.BAT file (as below) and copy the kernel,
+   compressed initial ramdisk and LOADLIN executable.
+
+     * AUTOEXEC.BAT The DOS automatically executed batch file.
+     * LOADLIN.EXE The LOADLIN program executable.
+     * ZIMAGE The Linux kernel.
+     * INITRDGZ.IMG The compressed initial ramdisk image.
+
+   The AUTOEXEC.BAT file should contain just one line as below.
+
+\loadlin \zImage initrd=\initrdgz.img root=/dev/loop0 ro
+
+   This specifies the kernel image to use, the initial ramdisk image, the root device after
+   the initial ramdisk has finished and that the root partition is to be mounted read-only.
+ 
+
+
+---
+http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS-4.html
+
+4. Booting the System
+
+   To boot from this new root device all that is required is that the floppy disk prepared as
+   described above is inserted for the PC to boot from.
+
+   You will see the following sequence of events.
+    1. DOS boots
+    2. AUTOEXEC.BAT starts
+    3. LOADLIN is run
+    4. The Linux kernel is copied into memory
+    5. The initial ramdisk is copied into memory
+    6. The Linux kernel is started running
+    7. The /linuxrc file on the initial ramdisk is run
+    8. The DOS partition is mounted and the root and swap devices set up
+    9. The boot sequence continues from the loopback device
+
+   When this is complete you can remove the boot floppy and use the Linux system.
+
+4.1 Possible Problems With Solutions
+
+   There are a number of stages where this process could fail, I will try to explain what they
+   are and what to check.
+
+   DOS booting is easy to recognise by the message that it prints MS-DOS Starting ... on the
+   screen. If this is not seen then the floopy disk is either not-bootable or the PC is not
+   bootable from the floppy disk drive.
+
+   When the AUTOEXEC.BAT file is run the commands in it should be echoed to the screen by
+   default. In this case there is just the single line in the file that starts LOADLIN.
+
+   When LOADLIN executes it will do two very visible things, firstly it will load the kernel
+   into memory, secondly it will copy the ramdisk into memory. Both of these are indicated by
+   a Loading... message.
+
+   The kernel starts by uncompressing itself, this can give crc errors if the kernel image is
+   corrupted. Then it will start running the initialisation sequence which is very verbose
+   with diagnostic messages. Loading of the initial ramdisk device is also visible during this
+   phase.
+
+   When the /linuxrc file is run there is no diagnostic messages, but you can add these
+   yourself as an aid to debugging. If this stage fails to set up the loopback device as the
+   root device then you may see a message that there is no root device and the kernel aborts.
+
+   The normal boot sequence of the new root device will now continue and this is quite
+   verbose. There may be problems about the root device being mounted read-write, but the
+   LOADLIN command line option 'ro' should stop that. Other problems that can occur are that
+   the boot sequence is confused about where the root device is, this is probably due to a
+   problem with /etc/fstab.
+
+   When the boot sequence has completed, the remaining problem is that programs are confused
+   about whether the DOS partition is mounted or not. This is why it is a good idea to use the
+   fake mount command described earlier. This makes life a lot easier if you want to access
+   the files on the DOS device.
+
+4.2 Reference Documents
+
+   The documents that I used to create my first loopback root filesystem were:
+
+     * The Linux kernel source, in particular init/main.c
+     * The Linux kernel documentation, in particular Documentation/initrd.txt and
+       Documentation/ramdisk.txt.
+     * The LILO documentation.
+     * The LOADLIN documentation
+ 
+
+
+---
+http://www.tldp.org/HOWTO/archived/Loopback-Root-FS/Loopback-Root-FS-5.html
+
+5. Other Loopback Root Device Possibilities
+
+   Once the principle of booting a filesystem in a file on a DOS partition has been
+   established there are many other things that you can now do.
+
+5.1 DOS Hard-disk Only Installation
+
+   If it is possible to boot Linux from a file on a DOS harddisk by using a boot floppy then
+   it is obviously also possible to do it using the harddisk itself.
+
+   A configuration boot menu can be used to give the option of running LOADLIN from within the
+   AUTOEXEC.BAT. This will give a much faster boot sequence, but is otherwise identical.
+
+5.2 LILO Booted Installation
+
+   Using LOADLIN is only one option for booting a Linux kernel. There is also LILO that does
+   much the same but without needing DOS.
+
+   In this case the DOS format floppy disk can be replaced by an ext2fs format one. Otherwise
+   the details are very similar, with the kernel and the initial ramdisk being files on that
+   disk.
+
+   The reason that I chose the LOADLIN method is that the arguments that need to be given to
+   LILO are slightly more complex. Also it is more obvious to a casual observer what the
+   floppy disk is since it can be read under DOS.
+
+5.3 VFAT / NTFS Installation
+
+   I have tried the NTFS method, and have had no problems with it. The NTFS filesystem driver
+   is not a standard kernel option in version 2.0.x, but is available as a patch from
+   [5]http://www.informatik.hu-berlin.de/~loewis/ntfs/. In version 2.2.x the NTFS driver is
+   included as standard in the kernel.
+
+   The only changes for the VFAT or NTFS options are in the initial ramdisk, the file /linuxrc
+   needs to mount a file system of type vfat or ntfs rather that msdos.
+
+   I know of no reason why this should not also work on a VFAT partition.
+
+5.4 Installing Linux without Re-partitioning
+
+   The process of installing Linux on a PC from a standard distribution requires booting from
+   a floppy disk and re-partitioning the disk. This stage could instead be accomplished by a
+   boot floppy that creates an empty loopback device and swap file. This would allow the
+   installation to proceed as normal, but it would install into the loopback device rather
+   than a partition.
+
+   This could be used as an alternative to a UMSDOS installation, it would be more efficient
+   in disk usage since the minimum allocation unit in the ext2 filesystem is 1kB instead of up
+   to 32kB on a DOS partition. It can also be used on VFAT and NTFS formatted disks which are
+   otherwise a problem.
+
+5.5 Booting From a Non-bootable device
+
+   This method can also be used to boot a Linux system from a device that is not normally
+   bootable.
+
+     * CD-Rom
+     * Zip Disks
+     * Parallel port disk drives
+
+   Obviously there are many other devices that could be used, NFS root filesystems are already
+   included in the kernel as an option, but the method described here might also be used
+   instead.
+ 

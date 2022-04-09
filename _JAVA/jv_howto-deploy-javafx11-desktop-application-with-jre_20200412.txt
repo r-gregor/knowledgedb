@@ -1,0 +1,169 @@
+filename: jv_howto-deploy-javafx11-desktop-application-with-jre_20200412.txt
+https://stackoverflow.com/questions/53453212/how-to-deploy-a-javafx-11-desktop-application-with-a-jre
+
+How to deploy a JavaFX 11 Desktop application with a JRE
+
+   I have a JavaFX (JDK 8) desktop business application, which uses Java Web Start for deployment. Users
+   have Java 8 installed, and they simply go to the URL (a public URL on my AWS Linux server) and the
+   application downloads / starts (using Web Start). I can easily update the application, too, by
+   deploying new JARs to the server. Everything works well.
+
+   However, Oracle has discontinued Web Start with Java 11, and in their "Java Client Roadmap Update"
+   white paper, March 2018, they recommend bundling a JRE with the application ("The notion of an
+   application being distributed separately from a standalone JRE is, therefore, quickly fading."). I
+   cannot rely on my users to stay at Java 8 for Web Start, and even if they do remain at 8, Oracle
+   requires a license to continue using Java 8 (which I do not have, can be very costly, and I'd prefer
+   anyways to move with the community towards JavaFX 11 and OpenJDK).
+
+   I would like to migrate to JavaFX 11. I have followed OpenJFX's "Getting Started with JavaFX11"
+   (https://openjfx.io/openjfx-docs/), using OpenJDK 11.0.1 with Gluon's JavaFX SDK 11.0.1 (on
+   Netbeans 10vc2), and have been able to get the sample applications to run (and appears to me I should
+   be able to port my JavaFX 8 code to JavaFX 11, quite easily).
+
+   However, this is where I am stuck for direction. How do I bundle this with the JRE and deploy this to
+   my end-users (and provide application updates)? Is there an easy way out there (or even a hard way,
+   with some direction/guides)?
+
+   I can spend hundreds of hours writing expressive, rich, and useful desktop business applications in
+   JavaFX 11, but what do I do then?
+
+   Are the deployment toolkits, like JWrapper, InstallAnywhere, etc, suited to this new era of Java 11?
+   Does Gluon/openjfx.io perhaps have a recommendation or guide I missed? I cannot seem to find any
+   recommendations or guides from reputable sources, for how us developers, who focus on writing the
+   front-end code, are to deploy the applications.
+
+***
+     * IMO, the deployment view of applications has been left really less documented and there have been
+       significant changes in terms of building and deploying the applications with Java11+. You can
+       possibly look at jlink and creating runtime images with it. But for the community, you would have
+       to post it step by step as you give it a try and maybe you could stitch a solution then.
+     * Using the jlink tool that's included with the JDK you can create a self-contained, customized
+       JRE with only the parts that your app needs. I guess that's what Oracle thinks you should use now
+       instead of Web Start.
+     * As of December 1, 2018, there is a posting with more information on this:
+       medium.com/@adam_carroll/java-packager-with-jdk11-31b3d620f4a8
+     * Just curious how large the executable ends up being with this new approach?
+
+***
+   The way it works now is, you convert your program to a module, then "link" it to all the other
+   modules it requires.
+
+   The result of this linking process is what's known as an image. An image is actually a file tree,
+   which includes a bin directory with one or more ready-to-run executables. This tree is what you
+   distribute, typically as a zip or tar.gz.
+
+   The steps are:
+    1. Create a module-info.java
+    2. Compile with a module path instead of a classpath
+    3. Create a jar from classes, as usual
+    4. Convert jar to a jmod with the JDK's jmod tool
+    5. Link that jmod, and the modules on which it depends, into an image
+
+Writing a module descriptor
+   The first step is to turn the application into a module. Minimally, this requires creating a
+   module-info.java at the top of your source tree (that is, in the empty package). Every module has a
+   name, which is often the same as a package name but doesn't have to be. So, your module-info.java
+   might look like this:
+module com.mcs75.businessapp {
+    exports com.mcs75.desktop.businessapp;
+
+    requires java.logging;
+    requires transitive javafx.graphics;
+    requires transitive javafx.controls;
+}
+
+Building
+   When you build, you don't specify a classpath at all. Instead, you specify a module path.
+
+   A module path is a list of directories, not files. Each directory contains, not surprisingly,
+   modules. The jmods directory of the JDK is included implicitly. All you need to include is
+   directories containing the non-JDK modules you need. In your case, that at least means Gluon's
+   JavaFX:
+javac -Xlint -g -d build/classes --module-path /opt/gluon-javafx/lib \
+    src/java/com/mcs75/desktop/businessapp/*.java
+
+   Then you create a jar the usual way:
+jar -c -f build/mybusinessapp.jar -C build/classes .
+
+   A jar file with a module-info.class in it is considered a modular jar.
+
+Making a jmod
+   Creating a jmod is usually a simple process:
+mkdir build/modules
+jmod create --class-path build/mybusinessapp.jar \
+    --main-class com.mcs75.desktop.businessapp.BusinessApplication \
+    build/modules/mybusinessapp.jmod
+
+Linking
+   Finally, you use the JDK's jlink command to assemble everything:
+jlink --output build/image \
+    --module-path build/modules:/opt/gluon-javafx/lib \
+    --add-modules com.mcs75.businessapp \
+    --launcher MyBusinessApp=com.mcs75.businessapp
+
+   jlink creates a minimal JRE, which contains only the modules you explicitly add (and the modules
+   those explicit modules require). --add-modules is the required option that specifies what to add.
+
+   As with other JDK tools, --module-path specifies directories containing modules.
+
+   The --launcher option causes the final image tree to have an additional executable script in its bin
+   directory with the given name (the part before the equals). So, MyBusinessApp=com.mcs75.businessapp
+   means "create an executable named MyBusinessApp, which executes the module com.mcs75.businessapp."
+
+   Because the jmod create command included a --main-class option, Java will know what to execute, just
+   like declaring a Main-Class attribute in a manifest. It is also possible to explicitly declare a
+   class to execute in the --launcher option if desired.
+
+Distributing
+   What you will want to distribute is a zip or tar.gz of the entire image file tree. The executable
+   that the user should run is in the image's bin directory. Of course, you are free to add your own
+   executables. You are also free to place this into any kind of installer, as long as the image tree's
+   structure is preserved.
+
+   [DEL: A future JDK will have a packaging tool for creating full-fledged native installers. :DEL]
+   As of Java 14, the JDK has a jpackage tool which can create native installers. For example:
+jpackage -n MyBusinessApp --runtime-image build/image \
+    -m com.mcs75.businessapp/com.mcs75.desktop.businessapp.BusinessApplication
+
+   -n specifies the name of the program. --runtime-image specifies the location of the existing jlink'd
+   image. -m is the module and class within the jlink'd image to execute, much like the portion after
+   the = in jlink's --launcher option.
+
+Cross-building
+   Since the image includes native binaries, you will need to create an image for each platform.
+   Obviously, one option is to build the image on a Linux system, and again on a Windows system, and
+   again on a Mac, etc.
+
+   But you can also use jmod and jlink to create images for other platforms, regardless of where you're
+   building.
+
+   There's only a few additional steps needed. First, you will need the JDKs for those other platforms.
+   Download them as archives (zip or tar.gz), not installers, and unpack them to directories of your
+   choice.
+
+   Each JDK defines a platform string. This is normally of the form <os>-<arch>. The platform is a
+   property of the java.base module; you can see any JDK's platform by examining that module:
+jmod describe path-to-foreign-jdk/jmods/java.base.jmod | grep '^platform'
+
+   Pass that platform string to your jmod command using the --target-platform option:
+mkdir build/modules
+jmod create --target-platform windows-amd64 \
+    --class-path build/mybusinessapp.jar \
+    --main-class com.mcs75.desktop.businessapp.BusinessApplication \
+    build/modules/mybusinessapp.jmod
+
+   Finally, when linking, you want to explicitly include the other JDK's jmods directory, so jlink won't
+   implicitly include its own JDK's modules:
+jlink --output build/image \
+    --module-path path-to-foreign-jdk/jmods:build/modules:/opt/gluon-javafx/lib \
+    --add-modules com.mcs75.businessapp \
+    --launcher MyBusinessApp=com.mcs75.businessapp
+
+       As of December 1, 2018, there is a posting with more information on this:
+       medium.com/@adam_carroll/java-packager-with-jdk11-31b3d620f4a8
+     * When using jlink while building for another platform, does one have to point to that platform's
+       javafx jmods?
+     * Yes.
+
+
+---

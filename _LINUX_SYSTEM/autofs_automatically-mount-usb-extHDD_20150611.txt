@@ -1,0 +1,135 @@
+filename: autofs_automatically-mount-usb-exthdd_20150611.txt
+http://linuxconfig.org/automatically-mount-usb-external-drive-with-autofs
+
+Automatically mount USB external drive with autofs
+
+   Question:
+
+   My Debian (up to date) system will automount USB pen drives on the fly, but not a 1 Tb
+   external USB drive (Iomega), which will mount but it has to be attached before booting. How
+   to I change the behaviour for the Iomega usb large drive so I can mount it after the system
+   is up? Thanks.
+
+   Answer:
+
+   If your 1 Tb external USB drive mounts when it is attached before booting you may have a
+   line in your /etc/fstab configuration file which mounts it during the boot time. If this is
+   the case and you plug in your external USB drive after the boot, execute as a root user:
+# mount -a
+
+   This will mount all devices which are not currently mounted, including your Iomega USB
+   drive.
+
+   However, this may not be the most reliable solution since the base device file name for
+   your drive can be different every time you plugin your USB disk. Since you have already
+   mentioned that you are using other USB pen drives, your base device file name for your
+   Iomega USB disk can be anything like: /dev/sdb1, /dev/sdd1 or /dev/sdXn .
+
+   I have exactly the same problem with my external WD USB drive as it mounts automatically in
+   Fedora but not in Debian. Therefore, I recommend use autofs. autofs is very simple a neat
+   solution. It takes little bit of configuration but its worth it !
+
+1. Make USB device base name permanent
+
+   To avoid any confusion whether base name for your USB block device is /dev/sdb1, /dev/sdd1
+   or /dev/sdXn we make it permanently /dev/Iomega anytime you plug it in. This can be done
+   with help of udev device manager. You should have udev already installed on your system,
+   otherwise install it with:
+# apt-get install udev
+
+   Next, search for a current base name of your external USB disk using fdisk command:
+# fdisk -l
+
+   This will return something like this:
+
+   OUTPUT:
+Disk /dev/sdc: 2000.3 GB, 2000396746752 bytes
+255 heads, 63 sectors/track, 243201 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Disk identifier: 0x001425a0
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/sdc1               1      243201  1953512001    b  W95 FAT32
+
+   Where the base name for your external USB device is /dev/sdc. Next, use udevinfo command
+   with /dev/sdc as an argument to get model attribute:
+$ udevinfo -a -p /sys/block/sdc/ | grep model
+    ATTRS{model}=="Ext HDD 1021    "
+
+   Now, that we have model attribute, we can add it to /etc/udev/rules.d/custom.rules by
+   following line:
+SUBSYSTEM=="scsi", ATTRS{model}=="Ext HDD 1021    ", SYMLINK+="Iomega%n"
+
+   At this point all we need to do is restart udev device manager:
+
+# /etc/init.d/udev restart
+Stopping the hotplug events dispatcher: udevd.
+Starting the hotplug events dispatcher: udevd.
+
+   Plug in external USB and your new base name is:
+ls -l /dev/Iomega*
+lrwxrwxrwx 1 root root  3 2011-02-23 12:36 /dev/Iomega -> sdc
+lrwxrwxrwx 1 root root 12 2011-02-23 12:36 /dev/Iomega0 -> bsg/14:0:0:0
+lrwxrwxrwx 1 root root  4 2011-02-23 12:36 /dev/Iomega1 -> sdc1
+lrwxrwxrwx 1 root root  3 2011-02-23 12:36 /dev/Iomega3 -> sg3
+
+   Please note that /dev/Iomega1 points to a /dev/sdc1, which is exactly the partition we are
+   interested in and we use it next to configure autofs.
+
+2. Setting up autofs
+
+   First we need to install autofs:
+# apt-get install autofs
+
+   Configuring autofs is rather simple task. All we need to do is to edit two simple files.
+
+   Let's start with master file by appending a following line:
+/media/   /etc/auto.ext-usb --timeout=10,defaults,user,exec,uid=1000
+
+   Next, edit /etc/auto.ext-usb file which we included in a master configuration file
+   configuration:
+Iomega            -fstype=auto           :/dev/Iomega1
+
+   Restart autofs:
+# /etc/init.d/autofs restart
+
+3. Testing autofs configuration
+
+   We are done! Every time you now plug in your external Iomega USB drive aufosf will add your
+   device to a list of Active Mount Points. Plugin your external USB drive now and execute:
+/etc/init.d/autofs status
+
+   OUTPUT:
+Configured Mount Points:
+------------------------
+/usr/sbin/automount --timeout=10 /media file /etc/auto.ext-usb ,defaults,user,exec,uid=1000
+
+Active Mount Points:
+--------------------
+/usr/sbin/automount --pid-file=/var/run/autofs/_media.pid --timeout=10\
+ /media file /etc/auto.ext-usb ,defaults,user,exec,uid=1000
+
+   and
+# mount
+
+   OUTPUT:
+automount(pid7124) on /media type autofs (rw,fd=4,pgrp=7124,minproto=2,maxproto=4)
+
+   Please note, although our drive is now listed as an active mount point the disk is not
+   mounted yet! autofs only waits for user to access specified mount point directory and once
+   that happens it will mount the filesystem.
+
+   Example:
+$ cd /media/
+$ ls
+$ cd Iomega
+$ ls
+lost.dir  music  picture  ps3  video mystuff
+$ cd ..
+$ ls
+Iomega
+
+   From the output above you can see that Iomega directory was created only when I tried to
+   access it. Every time you now plug in you USB external disk you can instantly access it via
+   some sort of Desktop or Bookmark shortcut. I hope this helps !
+

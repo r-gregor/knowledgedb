@@ -1,0 +1,123 @@
+filename: xrandr_x-brightness-settings_20160322.txt
+http://shallowsky.com/blog/linux/x-brightness-with-xrandr.html
+
+Changing X brightness and gamma with xrandr (Shallow Thoughts)
+
+   Akkana's Musings on Open Source Computing and Technology, Science, and Nature.
+
+Thu, 17 Mar 2016
+
+[2]Changing X brightness and gamma with xrandr
+   I switched a few weeks ago from unstable ("Sid") to testing ("Stretch") in the hope that my system,
+   particularly X, would break less often. The very next day, I updated and discovered I couldn't use my
+   system at night any more, because the program I use to [3]reduce the screen brightness by tweaking X
+   gamma no longer worked. Neither did other related programs, such as xgamma and xcalib.
+
+   The Dell monitor I use doesn't have reasonable hardware brightness controls: strangely, the
+   brightness button works when the monitor is connected over VGA, but if I want to use the sharper HDMI
+   connection, brightness adjustment no longer works. So I depend on software brightness adjustment in
+   order to use my computer at night when the room is dim.
+
+   Fortunately, it turns out there's a workaround. xrandr has options for both brightness and gamma:
+xrandr --output HDMI1 --brightness .5
+xrandr --output HDMI1 --gamma .5:.5:.5
+
+   I've always put xbrightness on a key, so I can use a function key to adjust brightness interactively
+   up and down according to conditions. So a command that sets brightness to .5 or .8 isn't what I need;
+   I need to get the current brightness and set it a little brighter or a little dimmer. xrandr doesn't
+   offer that, so I needed to script it.
+
+   You can get the current brightness with
+xrandr --verbose | grep -i brightness
+
+   But I was hoping there would be a more straightforward way to get brightness from a program. I looked
+   into Python bindings for xrandr; there are some, but with no documentation and no examples. After an
+   hour of fiddling around, I concluded that I could waste the rest of the day poring through the source
+   code and trying things hoping something would work; or I could spend fifteen minutes using
+   subprocess.call() to wrap the command-line xrandr.
+
+   So subprocesses it was. It made for a nice short script, much simpler than the old xbrightness C
+   program that used <X11/extensions/xf86vmode.h> and XF86VidModeGetGammaRampSize(): [4]xbright on
+   github:
+
+---
+scripts/xbright
+2c2a654  12 days ago
+@akkana akkana Script to use xrandr to adjust X brightness
+1 contributor
+RawBlameHistory     Executable File  73 lines (60 sloc)  2.21 KB
+
+<code>
+#!/usr/bin/env python
+
+# Change brightness incrementally using xrandr
+# since the older XF86VidModeSetGammaRamp() method no longer works.
+
+# Usage: xbright [val|+val|-val]
+# val is floating point and can go from 0 to 1 (or maybe higher?)
+
+import sys, os
+
+# There is an xrandr library for python:
+# from Xlib import X, display
+# from Xlib.ext import randr
+# but it has no documentation and no examples, so rather than spending
+# 2 days trying to figure out the API from reading the entire source,
+# I can spend 10 minutes and parse output from /usr/bin/xrandr instead:
+import subprocess
+XRANDR = "/usr/bin/xrandr"
+
+def get_brightness():
+    # xrandr --verbose | grep -i brightness
+    proc = subprocess.Popen([XRANDR, "--verbose"],
+                            shell=False, stdout=subprocess.PIPE)
+    s = proc.communicate()[0]
+    if not s:
+        print "No output from xrandr --verbose!"
+        sys.exit(1)
+
+    monitor = None
+    for line in s.split('\n'):
+        line = line.strip()
+        words = line.split()
+        if len(words) > 1 and words[1] == "connected":
+            monitor = words[0]
+        elif line.startswith("Brightness: "):
+            if not monitor:
+                print "Warning: couldn't tell which monitor to use"
+            return (float(line[12:]), monitor)
+    print "No Brightness line in xrandr --verbose!"
+    sys.exit(1)
+
+def set_brightness(new_brightness):
+    args = [ XRANDR ]
+    if monitor:
+        args.append("--output")
+        args.append(monitor)
+    args.append("--brightness")
+    args.append(str(new_brightness))
+    subprocess.call(args)
+
+def Usage():
+    print "Usage: %s [b | +b | -b]" % os.path.basename(sys.argv[0])
+    sys.exit(1)
+
+if __name__ == "__main__":
+    # We need to call cur_brightness even if we're setting an absolute
+    # brightness, because we need to get the relevant monitor.
+    cur_brightness, monitor = get_brightness()
+
+    if len(sys.argv) <= 1:
+        print "Currently brightness is", cur_brightness, "on monitor", monitor
+        print
+        Usage()
+
+    if sys.argv[1][0] == '-':
+        b = cur_brightness - float(sys.argv[1][1:])
+    elif sys.argv[1][0] == '+':
+        b = cur_brightness + float(sys.argv[1][1:])
+    else:
+        b = float(sys.argv[1])
+
+    set_brightness(b)
+</code>

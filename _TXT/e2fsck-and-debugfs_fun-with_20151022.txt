@@ -1,0 +1,230 @@
+filename: e2fsck-and-debugfs_fun-with_20151022.txt
+http://www.linux.com/community/blogs/129-servers/860868-fun-with-e2fsck-and-debugfs/
+
+Fun with e2fsck and debugfs
+
+Sunday, 18 October 2015 15:40	lakshmipathi	03 0
+Hello there,
+We are going to corrupt the system and then repair, restore sanity. Things we are going to do:
+
+fun1 → Corrupt the superblock.
+fun2 → Multiply owned block.
+fun3 → Corrupted inode.
+fun4 → Orphaned inode.
+
+Lets begin with perfectly working file system, which has say 10 files.
+mkfs.ext3 /dev/xvdb
+
+ Superblock backups stored on blocks:
+	32768, 98304, 163840, 229376, 294912, 819200, 884736
+
+Go ahead and mount it then create 10 files.
+mount /dev/xvdb /mnt
+
+for i in {1..10}; do echo "this is file$i" > /mnt/file$i.txt ; done
+Verify everything looks fine on mount point. Let the fun begin!
+
+Fun1: Attack Super block
+
+Our first task is to corrupt the super block. Run following command which will zero-out super block!
+dd if=/dev/zero of=/dev/xvdb count=1 bs=1024 seek=1
+above command,writes 0's on superblock location at offset 1024! Now lets try to mount it :
+umount /mnt && mount /dev/xvdb /mnt
+
+ mount: you must specify the filesystem type
+
+ 
+failed right? that's what we wanted :) Now how to fix this ? For cases like this ext3 has backup superblock
+(have look at above mkfs.ext3 output more closely!) All you need to do is tell mount command to use that
+copy of superblock.
+mount command expects block address in 1KB. so we need to convert our address like 98304 * 4 = 393216
+we will try again with alternate superblock option "-o sb=" now:
+mount -o sb=393216 /dev/xvdb /mnt
+Worked! Just go ahead and explore everything is fine on mountpoint!
+
+Fun 2: Multiply owned blocks - No, Its MY block!
+
+a Lets check out our existing file contents.
+cat /mnt/file1.txt /mnt/file2.txt
+
+this is file1
+this is file2
+
+We are going to corrupt file system in such way that file2.txt will also point to file1.txt content!!!!
+To modify file system structure, we will a command called debugfs - an ext2/ext3/ext4 file system debugger
+
+First fetch the data block address of file1.txt (i.e where 'this is file1' is stored).
+debugfs -s 98304 -b 4096 /dev/xvdb -w
+8debugfs: stat file1.txt
+
+ Inode: 12   Type: regular    Mode:  0644   Flags: 0x0
+Generation: 1325309953	  Version: 0x00000000
+User:	  0   Group:	 0   Size: 14
+File ACL: 0    Directory ACL: 0
+Links: 1   Blockcount: 8
+Fragment:  Address: 0	 Number: 0    Size: 0
+ctime: 0x561ff500 -- Thu Oct 15 18:48:32 2015
+atime: 0x561ff7f1 -- Thu Oct 15 19:01:05 2015
+mtime: 0x561ff500 -- Thu Oct 15 18:48:32 2015
+BLOCKS:
+(0):2048
+TOTAL: 1
+
+
+Okay, debugfs stat output tells us the file1.txt data block address is 2048
+
+Now lets point file2.txt to this block with another debugfs command named mi which is powerful command. It
+gives up ability to modify inode contents! run
+
+debugfs: mi file2.txt
+and keep pressing the enter key
+
+
+		       Mode    [0100644]
+		       User ID	  [0]
+		      Group ID	  [0]
+			  Size	  [14]
+		 Creation time	  [1444934912]
+	     Modification time	  [1444934912]
+		   Access time	  [1444935703]
+		 Deletion time	  [0]
+		    Link count	  [1]
+	      Block count high	  [0]
+
+
+until you reach Direct Block #0
+Here type file1.txt block address here (2048)
+
+	     Direct Block #0	[2049] 2048
+Now just press enter until debugfs
+
+debugfs: quit
+and quit. To summarize, we figure-out the block address (2048) of file1.txt with debugfs-stat command,
+then replaced file2.txt block address 2049 with 2048.
+By following unmounting and remounting - we ensure our above changes written to disk.
+umount /mnt
+
+mount -o sb=393216 /dev/xvdb /mnt -t ext3
+Now go head print file1.txt file2.txt
+cat /mnt/file1.txt /mnt/file2.txt
+
+this is file1
+this is file1
+
+I hope you can spot the difference between our previous file1.txt and file2.txt output ans this one,
+right? Now lets run fsck to repair this. Since we can't run file system checker (fsck) on mounted partitions
+umount /mnt
+e2fsck /dev/xvdb
+
+ e2fsck 1.41.12 (17-May-2010)
+e2fsck: Superblock invalid, trying backup blocks...
+/dev/xvdb was not cleanly unmounted, check forced.
+Pass 1: Checking inodes, blocks, and sizes
+
+Running additional passes to resolve blocks claimed by more than one inode...
+Pass 1B: Rescanning for multiply-claimed blocks
+Multiply-claimed block(s) in inode 12: 2048
+Multiply-claimed block(s) in inode 13: 2048
+Pass 1C: Scanning directories for inodes with multiply-claimed blocks
+Pass 1D: Reconciling multiply-claimed blocks
+(There are 2 inodes containing multiply-claimed blocks.)
+
+File /file1.txt (inode #12, mod time Thu Oct 15 18:48:32 2015)
+  has 1 multiply-claimed block(s), shared with 1 file(s):
+	/file2.txt (inode #13, mod time Thu Oct 15 18:48:32 2015)
+Clone multiply-claimed blocks? yes
+
+
+Hey! see it figures our file1.txt and file2.txt has shared block 2038 which is wrong. It prompts how to
+deal with this case, we indeed cloned it.
+Now it go on to update other book keeping entries: Just say yes to them.
+
+
+lock bitmap differences:  -2049
+Fix? yes
+Free blocks count wrong for group #0 (31863, counted=31853).
+Fix? yes
+Free blocks count wrong (1512305, counted=1512295).
+Fix? yes
+Free inodes count wrong for group #0 (8181, counted=8171).
+Fix? yes
+Free inodes count wrong (393205, counted=393195).
+Fix? yes
+
+Fun 3: Corrupt permission/type - can you fix it?
+
+
+Lets use debugfs again, open the drive with debugfs -this time we are going corrupt file 'mode' with
+modify inode option.
+debugfs: mi file3.txt
+
+Mode	[0100644] 0
+//keep pressing enter key
+and then quit debugfs.
+debugfs: quit
+unmount and mount again if needed, and do:
+ls -l /mnt/file3.txt
+
+ ?---------. 1 root root 14 Oct 15 18:48 /mnt/file3.txt
+
+
+hihi :) can you see that, we corrupted file permission!!!
+I want you to fix this 'mode' with debugfs mi. If you are wondering what values to put, just look
+above..no,not the sky :p just scroll above for original mode values
+
+Fun 4: Sad, Orphaned inodes
+
+You might have seen this error message sometimes, lets recreate it. we will create 2 files on a new
+directory 'dir1'
+mkdir /mnt/dir1
+
+ echo "this is file-a" > /mnt/dir1/a
+echo "this is file-b" > /mnt/dir1/b
+
+
+with the help of debugfs,we will corrupt dir1 entries!
+debugfs clri dir1
+
+what this will do is unlink the chain between directory and its file. Now go back and list ls -l /mnt/dir1
+won't show this file. You get error like
+
+ls: cannot access /mnt/dir1: Input/output error
+Remember file 'a' and 'b' are not deleted. Its laying on our file system without any directory pointing
+to it.
+If we run e2fcck now, it will find these orphaned inodes and put it under lost+found . So ahead and run
+it, you get message like
+
+ Pass 4: Checking reference counts
+Inode 2 ref count is 4, should be 3.  Fix? yes
+ Unattached inode 32770
+Connect to /lost+found? yes
+Inode 32770 ref count is 2, should be 1.  Fix? yes
+Unattached inode 32771
+Connect to /lost+found? yes
+Inode 32771 ref count is 2, should be 1.  Fix? yes
+
+e2fsck has done its job, lets go ahead and explore the end result.
+ls -l /mnt/lost+found/
+
+ total 8
+-rw-r--r-- 1 root root 15 Oct 15 20:28 #32770
+-rw-r--r-- 1 root root 15 Oct 15 20:28 #32771
+Verify the content of files:
+cat \#32770
+
+ this is file-a
+cat \#32771
+
+ this is file-b
+Can you guess the how these filename are created?
+
+Think..think..
+
+hmm..No? Have a close look at our e2fsck output. Yes, these the inode numbers of 'a' and 'b'.
+
+That's it, I hope you learned new corruption tricks, please feel free try these corruption on your
+production system^
+
+^  Disclaimer : I'm not responsible, if you get fired!
+
+

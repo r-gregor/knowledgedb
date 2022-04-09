@@ -1,0 +1,946 @@
+filename: lvm_multif_20151020.txt
+https://wiki.ubuntu.com/Lvm
+
+Lvm
+
+What is LVM
+LVM stands for Logical Volume Management. It is a system of managing logical volumes, or filesystems,
+that is much more advanced and flexible than the traditional method of partitioning a disk into one or
+more segments and formatting that partition with a filesystem.
+
+Why use LVM?
+For a long time I wondered why anyone would want to use LVM when you can use gparted to resize and move
+partitions just fine. The answer is that lvm can do these things better, and some nifty new things that
+you just can't do otherwise. I will explain several tasks that lvm can do and why it does so better than
+other tools, then how to do them. First you should understand the basics of lvm.
+
+The Basics
+There are 3 concepts that LVM manages:
+
+Volume Groups
+Physical Volumes
+Logical Volumes
+A Volume Group is a named collection of physical and logical volumes. Typical systems only need one Volume
+Group to contain all of the physical and logical volumes on the system, and I like to name mine after
+the name of the machine. Physical Volumes correspond to disks; they are block devices that provide the
+space to store logical volumes. Logical volumes correspond to partitions: they hold a filesystem. Unlike
+partitions though, logical volumes get names rather than numbers, they can span across multiple disks,
+and do not have to be physically contiguous.
+
+The Specifics
+One of the biggest advantages LVM has is that most operations can be done on the fly, while the system
+is running. Most operations that you can do with gparted require that the partitions you are trying to
+manipulate are not in use at the time, so you have to boot from the livecd to perform them. You also
+often run into the limits of the msdos partition table format with gparted, including only 4 primary
+partitions, and all logical partitions must be contained within one contiguous extended partition.
+
+Resizing Partitions
+With gparted you can expand and shrink partitions, but only if they are not in use. LVM can expand a
+partition while it is mounted, if the filesystem used on it also supports that ( like the usual ext3/4
+). When expanding a partition, gparted can only expand it into adjacent free space, but LVM can use free
+space anywhere in the Volume Group, even on another disk. When using gparted, this restriction often
+means that you must move other partitions around to make space to expand one, which is a very time
+consuming process that can result in massive data loss if it fails or is interrupted ( power loss ).
+
+Moving Partitions
+Moving partitions with gparted is usually only necessary in the first place because of the requirement
+that partitions be physically contiguous, so you probably won't ever need to do this with LVM. If you
+do, unlike gparted, LVM can move a partition while it is in use, and will not corrupt your data if it
+is interrupted. In the event that your system crashes or loses power during the move, you can simply
+restart it after rebooting and it will finish normally. When I got my SSD drive, I simply plugged it
+in, booted it up, and asked lvm to move my running root filesystem to the new drive in the background
+while I continued working. Another reason you might want to move is to replace an old disk with a new,
+larger one. You can migrate the system to the new disk while using it, and then remove the old one later.
+
+Many Partitions
+If you like to test various Linux distributions, or just different version of Ubuntu, or both, you can
+quickly end up with quite a few partitions. With conventional msdos partitions, this becomes problematic
+due to its limitations. With LVM you can create as many Logical Volumes as you wish, and it is usually
+quite easy since you usually have plenty of free space left. Usually people allocate the entire drive
+to one partition when they first install, but since extending a partition is so easy with LVM, there is
+no reason to do this. It is better to allocate only what you think you will need, and leave the rest of
+the space free for future use. If you end up running out of the initial allocation, adding more space
+to that volume is just one command that completes immediately while the system is running normally.
+
+Snapshots
+This is something you simply can not do without LVM. It allows you freeze an existing Logical Volume
+in time, at any moment, even while the system is running. You can continue to use the original volume
+normally, but the snapshot volume appears to be an image of the original, frozen in time at the moment
+you created it. You can use this to get a consistent filesystem image to back up, without shutting down
+the system. You can also use it to save the state of the system, so that you can later return to that
+state if you mess things up. You can even mount the snapshot volume and make changes to it, without
+affecting the original.
+
+The Details
+So how do I start using LVM?
+The alternate installer has the ability to set up and install to LVM, and is the supported way of doing
+so. You can install the lvm2 package on an existing system, or the desktop livecd and manually set it up,
+and then install to it. This is what I will cover. (Ubuntu 12.10 has since introduced LVM support from
+the installation live CD.)
+
+First, you need a Physical Volume. Typically you start with a hard disk, and create an LVM type partition
+on it. You can create one with gparted or fdisk, and usually only want one partition to use the whole
+disk, since LVM will handle subdividing it into Logical Volumes. In gparted, you need to check the lvm
+flag when creating the partition, and with fdisk, tag the type with code 8e.
+
+Once you have your LVM partition, you need to initialize it as a Physical Volume. Assuming this partition
+is /dev/sda1:
+
+sudo pvcreate /dev/sda1
+
+This writes the LVM header to the partition, which identifies it as a Physical Volume, and sets up a
+small area to hold the metadata describing everything about the Volume Group, and the the rest of the
+partition as unused Physical Extents. After that, you need to create a Volume Group named foo:
+
+sudo vgcreate foo /dev/sda1
+
+Now you have a Volume Group named foo. I suggest you change foo to a name meaningful to you. foo contains
+only one Physical Volume. Now you want to create a Logical Volume from some of the free space in foo:
+
+ sudo lvcreate -n bar -L 5g foo
+
+This creates a Logical Volume named bar in Volume Group foo using 5 GB of space. If you are installing,
+you probably want to create a Logical Volume like this to use as a root filesystem, and one for swap,
+and maybe one for /home. I currently have a Logical Volume for a Lucid install, and one for a Maverick
+install, so that is what I named those volumes. You can find the block device for this Logical Volume in
+'/dev/foo/bar' or 'dev/mapper/foo-bar'.
+
+You might also want to try the lvs and pvs commands, which list the Logical Volumes and Physical Volumes
+respectively, and their more detailed variants; lvdisplay and pvdisplay.
+
+If you are doing this from the desktop livecd, once you have created your Logical Volumes from the
+terminal, you can run the installer, and use manual partitioning to select how to use each Logical Volume,
+and then install.
+
+Resizing Partitions
+You can extend a Logical Volume with:
+
+ sudo lvextend -L +5g foo/bar
+
+This will add 5 GB to the bar Logical Volume in the foo Volume Group. You can specify an absolute size
+if you want instead of a relative size by omitting the leading +. The space is allocated from any free
+space anywhere in the bar Volume Group. If you have multiple Physical Volumes you can add the names of
+one or more of them to the end of the command to limit which ones should be used to satisfy the request.
+
+After extending the Logical Volume you need to expand the filesystem to use the new space. For ext 3/4,
+you simply run:
+
+ sudo resize2fs /dev/foo/bar
+
+Moving Partitions
+If you only have one Physical Volume then you probably will not ever need to move, but if you add a new
+disk, you might want to. To move the Logical Volume bar off of Physical Volume /dev/sda1, you run:
+
+ sudo pvmove -n bar /dev/sda1
+
+If you omit the -n bar argument, then all Logical Volumes on the /dev/sda1 Physical Volume will be moved. If
+you only have one other Physical Volume, then that is where it will be moved to, or you can add the name of
+one or more specific Physical Volumes that should be used to satisfy the request, instead of any Physical
+Volume in the Volume Group with free space. This process can be resumed safely if interrupted by a crash
+or power failure, and can be done while the Logical Volume(s) in question are in use. You can also add -b
+to perform the move in the background and return immediately, or -i s to have it print how much progress
+it has made every s seconds. If you background the move, you can check its progress with the lvs command.
+
+Snapshots
+When you create a snapshot, you create a new Logical Volume to act as a clone of the original Logical
+Volume. The snapshot volume initially does not use any space, but as changes are made to the original
+volume, the changed blocks are copied to the snapshot volume before they are changed, in order to preserve
+them. This means that the more changes you make to the origin, the more space the snapshot needs. If
+the snapshot volume uses all of the space allocated to it, then the snapshot is broken and can not be
+used any more, leaving you only with the modified origin. The lvs command will tell you how much space
+has been used in a snapshot Logical Volume. If it starts to get full, you might want to extend it with
+the lvextend command. To create a snapshot of the bar Logical Volume and name it snap, run:
+
+ sudo lvcreate -s -n snap -L 5g foo/bar
+
+This will create a snapshot named snap of the original Logical Volume bar and allocate 5 GB of space for
+it. Since the snapshot volume only stores the ares of the disk that have changed since it was created,
+it can be much smaller than the original volume. I recently used a 5 GB snapshot of a 12 GB Logical
+Volume holding my Maverick root filesystem and ran an dist-upgrade to Natty on the origin, which only
+used about 50-60% of the snapshot space.
+
+While you have the snapshot, you can mount it if you wish and will see the original filesystem as it appeared
+when you made the snapshot. In the above example you would mount the /dev/foo/snap device. You can modify
+the snapshot without affecting the original, and the original without affecting the snapshot. If you take
+a snapshot of your root Logical Volume, and then upgrade some packages, or to the next whole distribution
+release, and then decide it isn't working out, you can merge the snapshot back into the origin volume,
+effectively reverting to the state at the time you made the snapshot. To do this, you simply run:
+
+ sudo lvconvert --merge foo/snap
+
+IconsPage/info.png
+Note that this requires a more recent version of LVM than ships with Maverick. You can get one from my
+ppa by running sudo apt-add-repository ppa:psusi/ppa then installing/upgrading the lvm2 package.
+If the origin volume of foo/snap is in use, it will inform you that the merge will take place the next
+time the volumes are activated. If this is the root volume, then you will need to reboot for this to
+happen. At the next boot, the volume will be activated and the merge will begin in the background, so
+your system will boot up as if you had never made the changes since the snapshot was created, and the
+actual data movement will take place in the background while you work.
+
+
+
+---
+https://help.ubuntu.com/community/SettingUpLVM-WithoutACleanInstall
+
+SettingUpLVM-WithoutACleanInstall
+
+Introduction
+This HowTo explains how to setup LVM (Logical Volume Management) on an existing system. The typical way
+of setting up LVM on Ubuntu is to use the alternative installation CD to wipe your whole hard drive and
+setup LVM. Instead of starting from scratch with a clean system, we're going to add LVM to your already
+running Ubuntu. Smile :-)
+
+This has been tested on Ubuntu 7.04 (Feisty Fawn) through 8.04 (Hardy Heron), but should work on previous
+releases.
+
+An alternative option is to use blocks to-lvm, which does an automated in-place conversion.
+
+Installation
+Backup your data!!
+
+Map out your goals for LVM. Do you just want some expandable space for media files? Do you want to move
+your /home into LVM? Do you want to move everything under LVM? If you want to put everything under LVM,
+you should create a separate /boot partition (100MB should be fine) - otherwise you may not be able to
+boot your system.
+You're going to need some free space to setup your volume groups. You can use:
+Free space on your primary hard drive.
+A partition that you are not using any more. (such as the Windows partion you haven't booted in 6 months,
+that is what Qemu/VMWare are for isn't it??)
+A new blank hard drive you've added to your system.
+Format your free space/partition/new drive using your favorite disk management tool to "Linux LVM". Also
+use some of this space to create your separate /boot partition (100MB, ext3, bootable flag) if you are
+planning on putting everything under LVM.
+Now that you have an LVM partition you can create your volume groups on. Note that you don't need a
+single large partition formated to Linux LVM, you can format as many smaller LVM partitions as you like,
+and combine them into a single filesystem using the power of LVM later - this is the preferred method
+as it allows more flexibility.
+Install "lvm2" from the Ubuntu repositories. ("sudo aptitude install lvm2")
+Optionally install "system-config-lvm". Here: http://ubuntuforums.org/showthread.php?t=216117 is a forum
+thread on how to install it from Fedora RPM, (its not available in Ubuntu repositories.)
+
+Load the LVM module - modprobe dm-mod. You can skip this step in Jaunty (9.04) because the dm-mod module
+is compiled into the kernel.
+
+If that works without any errors, you can go ahead and add dm-mod to the end of your /etc/modules file
+(sudo nano /etc/modules). This will autoload LVM when Ubuntu starts - very important if you plan on
+moving your system directories under LVM.
+Configuration
+Code Listing 2.2: Activating LVM
+
+(Avoid scanning all devices but our disks)
+
+
+#sudo nano -w /etc/lvm/lvm.conf
+(Look for the following line)
+
+filter = [ "a/.*/" ]
+(Replace it with the following one to scan /dev/hda and /dev/hdb and reject anything else)
+
+filter = [ "a|/dev/hd[ab]|", "r/.*/" ]
+(Save the file and quit nano) NOTE: The default setup of Ubuntu 7.04 LVM2 already has this setup correctly.
+
+#sudo vgscan
+Reading all physical volumes.  This may take a while...
+No volume groups found
+(Make any previously set up volume groups available)
+
+#sudo vgchange -a y
+Prepare the partitions.
+
+Preparing the partitions
+
+# sudo pvcreate /dev/hda4 /dev/hdb1
+No physical volume label read from /dev/hda4
+Physical volume "/dev/hda4" successfully created
+No physical volume label read from /dev/hdb1
+Physical volume "/dev/hdb1" successfully created
+Setup a volume group. A volume group is the result of combining several physical units into a single
+logical device.
+
+In our example, /dev/hda1, /dev/hda2 and /dev/hda3 are the /boot, swap and root partitions so we need
+to combine /dev/hda4 and /dev/hdb1. It can be done with a single command, but, as an example, we will
+create our volume group and extend it.
+
+Code Listing 2.4: Creating and extending a volume group
+
+(Create a volume group named vg)
+
+# sudo vgcreate vg /dev/hda4
+/etc/lvm/backup: fsync failed: Invalid argument (Ignore this warning)
+Volume group "vg" successfully created
+(Extending an existing volume group)
+# sudo vgextend vg /dev/hdb1
+/etc/lvm/backup: fsync failed: Invalid argument (Ignore this warning, again and later as well)
+Volume group "vg" successfully extended
+Create the logical volumes. Logical volumes are the equivalent of partitions you would create using
+fdisk in a non LVM2 environment. In our example, we create the following partitions:
+
+Directory  Size
+/usr       10 GB
+/home      5 GB
+/opt       5 GB
+/var       10 GB
+/tmp       2 GB
+
+Since we are going to use LVM2, we should not worry too much about partition sizes because they can
+always be expanded as needed. However, it is easier to enlarge partitions than it is to shrink them,
+so it is best to start smaller and add space as needed.
+
+Creating and extending logical volumes
+
+# sudo lvcreate -L10G -nusr  vg
+Logical volume "usr" created (Further similar messages not displayed)
+# sudo lvcreate -L5G  -nhome vg
+# sudo lvcreate -L5G  -nopt  vg
+# sudo lvcreate -L10G -nvar  vg
+# sudo lvcreate -L2G  -ntmp  vg
+(As an example, let's extend a logical volume with 5 extra Gbytes)
+
+# sudo lvextend -L+5G /dev/vg/home
+Create filesystems on the logical volumes the same way you would on a regular partition. We use ext3 on
+the logical volumes but any filesystem of your choice will work:
+
+Creating the filesystems:
+
+# sudo mke2fs -j /dev/vg/usr
+# sudo mke2fs -j /dev/vg/home
+# sudo mke2fs -j /dev/vg/opt
+# sudo mke2fs -j /dev/vg/var
+# sudo mke2fs -j /dev/vg/tmp
+
+Mount your partitions as described in the handbook and mount your LVM2 logical volumes as if they were
+partitions. Replace the usual /dev/hdxx with /dev/vg/logical_volumename.
+
+Code Listing 2.7: Mounting your logical volumes
+
+(Make sure you have mounted your root partition as described in the handbook first)
+
+# sudo mkdir /mnt/ubuntu/usr
+# sudo mount /dev/vg/usr /mnt/ubuntu/usr
+# sudo mkdir /mnt/ubuntu/home
+# sudo mount /dev/vg/home /mnt/ubuntu/home
+# sudo mkdir /mnt/ubuntu/opt
+# sudo mount /dev/vg/opt /mnt/ubuntu/opt
+# sudo mkdir /mnt/ubuntu/var
+# sudo mount /dev/vg/var /mnt/ubuntu/var
+# sudo mkdir /mnt/ubuntu/tmp
+# sudo mount /dev/vg/tmp /mnt/ubuntu/tmp
+
+NOTE: These mount points are for testing purposes. After you have copied /usr to /mnt/ubuntu/usr,
+(and also for home, opt, var, tmp, etc), You can change your /etc/fstab mount points to permantent paths.
+
+For a nice GUI, you can run system-config-lvm from the shell. This will let you manage your LVM volume
+groups more easily. However, be careful, as changes are made immediately and you don't want to accidentally
+wipe your data.
+
+Acknowledgements
+Much of this HowTo was copied from the Gentoo Documentation and modified for
+Ubuntu. http://www.gentoo.org/doc/en/lvm2.xml
+
+
+
+---
+http://www.ovaistariq.net/638/on-lvm-how-to-setup-volume-groups-and-logical-volumes/
+
+On LVM: How to setup Volume Groups and Logical Volumes.
+
+
+LVM (Logical Volume Management) is a very important tool to have in the toolkit of a MySQL DBA. It
+allows you to create and extend logical volumes on the fly. This allows me to, say, add another disk
+and extend a partition effortlessly. The other very important feature is the ability to take snapshots,
+that you can then use for backups. All in all its a must have tool. Hence, this guide will allow you
+to understand various terminologies associated with LVM, together with setting up LVM volumes and in a
+later part will also show you how to extend the volumes.
+
+But first up let’s understand various terminologies associated with LVM.
+
+Terminologies
+
+There are three terminologies that you need to be familiar with before you start working with LVM.
+
+Physical Volume: Physical Volumes are actual hard-disks or partitions, that you normally mount or unmount
+on a directory.
+Volume Group: Volume Group is a group of multiple hard-disks or partitions that act as one. Volume Group
+is what is actually divided into logical volumes. In layman terms Volume Group is a logical hard-disk,
+which abstracts the fact that it is built from combining multiple harddisks or partitions.
+Logical Volume: Logical Volumes are actual partitions created on top of the Volume Group. These are what
+will be mounted on your system.
+The beauty of this whole system is that volume groups and logical volumes can created, resized, destroyed
+on the fly. Say, for example, you are nearly filled up your hard-disk and you want to extend the storage
+space by adding another hard-disk, then you can simply extend the volume group to include that hard-disk,
+and then extend the logical volume as well. Examples of these scenarios will be shown soon.
+
+Now let’s get our hand dirty, setting up LVM groups and volumes.
+
+Creating Volume Group and Logical Volumes
+
+Before we start making any changes let’s have a look at the partition table of our hard-disk.
+
+$ fdisk -l
+The output will be similar to something like the following:
+
+Disk /dev/sda: 10.7 GB, 10737418240 bytes
+255 heads, 63 sectors/track, 1305 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x00095aaf
+
+Device      Boot      Start     End     Blocks    Id    System
+/dev/sda1             1         63      498688    82    Linux swap / Solaris
+/dev/sda2    *        63        125     499712    83    Linux
+/dev/sda3             125       611     3906560   83    Linux
+/dev/sda4             611       1305    5576428+  83    Linux
+
+Now, lets use the partition /dev/sda4 for setting up the Volume Group.
+
+But before proceeding further you need to have the package lvm2 installed. On debian/ubuntu systems do
+the following
+$ apt-get install lvm2
+
+Now following are the steps to creating a volume group and logical volumes:
+
+Initializing the partition
+
+The first thing to do is to initialize the partition to be able to work with LVM, for that do the following
+$ pvcreate /dev/sda4
+
+The output will be similar to the following:
+Physical volume "/dev/sda4" successfully created
+
+Creating a Volume Group
+
+Now that we have the partition ready to be used by LVM, lets create a volume group named system
+$ vgcreate system /dev/sda4
+
+The output will be similar to the following:
+Volume group "system" successfully created
+
+Execute the following command to see the volume group created and its details:
+$ vgs
+
+The output will be similar to the following:
+  VG     #PV #LV #SN Attr   VSize VFree
+  system   1   0   0 wz--n- 5.32g 5.32g
+  
+Creating Logical Volumes
+Now lets create two logical volumes named logs and mysql, both having sizes of 2GB each.
+$ lvcreate -n logs -L 2g system
+$ lvcreate -n mysql -L 2g system
+
+Now lets see the details of the logical volumes:
+$ lvs
+
+The output will be similar to the following:
+  LV    VG     Attr   LSize Origin Snap%  Move Log Copy%  Convert
+  logs  system -wi-a- 2.00g
+  mysql system -wi-a- 2.00g
+  
+Making the logical volumes usable
+Now lets make these volumes usable, by creating filesystems and mounting them on appropriate directories.
+
+Let’s first create filesystems.
+
+$ mkfs.ext4 /dev/system/logs
+$ mkfs.ext4 /dev/system/mysql
+
+Note that I am creating ext4 filesystems. The other important thing to note in the commands executed is
+that the path to the volumes are actually:
+/dev/volume_group_name/logical_volume_name
+
+Since, we named the volume group system and the logical volumes logs and mysql, hence the above paths.
+
+Now lets mount the logical volumes on appropriate partitions.
+$ mkdir /var/logs
+$ mkdir /var/lib/mysql
+$ mount /dev/system/logs /var/logs/
+$ mount /dev/system/mysql /var/lib/mysql/
+
+Now execute the following command to see the logical volumes actually mounted,
+$ df -h
+
+The output is going to be something similar to the following,
+
+Filesystem                Size  Used Avail Use% Mounted on
+/dev/sda3                 3.7G  695M  2.9G  20% /
+none                      117M  216K  117M   1% /dev
+none                      122M     0  122M   0% /dev/shm
+none                      122M   36K  122M   1% /var/run
+none                      122M     0  122M   0% /var/lock
+/dev/sda2                 473M   30M  419M   7% /boot
+/dev/mapper/system-logs   2.0G   67M  1.9G   4% /var/logs
+/dev/mapper/system-mysql  2.0G   67M  1.9G   4% /var/lib/mysql
+
+Although we have successfully mounted the volumes, but we have not yet told the OS to mount the volumes
+on system startup. So in the final step, its just what we are going to do.
+
+Mounting the volumes on system startups
+The final step is now to configure the system to remount the logical volumes on system reboots, for the
+you will need to edit /etc/fstab. I will use my favourite editor vim,
+$ vim /etc/fstab
+
+and append the following entries to the end of the file:
+/dev/system/logs /var/logs ext4 noatime 0 2
+/dev/system/mysql /var/lib/mysql ext4 noatime 0 2
+
+And we are done setting up LVM. See how easy that was! In the next part of this tutorial we will have
+a look at how to extend existing Volume Groups and Logical Volumes. See you then!
+
+
+
+---
+http://ostechnix.com/2013/02/03/linux-basics-lvm-logical-volume-manager-tutorial/
+
+Linux Basics – LVM (Logical Volume Manager) Tutorial
+
+Logical Volume Manager (LVM);
+LVM is a tool for logical volume management which is used to allocating disks, striping, mirroring and
+resizing logical volumes. With LVM, a hard drive or set of hard drives is allocated to one or more
+physical volumes. LVM physical volumes can be placed on other block devices which might span two or
+more disks. Since a physical volume cannot span over multiple drives, to span over more than one drive,
+create one or more physical volumes per drive. The volume groups can be divided into logical volumes,
+which are assigned mount points, such as /home and / and file system types, such as ext2 or ext3 or
+ext4. When “partitions” reach their full capacity, free space from the volume group can be added to
+the logical volume to increase the size of the partition. When a new hard drive is added to the system,
+it can be added to the volume group, and partitions that are logical volumes can be increased in size.
+
+On the other hand, if a system is partitioned with the ext4 file system, the hard drive is divided
+into partitions of defined sizes. If a partition becomes full, it is not easy to expand the size of the
+partition. Even if the partition is moved to another hard drive, the original hard drive space has to
+be reallocated as a different partition or not used.
+In this how-to tutorial let us learn some basics of LVM commands.
+
+Scenario:
+In this example let us
+
+Create 3 partitions of size each 100MB.
+Convert them into physical  volumes.
+Combine physical volumes into volume group.
+Finally create a logical volume from the volume group.
+Create Partitions
+Use fdisk command to create and manage partions.
+
+To view the existing partitions use following command
+[root@server ~]# fdisk -l
+
+Disk /dev/sdb: 8589 MB, 8589934592 bytes
+255 heads, 63 sectors/track, 1044 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x0007b12c
+   Device Boot      Start         End      Blocks   Id  System
+Disk /dev/sda: 8589 MB, 8589934592 bytes
+255 heads, 63 sectors/track, 1044 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x000ac451
+   Device Boot      Start         End      Blocks   Id  System
+/dev/sda1   *           1         128     1024000   83  Linux
+Partition 1 does not end on cylinder boundary.
+/dev/sda2             128         291     1310720   82  Linux swap / Solaris
+Partition 2 does not end on cylinder boundary.
+/dev/sda3             291        1045     6052864   83  Linux
+
+The above output shows us two physical hard disks. The /dev/sda contains three partitions and no space
+to create additional partions. And the second drive /dev/sdb contains no partions yet. So let us use
+the second one in this tutorial.
+
+Now let us create three partions of each size 100MB using fdisk command.
+[root@server ~]# fdisk /dev/sdb
+
+WARNING: DOS-compatible mode is deprecated. It's strongly recommended to
+         switch off the mode (command 'c') and change display units to
+         sectors (command 'u').
+Command (m for help): n
+Command action
+   e   extended
+   p   primary partition (1-4)
+p
+Partition number (1-4): 1
+First cylinder (1-1044, default 1):
+Using default value 1
+Last cylinder, +cylinders or +size{K,M,G} (1-1044, default 1044): +100M
+Command (m for help): n
+Command action
+   e   extended
+   p   primary partition (1-4)
+p
+Partition number (1-4): 2
+First cylinder (15-1044, default 15):
+Using default value 15
+Last cylinder, +cylinders or +size{K,M,G} (15-1044, default 1044): +100M
+Command (m for help): n
+Command action
+   e   extended
+   p   primary partition (1-4)
+p
+Partition number (1-4): 3
+First cylinder (29-1044, default 29):
+Using default value 29
+Last cylinder, +cylinders or +size{K,M,G} (29-1044, default 1044): +100M
+
+To check whether the partions have been created use the parameter “p”.
+Command (m for help): p
+
+Disk /dev/sdb: 8589 MB, 8589934592 bytes
+255 heads, 63 sectors/track, 1044 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x0007b12c
+   Device Boot      Start         End      Blocks   Id  System
+/dev/sdb1               1          14      112423+  83  Linux
+/dev/sdb2              15          28      112455   83  Linux
+/dev/sdb3              29          42      112455   83  Linux
+
+Save the newly created partions.
+Command (m for help): w
+
+The partition table has been altered!
+Calling ioctl() to re-read partition table.
+Syncing disks.
+
+Update the kernel to save the changes without restarting the system.
+[root@server ~]# partprobe
+
+Warning: WARNING: the kernel failed to re-read the partition table on /dev/sda (Device or resource busy).
+As a result, it may not reflect all of your changes until after reboot.
+
+Again we will check the existing partitions using fdisk command.
+[root@server ~]# fdisk -l
+
+Disk /dev/sdb: 8589 MB, 8589934592 bytes
+255 heads, 63 sectors/track, 1044 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x0007b12c
+   Device Boot      Start         End      Blocks   Id  System
+/dev/sdb1               1          14      112423+  83  Linux
+/dev/sdb2              15          28      112455   83  Linux
+/dev/sdb3              29          42      112455   83  Linux
+Disk /dev/sda: 8589 MB, 8589934592 bytes
+255 heads, 63 sectors/track, 1044 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x000ac451
+   Device Boot      Start         End      Blocks   Id  System
+/dev/sda1   *           1         128     1024000   83  Linux
+Partition 1 does not end on cylinder boundary.
+/dev/sda2             128         291     1310720   82  Linux swap / Solaris
+Partition 2 does not end on cylinder boundary.
+/dev/sda3             291        1045     6052864   83  Linux
+
+The above output shows three partions has been created in the /dev/sdb disk. If fdisk -l doesn’t show
+the output reboot to take effect.
+
+Create Physical Volumes
+Note: If you had installed the server in the minimal mode, the commands pvcreate, lvcreate, vgcreate etc.,
+couldn’t be found. To use that commands install the lvm2 package first.
+[root@server ~]# yum install lvm2
+
+Loaded plugins: rhnplugin
+This system is not registered with RHN.
+RHN support will be disabled.
+Setting up Install ProcessThe
+Resolving Dependencies
+--> Running transaction check
+---> Package lvm2.i686 0:2.02.72-8.el6 set to be updated
+--> Processing Dependency: lvm2-libs = 2.02.72-8.el6 for package: lvm2-2.02.72-8.el6.i686
+--> Processing Dependency: libdevmapper-event.so.1.02(Base) for package: lvm2-2.02.72-8.el6.i686
+--> Processing Dependency: libdevmapper-event.so.1.02 for package: lvm2-2.02.72-8.el6.i686
+--> Running transaction check
+---> Package device-mapper-event-libs.i686 0:1.02.53-8.el6 set to be updated
+---> Package lvm2-libs.i686 0:2.02.72-8.el6 set to be updated
+--> Processing Dependency: device-mapper-event >= 1.02.53-8.el6 for package: lvm2-libs-2.02.72-8.el6.i686
+--> Running transaction check
+---> Package device-mapper-event.i686 0:1.02.53-8.el6 set to be updated
+--> Finished Dependency Resolution
+Dependencies Resolved
+================================================================================
+ Package                      Arch     Version              Repository     Size
+================================================================================
+Installing:
+ lvm2                         i686     2.02.72-8.el6        localrepo     514 k
+Installing for dependencies:
+ device-mapper-event          i686     1.02.53-8.el6        localrepo      79 k
+ device-mapper-event-libs     i686     1.02.53-8.el6        localrepo      74 k
+ lvm2-libs                    i686     2.02.72-8.el6        localrepo     565 k
+Transaction Summary
+================================================================================
+Install       4 Package(s)
+Upgrade       0 Package(s)
+Total download size: 1.2 M
+Installed size: 2.5 M
+Is this ok [y/N]: y
+Downloading Packages:
+--------------------------------------------------------------------------------
+Total                                            11 MB/s | 1.2 MB     00:00
+Running rpm_check_debug
+Running Transaction Test
+Transaction Test Succeeded
+Running Transaction
+  Installing     : device-mapper-event-libs-1.02.53-8.el6.i686              1/4
+  Installing     : device-mapper-event-1.02.53-8.el6.i686                   2/4
+  Installing     : lvm2-libs-2.02.72-8.el6.i686                             3/4
+  Installing     : lvm2-2.02.72-8.el6.i686                                  4/4
+Installed:
+  lvm2.i686 0:2.02.72-8.el6
+Dependency Installed:
+  device-mapper-event.i686 0:1.02.53-8.el6
+  device-mapper-event-libs.i686 0:1.02.53-8.el6
+  lvm2-libs.i686 0:2.02.72-8.el6
+Complete!
+
+Now create physical volumes using the command pvcreate.
+[root@server ~]# pvcreate /dev/sdb1 /dev/sdb2 /dev/sdb3
+
+  Physical volume "/dev/sdb1" successfully created
+  Physical volume "/dev/sdb2" successfully created
+  Physical volume "/dev/sdb3" successfully created
+  
+To verify the newly created physical volumes use the command pvdisplay.
+[root@server ~]# pvdisplay
+
+  "/dev/sdb1" is a new physical volume of "109.79 MiB"
+  --- NEW Physical volume ---
+  PV Name               /dev/sdb1
+  VG Name
+  PV Size               109.79 MiB
+  Allocatable           NO
+  PE Size               0
+  Total PE              0
+  Free PE               0
+  Allocated PE          0
+  PV UUID               jQl5F4-DyLj-SkHu-4lhZ-J3nQ-zax9-aT8sc4
+
+  "/dev/sdb2" is a new physical volume of "109.82 MiB"
+  --- NEW Physical volume ---
+  PV Name               /dev/sdb2
+  VG Name
+  PV Size               109.82 MiB
+  Allocatable           NO
+  PE Size               0
+  Total PE              0
+  Free PE               0
+  Allocated PE          0
+  PV UUID               i4MHvw-8hYB-Fwz8-fxTL-G3mu-fl5E-zGYhDO
+
+  "/dev/sdb3" is a new physical volume of "109.82 MiB"
+  --- NEW Physical volume ---
+  PV Name               /dev/sdb3
+  VG Name
+  PV Size               109.82 MiB
+  Allocatable           NO
+  PE Size               0
+  Total PE              0
+  Free PE               0
+  Allocated PE          0
+  PV UUID               99qkNw-3oAw-vXwg-WE6U-zyKO-Ffs3-rDSqUY
+  
+Create Volume Groups
+Create a new volume group called vg1 using two physical volumes /dev/sdb1 and /dev/sdb2 using the
+command vgcreate.
+[root@server ~]# vgcreate vg1 /dev/sdb1 /dev/sdb2
+
+  Volume group "vg1" successfully created
+To verify the volume group has been created or not use the command vgdisplay.
+[root@server ~]# vgdisplay
+  --- Volume group ---
+  VG Name               vg1
+  System ID
+  Format                lvm2
+  Metadata Areas        2
+  Metadata Sequence No  1
+  VG Access             read/write
+  VG Status             resizable
+  MAX LV                0
+  Cur LV                0
+  Open LV               0
+  Max PV                0
+  Cur PV                2
+  Act PV                2
+  VG Size               216.00 MiB
+  PE Size               4.00 MiB
+  Total PE              54
+  Alloc PE / Size       0 / 0
+  Free  PE / Size       54 / 216.00 MiB
+  VG UUID               ds3OtP-DMUx-33nN-HDar-eqNj-uIED-41gjqI
+  
+Create Logical Volume
+To create logical volume use the command lvcreate. Let us create a logical volume called lv1 with size 200MB.
+[root@server ~]# lvcreate -L 200M vg1 -n lv1
+  Logical volume "lv1" created
+  
+Verify the logical volume is created or not using command lvdisplay.
+[root@server ~]# lvdisplay
+
+  --- Logical volume ---
+  LV Name                /dev/vg1/lv1
+  VG Name                vg1
+  LV UUID                dgLZ79-JZdn-NUSF-fUS1-YVFk-36qs-iuafhE
+  LV Write Access        read/write
+  LV Status              available
+  # open                 0
+  LV Size                200.00 MiB
+  Current LE             50
+  Segments               2
+  Allocation             inherit
+  Read ahead sectors     auto
+  - currently set to     256
+  Block device           253:0
+
+Format and Mount the logical volume
+Now format the newly created logical volume and mount it in the /mnt directory or wherever you want.
+[root@server ~]# mkfs.ext4 /dev/vg1/lv1
+
+mke2fs 1.41.12 (17-May-2010)
+Filesystem label=
+OS type: Linux
+Block size=1024 (log=0)
+Fragment size=1024 (log=0)
+Stride=0 blocks, Stripe width=0 blocks
+51200 inodes, 204800 blocks
+10240 blocks (5.00%) reserved for the super user
+First data block=1
+Maximum filesystem blocks=67371008
+25 block groups
+8192 blocks per group, 8192 fragments per group
+2048 inodes per group
+Superblock backups stored on blocks:
+ 8193, 24577, 40961, 57345, 73729
+Writing inode tables: done
+Creating journal (4096 blocks): done
+Writing superblocks and filesystem accounting information: done
+This filesystem will be automatically checked every 35 mounts or
+180 days, whichever comes first.  Use tune2fs -c or -i to override.
+
+And mount the logical volume in the /mnt mount point.
+[root@server ~]# mount /dev/vg1/lv1 /mnt/
+
+Now the logical volume is successfully mounted in /mnt. You can use the new logical volume to store
+your datas.
+[root@server ~]# cd /mnt/
+[root@server mnt]# touch file1 file2 file3
+[root@server mnt]# mkdir dir1 dir2 dir3
+[root@server mnt]# ls
+dir1  dir2  dir3  file1  file2  file3  lost+found
+
+Extend Volume Group Size
+If you’re running out of the space in the logical volume, you can extend the size of it easily if your
+physical disk contains free space or with additional physical disk(Hard disk).
+Say for example let us extend the volume group vg1 using the physical volume /dev/sdb3. And let us add
+additonal 100MB to logical volume lv1.
+[root@server mnt]# vgextend vg1 /dev/sdb3
+
+  Volume group "vg1" successfully extended
+  
+Then resize the logical vloume lv1.
+[root@server mnt]# lvresize -L +100M /dev/vg1/lv1
+
+  Extending logical volume lv1 to 300.00 MiB
+  Logical volume lv1 successfully resized
+  
+Resize the filesystem of logical volume lv1.
+[root@server mnt]# resize2fs /dev/vg1/lv1
+resize2fs 1.41.12 (17-May-2010)
+
+Filesystem at /dev/vg1/lv1 is mounted on /mnt; on-line resizing required
+old desc_blocks = 1, new_desc_blocks = 2
+Performing an on-line resize of /dev/vg1/lv1 to 307200 (1k) blocks.
+The filesystem on /dev/vg1/lv1 is now 307200 blocks long.
+Now verify the new size of the logical volume lv1.
+[root@server mnt]# lvdisplay /dev/vg1/lv1
+  --- Logical volume ---
+  LV Name                /dev/vg1/lv1
+  VG Name                vg1
+  LV UUID                dgLZ79-JZdn-NUSF-fUS1-YVFk-36qs-iuafhE
+  LV Write Access        read/write
+  LV Status              available
+  # open                 1
+  LV Size                300.00 MiB
+  Current LE             75
+  Segments               3
+  Allocation             inherit
+  Read ahead sectors     auto
+  - currently set to     256
+  Block device           253:0
+  
+It’s done. Now the size of the logical volume lv1 is extended by 100MB.
+
+Remove Logical Volume
+Come out of the /mnt mount point, unmount the logical volume lv1 and remove it using command lvremove.
+[root@server mnt]# cd ..
+[root@server /]# umount /mnt/
+[root@server /]# lvremove /dev/vg1/lv1
+Do you really want to remove active logical volume lv1? [y/n]: y
+  Logical volume "lv1" successfully removed
+  
+Remove Volume Group
+[root@server /]# vgremove /dev/vg1
+  Volume group "vg1" successfully removed
+Remove Physical Volume
+[root@server /]# pvremove /dev/sdb1 /dev/sdb2 /dev/sdb3
+  Labels on physical volume "/dev/sdb1" successfully wiped
+  Labels on physical volume "/dev/sdb2" successfully wiped
+  Labels on physical volume "/dev/sdb3" successfully wiped
+
+
+---
+http://askubuntu.com/questions/3596/what-is-lvm-and-what-is-it-used-for
+
+What is LVM and what is it used for?
+
+As a Linux/Ubuntu newbie, what is LVM and what is it used for?
+
+In terms of a web server installation, what benefits does it provide?
+
+Would you recommend using it?
+
+***
+ehm, first google hit? en.wikipedia.org/wiki/Logical_Volume_Manager_%28Linux%29 ? Looking at the other
+hits on the front page? – maxschlepzig Sep 4 '10 at 12:38
+
+***
+Yes that was the first thing I did, but as a first time Ubuntu/Linux user, currently starting at the
+installation partition screen, I don't understand enough of the terms on that wikipedia page to know
+whether to use it or not. – Matthew Blackford Sep 4 '10 at 12:47
+
+***
+This question is now the first google result for "ubuntu server lvm", FYI. – Wug Nov 21 '13 at 8:48
+
+***
+You can think of LVM as "dynamic partitions", meaning that you can create/resize/delete LVM "partitions"
+(they're called "Logical Volumes" in LVM-speak) from the command line while your Linux system is running:
+no need to reboot the system to make the kernel aware of the newly-created or resized partitions.
+
+Other nice features that LVM "Logical Volumes" provide are:
+
+If you have more than one hard-disk, Logical Volumes can extend over more than one disk: i.e., they are
+not limited by the size of one single disk, rather by the total aggregate size.
+
+You can set up "striped" LVs, so that I/O can be distributed to all disks hosting the LV in
+parallel. (Similar to RAID-0, but a bit easier to set-up.)
+
+You can create a (read-only) snapshot of any LV. You can revert the original LV to the snapshot at a
+later time, or delete the snapshot if you no longer need it. This is handy for server backups for instance
+(you cannot stop all your applications from writing, so you create a snapshot and backup the snapshot LV),
+but can also be used to provide a "safety net" before a critical system upgrade (clone the root partition,
+upgrade, revert if something went wrong).
+
+While being most useful on server systems, I think that features 1. and 3., combined with LVM's ability
+to create/resize/delete LVs on the fly, are quite handy on desktop systems as well. (Especially if you
+experiment a lot with the system.)
+
+Downsides
+Of course, all of this comes at a price: the initial set-up of LVM is more complex than just partitioning
+a disk, and you will definitely need to understand the LVM terminology and model (Logical Volumes, Physical
+Volumes, Volume Groups) before you can start using it. (Once it is set up, using it is much easier, though.)
+
+Also if you use LVM across hard drives you may loose all your data when only one drive fails.
+
+Recommendation
+Reccommend reading the LVM HOW-TO from The Linux Documentation Project.

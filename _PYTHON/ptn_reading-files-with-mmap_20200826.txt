@@ -1,0 +1,597 @@
+filename: ptn_reading-files-with-mmap_20200826.txt
+https://realpython.com/python-mmap/
+
+Python mmap: Improved File I/O With Memory Mapping
+Aug 24, 2020
+
+   The Zen of Python has a lot of wisdom to offer. One especially useful idea is that "There should
+   be one-and preferably only one-obvious way to do it." Yet there are multiple ways to do most things
+   in Python, and often for good reason. For example, there are multiple ways to read a file in
+   Python, including the rarely used mmap module
+
+   Python's mmap provides memory-mapped file input and output (I/O). It allows you to take advantage of
+   lower-level operating system functionality to read files as if they were one large string or
+   array. This can provide significant performance improvements in code that requires a lot of file
+   I/O.
+
+   In this tutorial, you'll learn:
+     * What kinds of computer memory exist
+     * What problems you can solve with mmap
+     * How use memory mapping to read large files faster
+     * How to change a portion of a file without rewriting the entire file
+     * How to use mmap to share information between multiple processes
+
+   Free Download: Get a sample chapter from CPython Internals: Your Guide to the Python 3
+   Interpreter showing you how to unlock the inner workings of the Python language, compile the Python
+   interpreter from source code, and participate in the development of CPython.
+
+Understanding Computer Memory
+   Memory mapping is a technique that uses lower-level operating system APIs to load a file directly
+   into computer memory. It can dramatically improve file I/O performance in your program. To better
+   understand how memory mapping improves performance, as well as how and when you can use the mmap
+   module to take advantage of these performance benefits, it's useful to first learn a bit about
+   computer memory.
+
+   Computer memory is a big, complicated topic, but this tutorial focuses only on what you need to
+   know to use the mmap module effectively. For the purposes of this tutorial, the term memory refers to
+   random-access memory, or RAM.
+
+   There are several types of computer memory:
+    1. Physical
+    2. Virtual
+    3. Shared
+
+   Each type of memory can come into play when you're using memory mapping, so let's review each one
+   from a high level.
+
+Physical Memory
+   Physical memory is the least complicated type of memory to understand because it's often part of the
+   marketing associated with your computer. (You might remember that when you bought your computer, it
+   advertised something like 8 gigabytes of RAM.) Physical memory typically comes on cards that are
+   connected to your computer's motherboard.
+
+   Physical memory is the amount of volatile memory that's available for your programs to use while
+   running. Physical memory should not be confused with storage, such as your hard drive or solid-state
+   disk.
+
+Virtual Memory
+   Virtual memory is a way of handling memory management. The operating system uses virtual
+   memory to make it appear that you have more memory than you do, allowing you to worry less about how
+   much memory is available for your programs at any given time. Behind the scenes, your operating
+   system uses parts of your nonvolatile storage, such as your solid-state disk, to simulate additional
+   RAM.
+
+   In order to do this, your operating system must maintain a mapping between physical memory and
+   virtual memory. Each operating system uses its own sophisticated algorithm to map virtual memory
+   addresses to physical ones using a data structure called a page table.
+
+   Luckily, most of this complication is hidden from your programs. You don't need to understand page
+   tables or logical-to-physical mapping to write performant I/O code in Python. However, knowing a
+   little bit about memory gives you a better understanding of what the computer and libraries are
+   taking care of for you.
+
+   mmap uses virtual memory to make it appear that you've loaded a very large file into memory, even if
+   the contents of the file are too big to fit in your physical memory.
+
+Shared Memory
+   Shared memory is another technique provided by your operating system that allows multiple
+   programs to access the same data simultaneously. Shared memory can be a very efficient way of
+   handling data in a program that uses concurrency.
+
+   Python's mmap uses shared memory to efficiently share large amounts of data between multiple Python
+   processes, threads, and tasks that are happening concurrently.
+
+Digging Deeper Into File I/O
+   Now that you have a high-level view of the different types of memory, it's time to understand what
+   memory mapping is and what problems it solves. Memory mapping is another way to perform file I/O that
+   can result in better performance and memory efficiency.
+
+   In order to fully appreciate what memory mapping does, it's useful to consider regular file I/O from
+   a lower-level perspective. A lot of things happen behind the scenes when reading a file:
+    1. Transferring control to the kernel or core operating system code with system calls
+    2. Interacting with the physical disk where the file resides
+    3. Copying the data into different buffers between user space and kernel space
+
+   Consider the following code, which performs regular Python file I/O:
+def regular_io(filename):
+    with open(filename, mode="r", encoding="utf8") as file_obj:
+        text = file_obj.read()
+        print(text)
+
+   This code reads the entire file into physical memory, if there's enough available at runtime, and
+   prints it to the screen.
+
+   This type of file I/O is something you may have learned early on in your Python journey. The code
+   isn't very dense or complicated. However, what's happening under the covers of function calls like
+   read() is very complicated. Remember that Python is a high-level programming language, so much of
+   the complexity can be hidden from the programmer.
+
+System Calls
+   In reality, the call to read() signals the operating system to do a lot of sophisticated work.
+   Luckily, operating systems provide a way to abstract the specific details of each hardware device
+   away from your programs with system calls. Each operating system will implement this
+   functionality differently, but at the very least, read() has to perform several system calls to
+   retrieve data from the file.
+
+   All access with the physical hardware must happen in a protected environment called kernel space.
+   System calls are the API that the operating system provides to allow your program to go from user
+   space to kernel space, where the low-level details of the physical hardware are managed.
+
+   In the case of read(), several system calls are needed for the operating system to interact with the
+   physical storage device and return the data.
+
+   Again, you don't need a firm grasp on the details of system calls and computer architecture to
+   understand memory mapping. The most important thing to remember is that system calls are relatively
+   expensive computationally speaking, so the fewer system calls you do, the faster your code will
+   likely execute.
+
+   In addition to the system calls, the call to read() also involves a lot of potentially unnecessary
+   copying of data between multiple data buffers before the data gets all the way back to your
+   program.
+
+   Typically, this all happens so fast that it's not noticeable. But all these layers add latency and
+   can slow down your program. This is where memory mapping comes into play.
+
+Memory Mapping Optimizations
+   One way to avoid this overhead is to use a memory-mapped file. You can picture memory mapping as
+   a process in which read and write operations skip many of the layers mentioned above and map the
+   requested data directly into physical memory.
+
+   A memory-mapped file I/O approach sacrifices memory usage for speed, which is classically called the
+   space-time tradeoff. However, memory mapping doesn't have to use more memory than the
+   conventional approach. The operating system is very clever. It will lazily load the data as it's
+   requested, similar to how Python generators work.
+
+   In addition, thanks to virtual memory, you can load a file that's larger than your physical memory.
+   However, you won't see the huge performance improvements from memory mapping when there isn't enough
+   physical memory for your file, because the operating system will use a slower physical storage medium
+   like a solid-state disk to mimic the physical memory it lacks.
+
+Reading a Memory-Mapped File With Python's mmap
+   Now, with all that theory out of the way, you might be asking yourself, "How do I use Python's mmap
+   to create a memory-mapped file?"
+
+   Here's the memory-mapping equivalent of the file I/O code you saw before:
+import mmap
+
+def mmap_io(filename):
+    with open(filename, mode="r", encoding="utf8") as file_obj:
+        with mmap.mmap(file_obj.fileno(), length=0, access=mmap.ACCESS_READ) as mmap_obj:
+            text = mmap_obj.read()
+            print(text)
+
+   This code reads an entire file into memory as a string and prints it to the screen, just as the
+   earlier approach with regular file I/O did.
+
+   In short, using mmap is fairly similar to the traditional way of reading a file, with a few small
+   changes:
+    1. Opening the file with open() isn't enough. You also need to use mmap.mmap() to signal to the
+       operating system that you want the file mapped into RAM.
+    2. You need to ensure that the mode you use with open() is compatible with mmap.mmap(). The default
+       mode for open() is for reading, but the default mode for mmap.mmap() is for reading and writing.
+       So, you'll have to be explicit when opening the file.
+    3. You need to perform all reads and writes using the mmap object instead of the standard file
+       object returned by open().
+
+Performance Implications
+   The memory-mapping approach is slightly more complicated than the typical file I/O because it
+   requires creating another object. However, that small change can lead to big performance benefits
+   when reading a file of just a few megabytes. Here's a comparison of reading the raw text of the
+   famous novel The History of Don Quixote, which is roughly 2.4 megabytes:
+   >>>
+>>> import timeit
+>>> timeit.repeat(
+...     "regular_io(filename)",
+...     repeat=3,
+...     number=1,
+...     setup="from __main__ import regular_io, filename")
+[0.02022400000000002, 0.01988580000000001, 0.020257300000000006]
+>>> timeit.repeat(
+...     "mmap_io(filename)",
+...     repeat=3,
+...     number=1,
+...     setup="from __main__ import mmap_io, filename")
+[0.006156499999999981, 0.004843099999999989, 0.004868600000000001]
+
+   This measures the amount of time to read an entire 2.4-megabyte file using regular file I/O and
+   memory-mapped file I/O. As you can see, the memory mapped approach takes around .005 seconds versus
+   almost .02 seconds for the regular approach. This performance improvement can be even bigger when
+   reading a larger file.
+
+   Note: These results were gathered using Windows 10 and Python 3.8. Since memory mapping is very
+   dependent on the operating system implementations, your results may vary.
+
+   The API provided by Python's mmap file object is very similar to the traditional file object except
+   for one additional superpower: Python's mmap file object can be sliced just like string
+   objects!
+
+mmap Object Creation
+   There are few subtleties in the creation of the mmap object that are worth looking at more closely:
+mmap.mmap(file_obj.fileno(), length=0, access=mmap.ACCESS_READ)
+
+   mmap requires a file descriptor, which comes from the fileno() method of a regular file object. A
+   file descriptor is an internal identifier, typically an integer, that the operating system uses
+   to keep track of open files.
+
+   The second argument to mmap is length=0. This is the length in bytes of the memory map. 0 is a
+   special value indicating that the system should create a memory map large enough to hold the entire
+   file.
+
+   The access argument tells the operating system how you're going to interact with the mapped memory.
+   The options are ACCESS_READ, ACCESS_WRITE, ACCESS_COPY, and ACCESS_DEFAULT. These are somewhat
+   similar to the mode arguments to the built-in open():
+     * ACCESS_READ creates a read-only memory map.
+     * ACCESS_DEFAULT defaults to the mode specified in the optional prot argument, which is used for
+       memory protection.
+     * ACCESS_WRITE and ACCESS_COPY are the two write modes, which you'll learn about below.
+
+   The file descriptor, length, and access arguments represent the bare minimum you need to create a
+   memory-mapped file that will work across operating systems like Windows, Linux, and macOS. The code
+   above is cross-platform, meaning it will read the file through the memory-mapping interface on all
+   operating systems without needing to know which operating system the code runs on.
+
+   Another useful argument is offset, which can be a memory-saving technique. This instructs the mmap to
+   create a memory map starting at a specified offset in the file.
+
+mmap Objects as Strings
+   As previously mentioned, memory mapping transparently loads the file contents into memory as a
+   string. So, once you open the file, you can perform lots of the same operations you use with
+   strings, such as slicing:
+import mmap
+
+def mmap_io(filename):
+    with open(filename, mode="r", encoding="utf8") as file_obj:
+        with mmap.mmap(file_obj.fileno(), length=0, access=mmap.ACCESS_READ) as mmap_obj:
+            print(mmap_obj[10:20])
+
+   This code prints ten characters from mmap_obj to the screen and also reads those ten characters into
+   physical memory. Again, the data is read lazily.
+
+   The slice does not advance the internal file position. So, if you were to call read() after a slice,
+   then you would still read from the beginning of the file.
+
+Search a Memory-Mapped File
+
+   In addition to slicing, the mmap module allows other string-like behavior such as using find() and
+   rfind() to search a file for specific text. For example, here are two approaches to find the first
+   occurrence of " the " in a file:
+import mmap
+
+def regular_io_find(filename):
+    with open(filename, mode="r", encoding="utf-8") as file_obj:
+        text = file_obj.read()
+        print(text.find(" the "))
+
+def mmap_io_find(filename):
+    with open(filename, mode="r", encoding="utf-8") as file_obj:
+        with mmap.mmap(file_obj.fileno(), length=0, access=mmap.ACCESS_READ) as mmap_obj:
+            print(mmap_obj.find(b" the "))
+
+   These two functions both search a file for the first occurrence of " the " The main difference
+   between them is that the first uses find() on a string object, whereas the second uses find() on a
+   memory-mapped file object.
+
+   Note: mmap operates on bytes, not strings.
+
+   Here's the performance difference:
+   >>>
+>>> import timeit
+>>> timeit.repeat(
+...     "regular_io_find(filename)",
+...     repeat=3,
+...     number=1,
+...     setup="from __main__ import regular_io_find, filename")
+[0.01919180000000001, 0.01940510000000001, 0.019157700000000027]
+>>> timeit.repeat(
+...     "mmap_io_find(filename)",
+...     repeat=3,
+...     number=1,
+...     setup="from __main__ import mmap_io_find, filename")
+[0.0009397999999999906, 0.0018005999999999855, 0.000826699999999958]
+
+   That's several orders of magnitude difference! Again, your results may differ depending on your
+   operating system.
+
+   Memory-mapped files can also be used directly with regular expressions. Consider the following
+   example that finds and prints out all five-letter words:
+import re
+import mmap
+
+def mmap_io_re(filename):
+    five_letter_word = re.compile(rb"\b[a-zA-Z]{5}\b")
+
+    with open(filename, mode="r", encoding="utf-8") as file_obj:
+        with mmap.mmap(file_obj.fileno(), length=0, access=mmap.ACCESS_READ) as mmap_obj:
+            for word in five_letter_word.findall(mmap_obj):
+                print(word)
+
+   This code reads the entire file and prints out every word that has exactly five letters in it. Keep
+   in mind that memory-mapped files work with byte strings, so the regular expressions must also use
+   byte strings.
+
+   Here's the equivalent code using regular file I/O:
+import re
+
+def regular_io_re(filename):
+    five_letter_word = re.compile(r"\b[a-zA-Z]{5}\b")
+
+    with open(filename, mode="r", encoding="utf-8") as file_obj:
+        for word in five_letter_word.findall(file_obj.read()):
+            print(word)
+
+   This code also prints out all five-character words in the file, but it uses the traditional file I/O
+   mechanism instead of memory-mapped files. As before, the performance differs between the two
+   approaches:
+   >>>
+>>> import timeit
+>>> timeit.repeat(
+...     "regular_io_re(filename)",
+...     repeat=3,
+...     number=1,
+...     setup="from __main__ import regular_io_re, filename")
+[0.10474110000000003, 0.10358619999999996, 0.10347820000000002]
+>>> timeit.repeat(
+...     "mmap_io_re(filename)",
+...     repeat=3,
+...     number=1,
+...     setup="from __main__ import mmap_io_re, filename")
+[0.0740976000000001, 0.07362639999999998, 0.07380980000000004]
+
+   The memory-mapped approach is still an order of magnitude faster.
+
+Memory-Mapped Objects as Files
+   A memory-mapped file is part string and part file, so mmap also allows you to perform common file
+   operations like seek(), tell(), and readline(). These functions work exactly like their regular
+   file-object counterparts.
+
+   For example, here's how to seek to a particular location in a file and then perform a search for a
+   word:
+import mmap
+
+def mmap_io_find_and_seek(filename):
+    with open(filename, mode="r", encoding="utf-8") as file_obj:
+        with mmap.mmap(file_obj.fileno(), length=0, access=mmap.ACCESS_READ) as mmap_obj:
+            mmap_obj.seek(10000)
+            mmap_obj.find(b" the ")
+
+   This code will seek to location 10000 in the file and then find the location of the first occurrence
+   of " the ".
+
+   seek() works exactly the same on memory-mapped files as it does on regular files:
+def regular_io_find_and_seek(filename):
+    with open(filename, mode="r", encoding="utf-8") as file_obj:
+        file_obj.seek(10000)
+        text = file_obj.read()
+        text.find(" the ")
+
+   The code for both approaches is very similar. Let's see how their performance compares:
+   >>>
+>>> import timeit
+>>> timeit.repeat(
+...     "regular_io_find_and_seek(filename)",
+...     repeat=3,
+...     number=1,
+...     setup="from __main__ import regular_io_find_and_seek, filename")
+[0.019396099999999916, 0.01936059999999995, 0.019192100000000045]
+>>> timeit.repeat(
+...     "mmap_io_find_and_seek(filename)",
+...     repeat=3,
+...     number=1,
+...     setup="from __main__ import mmap_io_find_and_seek, filename")
+[0.000925100000000012, 0.000788299999999964, 0.0007854999999999945]
+
+   Again, after only a few small tweaks to the code, your memory-mapped approach is much faster.
+
+Writing a Memory-Mapped File With Python's mmap
+
+   Memory mapping is most useful for reading files, but you can also use it to write files. The mmap API
+   for writing files is very similar to regular file I/O except for a few differences.
+
+   Here's an example of writing text to a memory-mapped file:
+import mmap
+
+def mmap_io_write(filename, text):
+    with open(filename, mode="w", encoding="utf-8") as file_obj:
+        with mmap.mmap(file_obj.fileno(), length=0, access=mmap.ACCESS_WRITE) as mmap_obj:
+            mmap_obj.write(text)
+
+   This code writes text to a memory-mapped file. However, it will raise a ValueError exception if the
+   file is empty at the time you create the mmap object.
+
+   Python's mmap module doesn't allow memory mapping of an empty file. This is reasonable because,
+   conceptually, an empty memory-mapped file is just a buffer of memory, so no memory mapping object is
+   needed.
+
+   Typically, memory mapping is used in read or read/write mode. For example, the following code
+   demonstrates how to quickly read a file and modify only a portion of it:
+import mmap
+
+def mmap_io_write(filename):
+    with open(filename, mode="r+") as file_obj:
+        with mmap.mmap(file_obj.fileno(), length=0, access=mmap.ACCESS_WRITE) as mmap_obj:
+            mmap_obj[10:16] = b"python"
+            mmap_obj.flush()
+
+   This function will open a file that already has at least sixteen characters in it and change
+   characters 10 to 15 to "python".
+
+   The changes written to mmap_obj are visible in the file on disk as well as in memory. The official
+   Python documentation recommends always calling flush() to guarantee the data is written back to the
+   disk.
+
+Write Modes
+   The semantics of the write operation are controlled by the access parameter. One distinction between
+   writing memory-mapped files and regular files is the options for the access parameter. There are two
+   options to control how data is written to a memory-mapped file:
+    1. ACCESS_WRITE specifies write-through semantics, meaning the data will be written through memory
+       and persisted on disk.
+    2. ACCESS_COPY does not write the changes to disk, even if flush() is called.
+
+   In other words, ACCESS_WRITE writes both to memory and to the file, whereas ACCESS_COPY writes only
+   to memory and not to the underlying file.
+
+Search and Replace Text
+   Memory-mapped files expose the data as a string of bytes, but that string of bytes has another
+   important advantage over a regular string. Memory-mapped file data is a string of mutable bytes. This
+   means it's much more straightforward and efficient to write code that searches and replaces data in a
+   file:
+import mmap
+import os
+import shutil
+
+def regular_io_find_and_replace(filename):
+    with open(filename, "r", encoding="utf-8") as orig_file_obj:
+        with open("tmp.txt", "w", encoding="utf-8") as new_file_obj:
+            orig_text = orig_file_obj.read()
+            new_text = orig_text.replace(" the ", " python ")
+            new_file_obj.write(new_line)
+
+    shutil.copyfile("tmp.txt", filename)
+    os.remove("tmp.txt")
+
+def mmap_io_find_and_replace(filename):
+    with open(filename, mode="r+", encoding="utf-8") as file_obj:
+        with mmap.mmap(file_obj.fileno(), length=0, access=mmap.ACCESS_WRITE) as mmap_obj:
+            location = mmap_obj.find(b" the ")
+            mmap_obj[location:location + 8] = b" python "
+            mmap_obj.flush()
+
+   Both of these functions change the word " the " to " python " in the given file. As you can see, the
+   memory-mapped approach is much more concise. It also doesn't require manually keeping track of an
+   additional temporary file to do the replacement in place.
+
+   The memory-mapped approach is also much faster:
+   >>>
+>>> import timeit
+>>> timeit.repeat(
+...     "regular_io_find_and_replace(filename)",
+...     repeat=3,
+...     number=1,
+...     setup="from __main__ import regular_io_find_and_replace, filename")
+[0.060848899999999984, 0.061654600000000004, 0.061154300000000106]
+>>> timeit.repeat(
+...     "mmap_io_find_and_replace(filename)",
+...     repeat=3,
+...     number=1,
+...     setup="from __main__ import mmap_io_find_and_replace, filename")
+[0.0014825999999998896, 0.0011419999999999764, 0.0011451999999998463]
+
+   Keeping with the trend, memory mapping wins in speed again. In this basic search-and-replace
+   scenario, memory mapping results in both more concise code and improved performance!
+
+Sharing Data Between Processes With Python's mmap
+
+   Until now, you've used memory-mapped files only for data on disk. However, you can also create
+   anonymous memory maps that have no physical storage. This can be done by passing -1 as the file
+   descriptor:
+import mmap
+
+with mmap.mmap(-1, length=100, access=mmap.ACCESS_WRITE) as mmap_obj:
+    mmap_obj[0:100] = b"a" * 100
+    print(mmap_obj[0:100])
+
+   This creates an anonymous memory-mapped object in RAM that contains 100 copies of the letter "a".
+
+   An anonymous memory-mapped object is essentially a buffer of a specific size, specified by the length
+   parameter, in memory. The buffer is similar to io.StringIO or io.BytesIO from the standard
+   library. However, an anonymous memory-mapped object supports sharing across multiple processes, which
+   neither io.StringIO nor io.BytesIO allows.
+
+   This means you can use anonymous memory-mapped objects to exchange data between processes even though
+   the processes have completely separate memory and stacks. Here's an example of creating an anonymous
+   memory-mapped object to share data that can be written and read from both processes:
+import mmap
+
+def sharing_with_mmap():
+    BUF = mmap.mmap(-1, length=100, access=mmap.ACCESS_WRITE)
+
+    pid = os.fork()
+    if pid == 0:
+        # Child process
+        BUF[0:100] = b"a" * 100
+    else:
+        time.sleep(2)
+        print(BUF[0:100])
+
+   With this code, you create a memory-mapped buffer of 100 bytes and allow that buffer to be read and
+   written from both processes. This approach can be useful if you want to save memory and still share a
+   large amount of data across multiple processes.
+
+   Sharing memory with memory mapping has several advantages:
+     * Data doesn't have to be copied between processes.
+     * The operating system handles the memory transparently.
+     * Data doesn't have to be pickled between processes, which saves CPU time.
+
+   Speaking of pickling, it's worth pointing out that mmap is incompatible with higher-level, more
+   full-featured APIs like the built-in multiprocessing module. The multiprocessing module requires data
+   passed between processes to support the pickle protocol, which mmap does not.
+
+   You might be tempted to use multiprocessing instead of os.fork(), like the following:
+from multiprocessing import Process
+
+def modify(buf):
+    buf[0:100] = b"xy" * 50
+
+if __name__ == "__main__":
+    BUF = mmap.mmap(-1, length=100, access=mmap.ACCESS_WRITE)
+    BUF[0:100] = b"a" * 100
+    p = Process(target=modify, args=(BUF,))
+    p.start()
+    p.join()
+    print(BUF[0:100])
+
+   Here, you attempt to create a new process and pass it the memory-mapped buffer. This code will
+   immediately raise a TypeError because the mmap object can't be pickled, which is required to
+   pass the data to the second process. So, to share data with memory mapping, you'll need to stick to
+   the lower-level os.fork().
+
+   If you're using Python 3.8 or newer, then you can use the new shared_memory module to more
+   effectively share data across Python processes:
+from multiprocessing import Process
+from multiprocessing import shared_memory
+
+def modify(buf_name):
+    shm = shared_memory.SharedMemory(buf_name)
+    shm.buf[0:50] = b"b" * 50
+    shm.close()
+
+if __name__ == "__main__":
+    shm = shared_memory.SharedMemory(create=True, size=100)
+
+    try:
+        shm.buf[0:100] = b"a" * 100
+        proc = Process(target=modify, args=(shm.name,))
+        proc.start()
+        proc.join()
+        print(bytes(shm.buf[:100]))
+    finally:
+        shm.close()
+        shm.unlink()
+
+   This small program creates a list of 100 characters and modifies the first 50 from another process.
+
+   Notice only the name of the buffer is passed to the second process. Then the second process can
+   retrieve that same block of memory using the unique name. This is a special feature of the
+   shared_memory module that's powered by mmap. Under the hood, the shared_memory module uses each
+   operating system's unique API to create named memory maps for you.
+
+   Now you know some of underlying implementation details of the new shared memory Python 3.8 feature as
+   well as how to use mmap directly!
+
+Conclusion
+   Memory mapping is an alternative approach to file I/O that's available to Python programs through the
+   mmap module. Memory mapping uses lower-level operating system APIs to store file contents directly in
+   physical memory. This approach often results in improved I/O performance because it avoids many
+   costly system calls and reduces expensive data buffer transfers.
+
+   In this tutorial, you learned:
+     * What the differences are between physical, virtual, and shared memory
+     * How to optimize memory use with memory mapping
+     * How to use Python's mmap module to implement memory mapping in your code
+
+   The mmap API is similar to the regular file I/O API, so it's fairly straightforward to test out. Give
+   it a shot in your own code to see if your program can benefit from the performance improvements
+   offered by memory mapping.
+
+
+---

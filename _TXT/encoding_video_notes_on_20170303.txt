@@ -1,0 +1,1297 @@
+filename: encoding_video_notes_on_20170303.txt
+http://helpful.knobs-dials.com/index.php/Notes_on_encoding_video
+
+Notes on encoding video
+
+    This page is in a collection about both human and automatic dealings with audio, video, and images.
+
+                                               They include
+     * Color notes - objectively describing color
+     * Color notes - the eyes and the brain
+     * Color notes - physics, numbers, and (non)linearity
+     * Color notes - color spaces
+     * Color notes - references, links, and unsorted stuff
+
+     * Video
+
+     * Signal analysis, modeling, processing
+     * Sound programming, sound coding, sound codecs
+     * Unintentional and/or unwanted signal effects
+
+                                         ...and more applied stuff
+     * Notes on encoding video
+     * Image processing notes
+
+           Notes related to processing the file structure or contents of image, sound, or video.
+     ________________________________________________________________________________________________
+
+                                        Notes on encoding video ·
+
+                       Image file format notes · Image processing notes ·
+
+                           Sound programming, sound coding, sound codecs ·
+
+   The below focuses on mencoder and ffmpeg (which both largely just use libavcodec), as the are
+   portable, flexible, and common systems (and various other are other/further wrappers).
+
+   When mentioning options, the first (e.g. subq=7) is the mencoder form, the second (e.g. -subq 7) is
+   the ffmpeg form. The form for the x264 executable isn't listed (yet?).
+
+   See also Video for some more technical notes related to video files.
+
+Contents
+
+     * 1 Notes on...
+          + 1.1 "Give me the best options"
+     * 2 Codec choices
+          + 2.1 bitrate
+          + 2.2 rate control
+          + 2.3 On video that plays everywhere
+          + 2.4 Progressive and not
+     * 3 Telling the thing what you want
+          + 3.1 Mencoder and ffmpeg
+          + 3.2 for divx/xvid
+          + 3.3 for (lib)x264
+               o 3.3.1 Further detail options
+               o 3.3.2 Considering profiles and levels
+          + 3.4 some filters
+          + 3.5 libavcodec options worth mentioning
+               o 3.5.1 Frame type / GOP related
+          + 3.6 Handbrake
+     * 4 Tricks, commands, option notes
+          + 4.1 Images from movie
+          + 4.2 Movie from images
+          + 4.3 Screen capture
+          + 4.4 letterbox detection
+          + 4.5 specifying time positions, sections, and such
+          + 4.6 Add/fix an index (seekability)
+          + 4.7 Multiple inputs
+          + 4.8 Extracing audio to WAV
+          + 4.9 Flash encoding
+     * 5 Some more technical notes
+     * 6 Unsorted notes
+          + 6.1 lavc vcodecs
+          + 6.2 libavcodec audio-codec options, and other audio notes
+          + 6.3 Unsorted mplayer/mencoder notes
+     * 7 See also
+
+Notes on...
+
+"Give me the best options"
+   There are perhaps four main interests that are at odds with each other:
+     * video quality,
+     * time spent encoding,
+     * eventual file size (or (average) bitrate given a fixed length), and
+     * whether it should play everywhere without hiccups (codec availability, predictable decode
+       resource spikes) - on something minimal, on a decently powered media center, just on your extra
+       fancy overclocked PC
+
+   Defaults are biased to be playable on a lot of hardware and software, and for relatively fast encodes
+   at cost of some quality.
+   ...meaning you can easily go for better quality, or other tradeoffs.
+
+   You can go overboard. There are various "try even harder" settings, and some of their improvements
+   are visible, but many of them give improvements too small for the extra time spent, and/or make the
+   decoder (as in the player) also work harder (and make limited hardware stutter).
+
+   People tend to develop one or two tactics, such as
+          "for video I'll keep around, I have an extra hour or two for you to try harder, if it means
+          the quality is noticeably better"
+          "when transcoding over cabled LAN, just throw bitrate at it".
+
+   There are specific situations that may add another constraint or two. Consider:
+     * not caring about size as much as quality, or not caring about size at all. Say, when giving a
+       high quality 3D render to a client.
+     * a transcode to stream to a hardware player. Ideally, both the encode and decode/play steps are
+       simple, if only to keep latency down, so you can have low delay without risk of stutter
+       (particularly for real-time encodes, while webcasts and such often consider a few seconds delay
+       acceptable). On cabled LAN, you probably care a lot more about quality than about efficient use
+       of bitrate.
+     * complexity of video data; this also has an effect on resource requirements in eventual players.
+       VLC on a powerful computer plays a lot of things, but do you also want to play it on smartphones,
+       tablets, a decade-old set-top box? This implies some extra constraints to avoid decoding
+       problems. (This often implies simpler encodes, which will need higher bitrates for the same
+       quality)
+     * how long do you want the encode to take? Squeezing out the last few possible percents of
+       quality-per-space can take hours more work.
+     * should seeking be fast, e.g. for editing, animators who study movement? (On most codecs, this
+       implies frequent-enough iframes, which means a little bit more space use. Videos for video
+       editing may not use predictive frames at all - larger but a lot faster to work with)
+     * is the input video noisy? You'll probably need more bitrate for the quality you'ld usually expect
+          + ...and is it anime? Then you may be able to get away with noise reduction (in general that
+            will quickly look ugly)
+     * Does the video contain interlaced or telecined content?
+          You probably want to tell the codec that, or put a deinterlacing filter inbetween.
+          ...because giving interlaced/telecined content to a codec that assumes its input is always
+          progressive video means it loses quality trying to fix all this line-to-line tearing (looks
+          like high frequency details), much more than brilliant encoding options (that are not
+          "deinterlace this") can fix.
+          This is relevant to most analog-TV captures, many DVD rips, and some sources of digital video.
+
+   A few use cases:
+     * Encoding a render you just made for a client: High quality matters a most, squeezing the most out
+       of each byte really doesn't. It's easiest to throw a constant-quality encoder and/or a high
+       bitrate at it.
+
+          You probably want to use a common codec to make sure it plays everwhere, and all further video
+          editing/transcoding software understands it.
+          You could do two encodes - one high-quality master (for serious use) and a basic-quality demo
+          quality (that plays everywhere).
+     * You want to inspect a video and want fast per-frame seekability, forwards and backwards.
+          I'd make a temporary recoded version with only I-frames (or at least more common than once a
+          second), and don't care much about its size.
+     * Encoding a movie to a fixed size (such as a CD or DVD), and look as good as possible
+          + You're probably willing to spend more encoding time when it means a noticeable quality
+            improvement
+          + ...which means you probably want most of the try-harder options
+          + bothering about a few details can help squeeze out a little more (but at some point becomes
+            a little futile)
+     * Doing a quick recode from an unusual codec to something that will play on a simple player, and
+       can be thrown away afterwards.
+
+          This often means that you want to keep quality and don't care about size much, and encode time
+          is only limited by your patience. Using a fairly high bitrate is easiest.
+
+     * If you want to be sure something plays on a hardware DVD/DivX player, there are some detailed
+       quality-squeezing options to avoid - options that may lead to smaller encodes but may also lead
+       to spikes in bitrate or requite calculation, which limited-power hardware can't deal with. But
+       you don't have to worry about this at all on computers (except perhaps for high-bitrate HD
+       content).
+     * Encoding for a standard DVD-Video gives a settled codec, a bitrate limit, a size limit, so there
+       is relatively little to choose (and some loss in quality may be unavoidable)
+
+   There are some further options that may sometimes help, but may have no effect and/or even may cause
+   problems. For example, in some cases noise shaping and/or noise reduction may lets the encoder focus
+   on details rather than on noise -- but overdoing it can lead to blurriness and very visible
+   artifacts.
+
+Codec choices
+bitrate
+   If you care about the best tradeoff between size and qualitym this depends on the content and some
+   personal preference.
+   A given video has its own level of complexity, which varies throughout.
+   Modern codecs usually spent their bits more efficiently, but you usually have few options.
+   Once you choose a codec, bitrate is the primary constraint on quality.
+   Choose a bitrate that is too low for the given content, and no amount of clever options will help you
+   preserve quality. (too high and you're just wasting space)
+
+   To give an idea of bitrate that video may need - and of variations with codecs:
+     * encoding from DVD, SDTV (a.k.a. pre-HD TV) (~500kpix)
+          in DivX/XviD (and other variants of MPEG4 ASP) you can get decent quality with 700 to
+          1000kbit/s.
+          in H.264 (MPEG4 AVC), the same content can often be compressed in ~600kbit/s at comparable
+          quality. People regularly opt for somewhat higher bitrates to get nicer quality without worry.
+     * encoding to standard DVD-Video discs must use MPEG-2, but are typically at least 4.3GB large
+       (DVD5 discs). For 90 minutes you can spend 6000kbit/s on average. This seems like a lot, but
+       MPEG-2 doesn't code as well as newer codecs and often needs at least 3000kbit/s to get
+       consistently decent quality, and 6000kbit/s or more on some complex scenes.
+     * HD content
+          the amount of pixels are a few multiples higher than SD.
+                Yes, they are more redundant, but it also matters that there are multiples more of them.
+          As such, people often opt for H.264, because it scales a little better.
+                720p is youtubish at 1000kbps, decent at 2000kbps
+                Complex shiny 720p or 1080i/p video may need on the order of 4000kbit/s
+
+   When quality is more important than file size, you could just throw a large bitrate at it. Encoders
+   will easily fit quality in a larger bitrate (and may spend less time since they don't have to work as
+   hard). For either Xvid or H.264, <2500kbit for SD content and <10000kbit for HD content will usually
+   look quite good.
+
+   If size matters, then spending a little more time on getting similar quality from half that bitrate
+   sounds like a good idea. You may find yourself doing test encodes just to see whether a particular
+   bitrate (plus options) looks good enough.
+
+rate control
+   Bitrate roughly means "the space spent on encoding a given length of video (or audio)," and is
+   typically an amount per second of video.
+
+   rate control controls how it is spent.
+          Constant Bitrate (CBR) means 'this is how much to spend per frame'. It still varies, but
+          little.
+          Variable Bitrate (VBR) means 'vary bitrate in reaction to content complexity'. There are
+          multiple ways how.
+
+   (Note also that this is one of the major influences on how video can stutter (predictability of
+   decoder resource use))
+
+   There are generally four major variants of the CBR/VBR choice:
+     * CBR (one-pass)
+          typically means "spend this much per frame, just do your best". You have to pick a bitrate
+                ...that is high enough for good quality throughout the video - or be okay with the
+                complex parts encoding poorly.
+                ...or pick it higher so that the most complex parts will be okay (and be okay with
+                spending a bit much on the simple parts)
+          The size of the result is picked_bitrate*running_time, to within a small error.
+          Quality-per-size ratio will be lower than with VBR. But simpler to encode, so convenient for
+          e.g. streaming.
+     * one-pass aim-for-bitrate VBR - given a target bitrate (and often a maximum), try to spend the
+       target bitrate, but spike up to the maximum bitrate when it seems good for quality.
+                Resulting file size can be guessed, though input complexity will still vary
+                You can constrain this. Note that the more you do this, the more this becomes like CBR
+                tends to increase and decrease bitrate within a timespan of seconds (not always ideal)
+                requires you to make a good guess of the bitrate necessary for each video (takes some
+                intuition training)
+     * multiple-pass aim-for-bitrate VBR
+          given a target bitrate (and often a maximum), use one (or more) encodes passes to figure out
+          how to spread those bits around for the most consistent quality
+                can vary the bitrate more quickly than the above - and for better reasons.
+                average bitrate will often end up closer to the requested rate
+     * quality-based VBR (one-pass)
+          you ask for a particular quality per frame.
+                Easily creates bitrate spikes on complex content. You don't really know the resulting
+                filesize beforehand.
+                An easy alternative to CBR when you want high-quality and don't mind spending a bit more
+                space, in a more justified way than just throwing a large bitrate at it
+                can make sense for streaming encodes
+
+                There is a further distinction between whether the quantizer is fixed or not:
+
+                      constant quantizer (CQP, for Constant Quantizer Parameter)
+
+                            Similar degree of compression is applied to all frames, regardless of
+                            content. Bitrate will vary because contents do.
+                            you can ignore CQP, because CRF does something similar, and usually does it
+                            better
+
+                      constant ratefactor (CRF)
+
+                            will vary QP - around your given target but spend more on still frames and
+                            less on motion
+                            ...which tends to give the impression of better quality, even if PSNR and
+                            such wouldn't agree
+
+   Other notes:
+     * The resources required by the player are easiest to predict via CBR - either it's too higher or
+       it isn't.
+                (note that certain 'try harder' options are also part of this trouble)
+          VBR variants with strong bitrate spikes (e.g. n-pass, quality-based VBR) may stutter stutter
+          on underpowered hardware
+                which isn't as relevant for SD content anymore, but is for HD
+                and you can control this with e.g. some contraints
+     * When your most important factor is:
+          target size: multi-pass VBR
+          quality guarantee: quality-based VBR
+          realtime encoding: CBR is easiest, either one-pass VBR may code more efficiently
+                ...but defaults to CBR, because it often takes less CPU, and it is easier to guarantee
+                any content can be handled without stuttering (by the encoder and decoder).
+     * ABR, Average BitRate is VBR that tries to end up using the given average bitrate
+          Which can mean the one-pass and multi-pass variants, depending on context.
+          Some people are quite consistent with the term, I treat it as ambiguous and avoid it.
+     * for quality-based VBR, the scale of the value handed
+          is different between x264, and CQP in MPEG1/2/4
+          does not have a direct relation to bitrate (and observed behaviour has previously changed in
+          development)
+
+          Example:
+          -x264encopts crf=23
+          ,
+
+          -crf 23
+
+                Lower value is better quality.
+                      Currently, for DVD/SDTV resolution, 26 is probably comparable to your average
+                      downloaded movie (~700kbit?), 22 is significantly better (~1.4mbit?), 18 is
+                      near-lossless (~3mbit?)
+                values are technically floating-point, but integers are exact enough for most people
+     * Quality estimations are often more mathematical than visual.
+                In particular, noise in the source video has a very real effect
+                ...though you wouldn't always agree with the quality judgment even without noise.
+
+On video that plays everywhere
+   Define everywhere.
+          Codec-wise
+   For example, if you want to be sure video plays on every computer that hasn't been updated for a
+   decade, is the most plain installation (no extra codecs, no VLC), then you have to resort to old
+   versions of some common codec. `(MPEG-2 may be a decent bet - but you'ld need a considerably larger
+   bitrate for comparable quality)
+
+   Hardware players have few options. A set-top DVD player may play DivX/XviD. Only recent stuff will
+   attempt H.264. But in nether case all videos - you often need to observe standards complicance and
+   avoid bitrate spikes.
+   
+          When playing on computers you can get away with caring a lot less
+   (On standards complicance: In particular MPEG4 ASP has seen many implementations, including early
+   MSMPEG4, DivX, Xvid, and more. Some encoders and some decoders aren't very compliant, so there are
+   always options you should avoid if you want it to play on this sort of hardware. For H.264 things are
+   simpler; the main worry is resource draw.)
+
+   When you're encoding to play on a decently powerful computer, and can count on a relatively recent
+   and updated OS, (and particularly you can tell people to install VLC, and/or mplayerc and a codec
+   pack), then you can more or less do encode however and to whatever you want.
+
+          Resource-wise
+   Decoding video takes variable amount of resources for each frame, and so the resource draw varies
+   over time.
+
+   This is technically true even for CBR, but that case is pretty predictable (and there may be specs
+   that guarantee playability).
+
+   With VBR, the resource draw of decoding is higher than CBR in general, and also correlates strongly
+   with bitrate. If the decoder is not fast enough to do the work for a frame in real-time, it will
+   stutter, drop frames, or do other ugly things.
+
+   When encoding for players with limited resources (DVD players that do divx and/or H.264, old
+   computers repurposed for movie watching, and very-high-resolution HD even on modern computers), you
+   can add some constraints, to help ensure it will play with more limited resources. This comes at a
+   cost - the same quality will take more space.
+
+   H.264 has made the tradeoffs somewhat more explicit, through its levels (see e.g.  and
+   profiles.
+
+Progressive and not
+   Encoding wants progressive video.
+   If your source is not progressive, you want to make it that.
+
+   If it comes from a DVD it may be almost any mix of telecined, interlaced, and possibly progressive
+   content, all sliced together.
+
+   If the video you hand in are interlaced (such as video from TV capture cards, which usually place two
+   adjacent frames into one progressive frame, because that's how they receive it), or are telecined
+   (which, roughly, is framerate adjustment by doing interlacing only occasionally - common on NTSC
+   movie DVDs), then the frames being fed to the codec will easily show very sharp line-by-line
+   sharpness vertically, particularly in high motion scenes. Codecs that assume progressive input will
+   spend a lot of space on what from that perspective is video detail.
+
+   So you usually want to decode the content into progressive frames. Yes, de-interlacing is a slightly
+   lossy process, but not as bad as you think, and much better than the a codec that assumes progressive
+   frames.
+
+Telling the thing what you want
+Mencoder and ffmpeg
+   Note: the actual commands
+   avconv
+   and
+   ffmpeg
+   are the same thing - a recent name change thing within the ffmpeg project.
+
+   You can see both mencoder and ffmpeg consist largely of:
+     * a bunch of optional video filtering and other processing
+     * calls to the library handling the specific codec you are writing
+
+   In the latter both are almost identical, because they usually use the same libraries. (...and you'll
+   notice that the largest difference lies in how most arguments are handed in, since those are just
+   passed through to that codec/library)
+
+   Because of this, most of this page mentions both argument styles.
+          Note that some arguments may not apply to the codec/library you are using. When in doubt, look
+          at the docs.
+
+   For example, to do a conversion to DivX-style MPEG, aiming for 800kbps:
+avconv   -i input.mpg        -vcodec mpeg4      -b:v 800k                output.avi
+
+mencoder    input.mpg -oac copy -ovc lavc  -lavcopts vbitrate=800000  -o output.avi
+
+   (Note that both tools have a lot of defaults (different, and changing), so the output will rarely be
+   identical.)
+
+for divx/xvid
+   You want to specify bitrte - it has a default, but not a smart one.
+
+   Order of magnitude: For much DVD/TV-sized video (~500Kpixels), 800k which is okay with a fast encode,
+   and fairly decent when you use all basic try-harder options.
+
+   Try-harder options:
+   The basic improvement that you almost always want (cheap and noticeable) is at least:
+trell:mbd=2
+
+   It seems many people look through the docs for the 'gives decent improvement at moderate cost' notes,
+   and most settle on a set like:
+trell:mbd=2:mv0:v4mv:cbp:dia=2:predia=2:last_pred=3:cmp=2:precmp=2:subcmp=2:vmax_b_frames=2:vb_strategy=1
+
+   Some people like to add preme, and some play wih qns. It's an endless game of fine tuning - though
+   certainly worth it for some.
+
+   Some details on the mentioned options: (Note: the example values below are biased towards
+   better-than-default quality, while avoiding unreasonable speed/quality tradeoffs. Both mencoder and
+   ffmpeg style options are mentioned)
+
+   The basic 'do more work for more quality' options:
+     * trell
+       ,
+       -trellis 1
+       - do more work looking for choices that minimize quantization errors. Somewhat slower and
+       noticeably better encodes, and one of the easiest ways to lessen the blocky look. (TODO: check
+       whether this is on by default)
+
+          TODO: (verify) that these are identical
+     * cbp
+       ,
+       -flags cbp
+       - related to block decisions. Small quality gain at a small speed cost, so generally worth it.
+       (combines with trell - considers both bitrate and distortion(verify))
+
+          note: cbp seems deprecated in ffmpeg, figure out(verify)
+     * mbd=2
+       ,
+       -mbd rd
+       - control how the encoder decides the macroblock mode
+          + 0 (default) means 'use method specified by mbcmp', 1 means 'try all and optimize for size',
+            2 means 'try all and optimize for quality' (rate distortion). 0 (simple in ffmpeg) is
+            fastest, while 2 (rd in ffmpeg) and 1 (bits in ffmpeg) tend to be decent tradeoffs.
+          + Use of mbcmp, precmp, subcmp, cmp, and also qpel will override the method specified by mbd
+            (verify)
+
+   Motion estimation related:
+     * mv0
+       ,
+       -flags mv0
+       - macroblock decision tries more options. Small cost, small gain.
+     * v4mv
+       ,
+       -flags mv4
+       - allow 4 motion vectors per macroblock (in MPEG4). Small quality gain, small speed cost. Seems
+       to combine well with mbd 1 and 2.
+
+     * mencoder:
+       cmp=2
+       subcmp=2
+       precmp=2
+     * ffmpeg:
+       -cmp satd
+       -subcmp satd
+       -precmp satd
+
+          comparison function for motion estimation searches, respectively for full-pel, sub-pel, and
+          pre-pass
+          People seem to like 2, which in ffmpeg is satd
+
+     * mencoder:
+       dia=2
+       predia=2
+     * ffmpeg:
+       -dia_size 2
+       -pre_dia_size 2
+
+          motion detection diamond size and shape. 1 is default, 2 looks further/harder so is slower,
+          and does better in relatively few situations. (There are also some options that make for
+          faster, lower quality encodes)
+
+     * last_pred=2
+       ,
+       -last_pred 2
+       - control how many motion predictors from the previous frame are used. Default is 0
+
+          you can choose 1, 2, or 3 for slower encodes and often better quality.
+          People seem to argue whether 3 is worth the extra time, over 2
+
+     * preme=2
+       ,
+       -preme 2
+
+          when to do a motion estimation pre-pass. 2 means always, the default 1 means only after
+          i-frames. Has fairly little effect.
+
+     * qpel
+       : use quarter-pixel motion estimation. Doesn't really help for lowish bitrates, though may help a
+       bit for higher bitrates.(verify)
+
+          some hardware players do not support this. For compatibility, leave it off.
+
+   You can fix the quantizer -- but it's not really VBR as you still have to decide the target
+   bitrate(verify)
+
+   You'll want to know about:
+     * vqmin=
+       and
+       vqmax=
+       (ffmpeg:
+       -qmin
+       and
+       -qmax
+       ) seem to clamp the quantizer in a range
+
+          in other words, you can use a higher vqmin to lower the quality and CPU use, or use a lower
+          vqmax to try to force
+          2 is the lowest you would use; 1 is not worth the higher bitrate
+
+     * vqscale=
+       ,
+       -qscale
+       - seems to be a shorthand for setting both vqmin and vqmax to the same value (verify), i.e.
+       fixed quantizer, but no variation here seems to make little sense (average within a frame will
+       often be better than constant within a frame)
+
+   There is no CRF behaviour available.
+
+   Other interesting options:
+     * threads=auto
+       ,
+       -threads 0
+       (or a number. Default is 1) - More threads makes encodes faster on multicore CPUs, by
+       parallelizing calculation of motion estimation. Hurts that estimation's quality a little bit,
+       while making encodes noticeably faster.
+     * turbo
+       - sets a bunch of options for a fast, lower-quality encode. Useful for the first pass in 2-pass
+       ABR encodes, where the encoding is only there to estimate complexity
+          + Exact details seem to vary and may have changed over time. It does something like setting
+            subq=1, frameref=1, setting the simplest/fastest options for cmp, dia/predia, disables qpel,
+            mv4, trellis, cbp, mv0, and noise shaping/reduction.
+          + ffmpeg seems to have no equivalent, though you could just manually set all these.
+     * Depending on the present noise and other graininess, whether you have smooth or frame animation
+       (e.g. cartoons, anime), photographic film or cel-like look, and how the specific codec deals with
+       these things, you may wish to experiment with:
+          + qns=2
+            ,
+            -qns 2
+            - Noise shaping, which can hide ringing artifacts. Can help perceptual quality (even though
+            PSNR measurements will be lower). 2 seems a good value. Should be used on top of trellis.
+            Slow, not necessarily worth the bother, and can sometimes look worse.
+          + qns=200
+            ,
+            -nr 200
+            - Noise reduction. Sometimes improve perceptual quality by lessening general noise, but
+            aggressive values (say, nr=400) may just look like an ugly selective plastic-everything
+            blur. Avoid if not necessary.
+
+for (lib)x264
+  This article/section is a stub — probably a pile of half-sorted notes, is not well-checked so may
+                        have incorrect bits. (Feel free to ignore, fix, or tell me)
+
+   (Values below biased towards slower, better-quality encoding without going overboard)
+
+Further detail options
+   The two basic quality-for-speed tradeoffs are subq and frameref.
+     * frameref=4
+       ,
+       -refs 4
+       - How many adjacent frames to base decisions on.
+          + Defaults to 1. For typical (stabilized-)camera-based video, using 2 and 3 can give
+            noticeable improvements at acceptable time tradeoffs.
+          + For things like cleaned cel animation, anime, and anything else that is largely or usually
+            very still / repeats large chunks between frames, you may see improvement up to 6.
+          + More means slower encode. How much depends on other options as well.
+          + More may also hurt CABAC coding efficiency.
+          + More means more memory required by the decoder
+          + ...particularly the last can mean it may not play play on all hardware decoders. H.264
+            levels) relate to this. To be relatively safe, use at most 5 for SD resolution video, 4 for
+            HD.
+     * subq=6
+       ,
+       -subq 6
+       - sub-pixel motion estimation quality.
+          + Range is 1 (fast & bad) through 9 (slow, better quality for same bitrate, but hardly worth
+            the time).
+
+                1, 2, 3 are lower quality and not much faster
+                ~4 and 5 are often the default
+                ~6 or 7 are noticeably slower than 4 or 5 but you will still notice the quality
+                difference (...mostly when bframes>0).
+                There's little quality gain for 8 or 9
+                I've seen the default mentioned as 7, 6, and 5, which is also roughly the most sensible
+                zone.
+                Interacts with frameref somewhat, in that more references combines with this option to
+                encode slower. For higher frameref the quality increase levels off quickly, meaning that
+                large frameref combined with large subq is rarely worth the extra time.
+
+   Also interesting:
+     * -x264encopts cabac
+       ,
+       -coder 1
+       : CABAC does data compression better than the older CAVLC. Default is usually CABAC anyway.
+
+          You probably only use CAVLC (-x264encopts nocabac, -coder 0) when you want compliance to
+          Baseline
+     * me=umh
+       ,
+       -me_method umh
+       - motion estimation type.
+          + The default, me=hex, is good.
+          + Encoder nerds seem to like me=umh because it occasionally does better, but it is noticeably
+            slower. How much slower seems to mostly be correlated to frameref. (how much better also
+            varies with that, and of course the video content). You may want to decide based on your
+            value of frameref.
+     * mixed_refs: cleverer reference search. Generally gives improvements (when frameref is ≤2) and
+       doesn't give a large speed dent.
+     * bframes=3
+       ,
+       -bf 3
+       - max b-frame amount between I or P frames (see description above)
+          + As noted above, you probably want to use vb_strategy=1 , -b-strategy 1
+          + The encoder chooses when to use these, and it rarely uses more than 3.
+          + When you want to comply with Baseline, this should be 0
+     * b_pyramid
+       ,
+       -flags2 bpyramid
+       - Allow B-frames as prediction reference(verify)
+          + Allows better quality with slightly slower encoding and decoding. Usually worth it.
+          + rather-old decoders don't support this
+          + Only has an effect when b-frame amount is ≥2 (verify)
+     * weight_b
+       ,
+       -flags2 wpred
+       - more analysis in prediction from B-frames(verify).
+          + Useful, cheap, so you should use it.
+          + Only has an effect when b-frame amount is ≥2 (verify)
+     * weight_p
+       ,
+       -flags2 wpredp
+       - weighed prediction for P-frames. Slightly better compression, and helps coding
+       efficiency(/quality) of fades, and not much else. The encoder itself doesn't use this much. Small
+       speed hit, often little (sometimes no) effect. Options: 0 (off), 1 (simple), or 2 (smarter,
+       slower). Adobe Flash's video player before 10.1 had a bug that meant use of 2 caused errors.
+     * threads=auto
+       ,
+       -threads 0
+       - automatically choose amount of threads/cores to use. Similar story to xvid's: encoding speed
+       scales well, hurts quality a tiny bit(verify). Default value is 1. You can hand in an
+       integer.
+     * partitions=all
+       ,
+       -partitions parti4x4,parti8x8,partp4x4,partp8x8,partb8x8
+          + basically "be more thorough about prediction, not just what usually works well." Sometimes
+            does better on complex or fast movement.
+          + A "if you've got the time, sure" options, although the default seems to only exclude a
+            single non-general-purpose option(verify).
+     * 8x8dct
+       ,
+       -flags2 8x8dct
+          + Allows 8x8 as well as 4x4 DCT for macroblocks. Similar concludion to previous item.
+          + In x264: this one is specifically High profile, not Main or Baseline
+
+   The ffmpeg docs mention the following three option sets:
+     * high quality: subq=6 partitions=all 8x8dct me=umh frameref=5 bframes=3 b_pyramid weight_b
+     * decent quality: subq=5 8x8dct frameref=2 bframes=3 b_pyramid weight_b
+     * fastish encode: subq=4 bframes=2 b_pyramid weight_b
+
+   There are many more options, but for many of them the default is the best option, or their effect is
+   too minor. If you're really really interested, go read manuals and forums.
+
+Considering profiles and levels
+   There are quite a few profiles, some of which practical (fast switching between server streams), some
+   targeted at camcorders, professional editing, mastering uses, and there's the Scalable set
+   targeted at videoconferencing)
+
+   The more basic set of profiles includes the following:
+     * Baseline, Constrained Baseline (BP, CBP)
+          + intended use: video conferencing, low-cost mobile. In practice, things like iPods
+          + Constrained baseline is the set of features shared between Baseline, Main, and High
+          + Baseline: CBP plus some robustness, low-delay details
+
+          CAVLC (no CABAC): nocabac, -coder 0
+          No bframes: bframes=0, -bf 0
+          No pframe prediction: weightp=0, -wpredp 0
+          No 8x8 DCT: no8x8dct, -flags2 -wpred-dct8x8
+          nointerlaced
+          qp>0
+     * Main (MP)
+          + Intended use: (DVB) SDTV
+
+          CABAC: -coder 1
+          no8x8dct, -flags2 -wpred-dct8x8
+          qp>0
+     * High (HiP)
+          + Intended use: (DVB) HDTV, BluRay storage
+
+          CABAC: -coder 1
+          high qp>0
+
+   Notes:
+     * Mobile devices of different speeds can often comfortably decode Baseline and sometimes Main, but
+       typically not High.(verify)
+     * One of your choices is between Baseline for wide playability, and anything fancier which uses
+       CABAC for an almost immediate ~20% added coding efficiency.
+     * The H.264 levels basically let devices certify they have enough temporary space and throughput to
+       let it support a certain bitrate and resolution, and (effectively) -frameref choice.
+
+          You could mention smartphones and media players to have some level. For example, AppleTV does
+          Main profile 720p at level 3.1. General-purpose computers are usually a level above what you
+          need.
+     * CAVLC (Context-adaptive variable-length coding) is supported in all H.264 profiles
+     * CABAC (Context-adaptive binary arithmetic coding).
+          + better quality than CAVLC at same bitrate
+          + takes more CPU at decode time
+          + Supported in Main profiles and higher (computer decoders understand it, not all hardware
+            does)
+
+     * (don't confuse profiles with ffmpeg's presets)
+
+   h
+
+some filters
+  This article/section is a stub — probably a pile of half-sorted notes, is not well-checked so may
+                        have incorrect bits. (Feel free to ignore, fix, or tell me)
+
+   Rescale filter
+   Scaling down means less detail. Resizes between similar resolutions (e.g. 10% difference) will mostly
+   have the effect of a mild lowpass/blur, so while they may compress better it won't look much better.
+   Sometimes cropping or letterboxing is a better idea.
+
+   When you want a smaller file, or half the resolution, or when target size/bitrate is a hard
+   constraint, then resizing can be worth it, because encoding artifacts (from too low a bitrate) tend
+   to be more visible than a resolution difference, as long as the resolution is still decent.
+
+   You can also specify the interpolation method (-sws option), though the default bicubic is often the
+   best choice.
+   http://www.mplayerhq.hu/DOCS/HTML/en/menc-feat-rescale.html
+
+   Cropping filter
+   You may wish to crop off things like letterboxes. If a letterbox doesn't start on a macroblock edge,
+   that will look like a hard transition to black and the codec will spend more size on it than you
+   would care about.
+
+   For digitized stuff you may wish to cro off TV/VCR non-frame overscan noise and such.
+
+   Due to codec macroblocks, height and width should usually be a multiple of 4 or 8. Specific devices
+   can want specific resolutions, but PC playback rarely cares.
+
+   Other filters
+   There are quite a few filters available, though most are not useful in everyday cases.
+   To get a list of those you available in your installation, run
+   mencoder -vf help
+   .
+
+   Some of the more useful filters include those for deinterlacing, (inverse) telecine, post-processing,
+   and de-noising, and some specific things like creating black bands for subtitles to go in. In a few
+   cases, the same functionality can also be done by the video codec (for example, mpeg4 has **
+   functionality)
+
+   Use of multiple filters chains them - so order matters.
+   For example, to apply inverse telecine to content that may partially be progressive video, you can
+   use -vf pullup,softskip or -vf softpulldown,ivtc=1. See  for more details.
+
+   harddup is interesting to mention. Some containers allow a 'the next frame is the same as this' flag,
+   which saves space. However, this will not always play fine. The decoder might skip these and use the
+   next stored frame, meaning it plays too fast and the audio lags behind. (These synchronization
+   problems are apparently more likely to happen in MPEG formats) The safer alternative is to just hand
+   the same frame to the encoder again, to be compressed. This will take a little more space (though
+   usually relatively little) and avoid causing the described audio/video synchronization problem.
+
+libavcodec options worth mentioning
+   (...generally mentioning both the mencoder and ffmpeg argument names)
+
+   Notes:
+     * libavcodec shares a bunch of options between multiple encoders - in particular between Xvid and
+       H.264 (both being part of MPEG4)
+
+     * In ffmpeg (probably mencoder too), the details in the man page may lag behind the encoder, so
+       when in doubt, trust what
+       ffmpeg -h
+       says over what
+       man ffmpeg
+       says.
+
+Frame type / GOP related
+  This article/section is a stub — probably a pile of half-sorted notes, is not well-checked so may
+                        have incorrect bits. (Feel free to ignore, fix, or tell me)
+
+   (See Video#On_types_and_groups_of_frames for some technical background)
+
+     * -lavcopts keyint=60
+       ,
+       -g 60
+       - maximum GOP size (basically "after how many non-Iframes do we force an I-frame")
+
+          Something like 10 is good for fast seeking (though forces iframes when the content doesn't
+          call for it)
+          Something like 250 spends very few iframes unnecessarily (though can be much slower to seek)
+          I've seen low defaults like 12 (possibly to comply with something?) and high defaults like 250
+          I would recommend no higher than -g 90 or so - above 60 or so the space difference is
+          negligible and the seekability difference is not.
+          for fast seekability / frame-inspectable, you can force -g 1 (iframe-only)
+     * -lavcopts vmax_b_frames=2
+       ,
+       -bf 2
+       - maximum amount of B-frames in a row
+
+          essentially controls the choice between P- and B-frames whenever there's no call for I-frames
+          encoder's choice is always adaptive
+          strategy varies with codec; x264 uses at most 2 or 3 at a time, while you can easily get Xvid
+          to generate runs of 16 (the maximum)
+          at least 1 or 2 helps typically helps efficient use of space (fewer unnecessary I-frames)
+
+                For a lot of real-world content, more than 2 B-frames doesn't actually help much
+                Relatively still content (such as some anime) may benefit from 3.
+
+          I've seen defaults mentioned as 0 or 2 or 3 (varying with codec?)
+          When you use 2 or higher, you probably want to look at setting -b_strategy to 1 (or 2),
+          particularly for Xvid
+          B-frames make decoding a little slower. This is one reason that H.264 Baseline profile
+          compliance requires you do not use them.
+          0 can also be better for slightly better compatibility (...with slow hardware and old
+          software)(verify)
+     * vb_strategy=1
+       ,
+       -b_strategy 1
+       : encoder's strategy in I/P/B-frame choice
+
+          0 - use maximum number of B-frames possible (default). In Xvid this uses them even where
+          they're not the best choice(verify), so when you set vmax_b_frames<tt>/-bf value over 2 or
+          so you probably do not want this default
+          1 - Avoid B-frames in high motion scenes, which is better for overall quality in such scenes.
+          (can be further tuned with b_sensitivity) Its choice is a little crude, so sometimes you want:
+          2 - try to find optimal frame-type sequence, for more efficient use of space. Significantly
+          slower than the other options, and the gains are often tiny, so only useful when you have hard
+          size constraints and really wish to squeeze out the most quality. (Can be further tuned with
+          brd_scale)
+
+   For example, in Xvid...
+     * -bf 16 -g 16 might give:
+
+IBBBBBBBBBBBBBBBB
+
+     * -bf 16 -g 250 might give:
+
+IBBBBBBBBBBBBBBBBPBBBBBBBBBBBBBBBBPBBBB...
+
+     * -bf 1 might give:
+
+IBIBIBPBPBPBPBPI...
+
+   In H.264, TODO
+
+Handbrake
+  This article/section is a stub — probably a pile of half-sorted notes, is not well-checked so may
+                        have incorrect bits. (Feel free to ignore, fix, or tell me)
+
+   A fairly easy to use transcoder, mostly focused on MPEG4.
+
+   Most presets code to something that specific hardware likes, often combining H.264 video and AAC
+   audio in a MPEG-4 container.
+
+   ...but you can play with the options to do MP3 audio, Xvid-style video (though apparently not the
+   advanced settings), use a MKV container, and more.
+
+   Bitrate is in the Video tab, detailed try-harder settings in the Advanced tab, Audio stuff under
+   'Audio'.
+
+   for xvid
+
+   In the Video tab, 'Video codec' dropdown, 'MPEG-4 (FFmpeg)' refers to MPEG-4 ASP. There is exactly
+   one given preset that uses it, 'Legacy / Classic'
+
+   for x264
+
+   In the Video tab, 'Video codec' dropdown, 'H.264 (x264)' is what you want -- which is also the
+   default (in all given presets except 'Legacy / Classic' presets)
+
+   'Regular/High profile' preset is basically the slow-and-good-quality setting, 'Regular/Normal' a
+   somewhat faster variant.
+
+Tricks, commands, option notes
+Images from movie
+          mplayer/mencoder
+
+mplayer -nosound -vo png:z=4 infile
+
+   Where:
+     * you can also use
+       jpeg
+       ,
+       pnm
+       ,
+       tga
+       , or
+       gif89a
+       for an animated gif. See the mencoder man page for options for each file format, which may
+       include quality options and the directory to save files to.
+     * 4, for png, is moderately fast and low compression (1-9 scale)
+     * To extract one out of so many frames, add
+       -vf framestep=5
+       (for one out of six). Frameskip still decodes all frames it passes, which is slower than you
+       might wish
+     * ...If a selection of keyframes will do, you could getting an image per so-many seconds (or the
+       closest keyframe) using
+       -sstep 1
+       to skip a second for each extracted frame. The timestep may be irregular, and I seem to remember
+       getting a few bad frames(verify).
+
+          ffmpeg
+ffmpeg -i infile -an -f image2 filename%04d.png
+
+     * ffmpeg understands
+       %d
+       and
+       %[0-4]d
+       . When extracting single frames you can omit that.
+     * start at second position:
+       -ss 180
+     * extract every so many frames(verify):
+       -r 1/5
+     * exit after some amount of frames:
+       -frames 5
+
+     * -sameq ?
+
+   See also image2 demuxer for details.
+
+   For thumbnailing: try a start position and a single frame, e.g. -ss 180 and -frames 1 (mencoder) /
+   -vframes 1 (ffmpeg)
+
+   mencoder seems to use filenames like 00000001.jpg, 00000002.jpg, etc. You can't control the filename,
+   but you can control the directory it goes to, by adding :outdir=/tmp/path to the -vo options (works
+   on jpeg, png, and pnm outputs).
+
+   In ffmpeg you can control the filename.
+
+   See also
+     * http://code.google.com/p/ffmpegthumbnailer/
+
+Movie from images
+  This article/section is a stub — probably a pile of half-sorted notes, is not well-checked so may
+                        have incorrect bits. (Feel free to ignore, fix, or tell me)
+
+   ffmpeg
+   Something like:
+ffmpeg -r 10 -f image2 -pattern_type glob -i "*.png" -vcodec mpeg4 -b:v 2000k out.mp4
+
+   Alternatives to input specification:
+     * -i movie_%1d.tif
+       is shorter, but fails on gaps, and is annoying if there is no strict pattern.
+     * (There is also the deprecated
+       -i '%*.tif'
+       ) (verify)
+     * For some documentation: https://www.ffmpeg.org/ffmpeg-formats.html#image2-1
+
+   Notes:
+     * will determine image filetype (based on extension(verify))
+     * You may want a lower framerate, e.g.
+       -r 2
+     * academic users: when your input is sharp rendered things rather than photographic images, you may
+       e.g. prefer forcing iframes (via one-sized GOPs)
+
+   mencoder
+   Something like:
+mencoder "mf://*.jpg" -mf fps=10 -o movie.avi -ovc lavc -lavcopts vcodec=mjpeg
+
+   TODO: actually try
+
+   Alternatives:
+     * mf://@stills.txt
+
+Screen capture
+   https://trac.ffmpeg.org/wiki/Capture/Desktop
+
+   Note that you can use image2 as output as well, meaning individual files.
+
+letterbox detection
+   To help discover how the black bars around the video should be cropped:
+mplayer -vo null -vf cropdetect dvd:// -dvd-device DVD.ISO
+
+   The cropdetect filter may play safe, rounding the sizes to the nearest factor of 16 for compatibility
+   with the most compressors, which means that you may still see a thin black border.
+
+   You can play with the values (they are width:height:xoffset:yoffset). Most codecs will also deal with
+   other sizes, but may not necessarily do so most efficiently.
+
+   It may pay off to crop a little more than that, so you may want to play with the setting it
+   suggested, e.g.
+mplayer -vf crop=688:384:16:96 dvd:// -dvd-device DVD.ISO
+
+specifying time positions, sections, and such
+  This article/section is a stub — probably a pile of half-sorted notes, is not well-checked so may
+                        have incorrect bits. (Feel free to ignore, fix, or tell me)
+
+   Useful for frame capture, for example for when you want to extract certain sections, for thumbnails
+   that skips intros, and whatnot.
+
+          mplayer/mencoder
+   You can seek to a start position in seconds, with optional minutes and hours, for example
+   -ss 56
+   (position in seconds) and
+   -ss 01:02:56
+   (one hour, two minutes, 56 seconds in).
+
+   And stop before the end with either
+     * -endpos time
+       (note: actually amount of played time, not end position in video. For example, -ss 60 -endpos 60
+       goes from 0:01:00 to 0:02:00)
+
+     * -frames n
+       (to stop after n frames)
+
+          ffmpeg
+
+     * -ss 180
+       : the same in mencoder and ffmpeg, see above
+
+     * -vframes n
+       : stop after n frames
+
+Add/fix an index (seekability)
+
+          mplayer/mencoder
+   When there is no avi index or it is invalid, many players will either not allow seeking or take quite
+   a bit of time building one before playing the video.
+
+   You can make mplayer calculate an index before it starts playing using -idx, or force recalculation
+   with -forceidx, in case it doesn't seem correct but you know it is, for example because it fails to
+   seek properly or have audio/video syncing problems (note that that can have many other causes too).
+
+   You can also write a new file with a new index, which doesn't take very long.
+mencoder -forceidx -oac copy -ovc copy inputfile -o outputfile
+
+Multiple inputs
+          ffmpeg and multiple sources
+   You can use multiple inputs, and select from multiple streams from each input.
+
+   For example, a DVD source with two soundtracks might show (the 0 before the dot referring to input
+   0):
+Stream #0.0[0x1e0]: Video: mpeg2video (Main), yuv420p, 720x576 [PAR 16:15 DAR 4:3], 8000 kb/s, 25 fps, 25 tbr,
+ 90k tbn, 50 tbc
+Stream #0.1[0x80]: Audio: ac3, 48000 Hz, stereo, s16, 192 kb/s
+Stream #0.2[0x81]: Audio: ac3, 48000 Hz, stereo, s16, 192 kb/s
+Stream #0.3[0x20]: Subtitle: dvdsub
+
+   To pick out the video stream and the second audio stream, you can do
+-map 0:0 -map 0:2
+
+   ....which in the encode debug will show:
+Stream mapping:
+ Stream #0.0 -> #0.0
+ Stream #0.2 -> #0.1
+
+   You can also combine streams from multiple inputs (e.g. audio from a separate file).
+   You can also generate multi-stream outputs, but I haven't looked into that.
+
+Extracing audio to WAV
+
+          mplayer/mencoder
+mplayer -vo null -vc null -ao pcm:file=/data/outfile.wav -srate 44100 -noframedrop infile
+
+   Notes:
+     * -srate is optional but may be useful to convert from relatively unusual rates.
+     * -vc null (or dummy) means video isn't decoded
+     * -vo null discards the video (may be redundant, may be necessary for the chaining)(verify)
+     * -noframedrop may be redundant, given no video output (verify)
+
+Flash encoding
+   This article/section is a stub — probably a pile of half-sorted notes, is not well-checked so
+                      may have incorrect bits. (Feel free to ignore, fix, or tell me)
+
+   In libavcodec, the flv vcodec refers to Sorenson, which is now the older and lower-quality variant of
+   flash video. Recently, you can use H.264 - see below this section.
+ffmpeg -i input.avi -vcodec flv -acodec libmp3lame -b 800k -ab 96k -f flv output.flv
+
+   or:
+mencoder -of lavf -ovc lavc -oac lavc \
+  -lavcopts vcodec=flv:vbitrate=800:acodec=libmp3lame:abitrate=96 \
+  inputfile -o outputfile.flv
+
+   Notes:
+     * Audio in Flash is usually MP3 - with a few restrictions. The most important is that sampling rate
+       should be 11025Hz, 22050Hz or 44100Hz. If it's something different, (e.g. 48kHz) you should
+       specify to resample it
+          + ffmpeg example:
+            -ar 44100
+          + mencoder example
+            -af lavcresample=22050 -srate 22050
+     * Bitrate depends on what you want to do
+          + 800 above was to get acceptable video at TV/DVD resolution.
+          + For reference: youtube will recompress the video if the (average) bitrate is too high. It's
+            generally simplest to just upload a high-resolution original and let youtube handle the
+            encoding, but in some cases you can get a little more quality with your own cleverness.
+               o for 320x240, the limit is ~350kbps. Result of its recompression is typically
+                 ~240-300kbps.
+               o For for 480x360 and 640x480 its recompression is around ~500kbps
+               o For 1280x720 its recompression is ~2mbps.
+
+   Recent Flash versions...
+     * added H.264 video (since Flash 9)
+     * added AAC audio (since Flash 9)
+     * added Speex audio (since Flash 10)
+     * understands MPEG4 containers (since Flash 9). Uses .f4v extension (in the case of video). When
+       you use H.264 or AAC, this container is recommended.
+
+   When using H.264 for Flash video, for Flash-less devices (iPhone, iPad), and in HTML5 compliant
+   browsers, which is making it the new web favorite.
+
+   As of this writing, FFmpeg does not support directly writing an F4V container ((verify) -
+   probably about some of the metadata, since it can certainly use mpeg-4 containers), so you'll have to
+   use the older .flv container for now (which apparently is a little more restrictive). Example:
+ffmpeg -i input.avi -vcodec libx264 -vpre hq -vpre main -ar 44100 -ab 96k -ac 2 -f flv output.flv
+
+   When you want to support many devices (particularly phones and other mobile devices) without using
+   multiple streams, you have to stick with a bunch of restrictions. In particular, some mobile devices
+   can decode Main profile in realtime, but in others you can only guarantee that for
+   Baseline(verify) (and that's with hardware assistance), so but using fancier features that make
+   for more efficient quality-per-space may make video choppy on such platforms. Yes, Baseline is going
+   to be considerably larger for the same quality.
+
+Some more technical notes
+   See also Video for some more general technical information
+
+Unsorted notes
+
+lavc vcodecs
+   This article/section is a stub — probably a pile of half-sorted notes, is not well-checked so
+                      may have incorrect bits. (Feel free to ignore, fix, or tell me)
+
+   This hasn't been updated for a while, so could be outdated (particularly if it's about something that
+                                  evolves constantly, such as software).
+
+   Ordered very roughly from more to less interesting:
+     * MPEG4 AVC
+          + libx264 - x264 H.264/AVC MPEG-4 Part 10
+
+     * MPEG4 ASP
+          + mpeg4 - MPEG-4 (DivX 4/5)
+          + libxvid - Xvid MPEG-4 Part 2 (ASP)
+          + msmpeg4 - DivX 3
+          + msmpeg4v2 - MS MPEG4v2 (pre-standard)
+
+     * libtheora - Theora
+
+     * flv - Sorenson's H.263 variant used in Flash video (note: recent Flash supports H.264 formats
+       too)
+
+     * mpeg1video - MPEG-1 video
+     * mpeg2video - MPEG-2 video
+
+     * h263 - H.263
+     * h263p - H.263+
+     * h261 - H.261
+     * svq1 - Apple Sorenson Video 1 (H.263-based)
+     * rv10 - an old RealVideo codec (H.263-based)
+
+     * dvvideo - Sony Digital Video
+
+     * huffyuv - HuffYUV
+     * ffvhuff - nonstandard 20% smaller HuffYUV using YV12
+     * ffv1 - FFmpeg's lossless video codec
+     * ljpeg - Lossless JPEG
+     * mjpeg - Motion JPEG
+
+     * snow experimental wavelet-based codec (from FFmpeg)
+     * roqvideo - ID Software RoQ Video
+
+     * wmv1 - Windows Media Video, version 1 (AKA WMV7)
+     * wmv2 - Windows Media Video, version 2 (AKA WMV8)
+
+     * asv1 - ASUS Video v1
+     * asv2 - ASUS Video v2
+
+   See also:
+     * Encoding with the libavcodec codec family
+     * Using libavcodec for VCD/SVCD/DVD Encoding
+
+     * http://web.njit.edu/all_topics/Prog_Lang_Docs/html/mplayer/codecs.html#libavcodec
+
+     * http://www.mplayerhq.hu/DOCS/codecs-status.html
+
+libavcodec audio-codec options, and other audio notes
+   This article/section is a stub — probably a pile of half-sorted notes, is not well-checked so
+                      may have incorrect bits. (Feel free to ignore, fix, or tell me)
+
+   This hasn't been updated for a while, so could be outdated (particularly if it's about something that
+                                  evolves constantly, such as software).
+
+   Audio codecs are regularly
+     * MP3 (gives good quality in limited bitrates)
+     * MP2 (for compatibility, and it's simpler+faster than MP3. Also lavc's default(verify))
+
+   In some cases you are constrained to specific codecs. For example, you could use AC3 for DVDs, AAC
+   for videos meant to be played on a PSP) or 3GPP-specific codecs, or want some feature not
+   available in all codecs (e.g. more channels than stereo, losslessness).
+
+   List of acodecs from the man page (may be a little outdated):
+     * copy - uses the input stream as-is (may not be possible in the given container)
+
+     * MP3:
+          + libmp3lame - MPEG-1 audio layer 3 (MP3) using LAME (not to be confused with -oac mp3lame)
+          + mp3 is deprecated, use libmp3lame now
+          + If you use mencoder, it seems that using -oac mp3lame + -lameopts gives you more
+            configurability than -oac lavc + acodec=libmp3lame (verify)
+     * libfaac - AAC (Advanced Audio Coding) using FAAC
+     * ac3 - AC-3 Dolby Digital
+     * mp2 - MPEG-1 audio layer 2 (MP2), useful for DVDs and such
+     * vorbis - Ogg Vorbis
+     * pcm_* and adpcm_* - PCM and ADPCM formats, various specific variants
+     * libamr_nb - 3GPP Adaptive Multi-Rate (AMR) narrow-band
+     * libamr_wb - 3GPP Adaptive Multi-Rate (AMR) wide-band
+     * wmav1 - Windows Media Audio v1
+     * wmav2 - Windows Media Audio v2
+     * flac - Free Lossless Audio Codec (FLAC)
+     * g726 - G.726 ADPCM
+     * roq_dpcm - Id Software RoQ DPCM
+     * sonic - experimental simple lossy codec
+     * sonicls - experimental simple lossless codec
+
+   You probably want to specify a bitrate; defaults may well be overly conservative.
+
+   For example, to re-encode only audio:
+mencoder movie.wmv -o movie.avi -ovc copy -oac lavc -lavcopts acodec=libmp3lame:abitrate=96
+ffmpeg -i movie.wmv -acodec libmp3lame -ab 96 movie.avi
+
+   When you use -oac mp3lame instad of (instead of -lavcopts acodec=libmp3lame), you get more control
+   over encoding options (using -lameopts). For example:
+mencoder movie.wmv -o movie.avi -ovc lavc -oac mp3lame -lameopts preset=medium
+
+Unsorted mplayer/mencoder notes
+   File/container options
+   The output file format -- usually little more than a container -- is regularly left as the default
+   .avi, which is fine if you're not doing any fancy multiplexing, multi-tracking, or embedding. {{{1}}}
+
+   There are a few details to container formats, what the file can contain (such as alternative audio
+   streams and subtitles), what sort of conventional abuse exists (very common in AVI), which formats
+   are standard-supported and which formats can be shoved in but won't be played by (only-)compliant
+   players.
+
+   There are also some details to specific combinations when encoding (see for example MPEG's harddup
+   details).
+
+   Encoder/codec choice Mplayer gets a lot of functionality from using FFmpeg, or more specifically
+   libavcodec (lavc for short). (lavc is developed by the ffmpeg team, and ffmpeg itself is another
+   front-end to libavcodec).
+
+   In an overall convesion, some things are done with mencoder-specific code, some with lavc (or another
+   encoder choice), and some can be done with either.
+
+   For example, there is an mplayer-internal way to encode xvid, and an ffmpeg way. Similarly, there are
+   multiple ways to use mp3 as an audio codec (some were removed to avoid confusion), and multiple ways
+   to mux together streams. In some cases, you may wish to use some specialized tool (for example for
+   complicated muxing) instead of mencoder.
+
+   There are two main choices to make when encoding, three if you're picky:
+     * choice of library for the output video codec (-ovc)
+     * choice of library for the output audio codec (-oac)
+     * output (container) format (-of)
+
+   To see the options available in your version/installation, run
+   mencoder -ovc help -oac help -of help
+   .
+
+   You can also leave a stream alone by using
+   -ovc copy
+   (for video) or
+   -oac copy
+   (for audio). This passes through that stream, so obviously also doesn't combine with filters, and is
+   useful to ends like taking out a single stream or muxing streams into containers.
+
+   See also:
+     * http://www.mplayerhq.hu/DOCS/HTML/en/menc-feat-selecting-codec.html
+
+   Note that libavcodec with the mpeg4 vcodec will by default set Fhe fourCC FMP4, which is not as
+   widely recognized as some other FourCCs. A better supported value is DX50 (DivX 5), which should ebe
+   compatible with more MPEG4-capable players. You can set -fourcc DX50 on the command line (or as a
+   default in your mencoder config).
+
+   Simple example
+   
+   To give a simple recoding example:
+mencoder movie.wmv -o movie.avi -ovc lavc -oac lavc
+
+   This will
+     * convert from Microsoft WMV, detected from the input file you have it
+     * into a new AVI container (default, and there is no specific -of set)
+
+   The choice of lavc as the encoding library for both audio and video, with no further options, means
+   this case relies on configured defaults, which means that the output AVI will most likely contain
+   DivX video and MP2 audio.
+
+   If you want to make specific codec choices and make specific quality options (usually of the 'spend
+   longer to make a better quality output' sort), you pass them in via -lavcopts.
+
+   Most of the variation and choice lies in the options to libavcodec, which are not detailed by the
+   basic -oac help functionaliry because to mencoder, lavc is just one of the libraries you can plug in.
+
+   The mencoder page does however spend a lot of text on lavc. See man mencoder and look for the
+   lavcopts section. To skip to that section while viewing the man page, type: /\(\-lavcopts) (or you
+   can just scroll there).
+
+   See also
+     * http://www.mplayerhq.hu/DOCS/HTML/en/ and particularly:
+          + http://www.mplayerhq.hu/DOCS/HTML/en/encoding-guide.html
+          + http://www.mplayerhq.hu/DOCS/HTML/en/mencoder.html
+
+   Retrieved from
+   http://helpful.knobs-dials.com/index.php?title=Notes_on_encoding_video&oldid=51338

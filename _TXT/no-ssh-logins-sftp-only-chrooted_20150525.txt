@@ -1,0 +1,119 @@
+filename: no-ssh-logins-sftp-only-chrooted_20150525.txt
+http://ramblingfoo.blogspot.co.uk/2015/05/howto-no-ssh-logins-sftp-only-chrooted.html?utm_source=feedburner&utm_medium=feed&utm_campaign=Feed:+RamblingFoo+(Rambling+around+foo)
+
+HOWTO: No SSH logins SFTP only chrooted server configuration with OpenSSH
+
+   If you are in a situation where you want to set up a SFTP server in a more secure way, don't want to
+   expose anything from the server via SFTP and do not want to enable SSH login on the account allowed
+   to sftp, you might find the information below useful.
+   What do we want to achive:
+     * SFTP server
+     * only a specified account is allowed to connect to SFTP
+     * nothing outside the SFTP directory is exposed
+     * no SSH login is allowed
+     * any extra security measures are welcome
+
+   To obtain all of the above we will create a dedicated account which will be chroot-ed, its home will
+   be stored on a removable/no always mounted drive (acessing SFTP will not work when the drive is not
+   mounted).
+   Mount the removable drive which will hold the SFTP area (you might need to add some entry in fstab).
+   Create the account to be used for SFTP access (on a Debian system this will do the trick):
+
+     # adduser --system --home /media/Store/sftp --shell /usr/sbin/nologin sftp
+
+   This will create the account sftp which has login disabled, shell is /usr/sbin/nologin and create the
+   home directory for this user.
+   Unfortunately the default ownership of the home directory of this user are incompatible with
+   chroot-ing in SFTP (which prevents access to other files on the server). A message like the one below
+   will be generated in this kind of case:
+
+     $ sftp -v sftp@localhost
+     [..]
+     sftp@localhost's password:
+     debug1: Authentication succeeded (password).
+     Authenticated to localhost ([::1]:22).
+     debug1: channel 0: new [client-session]
+     debug1: Requesting no-more-sessions@openssh.com
+     debug1: Entering interactive session.
+     Write failed: Broken pipe
+     Couldn't read packet: Connection reset by peer
+
+   Also /var/log/auth.log will contain something like this:
+
+     fatal: bad ownership or modes for chroot directory "/media/Store/sftp"
+
+   The default permissions are visible using the 'namei -l' command on the sftp home directory:
+
+     # namei -l /media/Store/sftp
+     f: /media/Store/sftp
+     drwxr-xr-x root root    /
+     drwxr-xr-x root root    media
+     drwxr-xr-x root root    Store
+     drwxr-xr-x sftp nogroup sftp
+
+   We change the ownership of the sftp directory and make sure there is a place for files to be uploaded
+   in the SFTP area:
+
+     # chown root:root /media/Store/sftp
+     # mkdir /media/Store/sftp/upload
+     # chown sftp /media/Store/sftp/upload
+
+   We isolate the sftp users from other users on the system and configure a chroot-ed environment for
+   all users accessing the SFTP server:
+
+     # addgroup sftpusers
+     # adduser sftp sftusers
+
+   Set a password for the sftp user so password authentication works:
+
+     # passwd sftp
+
+   Putting all pieces together, we restrict access only to the sftp user, allow it access via password
+   authentication only to SFTP, but not SSH (and disallow tunneling and forwarding or empty passwords).
+   Here are the changes done in /etc/ssh/sshd_config:
+
+     PermitEmptyPasswords no
+     PasswordAuthentication yes
+     AllowUsers sftp
+     Subsystem sftp internal-sftp
+     Match Group sftpusers
+             ChrootDirectory %h
+             ForceCommand internal-sftp
+             X11Forwarding no
+             AllowTcpForwarding no
+             PermitTunnel no
+
+   Reload the sshd configuration (I'm using systemd):
+
+     # systemctl reload ssh.service
+
+   Check sftp user can't login via SSH:
+
+     $ ssh sftp@localhost
+     sftp@localhost's password:
+     This service allows sftp connections only.
+     Connection to localhost closed.
+
+   But SFTP is working and is restricted to the SFTP area:
+
+     $ sftp sftp@localhost
+     sftp@localhost's password:
+     Connected to localhost.
+     sftp> ls
+     upload
+     sftp> pwd
+     Remote working directory: /
+     sftp> put netbsd-nfs.bin
+     Uploading netbsd-nfs.bin to /netbsd-nfs.bin
+     remote open("/netbsd-nfs.bin"): Permission denied
+     sftp> cd upload
+     sftp> put netbsd-nfs.bin
+     Uploading netbsd-nfs.bin to /upload/netbsd-nfs.bin
+     netbsd-nfs.bin                                                              100% 3111KB
+     3.0MB/s   00:00
+
+   Now your system is ready to accept sftp connections, things can be uploaded in the upload directory
+   and whenever the external drive is unmounted, SFTP will NOT work.
+   Note: Since we added 'AllowUsers sftp', you can test no local user can login via SSH. If you don't
+   want to restrict access only to the sftp user, you can whitelist other users by adding them in the
+   AllowUsers directive, or dropping it entirely so all local users can SSH into the system.

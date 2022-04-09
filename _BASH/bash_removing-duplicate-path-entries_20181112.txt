@@ -1,0 +1,114 @@
+filename: bash_removing-duplicate-path-entries_20181112.txt
+https://www.linuxjournal.com/content/removing-duplicate-path-entries
+
+Removing Duplicate PATH Entries
+November 9, 2018
+
+   The goal here is to remove duplicate entries from the PATH variable. But before I begin, let's be
+   clear: there's no compelling reason to to do this. The shell will, in essence, ignore duplicates PATH
+   entries; only the first occurrence of any one path is important. Two motivations drive this exercise.
+   The first is to look at an awk one-liner that initially doesn't really appear to do much at all. The
+   second is to feed the needs of those who are annoyed by such things as having duplicate PATH entries.
+
+   I first had the urge to do this when working with [24]Cygwin. On Windows, which puts almost every
+   executable in a different directory, your PATH variable quickly can become overwhelming, so removing
+   duplicates makes it slightly less confusing when you're trying to decipher what's actually in your
+   PATH variable.
+
+   Your first thought about how to this might be to break up the path into the individual elements with
+   sed and then pass that through sort and uniq to get rid of duplicates. But you'd quickly realize that
+   that doesn't work, since you've now reordered the paths, and you don't want that. You want to keep
+   the paths in their original order, just with duplicates removed.
+
+   The original idea for this was not mine. I found the basic code for it on the internet. I don't
+   remember exactly where, but I believe it was on [25]Stack Exchange. The original bash/awk code was
+   something like this:
+PATH=$(echo $PATH | awk -v RS=: -v ORS=: '!($0 in a) {a[$0]; print}')
+
+   And it's close. It almost works, but before looking at the output, let's look at why/how it works. To
+   do that, first notice the -v options. Those set the input and output Record Separator variables that
+   awk uses to separate the input data into individual records of data and how to reassemble them on
+   output. The default is to separate them by newlines—that is, each line of input is a separate record.
+   Instead of newlines, let's use colons as the separators, which gives each of the individual paths in
+   the PATH variable as a separate record. You can see how this works in the following where you change
+   only the input separator and leave the output separator as the newline, and come up with a simple awk
+   one-liner to print each of the elements of the path on a separate line:
+$ cat showpath.sh
+export PATH=/usr/bin:/bin:/usr/local/bin:/usr/bin:/bin
+awk -v RS=: '{print}' <<<$PATH
+
+$ bash showpath.sh
+/usr/bin
+/bin
+/usr/local/bin
+/usr/bin
+/bin
+
+   So, back to the original code. To help understand it, let's make it look at bit more awkish by
+   reformatting it so that it has the more normal pattern  { action } or condition { action } look to
+   it:
+!($0 in a)  {
+                a[$0];
+                print
+            }
+
+   The condition here is !($0 in a). In this, $0 is the current input record, and a is an awk variable
+   (the use of the in operator, tells you that a is an array). Remember, each input record is an
+   individual path from the PATH variable. The part inside the parentheses, $0 in a tests to see if the
+   path is in the array a. The exclamation and the parentheses are to negate the condition. So, if the
+   current path is not in a, the action executes. If the current path is in a, the action doesn't
+   execute, and since that's all there is to the script, nothing happens in that case.
+
+   If the current path is not in the array, the code in the action uses the path as a key to reference
+   into the array. In awk, arrays are associative arrays, and referencing a non-existent element in an
+   associate array automatically creates the element. By creating the element in the array, you've now
+   set the array so that the next time you see the same path element, your condtiion !($0 in a) will
+   fail and the acton will not execute. In other words the action will execute only the first time that
+   you see a path. And finally, after referencing the array, you print the current path, and awk
+   automatically adds the output separtor. Note that an empty print is equivalent to print $0. Let's see
+   it in action:
+$ cat nodupes.sh
+export PATH=/usr/bin:/bin:/usr/local/bin:/usr/bin:/bin
+echo $PATH | awk -v RS=: -v ORS=: '!($0 in a) {a[$0]; print}'
+
+$ bash nodupes.sh
+/usr/bin:/bin:/usr/local/bin:/bin
+:
+
+   As I said, it almost works. The only problem is there's an extra newline and an extra colon on the
+   following line. The extra newline comes from the fact that echo is adding a newline onto the end of
+   the path, and since awk is not treating newlines as separators, it gets added to the end of the last
+   path, which, in this case, causes it to look like awk failed to remove a duplicate. But awk doesn't
+   see them as duplicates, it sees /bin and /bin\n. You can eliminate the trailing newline by using the
+   -n option to echo:
+$ cat nodupes2.sh
+export PATH=/usr/bin:/bin:/usr/local/bin:/usr/bin:/bin
+echo -n $PATH | awk -v RS=: -v ORS=: '!($0 in a) {a[$0]; print $0}'
+
+$ bash nodupes2.sh
+/usr/bin:/bin:/usr/local/bin:
+
+   And you're almost there, except for the trailing colon, which is not actually a problem. Empty PATH
+   elements will be ignored, but since you've come this far on this somewhat pointless journey, you
+   might as well go the distance. To fix the problem, use awk's printf command rather than print. Unlike
+   print, printf does not automatically include output record separators, so you have to output them
+   yourself:
+$ cat nodupes3.sh
+export PATH=/usr/bin:/bin:/usr/local/bin:/usr/bin:/bin
+echo -n $PATH | awk -v RS=: '!($0 in a) {a[$0]; printf("%s%s", length(a) > 1 ? ":" : "", $0)}'
+
+$ bash nodupes3.sh
+/usr/bin:/bin:/usr/local/bin
+
+   You may be a bit confused by this at first glance. Rather than eliminating the trailing separtor,
+   you've reversed the logic, and you're outputting the separator first, then the PATH element, so
+   instead of needing to eliminate the trailing separator, you need to suppress a leading separator. The
+   record separator is output by the first %s format specifier and comes from the length(a) > 1 ? ":" :
+   "", so it is only printed when there's more than one element in the array (that is, the second and
+   subsequent times).
+
+   As I said at the outset, there's no reason you have to remove duplicate path entries; they cause no
+   harm. However, for some, the simple fact that they are there is reason enough to eliminate them.
+
+
+---

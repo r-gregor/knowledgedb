@@ -1,0 +1,116 @@
+filename: linux_howto-freeze-unix-account.txt
+
+w to freeze Unix accounts
+By Sandra Henry-Stocker  1 
+
+January 07, 2013, 7:31 PM — Disabling access when someone leaves your company, whether or not by choice, is one of the key responsibilities of a systems administrator. Whether you remove accounts in their entirety -- along with perhaps gigabytes of files -- or only disable them so that no one can log into them is a choice that must be made with some knowledge of how the accounts were being used or a good policy that tells you who makes decisions about user accounts on various servers or applications. In general, unless you know that the files in some former employee's home directory are of no further value (e.g., maybe just a standard set of files for starting up common applications), it is a better idea to lock an account than remove it and its contents. This gives other people a chance to take over or review any work in progress and could save you from having to restore the same files from your backups sometime later.
+
+Unix systems offer a number of ways to freeze accounts without emptying them. The userdel command, for example, will generally not remove the contents of a user's home unless a -r (remove) or -f (force) argument is used along with it. Instead, the command will do no more than remove the user's /etc/passwd and /etc/shadow entries.
+
+An even safer bet, especially useful when the status of an account's user is in question, is to lock the account. Locking leaves the files intact and changes something in the /etc/passwd or the /etc/shadow file that prevents the account from being used. One such option is to change the user's shell from /bin/bash or some other legitimate shell to /bin/false. When /bin/false is used, the user's password hash is left intact even though the user can no longer log in. If you later need to reactivate the account, all you need to do is change /bin/false back to the original shell.
+
+Another option is to insert a special character in front of the password hash in the /etc/shadow file. And I say "special" only because using a character such as ! will make your intention clear while any other character is more likely look like it's simply a part of the hash. The usermod command on Linux systems does exactly that. It provides a lock option (-L) that inserts an exclamation point (!) in front of the password hash as described.
+
+shenry-stocker:!$x$19pf0n9r...
+If you need to unfreeze the account later, the usermod -U command will unlock it, removing the inserted !.
+
+The *LK* used on Solaris systems to lock accounts doesn't give you an easy way to reactivate an account without creating a new password, so I generally use the "!" trick on those as well -- at least until I've confirmed that the accounts will not be turned back over to the original users.
+
+Another of the things you should do on a Unix system before removing an account is check to see whether the person has any processes that might still be running. Even if the individual has just been escorted out of the building, he or she may have have left processes running or may have active logins. You can easily check with a ps -U username command.
+
+Another thing to look into is whether the user has any cron jobs set up. The userdel command might not remove cron files and usermod is unlikely to make any changes until the cron daemon is restarted -- and maybe not even then. It's safer to remove the person's crontab file or move it to a location from which it can be recovered if needed -- such as their home directory. You might need to restart the cron daemon if you move the file. I did not have to do this.
+
+Of course, you might want to capture a listing of the user's processes and cron jobs before you make any changes to files, just in case that information will prove of any value later on.
+
+You should also consider looking for files in other locations on the server in case those files should also be removed to adopted by other staff members.
+
+Here's a sample script that might be a good start for one that you might use to facilitate closing accounts for a group of individuals. Their usernames would be included, one per line in a file named RM-ACCT-LIST (see line 3). This only works on the local system for accounts that are defined locally, so it won't work if your users are defined in a service such as NIS+.
+
+Note that the command used to restart cron might need to be changed to a service crond restart command or running an init script if you're not working with a "systemd" Linux system.
+
+#!/bin/bash
+
+SAVEDIR="/home/frozen"
+
+for username in `cat RM-ACCT-LIST`
+do
+    # create a directory in which to save info on frozen accounts
+    if [ ! -d $SAVEDIR ]; then
+        mkdir $SAVEDIR
+    fi
+
+    # make sure the account exists on the system
+    grep ^$username: /etc/passwd > /dev/null
+    if [ $? != 0 ]; then
+        echo "No such user: $username"
+        exit 1
+    fi
+
+    # lock the account
+    usermod -L $username
+
+    # preface the user's info file with the current date and time and some
+    # information on the user
+    date > $SAVEDIR/$username
+    echo >> $SAVEDIR/$username
+    finger $username >> $SAVEDIR/$username
+    echo >> $SAVEDIR/$username
+
+    # check if the person is still logged in or has running processes
+    ps -U $username > /dev/null
+    if [ $? == 0 ]; then
+        echo "processes:" >> $SAVEDIR/$username
+        ps -U $username >> $SAVEDIR/$username
+        echo >> $SAVEDIR/$username
+    fi
+
+    # kill processes
+    pkill -U $username
+
+    # look for cron jobs
+    if [ -f /var/spool/cron/$username ]; then
+        echo "cron jobs" >> $SAVEDIR/$username
+        crontab -u $username -l >> $SAVEDIR/$username
+        mv /var/spool/cron/$username /home/$username/crontab
+    fi
+
+    # find files outside the user's home directory
+    echo "files outside home directory:" >> $SAVEDIR/$username
+    find / -user $username 2>/dev/null | egrep -v "^/home/$username|^/proc" \
+        >> $SAVEDIR/$username 2>/dev/null
+done
+
+# restart cron service just in case any cron files were encountered and moved
+# YOU MIGHT NOT NEED THIS
+# systemctl restart crond.service
+Restoring frozen accounts is even easier. You'd just need to unlock the account and, if applicable, restore the cron file.
+
+#!/bin/bash
+
+SAVEDIR="/home/frozen"
+
+for username in `cat RECOVER-ACCT-LIST`
+do
+
+    # make sure the account exists on the system
+    grep ^$username: /etc/passwd > /dev/null
+    if [ $? != 0 ]; then
+        echo "No such user: $username"
+        exit 1
+    fi
+
+    # remove information saved during the freeze if it exists
+    if [ -f /home/frozen/$username ]; then
+        rm /home/frozen/$username
+    fi
+
+    # unlock the account
+    usermod -U $username
+
+    # restore the cron file
+    if [ -f /home/$username/crontab ]; then
+        mv /home/$username/crontab /var/spool/cron/$username
+    fi
+
+done
+If you modify and use these scripts, make sure the commands work as intended on your Unix systems and, of course, modify them as needed. Testing on a dummy account is always a good idea!

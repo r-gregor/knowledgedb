@@ -1,0 +1,727 @@
+filename: multiboot-usb-manually-multif_20201022.txt
+https://linuxconfig.org/how-to-create-multiboot-usb-with-linux
+
+How to create multiboot USB with Linux
+
+Create a bootable usb device containing multiple Linux distributions.
+
+Requirements
+     * An usb device with enough size to contain multiple isos
+     * Root permissions to modify the device partitions and install grub
+
+Difficulty
+   MEDIUM
+
+Introduction
+   Being able to run an entire operating system directly from an installation media it's
+   extremely useful: we can test a distribution, use it for backup purposes, or perhaps to
+   repair an existing system. The usual way to create a bootable media is to write a system
+   image on it using the dd command or some dedicated tool. In this tutorial we will see how
+   to create a multiboot usb device which can host multiple distributions images.
+
+A word on BIOS vs UEFI
+   UEFI (Unified Extensible Firmware Interface) it's the modern firmware created as a
+   replacement for the legacy BIOS (Basic Input Output System). The majority of recent Linux
+   distributions can boot in both modes without problems: the installer will automatically
+   adjust its behavior accordingly.
+   The two firmwares are, by standard, associated with a specific partition table layout: UEFI
+   goes hand in hand with gpt, while BIOS comes with the msdos one. Those associations,
+   however are not strictly mandatory, since, at least in theory, a UEFI firmware can start
+   the boot process from a msdos disk layout and a legacy BIOS system can do the same from a
+   gpt partitioned disk.
+
+   In the former case the EFI partition must be the first one on the disk, and be formatted
+   with the fat32 fileystem, in the latter, a bios boot partition without any filesystem on it
+   should exists, needed to store the grub stage 1.5, since on a gpt layout the gap between
+   the master boot record and the first partition doesn't exist (this is where this grub stage
+   usually gets installed).
+   We will prepare our device using a traditional msdos layout, installing the grub bootloader
+   in both efi and legacy mode to be able to start the distributions both in UEFI and BIOS
+   mode.
+
+Preparing the device
+   The first thing we have to do is to prepare our device. We will create two partitions, in
+   order:
+     * An EFI partition
+     * A data partition
+
+   The first is needed to boot in UEFI mode, since its where grub-efi gets installed. The
+   partition must be formatted with a fat32 filesystem. Theoretically, the setup would work
+   even with just this partition, since we could also use it to store the distributions images
+   we want to use. However in that case we would be limited, since fat32 doesn't support files
+   lager than 4GB, and some iso can exceed this size.
+   The second partition will be formatted with a filesystem supported by grub, and will host
+   the images and the grub configuration files.
+   For the sake of this tutorial I will assume the device we want to prepare is /dev/sdb.
+
+The partition table and the EFI partition
+   The first thing to do is to create a msdos partition table on the device:
+$> sudo parted -s /dev/sdb mklabel msdos
+
+   After this step, we can create the EFI partition and format it with a fat32 filesystem. The
+   recommended size for the partition is 550 MiB: on smaller partitions we could receive an
+   error such as "not enough clusters for 32 bit FAT":
+$> sudo parted -s /dev/sdb mkpart primary 1MiB 551MiB
+
+   We will then proceed in activating the esp and boot flags:
+$> sudo parted -s /dev/sdb set 1 esp on
+$> sudo parted -s /dev/sdb set 1 boot on
+
+   Finally we must create the fat32 filesystem:
+$> sudo mkfs.fat -F32 /dev/sdb1
+
+The data partition
+   The other partition we must create is the data partition, which will host the ISO images of
+   the distributions and the grub configuration files. We can adjust the size of the partition
+   to our needs: the bigger it is, the most images it will be able to contain. Here we will
+   use all the remaining space on the device:
+$> sudo parted -s /dev/sdb mkpart primary 551MiB 100%
+
+   We can format the partition with one of the filesystems supported by grub. In this case I
+   will use ext4:
+$> sudo mkfs.ext4 /dev/sdb2
+
+Create the mountpoints and mount the partitions
+   The next step is to mount the EFI partition and the data partition somewhere in our system
+   so we can create the necessary directories on them, install grub and put our iso files in
+   place:
+# Create the mountpoints
+$> sudo mkdir /media/{efi,data}
+
+# Mount the EFI partition
+$> sudo mount /dev/sdb1 /media/efi
+
+# Mount the data partition
+$> sudo mount /dev/sdb2 /media/data
+
+Installing the grub bootloader
+   In order for our device to be able to work in both legacy and UEFI modes we need to install
+   grub and grub for efi. On Fedora the grub binary it's called grub2 and to generate a custom
+   configuration on a UEFI setup, the installation of the grub2-efi-modules package is also
+   necessary. On some other distributions the name of the binary it's just "grub":
+# Installing legacy grub2
+sudo grub2-install \
+  --target=i386-pc \
+  --recheck \
+  --boot-directory="/media/data/boot" /dev/sdb
+
+# Installing grub for efi
+sudo grub2-install \
+  --target=x86_64-efi \
+  --recheck \
+  --removable \
+  --efi-directory="/media/efi" \
+  --boot-directory="/media/data/boot"
+
+   As you can observe, in both cases we used /media/data/boot as the grub boot-directory. This
+   directory will be automatically created when the commands above are launched, and it will
+   host grub configuration files.
+
+Copy the images and create the grub.cfg file
+
+   To create or update a grub configuration on a modern linux system we usually run the
+   grub2-mkconfig command, or, in debian-based distributions, the update-grub wrapper-script.
+   These tools perform the needed operations automatically.
+
+   In our case, however, we must get our hands dirty and create the configuration manually.
+   Not all distributions require the same directives, but here will see some common examples.
+   First we should create the directory which will host the images of our distributions:
+$> sudo mkdir /media/data/boot/iso
+
+   Optionally we may want to take ownership of this directory, to be able to move images on it
+   more easily. Assuming a id and gid of 1000 we would run:
+$> sudo chown 1000:1000 /media/data/boot/iso
+
+   Now, suppose we want to include the latest Fedora netinstall image in our setup. First we
+   have to download the image in the /media/data/iso directory:
+$> wget -O /media/data/boot/iso/Fedora-Workstation-netinst-x86_64-28-1.1.iso \
+https://download.fedoraproject.org/pub/fedora/linux/releases/28/Workstation/x86_64/iso/Fedora-Workstation-netinst-x86_64-28-1.1.iso
+
+   Then, once the download is finished, we must add an entry for it in the grub.cfg file in
+   the /media/data/boot/grub2 directory. Since it is the first entry we add the file itself
+   must be created:
+menuentry "Fedora-Workstation-netinst-x86_64-28-1.1" {
+    isofile="/boot/iso/Fedora-Workstation-netinst-x86_64-28-1.1.iso"
+    loopback loop "${isofile}"
+    linux (loop)/isolinux/vmlinuz iso-scan/filename="${isofile}" inst.stage2=hd:LABEL=Fedora-WS-dvd-
+x86_64-28 quiet
+    initrd (loop)/isolinux/initrd.img
+}
+
+   The entry structure it's pretty simple: we defined the isofile variable, with the path to
+   our image as a value. Grub is able to boot from an iso directy, and that's what the
+   loopback command is for: in the example above the filesystem image will be mounted and made
+   available on the loop device.
+   The line starting with linux contains the path to vmlinuz, which is the kernel executable,
+   plus other boot directives. Among them you can notice iso-scan/filename which is needed to
+   find the iso image on the disk using the specified path.
+
+   Finally, the line starting with initrd specifies the path to the initrd. All those paths
+   are, obviously, relative to the loop device, that's why they are prefixed by the (loop)
+   notation.
+   How do we know the directives we should use in a specific case? One way is to mount the
+   image somewhere in our system and take a look at the files placed in the isolinux
+   directory. However, pre-written configuration already exists and are easy to find online.
+   Another example, now: we will add the latest Ubuntu release image to our bootable device:
+$> wget http://releases.ubuntu.com/18.10/ubuntu-18.10-desktop-amd64.iso?_ga=2.232120863.1006005768.15
+40658570-734439277.1540658570 \
+-O /media/data/boot/iso/ubuntu-18.10-desktop-amd64.iso
+
+   Now, we add the entry to the configuration file:
+menuentry "Ubuntu 18.10 - Try without installing" {
+    isofile="/boot/iso/ubuntu-18.10-desktop-amd64.iso"
+    loopback loop "${isofile}"
+    linux (loop)/casper/vmlinuz iso-scan/filename="${isofile}" boot=casper quiet splash ---
+    initrd (loop)/casper/initrd
+}
+
+   Here is what our multiboot-menu should look like at this point:
+   [37]Multiboot Grub Menu
+   Multiboot Grub Menu
+
+Closing thoughts
+   In this tutorial we saw how to create a multiboot-usb device containing many distributions
+   images. Following this setup, we will be able to boot both on legacy on UEFI firmware,
+   choosing what image to launch from the grub menu.
+   The grub.cfg setup here presented is absolutely minimal, and can be further customized to
+   include many other modules and adjust other settings like the grub timeout: consulting the
+   official grub documentation is the perfect way to start exploring the many possibilities.
+
+
+---
+https://wiki.archlinux.org/index.php/Multiboot_USB_drive
+
+Multiboot USB drive
+
+   A multiboot USB flash drive allows booting multiple ISO files from a single device. The ISO
+   files can be copied to the device and booted directly without unpacking them first. There
+   are multiple methods available, but they may not work for all ISO images.
+
+Using GRUB and loopback devices
+
+   Advantages:
+     * only a single partition required
+     * all ISO files are found in one directory
+     * adding and removing ISO files is simple
+
+   Disadvantages:
+     * not all ISO images are compatible
+     * the original boot menu for the ISO file is not shown
+     * it can be difficult to find a working boot entry
+
+Preparation
+   Create at least one partition and a filesystem supported by [46]GRUB on the USB drive. See
+   [47]Partitioning and [48]File systems#Create a file system. Choose the size based on the
+   total size of the ISO files that you want to store on the drive, and plan for extra space
+   for the bootloader.
+
+Installing GRUB
+
+Simple installation
+   Mount the filesystem located on the USB drive:
+$> mount /dev/sdXY /mnt
+
+   Create the directory /boot:
+$> mkdir /mnt/boot
+
+   Install GRUB on the USB drive:
+$> grub-install --target=i386-pc --recheck --boot-directory=/mnt/boot /dev/sdX
+
+   In case you want to boot ISOs in UEFI mode, you have to install grub for the UEFI target:
+$> grub-install --target=x86_64-efi --removable --boot-directory=/mnt/boot --efi-directory=/mnt
+
+   For UEFI, the partition has to be the first one in an MBR partition table and formatted
+   with FAT32.
+
+Hybrid UEFI GPT + BIOS GPT/MBR boot
+   This configuration is useful for creating a universal USB key, bootable everywhere. First
+   of all you must create a [49]GPT partition table on your device. You need at least 3
+   partitions:
+    1. A BIOS boot partition (gdisk type code EF02). This partition must be 1 MiB in size
+    2. An EFI System partition (gdisk type code EF00 with a [50]FAT32 filesystem). This
+       partition can be as small as 50 MiB.
+    3. Your data partition (use a filesystem supported by [51]GRUB). This partition can take
+       up the rest of the space of your drive.
+
+   [52]Tango-inaccurate.png The factual accuracy of this article or section is disputed.[53]
+   Tango-inaccurate.png
+   Reason: Must create because something might not be enough? (Discuss in [54]Talk:Multiboot
+   USB drive#)
+
+   Next you must create a hybrid MBR partition table, as setting the boot flag on the
+   protective MBR partition might not be enough.
+
+   Hybrid MBR partition table creation example using [55]gdisk:
+$> gdisk /dev/sdX
+
+Command (? for help): r
+Recovery/transformation command (? for help): h
+
+WARNING! Hybrid MBRs are flaky and dangerous! If you decide not to use one,
+just hit the Enter key at the below prompt and your MBR partition table will
+be untouched.
+
+Type from one to three GPT partition numbers, separated by spaces, to be added to the hybrid MBR, in
+ sequence: 1 2 3
+Place EFI GPT (0xEE) partition first in MBR (good for GRUB)? (Y/N): N
+
+Creating entry for GPT partition #1 (MBR partition #1)
+Enter an MBR hex code (default EF):
+Set the bootable flag? (Y/N): N
+
+Creating entry for GPT partition #2 (MBR partition #2)
+Enter an MBR hex code (default EF):
+Set the bootable flag? (Y/N): N
+
+Creating entry for GPT partition #3 (MBR partition #3)
+Enter an MBR hex code (default 83):
+Set the bootable flag? (Y/N): Y
+
+Recovery/transformation command (? for help): x
+Expert command (? for help): h
+Expert command (? for help): w
+
+Final checks complete. About to write GPT data. THIS WILL OVERWRITE EXISTING
+PARTITIONS!!
+
+Do you want to proceed? (Y/N): Y
+
+   Do not forget to format the partitions :
+$> mkfs.fat -F32 /dev/sdX2
+$> mkfs.ext4 /dev/sdX3
+
+   You can now install GRUB to support both EFI + GPT and BIOS + GPT/MBR. The GRUB
+   configuration (--boot-directory) can be kept in the same place.
+
+   First, you need to mount the EFI system partition and the data partition of your USB drive.
+
+   An example of this would be as follows:
+$> mount /dev/sdX3 /mnt
+$> mkdir -p /mnt/boot/EFI
+$> mount /dev/sdX2 /mnt/boot/EFI
+
+   Then, you can install GRUB for UEFI with:
+
+   In most cases EFI_MOUNTPOINT will correspond to the /mnt/boot/EFI subdirectory on your
+   mounted USB disk.
+$> grub-install --target=x86_64-efi --recheck --removable --efi-directory=/EFI_MOUNTPOINT --boot-dire
+ctory=/DATA_MOUNTPOINT/boot
+
+   And for BIOS with:
+$> grub-install --target=i386-pc --recheck --boot-directory=/DATA_MOUNTPOINT/boot /dev/sdX
+
+   As an additional fallback, you can also install GRUB on your MBR-bootable data partition:
+$> grub-install --target=i386-pc --recheck --boot-directory=/DATA_MOUNTPOINT/boot /dev/sdX3
+
+Configuring GRUB
+
+Using a template
+   There are some git projects which provide some pre-existing GRUB configuration files, and a
+   nice generic grub.cfg which can be used to load the other boot entries on demand, showing
+   them only if the specified ISO files - or folders containing them - are present on the
+   drive.
+
+   Multiboot USB: https://github.com/aguslr/multibootusb
+
+   GLIM (GRUB2 Live ISO Multiboot): https://github.com/thias/glim
+
+Manual configuration
+   For the purpose of multiboot USB drive it is easier to edit grub.cfg by hand instead of
+   generating it. Alternatively, make the following changes in /etc/grub.d/40_custom or
+   /mnt/boot/grub/custom.cfg and generate /mnt/boot/grub/grub.cfg using [58]grub-mkconfig.
+
+   As it is recommend to use a [59]persistent name instead of /dev/sdxY to identify the
+   partition on the USB drive where the image files are located, define a variable for
+   convenience to hold the value. If the ISO images are on the same partition as GRUB, use the
+   following to read the UUID at boot time:
+/mnt/boot/grub/grub.cfg
+$> path to the partition holding ISO images (using UUID)
+probe -u $root --set=rootuuid
+set imgdevpath="/dev/disk/by-uuid/$rootuuid"
+
+   Or specify the UUID explicitly:
+/mnt/boot/grub/grub.cfg
+$> path to the partition holding ISO images (using UUID)
+set imgdevpath="/dev/disk/by-uuid/UUID_value"
+
+   Alternatively, use the device label instead of UUID:
+/mnt/boot/grub/grub.cfg
+$> path to the partition holding ISO images (using labels)
+set imgdevpath="/dev/disk/by-label/label_value"
+
+   The necessary UUID or label can be found using lsblk -f. Do not use the same label as the
+   Arch ISO for the USB device, otherwise the boot process will fail.
+
+   To complete the configuration, a boot entry for each ISO image has to be added below this
+   header, see the next section for examples.
+
+Boot entries
+   It is assumed that the ISO images are stored in the boot/iso/ directory on the same
+   filesystem where GRUB is installed. Otherwise it would be necessary to prefix the path to
+   ISO file with device identification when using the loopback command, for example loopback
+   loop (hd1,2)$isofile. As this identification of devices is not [60]persistent, it is not
+   used in the examples in this section.
+
+   One can use persistent block device naming like so. Replace the UUID according to your ISO
+   filesystem UUID.
+$> define globally (i.e outside any menuentry)
+insmod search_fs_uuid
+search --no-floppy --set=isopart --fs-uuid 123-456
+$> later use inside each menuentry instead
+loopback loop ($isopart)$isofile
+
+   Tip: For a list of kernel parameters, see [61]the kernel's command-line parameter
+   documentation. For more examples of boot entries, see the [62]GRUB upstream documentation
+   or the documentation for the distribution you wish to boot.
+
+Arch Linux monthly release
+   Also see [63]archiso.
+menuentry '[loopback]archlinux-2020.10.01-x86_64.iso' {
+        set isofile='/boot/iso/archlinux-2020.10.01-x86_64.iso'
+        loopback loop $isofile
+        linux (loop)/arch/boot/x86_64/vmlinuz-linux img_dev=$imgdevpath img_loop=$isofile earlymodul
+es=loop
+        initrd (loop)/arch/boot/intel-ucode.img (loop)/arch/boot/amd-ucode.img (loop)/arch/boot/x86_
+64/initramfs-linux.img
+}
+
+   See [64]README.bootparams for archiso options supported in kernel command line.
+
+archboot
+   Also see [65]archboot.
+menuentry '[loopback]archlinux-2014.11-1-archboot' {
+        set isofile='/boot/iso/archlinux-2014.11-1-archboot.iso'
+        loopback loop $isofile
+        linux (loop)/boot/vmlinuz_x86_64 iso_loop_dev=$imgdevpath iso_loop_path=$isofile
+        initrd (loop)/boot/initramfs_x86_64.img
+}
+
+Using Syslinux and memdisk
+   Using the [66]memdisk module, the ISO image is loaded into memory, and its bootloader is
+   loaded. Make sure that the system that will boot this USB drive has sufficient amount of
+   memory for the image file and running operating system.
+
+Preparation
+   Make sure that the USB drive is properly [67]partitioned and that there is a partition with
+   [68]file system supported by Syslinux, for example fat32 or ext4. Then install Syslinux to
+   this partition, see [69]Syslinux#Installation on BIOS.
+
+Install the memdisk module
+   The memdisk module was not installed during Syslinux installation, it has to be installed
+   manually. Mount the partition where Syslinux is installed to /mnt/ and copy the memdisk
+   module to the same directory where Syslinux is installed:
+$> cp /usr/lib/syslinux/bios/memdisk /mnt/boot/syslinux/
+
+Configuration
+   After copying the ISO files on the USB drive, edit the [70]Syslinux configuration file and
+   create menu entries for the ISO images. The basic entry looks like this:
+boot/syslinux/syslinux.cfg
+LABEL some_label
+    LINUX memdisk
+    INITRD /path/to/image.iso
+    APPEND iso
+
+   See [71]memdisk on Syslinux wiki for more configuration options.
+
+Caveat for 32-bit systems
+   When booting a 32-bit system from an image larger than 128MiB, it is necessary to increase
+   the maximum memory usage of vmalloc. This is done by adding vmalloc=valueM to the kernel
+   parameters, where value is larger than the size of the ISO image in MiB.[72][1]
+
+   For example when booting the 32-bit system from the [73]Arch installation ISO, press the
+   Tab key over the Boot Arch Linux (i686) entry and add vmalloc=768M at the end. Skipping
+   this step will result in the following error during boot:
+modprobe: ERROR: could not insert 'phram': Input/output error
+
+Automated tools
+     * liveusb-builder - A script suite to create multiboot USB stick for GNU/Linux
+       distributions
+
+          [74]https://github.com/mytbk/liveusb-builder || [75]liveusb-builder-git^AUR
+
+     * MultiSystem - A graphical tool that allows to install, manage, and remove multiple ISO
+       images on a USB device.
+
+          [76]http://liveusb.info/dotclear/ || [77]multisystem^AUR
+
+     * MultiBootUSB - A cross platform Python software with CLI and GUI interfaces which
+       allows you to install and remove multiple live Linux images on a USB stick.
+
+          [78]http://multibootusb.org/ || [79]multibootusb^AUR
+
+     * GRUB2 Live ISO Multiboot (GLIM) - A set of GRUB configuration files to turn a VFAT
+       formatted USB memory stick with GNU/Linux distribution ISO images into a multiboot USB
+       drive.
+
+          [80]https://github.com/thias/glim || not packaged? [81]search in AUR
+
+See also
+
+     * GRUB:
+          + [82]https://help.ubuntu.com/community/Grub2/ISOBoot/Examples
+          + [83]https://help.ubuntu.com/community/Grub2/ISOBoot
+          + [84]GRUB Live ISO Multiboot - GRUB configurations for booting ISO images
+     * Syslinux:
+          + [85]Boot an ISO image
+
+   Retrieved from
+   "[86]https://wiki.archlinux.org/index.php?title=Multiboot_USB_drive&oldid=636943"
+   [87]Category:
+     * [88]Boot process
+
+
+---
+http://multibootusb.org/page_guide/
+
+   Learn how to use MultiBootUSB...
+
+What does MultiBootUSB do?
+   MultiBootUSB allows you to do the following:
+    1. Install multiple live Linux distros and other operating systems to a USB disk and make
+       it bootable without erasing existing data.
+    2. Uninstall installed OSes later.
+    3. Write ISO images directly to a USB disk (GUI for Linux dd command).
+    4. Boot ISO images and USB disks directly without rebooting your system using QEMU.
+    5. Boot USB on UEFI/EFI systems through GRUB2 bootloader support (limited support).
+     ______________________________________________________________________________________
+
+Requirements:
+    1. Formatted USB disk:
+          + FAT32, NTFS, ext2/3/4 or Btrfs filesystem. However, FAT filesystem is recommended
+            and ext2/3/4 or Btrfs filesystems will only work under Linux.
+          + Keep single partition (primary) to avoid later problems.
+    2. ISO file of live Linux distro of your choice.
+    3. Latest release of MultiBootUSB.
+     ______________________________________________________________________________________
+
+Installation:
+     * On Windows:
+          + The windows version of MultiBootUSB is not a standalone program. You need to
+            install it after download. Download the latest setup binary (.exe) file from
+            [23]here
+          + The installation is fairly simple. Double click on the executable and follow the
+            on-screen instructions.
+     * On Linux:
+       Pre-packaged:
+          + Packages for various distros available [24]here
+       ...or from source code:
+       On Linux:
+          + MultiBootUSB depends on the following packages under Linux:
+               o python3-pyqt5
+               o p7zip-full
+               o parted
+               o util-linux
+               o python3-pyudev
+               o mtools
+               o python3-dbus
+               o python3-six
+          + Install above packages using your package manager. Remember that package name may
+            not be identical for all distros. You need to search equivalent package for your
+            distro and install it.
+          + You must uninstall your previous installation of MultiBootUSB, if you have done it
+            earlier.
+          + Download source code of stable version from [25]here or development version from
+            [26]here
+          + Extract to local directory and move in to multibootusb directory.
+          + Issue sudo python3 ./multibootusb command to start GUI
+       On Windows:
+          + Download and install following packages:
+               o [27]Python 3. I use python version 3.5 but it should work on higher versions
+                 as well.
+               o [28]PyQt5 and installation instruction are [29]here
+               o [30]wmi module
+               o [31]pywin32
+               o [32]psutils
+               o [33]Git, if you wish to contribute back to MultiBootUSB project
+          + Installation and configuration of above packages/ modules is not a part of this
+            documentation. You must use Google for that.
+          + If you have installed python correctly on windows, it is recommanded that you use
+            pip3.exe for installing above packages.
+          + Download source code of stable version from [34]here or development version from
+            [35]here
+          + Open command prompt with admin privilage and move in to multibootusb directory.
+          + Issue python3.exe multibootusb command to start GUI
+
+Creating live Linux on USB disk:
+     * Creating bootable live Linux on a USB disk essentially involves three steps:
+         1. Step 1 - Insert USB disk and start the program
+         2. Step 2 - Choose your ISO
+         3. Step 3- Click Install distro button.
+          + Step 1- Insert USB disk and start the program
+          + Insert USB disk and wait for a few seconds so that operating oystem can detect it.
+       [select-usb-disk.png]
+       ​
+          + Linux:
+               o All modern Linux distros should mount USB disks automatically after
+                 insertion. MultiBootUSB also has function to auto mount USB drive. However,
+                 if you still find your USB disk is not mounted, then open file manager and
+                 click on the USB disk icon to mount it.
+               o MultiBootUSB needs administrator privileges to run. When running as normal
+                 user, a password window will popup and ask for your password.
+          + Windows: Open MultiBootUSB under Start --> Program Files --> MultiBootUSB -->
+            Click MultiBootUSB
+          + Once started, the list of USB disks can be found under the Select USB disk combo
+            box. You can find the details of currently selected USB disks just below combo
+            box.
+          + Use the Detect Drives button to detect USB disks inserted after starting the
+            program.
+          + You can click on All Drives option to show all connected drives (including fixed
+            system drives). Be careful with this option!
+     * Step 2 - Choose your ISO
+          + Clicking on Browse button located next to select image text, should bring file
+            chooser dialog. The chosen ISO path will be available in the line edit for your
+            review.
+       [browse-iso.png]
+     * Step 3 - Click Install distro button
+          + The third and final step is to simply click on Install distro. MultiBootUSB will
+            check if ISO is supported by the program.
+       [install-distro.png]
+          + If the live Linux distro is supported, then a Review Selection window will appear
+            and wait for your confirmation. The review window will indicate the selected USB
+            disk, mount path of the disk and the selected ISO.
+          + Choose Yes if you are ready to proceed.
+       [review-selection.png]
+          + Wait for the program to install ISO on a disk. If the installation is successful,
+            the distro name should appear in the list box. The list box will show all the
+            distros installed every time you open MultiBootUSB.
+
+Adding an additional live Linux distro:
+     * You can follow Step 1, Step 2 and Step 3 mentioned above for adding a new distro again.
+     ______________________________________________________________________________________
+
+Adding persistence file:
+     * Only distros based on Ubuntu, Fedora and Debian are supported.
+     * Once you complete the step 2 (Choose an ISO), MultiBootUSB will detect the type of
+       distro and a persistence size chooser slider would appear below MultiBootUSB tab. The
+       maximum size of the persistence also automatically calculated according to the USB disk
+       filesystem.
+
+   [persistence-bar.png]
+     * Choose the desired persistence size by dragging the slider to right and follow the Step
+       3 as usual.
+     * Once distro installes successfully, you will find the additional persistence file under
+       distro install directory.
+
+   [applying-persistence.png]
+     * Reboot your system to choose your favourite distro as persistence menu will be added
+       automatically to menu entry.
+
+   Note: Few users have reported that Debian persistence option does'nt work properly.
+
+Removing or uninstalling a distro:
+
+     * You can only uninstall distros installed by MultiBootUSB.
+
+   [remove-distro.png]
+     * Select distro from the list and click Uninstall Distro.
+     * You will be notified after successful uninstallation.
+
+Writing ISO directly to USB disk:
+
+   Be warned that this method will destroy all data on target USB disk.
+     * MultiBootUSB also has an option to write ISO file directly to an USB disk. You can
+       choose this option if any of the above method fails to create live usb disk.
+     * You can think of this method as a GUI to dd under Linux. In fact, it actually uses dd
+       for writing to disk.
+
+   [write-image-to-disk.png]
+     * To write to USB disk, you need to choose, the USB disk, ISO image and click on the
+       Write image to disk push button available under Write image to disk tab.
+     * A review window will appear for confirmation and select yes to proceed. Once selected,
+       ISO writing will start and progress will be indicated in progressbar.
+
+   [imager-progress.png]
+     * Please note that you need to select the whole disk /dev/sdb and not the device
+       partition /dev/sdb1.
+     * You need to format the USB disk if you have to revert back to original state and start
+       using nondestructive method.
+
+Reinstalling Syslinux:
+     * There may be a situation when you want to install Syslinux for various reasons (e.g.
+       using other live USB creator will remove Syslinux installation performed by
+       MultiBootUSB). In such cases you can reinstall Syslinux from the Install syslinux tab.
+
+   [install-syslinux.png]
+     * First, choose an USB disk partition (eg. /dev/sdb1 or G:), then choose method and click
+       Install.
+     * This will install syslinux in the multibootusb directory on the selected USB partition.
+
+Editing Syslinux config files:
+
+     * Please perform this action with caution. Any change in the path will make your distro
+       install completely useless.
+     * View and edit syslinux.cfg file from the Install Syslinux tab. This action will open
+       syslinux.cfg in a default text editor.
+
+Test your ISO and USB with QEMU option:
+     * Test your downloaded ISOs and USB disks without rebooting your system.
+     * QEMU binaries are shipped with Windows setup file by default. For Linux you need to
+       install "qemu" package to enable this feature.
+
+   [boot-qemu.png]
+
+   Booting ISO
+   [boot-qemu-iso.png]
+     * Go to Boot ISO/USB --> Browse ISO --> Choose RAM size --> Click on Boot ISO.
+     * Your ISO will boot in a separate window.
+     * Maximum RAM size is currently limited to 2GB.
+
+   Booting USB
+   [boot-qemu-usb.png]
+
+   ​
+     * Go to Boot ISO/USB --> Select USB Disk --> Choose RAM size --> Click on Boot USB.
+     * Your USB disk listed in the combobox will boot in a separate window.
+     * Linux: You must select the whole disk (e.g. /dev/sdb) and NOT the device partition
+       (e.g. /dev/sdb1).
+
+Using MultBootUSB command line options:
+     * You can invoke command line options using multibootusb -c.
+     * Windows users must use source code to avail this option.
+     * Here is the text retrieved using multibootusb -c -h command and ensure to run with
+       admin privilege:
+
+An advanced MultiBoot live USB creator which can be used from the command line or via a GUI.
+Usage: python3 multibootusb [option(s)]
+
+Options:
+  -h or --help        :   Print this help message and exit
+  -c or --command     :   Invoke command line usage.  This option is required;
+                          if omitted, the GUI will be launched.
+  -i or --iso         :   Path to ISO file(s).  If many ISOs are supplied,
+                          they should be separated by ',' with no spaces in
+                          between.
+  -t or --target      :   Path to target USB device partition (e.g. "/dev/sdb1").
+  -y or --yes         :   Default yes for user input during install.
+                          Will not wait for user.
+  -u or --uninstall   :   List and uninstall distro from an USB disk.
+  -d or --debug       :   Enable debug messages (very verbose!)
+
+
+   Example for making a bootable USB from the command line:
+Linux:
+    python3 multibootusb -c -i ../../favourite.iso -t /dev/sdb1
+
+Windows:
+    python3 multibootusb -c -i ../../favourite.iso -t G:
+
+   Example for uninstalling a distro from a USB:
+Linux:
+    python3 multibootusb -c -u -t /dev/sdb1
+
+Windows:
+    python3 multibootusb -c -u -t G:
+
+   Example for installing multiple distros without user intervention:
+Linux:
+    python3 multibootusb -c -y -i ../../favourite.iso,../../other-distro.iso -t /dev/sdb1
+
+Windows:
+    python3 multibootusb -c -i ../../favourite.iso,../../other-distro.iso -t G:
+
+What if something goes wrong?
+     * Check if your issue is addressed in the Frequently Asked Section (FAQ) [36]here .
+     * If not raise an issue at [37]Github Issue Tracker
+
+
+---

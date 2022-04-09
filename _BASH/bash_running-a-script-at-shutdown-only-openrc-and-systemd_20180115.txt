@@ -1,0 +1,85 @@
+filename: bash_running-a-script-at-shutdown-only-openrc-and-systemd_20180115.txt
+https://fitzcarraldoblog.wordpress.com/2018/01/13/running-a-shell-script-at-shutdown-only-not-at-reboot-a-comparison-between-openrc-and-systemd/
+
+Running a shell script at shutdown only (not at reboot) – a comparison between OpenRC and systemd
+January 13, 2018
+
+   Gentoo Linux on my laptops uses OpenRC with SysVinit, whereas Lubuntu 17.10 on my family’s PC
+   uses systemd. I have had to configure both Linux distributions to run a backup job at shutdown,
+   so I thought it would be interesting to summarise the two approaches.
+
+-->   OpenRC
+   Create a Bash script /etc/local.d/10-run_on_shutdown.stop with the following contents:
+#!/bin/bash
+if [ `who -r | awk '{print $2}'` = "0" ]; then
+    ########################################################################
+    # Put Bash commands here to be executed on shutdown but not on reboot. #
+    # For example, backup home directories to an external USB HDD.         #
+    ########################################################################
+fi
+
+   From now on the script will run to completion when you shutdown the machine, but not when you reboot
+   it.
+
+-->   systemd
+   1. Create a Bash script /usr/local/sbin/run_on_shutdown.sh with the following contents:
+#!/bin/bash
+REBOOT=$( systemctl list-jobs | egrep -q 'reboot.target.*start' && echo "rebooting" || echo "not_rebooting" )
+if [ $REBOOT = "not_rebooting" ]; then
+    ########################################################################
+    # Put Bash commands here to be executed on shutdown but not on reboot. #
+    # For example, backup home directories to an external USB HDD.         #
+    ########################################################################
+fi
+
+   2. Create a unit file /etc/systemd/system/run_on_shutdown.service with the following contents:
+[Unit]
+Description=Run a script at shutdown but not at reboot
+Before=shutdown.target
+RequiresMountsFor=/home
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+ExecStop=/usr/local/sbin/run_on_shutdown.sh
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+
+   I have assumed the Bash script is to backup /home, so change the directory list in
+   ‘RequiresMountsFor=‘ if the script necessitates that other directories are still mounted – see
+   ‘man systemd.unit‘ for details.
+
+   3. Enable the unit file and start the service as follows:
+user $ sudo systemctl enable run_on_shutdown.service
+user $ sudo systemctl start run_on_shutdown.service
+
+   From now on, the script will run to completion when you shutdown the machine, but not when you reboot
+   it.
+
+   A note on the systemd solution:
+
+   There are plenty of posts on the Web suggesting how to run a script at shutdown in installations that
+   use systemd, but the approaches either do not work in my case or they do not discriminate between
+   shutting down and rebooting. For example, if you are wondering why I do not use
+   ‘Conflicts=reboot.target‘ in the unit file, I found it does not prevent the Bash script from being
+   launched when the system is rebooted (see the entry for ‘Conflicts=‘ in ‘man systemd.unit‘ for the
+   functionality). If you are wondering why I do not simply place a script in
+   /lib/systemd/system-shutdown/, it is because scripts in that directory are launched late in the
+   shutdown process, after file systems have been mounted read-only. And if you are wondering why the
+   Bash script tests if the system is rebooting (as distinct from shutting down) rather than the unit
+   file being configured to do that, it is because the systemd shutdown target is active in any type of
+   system termination, be it rebooting or halting, and it therefore does not help in discriminating
+   between the termination types (see ‘man systemd.special‘). I tried several approaches in the unit
+   file to see if it could be made to launch a Bash script when shutting down but not when rebooting,
+   but the only solution that works for me in the Lubuntu 17.10 installation on my family’s PC uses the
+   two files listed above working in conjunction with each other.
+
+   Some background reading
+    1. Stack Exchange Super User : How do I run a script before everything else on shutdown with
+       systemd?
+    2. Stack Overflow : how can a systemd controlled service distinguish between shutdown and
+       reboot?
+    3. Unix & Linux Stack Exchange : Systemd : How to execute script at shutdown only (not at
+       reboot)

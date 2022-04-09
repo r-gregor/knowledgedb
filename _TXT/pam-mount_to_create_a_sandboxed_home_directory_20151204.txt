@@ -1,0 +1,123 @@
+filename: pam-mount_to_create_a_sandboxed_home_directory_20151204.txt
+https://www.debian-administration.org/article/586/Using_pam-mount_to_create_a_sandboxed_home_directory
+
+Using pam-mount to create a sandboxed home directory
+
+Posted by JamesBarrett on Tue 25 Mar 2008 at 09:37
+
+My biggest fear when using a public computer is that the data I enter might fall into the wrong hands. One
+way for developers to combat data theft is to hold personal info only for as long as is absolutely
+necessary, thereby shortening the window of opportunity for an attacker. This is possible in Linux
+through a combination of tmpfs and unionfs.
+
+Sandboxes are useful when developing software, but they can also be helpful if you have a number of users
+you do not trust. Be it someone you know or don't know, it would be a tedious effort to have to clean
+up after their cruft every time they log out. For instance, consider this scenario: you are building a
+public access computer terminal which will be used by pretty much anyone. The reason for its presence,
+the location and the packages installed are all arbitrary. In this scenario you are mostly concerned
+with one thing: security! Since the machine will be used by random people and there will be no one to
+monitor the machine on a 24/7 basis, it must be hardened.
+
+If you are using Live CDs, then your job is 1/2 done. If it is ok to require a reboot after each user is
+done with their session then just use any stock Live CD and disregard the rest of this article. If however
+you happen to live on planet Earth, where constant rebooting would be fairly unacceptable, you will want
+to create a Live CD that securely replenishes the live system user's defaults without issuing a reboot.
+
+Something similar was implemented in Debiosk 0.1. The ultimate aim of Debiosk is to allow people to
+have a usable desktop upon login, but also have all of their changes dissolve before the next person
+logs in. It is essential that nobody can browse through, mangle or steal any former user's data, nor
+mangle the default configuration for future users. The process in v0.1 consisted of an elaborate set of
+poorly hacked-together shell scripts relying on Xsession.d with "while true" loops and a lot of "rm -rf",
+"cp -r" and "chown" commands. /etc/inittab currently has this near the end of it:
+
+2:2345:respawn:/bin/su - user -c '/usr/bin/startx'
+Looking back I have no clue what I was thinking... Thankfully, there is a better way. Essentially we will be
+combining the scratchiness of a tmpfs with the versatility of unionfs and welding it together with pam_mount.
+
+pam_mount (in the Debian archives as "libpam-mount") is a package whose original intention remains to
+mount network shares upon a user logging into the system without having to grapple with fstab. While it
+is geared towards things like samba shares, literally any mounting procedure which you could do as root
+on the command line could be duplicated with pam_mount. The file systems available are contingent only
+upon what the kernel can handle. pam_mount needs to be configured in /etc/security/pam_mount.conf. See
+the README.Debian for more details, and keep reading on for an example.
+
+tmpfs is a file system which resides in system memory. When it is mounted it is empty. Data can then
+be saved to it like a normal file system. When it is unmounted, all files held within it will be
+lost. Pertinent mount options are size, uid, gid and mode.
+
+unionfs is a pleasant thing. It is not a file system in the sense of ext3, jfs and the like, but rather
+it unifies two directory trees into one mount point. It requires a single mount option, dirs, which takes
+two or more values. In etch, the use of this requires that kernel modules be installed. The easiest way
+is like so:
+
+# apt-get install unionfs-modules-`uname -r`
+Disregarding pam_mount for a minute, let's explore the procedure on the command line. Brining up a root
+shell; the following commands will suffice:
+# mkdir /tmp/tmpfs
+# mount -t tmpfs -o size=15M,mode=0700 tmpfs /tmp/tmpfs
+# mkdir /home/testing-home
+# touch /home/testing-home/stuff /home/testing-home/morestuff
+# mount -t unionfs -o dirs=/tmp/tmpfs:/home/testing-home=ro unionfs /home/testing-home
+
+Test that it works:
+# rm /home/testing-home/stuff
+# mv /home/testing-home/morestuff /home/testing-home/lessstuff
+# umount /home/testing-home
+# ls /home/testing-home
+
+You ought to see the original files there, untouched and unchanged. Take a look in /tmp/tmpfs and see
+the cruft, then umount that as well.
+# umount /tmp/tmpfs
+
+This is all well and good, but it is not seamless. This is where pam_mount comes into play. Since we
+need this to all occur without having the user or an admin run scripts, we should let pam do it for us.
+
+Firstly, install libpam-mount with apt. Edit /etc/security/pam_mount.conf and add these two lines to
+the very end:
+volume debiosk tmpfs - tmpfs /tmp/tmpfs "size=15M,uid=debiosk,gid=debiosk,mode=0700" - -
+
+volume debiosk unionfs - unionfs /home/debiosk "dirs=/tmp/tmpfs:/home/debiosk=ro" - -
+
+A quick breakdown of the syntax and terminology suffices here:
+"volume" - asserts that this will mount a volume (don't change this)
+"debiosk" - the user who will trigger this upon login
+"tmpfs" - the type of file system to mount (like '-t tmpfs' on a typical mount command)
+" - " - placeholder, used only if mount needs to connect to a server
+"tmpfs" - this time, it is the volume we will be mounting - this should not be omitted
+"/tmp/tmpfs" - an arbitrary location that will hold our tmpfs
+"size=15M,uid=debiosk,gid=debiosk,mode=0700" - typical mount options:
+"size=15m," - adjust this value accordingly to avoid OOM errors
+"uid=debiosk,gid=debiosk," - we want the tmpfs to be owned by the user so that their changes can be
+recorded in the tmpfs
+"mode=0700" - typical mode
+" - - " - there to take the place of key ciphers, which we will not need for our purposes.
+
+And for the unionfs line, we can just explain the options to refrain from repeating ourselves:
+"dirs=/tmp/tmpfs:/home/debiosk=ro" - tells unionfs to unify two directories, /tmp/tmpfs and /home/debiosk,
+while keeping /home/debiosk read-only
+
+If you notice on the unionfs pam_mount line, we will be mounting this directly on top of a directory
+that we are unifying. This will stop the user from modifying any core default files in their home directory.
+
+Modify the above lines accordingly to suit your needs. Next, we need to add the following line ...
+
+@include common-pammount
+... to the very bottom of the following files in /etc/pam.d/ ...
+
+/etc/pam.d/login
+/etc/pam.d/su
+/etc/pam.d/xdm (if it exists)
+... so that pam_mount will be invoked after everything else.
+
+Now, whenever the debiosk user logs in they will be presented with a sandbox home directory that looks
+just like their regular home directory. Any modifications that take place will dissolve, be trashed and
+remain completely unrecoverable upon logout.
+
+Oh, and the end of that inittab for Debiosk can now look like this:
+
+2:2345:respawn:/bin/login -f debiosk
+Thanks!
+
+This article is a fragment from the next revision of my Kiosk HOWTO which is still unfinished. The next
+development version of Debiosk will most likely contain this solution. Debiosk is a linux kiosk framelate
+based on Debian.
