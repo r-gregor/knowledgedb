@@ -99,7 +99,7 @@ Getting started
   <Stream: itag="36" mime_type="video/3gpp" res="240p" fps="30fps" vcodec="mp4v.20.3" acodec="mp4a.40.2">,
   <Stream: itag="17" mime_type="video/3gpp" res="144p" fps="30fps" vcodec="mp4v.20.3" acodec="mp4a.40.2">]
 
-   Conversely, if you only want to see the DASH streams (also referred to as "adaptive") you can do:
+   Conversely, if you only want to see the DASH streams (also referred to as 'adaptive') you can do:
 >>> yt.streams.filter(adaptive=True).all()
  [<Stream: itag="137" mime_type="video/mp4" res="1080p" fps="30fps" vcodec="avc1.640028">,
   <Stream: itag="248" mime_type="video/webm" res="1080p" fps="30fps" vcodec="vp9">,
@@ -197,24 +197,24 @@ $ pytube http://youtube.com/watch?v=9bZkp7q19f0 --list
    Finally, if you're filing a bug report, the cli contains a switch called --build-playback-report,
    which bundles up the state, allowing others to easily replay your issue.
 
-     * © 2019 GitHub, Inc.
-     * [115]Terms
-     * [116]Privacy
-     * [117]Security
-     * [118]Status
-     * [119]Help
+     * C 2019 GitHub, Inc.
+     * Terms
+     * Privacy
+     * Security
+     * Status
+     * Help
 
-     * [120]Contact GitHub
-     * [121]Pricing
-     * [122]API
-     * [123]Training
-     * [124]Blog
-     * [125]About
+     * Contact GitHub
+     * Pricing
+     * API
+     * Training
+     * Blog
+     * About
 
-   (BUTTON) You can’t perform that action at this time.
+   (BUTTON) You can't perform that action at this time.
 
-   You signed in with another tab or window. [126]Reload to refresh your session. You signed out in
-   another tab or window. [127]Reload to refresh your session.
+   You signed in with another tab or window. Reload to refresh your session. You signed out in
+   another tab or window. Reload to refresh your session.
 
    (BUTTON)
 
@@ -392,7 +392,7 @@ Downloading a Video
    The pytube API makes all information intuitive to access. For example, this is how you would get the
    video's title:
 >>> yt.title
-PSY - GANGNAM STYLE(ê°•ë‚¨ìŠ¤íƒ€ì�¼) M/V
+PSY - GANGNAM STYLE(???????) M/V
 
    And this would be how you would get the thumbnail url:
 >>> yt.thumbnail_url
@@ -456,8 +456,8 @@ DASH vs Progressive Streams
    download both the audio and video tracks and then post-process them with software like FFmpeg to
    merge them.
 
-   The legacy streams that contain the audio and video in a single file (referred to as â€œprogressive
-   downloadâ€�) are still available, but only for resolutions 720p and below.
+   The legacy streams that contain the audio and video in a single file (referred to as "progressive
+   download") are still available, but only for resolutions 720p and below.
 
    To only view these progressive download streams:
 >>> yt.streams.filter(progressive=True).all()
@@ -467,7 +467,7 @@ DASH vs Progressive Streams
 <Stream: itag="36" mime_type="video/3gpp" res="240p" fps="30fps" vcodec="mp4v.20.3" acodec="mp4a.40.2">,
 <Stream: itag="17" mime_type="video/3gpp" res="144p" fps="30fps" vcodec="mp4v.20.3" acodec="mp4a.40.2">]
 
-   Conversely, if you only want to see the DASH streams (also referred to as â€œadaptiveâ€�) you can do:
+   Conversely, if you only want to see the DASH streams (also referred to as 'adaptive') you can do:
 >>> yt.streams.filter(adaptive=True).all()
 [<Stream: itag="137" mime_type="video/mp4" res="1080p" fps="30fps" vcodec="avc1.640028">,
 <Stream: itag="136" mime_type="video/mp4" res="720p" fps="30fps" vcodec="avc1.4d401f">,
