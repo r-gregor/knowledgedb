@@ -1,0 +1,1340 @@
+filename: c_optimization-of-computer-programs-in-c_20230302.txt
+http://icps.u-strasbg.fr/~bastoul/local_copies/lee.html
+
+                                  Optimization of Computer Programs in C
+
+   Abstract: A substantial portion of a knowledge worker's life may be spent waiting for a computer
+   program to produce output. Users and organizations control their wait time by purchasing faster
+   computers, adding memory, or using faster network connections. Developers of application programs
+   have a responsibility to design their programs make the best use of these limited and expensive
+   resources.
+
+   This document describes techniques for optimizing (improving the speed of) computer programs written
+   in C. It focuses on minimizing time spent by the CPU and gives sample source code transformations
+   that often yield improvements. Memory and I/O speed improvements are also discussed.
+
+     ________________________________________________________________________________________________
+
+                                                 CONTENTS
+
+    0. Contents
+    1. Introduction
+    2. Compute-bound
+          + Choose a Better Algorithm
+          + Write Clear, Simple Code
+          + Perspective
+          + Understand your Compiler Options
+          + Inlining
+          + Loop Unrolling
+          + Loop Jamming
+          + Loop Inversion
+          + Strength Reduction
+          + Loop Invariant Computations
+          + Code for Common Case
+          + Tail Recursion Elimination
+          + Table Lookup
+          + Sorting
+          + Variables
+          + Function Calls
+          + Digestibility
+          + String Operations
+          + FP Parallelism
+          + Get a Better Compiler
+          + Stack Usage
+          + Code it in Assembly
+          + Shared Library Overhead
+          + Machine-Specific Optimization
+    3. Memory-bound
+          + Locality of Reference
+          + Column-major Accessing
+          + Don't Copy Large Things
+          + Split or Merge Arrays
+          + Reduce Padding
+          + Increase Padding
+          + March Forward
+          + Beware the Power of Two
+          + Memory Leaks
+          + Be Stringy
+          + Hinting
+          + Fix the Problem in Hardware
+          + Cache Profilers
+    4. IO-bound
+          + Sequential Access
+          + Random Access
+          + Terminals
+          + Sockets
+          + SFIO
+    5. Gotchas
+    6. Glossary
+    7. References
+    8. Acknowledgements
+     ________________________________________________________________________________________________
+
+                                               INTRODUCTION
+
+   The single most effective optimization technique is to use a profiler to identify performance
+   bottlenecks. It's often difficult to guess what part of your program is consuming the most resources,
+   and if you base your optimization efforts on speculation instead of real data, you'll waste a lot of
+   time speeding up the parts of your program that were fast already.
+
+   Once you have identified a bottleneck, for example a loop that is executed thousands of times,
+   remember that the best thing to do is to redesign the program so that it doesn't need to execute the
+   loop thousands of times. This is more effective than making the loop run 10% faster, yet just as
+   often, which is precisely the sort of thing an optimizing compiler can do by itself. Optimization is
+   simply waste of programmer time if any of these statements are true:
+     * parts of the program haven't been written yet
+     * the program is not fully tested and debugged
+     * it seems to run fast enough already
+
+   Also take into account how the program will be used. If it's a report-generator program which only
+   needs to be run once a day, the user may start it before going off to lunch and if so there's really
+   no point in making it finish before they get back. If it's being invoked from within another program
+   that's even slower than yours, again the user will notice no difference. But if it handles
+   mouse-tracking events for a GUI the user will complain about any noticeable delay.
+
+   Given that optimizing is reasonable, compile in full optimize mode and run your program on
+   "real-world" input data. If you don't have access to real input data, choose your test input data
+   with care: programmers tend to test with a smaller set of input data and a different variety of cases
+   than the the program will likely encounter once it's in the hands of users.
+
+   Use the time(1) command to see if your program is compute-bound, memory bound, or I/O bound, or for
+   that matter if it's bound at all: even if your program "seems" to be taking a long time to run, it
+   may only be a second of CPU time. You may have more "time" commands on your system than you realize:
+   sometimes it's built into the shell (SunOS csh for example) and has lots of nifty options. You can
+   also get performance information from getrusage() if you have it, and of course from profiling
+   programs like gprof, prof, and tcov.
+     ________________________________________________________________________________________________
+
+                                               COMPUTE BOUND
+
+   Recompile your program with profiling enabled and whatever optimization options are compatible with
+   that. Run your program, again on real world data, and generate a profiling report. Figure out which
+   function uses the most CPU time, then look it over very carefully and see if any of these approaches
+   might be useful. Make one change at a time, then run the profiler again, repeating the process until
+   there is no obvious bottleneck or the program runs sufficiently fast.
+
+   The first four are quite important; the rest are in no particular order.
+
+    CHOOSE A BETTER ALGORITHM
+
+   Think about what the code is really doing. Become familiar with the body of literature that describes
+   your specialty and learn and use the most appropriate algorithms, even if you didn't come up with
+   them yourself. You should be familiar with O(n) notation, which is defined in many computer science
+   texts.
+
+   Some of the obvious replacements:
+
+                        slow algorithm                 replace with
+                        sequential search              binary search or hash lookup
+                        insertion or bubble sort       quick sort, merge sort, radix sort
+
+   Also choose an appropriate data structure. If you'll be doing a lot of insertions and deletions at
+   random places then a linked list would be good. If you'll be doing some binary searching, an array
+   would be better.
+
+    WRITE CLEAR, SIMPLE CODE
+
+   Some of the very things that make code clear and readable to humans also make it clear and readable
+   to compilers. Complicated expressions are harder to optimize and can cause the compiler to "fallback"
+   to a less intense mode of optimization. I've seen one compiler that has translation-unit limits which
+   when overrun will cause the entire module to be de-optimized by one level.
+
+   Part of the clarity is making hunks of code into functions when appropriate. The cost of a function
+   call is extremely small on modern machines, so optimization is NOT a valid excuse for writing
+   ten-page functions.
+
+   If you write clean, portable code you can quickly port to the latest, fastest machine and offer that
+   as a solution to your customers who are interested in speed.
+
+    PERSPECTIVE
+
+   Get a sense for how long certain operations take. Among the the slowest are opening a file, reading
+   or writing significant amounts of data, starting a new process, searching, sorting, operations on
+   entire arrays, and copying large amounts of data around. The fastest operations are basic elements of
+   the language like assigning to a variable, dereferencing a pointer, or adding two integers. None of
+   these operations take very long in and of themselves (a few microseconds) but all computer languages
+   allow sections of code to be executed repeatedly. If you perform even the fastest operation 10
+   million times, it will take a noticeable amount of time. In real programs, various things happen
+   various numbers of times and having some common sense can help you interpret the output from your
+   profiler.
+
+   A sure sign of misunderstanding is this fragment:
+    if (x != 0) x = 0;
+
+   The intent is to save time by not initializing x if it's already zero. In reality, the test to see
+   whether it's zero or not will take up about as much time as setting it to zero itself would have.
+    x = 0;
+
+   has the same effect and will be somewhat faster.
+
+   For the intrepid hacker, there is no substitute for examining the assembler-level output the compiler
+   generates and counting the instructions. If you do this, don't forget to include wait states in your
+   tally. Also keep in mind that some optimization and instruction scheduling is put off until link time
+   and won't show up in the assembler output for an individual module.
+
+   I have a small, fairly portable program that prints out the approximate unoptimized speed of basic C
+   operators and library functions, speed.c . It's not a benchmark (the measurements are not
+   weighted or averaged in anyway) but it'll give a beginner a numerical sense to the cost of various
+   things in C.
+   Note: (a) I have no anonymous ftp server at my site, so you'll have to look at it in your browser and
+   save it to a file or copy and paste it into an editor. (b) Be sure to compile it with optimization
+   off. Most of the code is trivial and would be eliminated by an optimizer; the timing would end up
+   being mostly zeroes.
+
+    UNDERSTAND YOUR COMPILER OPTIONS
+
+   Most compilers have several levels of optimization. Make sure you're using the highest level. One
+   popular compiler, gcc, has an incredible variety of optimization levels and options. Some compilers
+   have special #pragmas or keywords (for example, inline) which also affect optimization.
+
+   High levels of optimization can make poorly written (but compilable) code break. Less often,
+   optimizers mangle perfectly correct code. Problems with side effects and evaluation order tend to
+   screw things up, so you may have to fix the code up a little before you can use the highest level.
+   Signal handlers activated at inopportune times may disturb an optimized program in ways that wouldn't
+   disturb an unoptimized one.
+
+    INLINING
+
+   gcc (with the -finline-functions option) and a few other compilers are capable of inlining small
+   functions at higher optimization levels automatically. K&R C compilers that I've seen won't do it at
+   all or will only do it for library functions written in assembly (for example the math library). C++
+   compilers almost universally support inline functions.
+
+   If necessary, C functions can be recoded as macros to obtain similar speedup on compilers with no
+   inlining capability. This should be done after the code is completely debugged. All debuggers I've
+   seen are incapable of displaying or stepping through the expanded macro text.
+
+   An example of inlining via macros:
+
+     Old code:
+
+int foo(a, b) {
+	a = a - b;
+	b++;
+	a = a * b;
+	return a;
+}
+
+     New code:
+
+#define foo(a, b) (((a)-(b)) * ((b)+1))
+
+   The extra parentheses are necessary to preserve grouping in case foo is used in an expression with
+   higher precedence than * or in case a and/or b contain subexpressions with lower precedence than + or
+   -.
+
+   Comma expressions and do { ... } while(0) can be used for more complicated functions, with some
+   restrictions. The do-while macros let you create local variables for use in the macro, but you can't
+   return a value to the expression the macro is used in. The opposite is true for macros using comma
+   expressions.
+
+   Some caveats:
+
+    1. Gratuitously making every function in sight into a macro leads to massive code-bloat and can
+       increase the amount of memory your program needs dramatically. The larger a program is, the less
+       likely it is to fit entirely into cache or some other layer of physical memory, undoing the hoped
+       for gains.
+    2. Macros in C "evaluate" their arguments each time the argument is mentioned inside the macro. If
+       the actual argument passed to the macro is a complicated expression or function call, the net
+       result very well may be an increase in CPU time. Performing multiple side-effects when the caller
+       did not expect that will almost certainly make the program buggy.
+    3. Because these macros can contain complicated statements, optimizers have a hard time figuring
+       them out and may give up. Also don't forget that there's a limit on how many characters a macro
+       can have.
+    4. Profilers don't see macros so it's hard to optimize any further once you've done this.
+
+    LOOP UNROLLING
+
+   Many compilers (e.g. gcc -funroll-loops) will do this, but if you know that yours doesn't you can
+   change your source code a bit to get the same effect.
+
+     Old code:
+
+for (i = 0; i < 100; i++) {
+	do_stuff(i);
+}
+
+     New code:
+
+for (i = 0; i < 100; ) {
+	do_stuff(i); i++;
+	do_stuff(i); i++;
+	do_stuff(i); i++;
+	do_stuff(i); i++;
+	do_stuff(i); i++;
+	do_stuff(i); i++;
+	do_stuff(i); i++;
+	do_stuff(i); i++;
+	do_stuff(i); i++;
+	do_stuff(i); i++;
+}
+
+   This way the test for i < 100 and the branch back up to the top of the loop only get executed 11
+   times rather than 101. Loop unrolling works best when the loop is executed a fixed non-prime number
+   of times and the iteration variable is only modified in one place (aside from its initialization). If
+   do_stuff() didn't make use of i, all the little i++'s could be replaced by a single i += 10.
+   Re-arranging the for loop into a do-while loop can make the 11 into 10. If the loop only went to,
+   say, five rather than 100 you could unroll the loop completely and eliminate the branching and
+   testing entirely.
+
+   For computations which converge on some result, compilers will often refuse to unroll on the grounds
+   that unrolling will change the result. If the application is not sensitive to excess precision you
+   can arrange to test the convergence less often by duplicating the interior of the loop. This is
+   especially useful if the test for convergence is expensive in relation to the calculation of the
+   result.
+
+   An unrolled loop is larger than the "rolled" version and so may no longer fit into the instruction
+   cache (on machines which have them). This will make the unrolled version slower. Also, in this
+   example, the call to do_stuff() overshadows the cost of the loop, so any savings from loop unrolling
+   are insignificant in comparison to what you'd achieve from inlining in this case.
+
+   If you happen to be using a vectorizing compiler, loop unrolling can interfere with the vector
+   optimizations.
+
+    LOOP JAMMING
+
+   The idea is to combine adjacent loops which loop over the same range of the same variable. Assuming
+   nothing in the second loop indexes forward (for example array[i+3]), you can do this:
+
+     Old code:
+
+for (i = 0; i < MAX; i++) {  /* initialize 2d array to 0's */
+	for (j = 0; j < MAX; j++) {
+		a[i][j] = 0.0;
+	}
+}
+
+for (i = 0; i < MAX; i++) {  /* put 1's along the diagonal */
+	a[i][i] = 1.0;
+}
+
+     New code:
+
+for (i = 0; i < MAX; i++) {
+	for (j = 0; j < MAX; j++) {
+		a[i][j] = 0.0;      /* initialize 2d array to 0's */
+	}
+	a[i][i] = 1.0;          /* put 1's along the diagonal */
+}
+
+   And now the incrementing and testing of i is done only half as often. Under some circumstances,
+   locality of reference may be better, improving cache behavior. (The example above was lifted from Aho
+   & Ullman.)
+
+    LOOP INVERSION
+
+   Some machines have a special instruction for decrement and compare with 0. Assuming the loop is
+   insensitive to direction, try this replacment:
+
+     Old code:
+
+for (i = 1; i <= MAX; i++) {
+	...
+}
+
+     New code:
+
+i = MAX+1;
+while (--i) {
+	...
+}
+
+   Though watch out for problems with lookahead caches as noted below in MARCH FORWARD. If you plan on
+   doing this in combination with pointer arithmetic note that while ANSI C has a special rule that
+   allows you to set an index to one element past the end of the array, there is no similar rule for one
+   element before the beginning of the array.
+
+    STRENGTH REDUCTION
+
+   Strength reduction is the replacement of an expression by a different expression that yields the same
+   value but is cheaper to compute. Many compilers will do this for you automatically. The classic
+   examples:
+
+     Old code:
+
+x = w % 8;
+y = pow(x, 2.0);
+z = y * 33;
+for (i = 0; i < MAX; i++) {
+	h = 14 * i;
+	printf("%d", h);
+}
+
+     New code:
+
+x = w & 7;             /* bit-and cheaper than remainder */
+y = x * x;             /* mult is cheaper than power-of */
+z = (y << 5) + y;      /* shift & add cheaper than mult */
+for (i = h = 0; i < MAX; i++) {
+	printf("%d", h);
+	h += 14;           /* addition cheaper than mult */
+}
+
+   Also note that array indexing in C is basically a multiply and an add. The multiply part can be
+   subjected to strength reduction under some circumstances, notably when looping through an array.
+
+    LOOP INVARIANT COMPUTATIONS
+
+   Any part of a computation that does not depend on the loop variable and which is not subject to side
+   effects can be moved out of the loop entirely. Most compilers are pretty good at doing this. Try to
+   keep the computations within the loop simple anyway, and be prepared to move invariant computations
+   out yourself: there may be some situations where you know the value won't vary, but the compiler is
+   playing it safe in case of side-effects. "Computation" here doesn't mean just arithmetic; array
+   indexing, pointer dereferencing, and calls to pure functions are all possible candidates for moving
+   out of the loop.
+
+   In loops which call other functions, you might be able to get some speedup by ripping the subroutines
+   apart and figuring out which parts of them are loop-invariant for that particular loop in their
+   caller and calling those parts ahead of time. This is not very easy and seldom leads to much
+   improvement unless you're calling subroutines which open and close files repeatedly or malloc and
+   free large amounts of memory on each call or something else drastic.
+
+   A common but not-always-optimized-away case is the repeated use of an expression in successive
+   statements. This doesn't have to be related to a loop at all. You can try this replacement and see if
+   it helps:
+
+     Old code:
+
+  total =
+    a->b->c[4]->aardvark +
+    a->b->c[4]->baboon +
+    a->b->c[4]->cheetah +
+    a->b->c[4]->dog;
+
+     New code:
+
+  struct animals * temp = a->b->c[4];
+  total =
+    temp->aardvark +
+    temp->baboon +
+    temp->cheetah +
+    temp->dog;
+
+   Older C compilers were allowed to regroup arithmetic expressions to some extent. ANSI codified that
+   arithmetic expressions are evaluated as they are grouped so as to avoid any unwanted surprises. What
+   this means is that
+
+  float a, b, c, d, f, g;
+  ...
+  a = b / c * d;
+  f = b * g / c;
+
+   will not been seen as having the common subexpression b / c. If you rewrite the second expression:
+
+  float a, b, c, d, f, g;
+  ...
+  a = b / c * d;
+  f = b / c * g;
+
+   an ANSI C compiler is now free to compute b / c only once. Note that the new code may behave
+   differently for overflow or provide slightly different results with floating point.
+
+    CODE FOR COMMON CASE
+
+   In a section of code which deals with several alternative situations, place at the beginning the
+   tests and the code for the situations which occur most often. Frequently, this takes the form of a
+   long train of mutually exclusive if-then-else's, of which only one will get executed. By placing the
+   most likely one first, fewer if's will need to be performed over the long term.
+
+   But if the conditions are simple things like x == 3, consider using a switch statement. Some
+   compilers are quite sophisticated in how they translate switch statements.
+
+    TAIL RECURSION ELIMINATION
+
+   First, let me define tail recursion elimination (TRE). When a recursive function calls itself, an
+   optimizer can, under some conditions, replace the call with an assembly level equivalent of a "goto"
+   back to the top of the function. The saves the effort of growing the stack, saving and restoring
+   registers, and any other function call overhead. For very small recursive functions that make
+   zillions of recursive calls, TRE can result in a substantial speedup. With proper design, the TRE can
+   take a recursive function and turn it into whatever is the fastest form of loop for the machine.
+
+   Tail recursion elimination (TRE for short) has been around for a long time. It originated with
+   "functional" languages like LISP which do so much recursion that TRE is a necessity. C, C++, and the
+   "pascal-like" languages fall into the "imperative" language category and extremely efficient
+   programs, recursive or not, can be written and compiled without the benefit of TRE and still perform
+   on par with (and often better than) a similar LISP program. What I'm leading up to is that TRE is not
+   automatically present in every modern optimizer, though many certainly do have it.
+
+   Back to the conditions I mentioned earlier. In order for TRE to be a safe optimization the function
+   must return the value of the recursive call without any further computation. Example:
+
+int isemptystr(char * str) {
+	if (*str == '\0') return 1;
+	else if (! isspace(*str)) return 0;
+	else return isemptystr(++str);
+}
+
+   The above can have TRE applied to the final return statement because the returned value from this
+   invocation of isemptystr will be exactly that of the n+1th invocation, with no further computation.
+
+   And now a counterexample:
+
+int factorial(int num) {
+	if (num == 0) return 1;
+	else return num * factorial(num - 1);
+}
+
+   The above cannot have TRE applied because the returned value is not used directly: it is multiplied
+   by num after the call, so the state of that invocation must be maintained until after the return.
+   Even a compiler that supports TRE cannot use it here.
+
+   And now a counter-counterexample, a rewrite of the factorial program to allow TRE optimization.
+
+int factorial(int num, int factor) {
+	if (num == 0) return factor;
+	else return factorial(num - 1, factor * num);
+}
+
+   In my experience, the optimizers for imperative languages don't bother to perform this sort of
+   rewriting. I have seen it done with Scheme compilers, so it is possible. Programmers who write code
+   this way (other than for example purposes!) should be beaten about the head and shoulders with a
+   blunt dandruff-removing object.
+
+   Even if your compiler implements TRE optimization, you should not assume that it automatically has
+   done so for you. You may have to rewrite even the simplest recursive function before TRE can be
+   applied. If doing so reduces the readability of the function, the effort is highly questionable.
+
+   There is a large subset of recursive algorithms that have simple iterative counterparts. C compilers
+   are very, very good at optimizing loops and can do so without the sometimes-onerous conditions that
+   TRE requires, so if you must optimize at the source level, consider using plain iteration before
+   TRE-friendly rewriting.
+
+   Finally, if the recursive function contains loops or large amounts of code, TRE will be only
+   marginally helpful, since TRE only optimizes the recursion, not anything about the algorithm itself.
+   Function calls are very fast, and optimizing out something that is already very fast will quickly run
+   into the law of diminishing returns.
+
+    TABLE LOOKUP
+
+   Consider using lookup tables especially if a computation is iterative or recursive, e.g. convergent
+   series or factorial. (Calculations that take constant time can often be recomputed faster than they
+   can be retrieved from memory and so do not always benefit from table lookup.)
+
+     Old code:
+
+long factorial(int i) {
+	if (i == 0)
+		return 1;
+	else
+		return i * factorial(i - 1);
+}
+
+     New code:
+
+static long factorial_table[] =
+{1, 1, 2, 6, 24, 120, 720 /* etc */};
+
+long factorial(int i) {
+	return factorial_table[i];
+}
+
+   If the table is too large to type, you can have some initialization code compute all the values on
+   startup or have a second program generate the table and printf it out in a form suitable for
+   #include-ing into a source file. At some point, the size of the table will have a noticeable affect
+   on paging space. You could have the table cover the first N cases then augment this with a function
+   to compute the rest. As long as a significant number of the values requested are in the table there
+   will be a net win.
+
+    SORTING
+
+   For nearly all situations, the library qsort function is speedy enough to make implementation of your
+   own sort algorithm unnecessary. Focus your optimization efforts on speeding up the comparison
+   function. Often the strcmp optimizations discussed later in this document are helpful.
+
+   Consider massaging the input data ahead of time in such a way as to make the comparison routine run
+   faster:
+     * Perform uppercasing and punctuation/diacritic removal ahead of time.
+     * Reorder fields (e.g. ASCII representations of dates and times) so that simple string comparison
+       can be used.
+     * Convert string data to numbers if a sensible mapping is available.
+
+   If you are sorting array of structs or other large objects, sort an array of pointers to them instead
+   so the sort function won't waste time copying whole structs around during the sort.
+
+   Evaluate ratio of insertions to lookups.
+     * If you do many more insertions than lookups (in a given context) do the sorting all at once after
+       all insertions are done.
+     * If you do more lookups than insertions, try to maintain the array in order by inserting items
+       one-at-a-time into their proper sort location, without re-sorting the whole thing.
+     * If insertions are expensive, put new items into a "holding pen" until data can be merged in
+       conveniently.
+
+   If you are writing the sort function yourself, write a specific sort for a specific type of array and
+   a specific comparison function. Incorporate everything into your sort function, essentially inlining
+   the comparison function and swapping code.
+
+   For custom sorts patterned after qsort you can make special copies of the sort which assume that data
+   being swapped is a convenient machine size, like short, long, or double. When the width of the object
+   being sorted matches the size of a basic type (and the alignment is suitable) you can do a direct
+   swap instead of calling memcpy.
+
+   Make sure assert or other debugging statements are commented out or #defined away.
+
+    VARIABLES
+
+   Avoid referring to global or static variables inside the tightest loops. Don't use the volatile
+   qualifier unless you really mean it. Most compilers take it to mean roughly the opposite of register,
+   and will deliberately not optimize expressions involving the volatile variable.
+
+   Avoid passing addresses of your variables to other functions. The optimizer has to assume that the
+   called function is capable of stashing a pointer to this variable somewhere and so the variable could
+   get modified as a side effect of calling what seems like a totally unrelated function. At less
+   intense levels of optimization, the optimizer may even assume that a signal handler could modify the
+   variable at any time. These cases interfere with placing variables in registers, which is very
+   important to opimization. Example:
+
+  a = b();
+  c(&d);
+
+   Because d has had its address passed to another function, the compiler can no longer leave it in a
+   register across function calls. It can however leave the variable a in a register. The register
+   keyword can be used to track down problems like this; if d had been declared register the compiler
+   would have to warn that its address had been taken.
+
+    FUNCTION CALLS
+
+   While functions and modularity are a good thing, a function call inside an oft-executed loop is a
+   possible bottleneck. There are several facets to the problem, some of which I've alluded to above.
+   Aside from the expense of executing the instructions in the other function:
+
+     * Function calls interrupt an optimizer's train of thought in a drastic way. Any references through
+       pointers or to global variables are now "dirty" and need to be saved/restored across the function
+       call. Local variables which have had their address taken and passed outside the function are also
+       now dirty, as noted above.
+     * There is some overhead to the function call itself as the stack must be manipulated and the
+       program counter altered by whatever mechanism the CPU uses.
+     * If the function being called happens to be paged out, there will be a very long delay before it
+       gets read back in. For functions called in a loop it's unusual for the called function to be
+       paged out until the loop is finished, but if virtual memory is scarce, calls to other functions
+       in the same loop may demand the space and force the other function out, leading to thrashing.
+       Most linkers respect the order in which you list object files, so you can try to get functions
+       near each other in hopes that they'll land on the same page.
+
+    DIGESTIBILITY
+
+   Straight-line code, even with an extra statement or two, will run faster than code full of if's,
+   &&'s, switch's, and goto's. Pipelining processors are much happier with a steady diet of sequential
+   instructions than a bunch of branches, even if the branches skip some unnecessary sections.
+
+    STRING OPERATIONS
+
+   Most of the C library str* and mem* functions operate in time proportional to the length(s) of the
+   string(s) they are given. It's quite easy to loop over calls to these and wind up with a significant
+   bottleneck. Some things that may ease the situation:
+
+   strlen
+
+   Avoid calling strlen() during a loop involving the string itself. Even if you're modifying the
+   string, it should be possible to rewrite it so that you set x = strlen() before the loop and then x++
+   or x-- when you add or remove a character.
+
+   strcat
+
+   When building up a large string in memory using strcat, it will scan the full (current) length of the
+   string on each call. If you've been keeping track of the length anyway (see above) you can index
+   directly to the end of the string and strcpy or memcpy to there.
+
+   strcmp
+
+   You can save a little time by checking the first characters of the strings in question before doing
+   the call. Obviously, if the first characters differ, there's no reason to call strcmp to check the
+   rest. Because of the non-uniform distribution of letters in natural languages, the payoff is not 26:1
+   but more like 15:1 for uppercase data.
+
+  #define QUICKIE_STRCMP(a, b)  (*(a) != *(b) ? \
+      (int) ((unsigned char) *(a) - \
+             (unsigned char) *(b)) : \
+      strcmp((a), (b)))
+
+   But watch out:
+
+    1. There's a double evaluation going on, so this can be counter-productive if the arguments to
+       strcmp aren't just simple variables.
+    2. If you're working on adjacent strings in sorted input, you will almost always have to check past
+       the first character anyway.
+
+   An entirely different way to speed up strcmp is to place all your strings into a single array, in
+   order. Then you only have to compare the pointers, not the strings. If the point of all the calls to
+   strcmp is to search for a value from a large, known set and you expect that you'll be doing many such
+   searches then you'll want to invest in a hash table.
+
+   strlen(s) == 0
+
+   Empty string tests are common, and even experienced programmers may use strlen for this purpose. But
+   if the strings you are working with are of substantial size, strlen will dutifully check each
+   character until it finds the NUL terminator. Replace with *s == '\0' which saves the function call
+   overhead plus it only has to check the first character. There can be a substantial improvement if
+   your character strings are fairly long.
+
+   strcpy(s, "")
+
+   *s = '\0' works just fine and saves a function call.
+
+   strncpy(s, t, n)
+
+   Be aware that strncpy pads short strings with 0's. Except for the first one, which terminates the
+   string, the extra zeroes are typically never used, so some time is wasted, though typically not very
+   much.
+
+   memcpy/memmove
+
+   Generally, memcpy is faster than memmove because it can assume that its arguments don't overlap. If
+   you are tempted to replace these with your own versions, be sure to verify that your version (a)
+   works and (b) is faster.
+
+    FP PARALLELISM
+
+   In some really weird cases (early RISC chips with FPUs, which includes many SPARC-based machines) you
+   can get some speed by turning your integer multiplies, divides, and modulos into float operations.
+   This does two things: the FPU is taking some of the load off the main CPU so it can get some other
+   stuff done; but mostly some RISC machines emulate integer multiply and divide in software and the FPU
+   can actually do it faster anyway. This is not a sure thing and you should try it both ways on all the
+   machines you plan to run on before you do this. Also, converting back-and-forth between ints and
+   floats can take up considerable time. I have heard this is an acute problem on Apollos.
+
+   On many machines, floats work faster than doubles. If the bottleneck involves FP arithmetic and you
+   don't need the extra precision, change the pertinent variables to float and see what happens. But
+   similar to above, the cost of converting between floats and doubles can outweigh the benefits if
+   applied indiscriminately. Note that on K&R compilers and ANSI compilers used w/o prototypes, there is
+   an automatic conversion of floats to doubles in function calls and in many expressions.
+
+    GET A BETTER COMPILER
+
+   gcc produces somewhat faster code than the compilers that come with some OS's. Try compiling your
+   code with all the compilers you have at your disposal and use the fastest one for compiling the one
+   or two functions which are bottlenecks. For the rest just use the one that gives the most informative
+   error messages and produces the most reliable output. This is more difficult with C++ since different
+   compilers can use incompatible name-mangling schemes.
+
+   Compilers are evolving even as we speak, so keep up with the latest revision if possible.
+
+    STACK USAGE
+
+   A typical cause of stack-related problems is having large arrays as local variables. In that case the
+   solution is to rewrite the code so it can use a static or global array, or perhaps allocate it from
+   the heap. A similar solution applies to functions which have large structs as locals or parameters.
+   (On machines with small stacks, a stack bound program may not just run slow, it might stop entirely
+   when it runs out of stack space.)
+
+   Recursive functions, even ones which have few and small local variables and parameters, can still
+   affect performance. On some ancient machines there is a substantial amount of overhead associated
+   with function calls, and turning a recursive algorithm into an iterative one can save some time.
+
+   A related issue is last-call optimization. Many LISP and Scheme compilers do this automatically, but
+   few C compilers support it. Consider this example:
+
+int func1() {
+	int a, b, c, etc;
+
+	do_stuff(a, b, c)
+		if (some_condition)
+			return func2();
+		else
+			return 1;
+}
+
+   Since func1()'s last statement is to call func2() and func1() has no need of its variables after that
+   point, it can remove its stack frame. When func2() is done it returns directly to func1()'s caller.
+   This (a) reduces the maximum depth of the stack and (b) saves the execution of some
+   return-from-subroutine code as it will get executed only once instead of twice (or more, depending on
+   how deeply the function results are passed along.)
+
+   If func1() and func2() are the same function (recursion) the compiler can do something else: the
+   stack can be left in place and the call can be replaced by a goto back to the top of the function.
+   This is called tail-recursion elimination.
+
+    CODE IT IN ASSEMBLY
+
+   Estimates vary widely, but a competent human writing assembly-level code can produce code which runs
+   about 10% faster than what a compiler with full optimization on would produce from well-written
+   high-level source. Of course, this is not a portable solution. RISC assembler is especially difficult
+   to write by hand.
+
+   Experts vary on the approach one should take. Some suggest writing your own assembler version of a
+   function from scratch in hopes that you'll find a novel way of calculating the result while others
+   recommend taking the compiler's version as a starting point and just fine-tuning it.
+
+    SHARED LIBRARY OVERHEAD
+
+   Dynamically linked shared libraries are a really nifty thing. In many cases though, calling a
+   dynamically linked function is slightly slower than it would be to call it statically. The principal
+   part of this extra cost is a one-time thing: the first time a dynamically called function is called
+   there is a bit of searching going on, but thereafter the overhead should be a very tiny number of
+   instructions.
+
+   For applications with thousands of functions, there can be a noticeable lag at startup. Linking
+   statically will reduce this, but defeats (to some extent) the benefits of code sharing that dynamic
+   libraries can bring. Often, you can selectively link some libraries as dynamic and others as static.
+   For example, the X11, C and math libraries you'd link dynamically (since other processes will be
+   using these also and the program can use to the copy already in memory) but still link your own
+   application-specific libraries statically.
+
+    MACHINE-SPECIFIC OPTIMIZATION
+
+   As with other machine-specific code, you can use #ifdef to set off sections of code which are
+   optimized for a particular machine. Compilers don't predefine RISC or SLOW_DISK_IO or HAS_VM or
+   VECTORIZING so you'll have to come up with your own and encode them into a makefile or header file.
+     ________________________________________________________________________________________________
+
+                                               MEMORY BOUND
+
+    LOCALITY OF REFERENCE
+
+   The foremost consideration when optimizing memory access, whether for virtual memory or cache
+   considerations, is locality of reference. That is the property of a program to use addresses which
+   are near (in both time and location) other recent references to memory. The main difference between
+   optimizing for VM and optimizing for cache is scale: VM pages can be anywhere from 0.5kb to 8kb and
+   beyond and can take tens of milliseconds to read in from disk. Cache blocks typically range from 16
+   bytes to 256 bytes and get read in in the tens of microseconds. A program which forces many VM pages
+   or cache lines to load in quick succession is said to be "thrashing."
+
+   You can affect locality of reference by changing the order in which you access and allocate things
+   and by splitting your data structures into "frequently used" and "infrequently used" segments and
+   allocating all the "frequently used" stuff together. (But don't fool yourself into thinking that
+   malloc always allocates adjacent chunks of memory on each successive call. You have to allocate one
+   giant chunk and dole it out yourself to be certain. But this can lead to other problems.)
+
+   Search and sort algorithms differ widely in their patterns of accessing memory. Merge sort is often
+   considered to have the best locality of reference. Search algorithms may take into consideration that
+   the last few steps of the search are likely to take place in the same page of memory, and select a
+   different algorithm at that point.
+
+    COLUMN-MAJOR ACCESSING
+
+   When stepping through multi-dimensional arrays, be sure to increment the rightmost index first. This
+   natural for C programmers, but backwards for FORTRAN. If you find yourself writing C code like this,
+   you probably need to be re-educated:
+
+	float array[20][100];
+	int i, j;
+
+	for (j = 0; j < 100; j++)
+		for (i = 0; i < 20; i++)
+			array[i][j] = 0.0;
+
+    DON'T COPY LARGE THINGS
+
+   Instead of copying strings, arrays, or large structs, consider copying a pointer to them. As long as
+   you're done using the pointer before you modify the string, array, or struct you're okay.
+
+   ANSI C now requires that structs are pass-by-value like everything else, thus if you have
+   extraordinarily large structs, or are making millions of function calls on medium-sized ones, you
+   might consider passing the struct's address instead, after modifying the called function so that it
+   doesn't perturb the contents of the struct.
+
+    SPLIT OR MERGE ARRAYS
+
+   If the parts of your program making heaviest use of memory are doing so by accessing elements in
+   "parallel" arrays you can combine them into an array of structs so that the data for a given index is
+   kept together in memory.
+
+   If you already have an array of structs, but find that the critical part of your program is accessing
+   only a small number of fields in each struct, you can split these fields into a separate array so
+   that the unused fields do not get read into the cache unnecessarily.
+
+    REDUCE PADDING
+
+   On machines with alignment restrictions you can sometimes save a tiny amount of space by arranging
+   similarly-typed fields together in a structure with the most restrictively aligned types first. There
+   may still be padding at the end, but eliminating that can destroy the performance gains the alignment
+   was meant to provide.
+
+     Old code:
+
+  /* sizeof = 64 bytes */
+  struct foo {
+    float   a;
+    double  b;
+    float   c;
+    double  d;
+    short   e;
+    long    f;
+    short   g;
+    long    h;
+    char    i;
+    int     j;
+    char    k;
+    int     l;
+  };
+
+     New code:
+
+  /* sizeof = 48 bytes */
+  struct foo {
+    double  b;
+    double  d;
+    long    f;
+    long    h;
+    float   a;
+    float   c;
+    int     j;
+    int     l;
+    short   e;
+    short   g;
+    char    i;
+    char    k;
+  };
+
+   ANSI C makes few guarantees about internal struct padding, but an arrangement like that usually
+   results in minimal losses even on the pickiest of RISC machines.
+
+   A typical use of char or short variables is to hold a flag or mode bit. You can combine several of
+   these flags into one byte using bit-fields at the cost of data portability. You might instead use
+   bitmasks and the & operator to extract the values; this is more portable but also more tedious.
+
+    INCREASE PADDING
+
+   Paradoxically, increasing the size and alignment of a data structure to match (or to be an integer
+   fraction or multiple of) the cache line size may increase performance. The rationale is that if the
+   data structure is an odd size relative to the cache line size, it may overlap two cache lines thus
+   doubling the time needed to read it in from main memory.
+
+   The size of a data structure can be increased by adding a dummy field onto the end, usually a
+   character array. The alignment is harder to control, but usually one of these techniques will work:
+     * Use malloc instead of a static array. Some mallocs automatically allocate storage suitably
+       aligned for cache lines. (And some don't.)
+     * Allocate a block twice as large as you need, then point wherever in it that satisfies the
+       alignment you need.
+     * Use an alternate allocator (e.g. memalign) which guarantees minimal alignment.
+     * Use the linker to assign specific addresses or alignment requirements to symbols.
+     * Wedge the data into a known position inside another block which is already aligned.
+
+    MARCH FORWARD
+
+   Theoretically, it makes no difference whether you iterate over an array forwards or backwards, but
+   some caches are of a "predictive" type that tries to read in successive cache lines even before you
+   need them. Because these caches must work quickly, they tend to be fairly dim and rarely have the
+   extra logic for predicting backwards traversal of memory pages.
+
+    BEWARE THE POWER OF TWO
+
+   One common method of mapping memory addresses to cache lines is to strip off leading bits from the
+   address.
+
+   Take as an example a hypoythetical direct-mapped 1MB cache with 128-byte cache lines and a program
+   which uses 16MB of memory, all happening on a machine with 32 bit addresses. The simplest way for the
+   cache to map the memory into the cache is to mask off the first 12 and the last 7 bits of the
+   address, then shift to the right 7 bits. What we end up with is a cache that maps any two addresses
+   exactly 8192 (2^13) bytes apart in main memory to the same cache line. If the program happens to use
+   an array of 8192 byte structs, and refers to just one element in each one while processing the whole
+   array, every access will map to the same cache line and force a reload, which is considerable delay.
+
+   This seems like a contrived situation, but the same problem arises for any struct which is a multiple
+   of 8192 (in the above example). If the struct were half the size, the problem would be half as severe
+   (and so on) but probably still noticeable. Since we have used only one (one!) cache line, any future
+   access to the array will have to reload cache lines, in spite of the supposed 1MB capacity.
+
+   The solution in this case is probably to isolate the one field into a separate array. Say the field
+   is 4 bytes wide; then the cache would only need a reload every 32 iterations through the array. This
+   is probably seldom enough that the cache lines can be read in advance of their need and processing
+   can occur at full speed.
+
+    MEMORY LEAKS
+
+   malloc and free have some interesting behavior at times, and are often implemented in completely
+   different ways on different machines. Some mallocs have a way of "tuning" for performance (mallopt
+   for example.)
+
+   In some applications, malloc takes very little time and free takes a lot, so if your program uses a
+   bunch of memory but doesn't really re-use any of it before it dies, the program might run faster if
+   you just do this
+
+    #define free(x)   /* no-op */
+
+   in a header someplace. I would emphasize that this has narrow utility. Programs with long lifetimes
+   (for example, background demons) and programs which use a significant portion of physical memory
+   should carefully free everything as soon as it's no longer needed.
+
+    BE STINGY
+
+   Allocate less stuff in the first place; this is kind of trite since most programmers don't go to the
+   trouble of calling malloc unless they have a good reason, but there might be a few things that could
+   go on the stack instead. If you have some data structure which is mostly "holes" like a hash table or
+   sparse array, it might be to your advantage to use a smaller table or list or something.
+
+   Buddy system allocators are subject to massive amounts of internal fragmentation, and often their
+   worst case is when you allocate something whose size is near, or slightly larger than a power of two,
+   which is not exactly uncommon. They also tend to put things of like size together in preference to
+   putting things allocated in sequence together; this affects locality of reference, sometimes in a
+   good way, sometimes not.
+
+    HINTING
+
+   You may have mallopt on your (Unixish) system. This can be used to get malloc to allocate small
+   blocks fairly quickly and painlessly.
+
+   SunOS (and perhaps others) have madvise() and vadvise() system calls. These can be used to clue the
+   OS in as to what sort of way you're going to be accessing memory: randomly, sequentially, mark some
+   pages as no longer needed, etc.
+
+    FIX THE PROBLEM IN HARDWARE
+
+   In the current computer era, the costs of main memory, cache memory, and disk storage for VM are
+   steadily decreasing. It is entirely possible that rewriting the code won't improve the situation as
+   much as simply throwing money at the problem and buying more memory.
+
+   Some common sense is required, since for mass-market software this isn't always practical. One side
+   of the argument is that you can't just tell everyone to spend $500 in upgrades just to run your $10
+   shareware program. On the other hand, increasing swap space by 16MB will cost, averaged over time and
+   population, about US$4 at current (1997) rates.
+
+    CACHE PROFILERS
+
+   In the best of all worlds, you would run a cache profiler to find out exactly what parts of your
+   program or data structures are causing cache problems. Few development environments include one.
+   Often, the best that one can do is infer from an execution profile that a cache problem might exist
+   in a certain function, especially if large arrays or many data structures are involved.
+     ________________________________________________________________________________________________
+
+                                                 I/O BOUND
+
+   I/O (in Unix) usually puts your process to sleep for a time. The request for I/O may finish fairly
+   quickly but perhaps some other process is busy using the CPU and your process has to wait. Because
+   the length of the wait is somewhat arbitrary and depends on what exactly the other processes are
+   doing, I/O bound programs can be tricky to optimize.
+
+    SEQUENTIAL ACCESS
+
+   Buffered I/O is usually (but not always) faster than unbuffered. Some gain can be wrought from using
+   a larger than normal sized buffer; try out setvbuf(). If you aren't worried about portability you can
+   try using lower level routines like read() and write() with large buffers and compare their
+   performance to fread() and fwrite(). Using read() or write() in a single-character-at-a-time mode is
+   especially slow on Unix machines because of the system call overhead.
+
+   Consider using mmap() if you have it. This can save effort in several ways. The data doesn't have to
+   go through stdio which saves a buffer copy. Depending on the sophistication of the paging hardware,
+   the data need not even be copied into user space; the program can just access an existing copy.
+   mmap() also lends itself to read-ahead; theoretically the entire file could be read into memory
+   before you even need it. Lastly, the file is can be paged directly off the source disk and doesn't
+   have to use up virtual memory.
+
+    RANDOM ACCESS
+
+   Again, consider mmap() if you have it. If there's a trade off between I/O bound and memory bound in
+   your program, consider a lazy-free of records: when memory gets tight, free unmodified records and
+   write out modified records (to a temporary file if need be) and read them in later. Though if you
+   take the disk space you'd use to write the records out and just add it to the paging space instead
+   you'll save yourself a lot of hassle.
+
+    ASYNCHRONOUS I/O
+
+   You can set up a file descriptor to be non-blocking (see ioctl(2) or fcntl(2) man pages) and arrange
+   to have it send your process a signal when the I/O is done; in the meantime your process can get
+   something else done, including perhaps sending off other I/O requests to other devices. Significant
+   parallelism may result at the cost of program complexity.
+
+   Multithreading packages can aid in the construction of programs which utilize asynchronous I/O.
+
+    TERMINALS
+
+   If your program spews out a lot of data to the screen, it's going to run slow on a 1200 baud line.
+   Waiting for the screen to catch up stops your program. This doesn't add to the CPU or disk time as
+   reported for accounting purposes, but it sure seems slow to the user. Bitmap displays are subject to
+   a similar problem: xterms with jump scroll mode off can be quite slow at times.
+
+   A general solution is to provide a way for the user to squelch out irrelevant data. Screen handling
+   utilities like curses can speed things up by reducing wasted screen updates.
+
+    SOCKETS
+
+   These have some weird properties. You may find that sending short, infrequent messages is extremely
+   slow. This is because small messages may just sit in a buffer for a while waiting for the rest of the
+   buffer to get filled up. There's some socket options you can set to get around this for TCP; or
+   switch to an non-streaming protocol such as UDP. But the usual limitation is the network itself and
+   how busy it is.
+
+   For the most part there's no free lunch and sending more data simply takes more time. However, a
+   local network with a switched hub, bandwidth should have a clear theoretical upper limit. If you
+   aren't getting anywhere near it, you might be able to blame the IP implementation being used with
+   your OS. Try switching to a different "IP stack" and see if that helps a bit.
+
+   On Unix machines there are typically two socket libraries available, BSD sockets, and TLI. One is
+   usually implemented in terms of the other and may suffer an extra buffer copy or other overhead. Try
+   them both and see which is faster.
+
+    SFIO
+
+   This replacement for stdio written by Phong Vo and Dave Korn is available through
+   netlib@research.att.com. By slightly changing the calling sequences they have enabled several nifty
+   optimizations and claim a substantial improvement.
+     ________________________________________________________________________________________________
+
+                                                  GOTCHAS
+
+   Some of the things that may trip up novices:
+
+   1. Programmers tend to over-estimate the usefulness of the programs they write. The approximate value
+   of an optimization is:
+    number of runs × number of users × time savings × user's salary
+    - time spent optimizing × programmer's salary
+
+   even if the program will be run hundreds of times by thousands of users, an extra day spent saving 40
+   milliseconds probably isn't going to help.
+
+   2. Machines are not created equal. What's fast on one machine may be slow on another. I don't just
+   mean abstract machines like SPARC or MC68000, but actual machines with serial numbers. Extra
+   interface cards, different disks, number of logged in users, extra memory, background demons, and
+   just about anything else can affect the speed of various parts of a program and influence which part
+   of the program is a bottleneck and its speed as a whole.
+
+   A particular problem is that many programmers are power users and have machines loaded with memory
+   and a math co-processor and tons of disk space while the users get bare-bones CPUs and run over a
+   network. The programmer gets a distorted view of the program's performance and may fail to optimize
+   the parts of the program which are taking up the user's time, such as floating point or memory
+   intensive routines.
+
+   3. As I've mentioned along the way, many of these optimizations may already be performed by your
+   compiler!
+
+   4. Don't get into the habit of writing code according to the above rules of optimization. Only apply
+   them after you have discovered exactly which function is the problem. Some of the rules if applied
+   globally would make the program even slower. Nearly all make the intent of the code less obvious to a
+   human reader, which can get you in trouble if you have to fix a bug or something later on. Be sure to
+   comment optimizations--the next programmer may simply assume it's ugly code and rewrite it.
+
+   5. Spending a week optimizing a program can easily cost thousands of dollars in programmer time.
+   Sometimes, it's easier to just buy a faster CPU or more memory or a faster disk and solve the problem
+   that way.
+
+   6. Novices often assume that writing lots of statements on a single line and removing spaces and tabs
+   will speed things up. While that may be a valid technique for some interpreted languages, it doesn't
+   help at all in C.
+     ________________________________________________________________________________________________
+
+                                                 GLOSSARY
+
+   bottleneck
+          the part of a program that accounts for the majority of time. According to an apocryphal 90/10
+          rule, 90% of the time is spent in 10% of the code.
+
+   buddy system allocator
+          one of many possible algorithms for implementing the malloc/free part of the C library. Buddy
+          system allocators distribute blocks in memory depending in part on their sizes and not merely
+          by the order in which the were allocated.
+
+   compute bound
+          a program uses different resources in the machine in the course of being run. A program which
+          relies heavily on the availability of the CPU is said to be compute bound. Such a program
+          would not be sped up significantly by installing more memory or a faster disk drive.
+
+   inlining
+          function calls involve changing the stack pointer and program counter registers, passing
+          arguments, and allocating space for results. This means almost the entire state of the CPU
+          itself is saved then restored at each function call. CPUs are designed with this in mind and
+          do all of this very quickly, but additional speed can be gained by inlining, or integrating
+          the called function into the caller. The called function then uses the caller's stack to store
+          local variables and can (when semantics allow) make direct references to parameters rather
+          than copies.
+
+   i/o bound
+          calls to underlying operating system functions for reading or writing data use system
+          resources other than the CPU. While waiting for the resource to become available, or for the
+          request to simply finish, the CPU is idle or may switch to a different process. A program that
+          spends most of its time waiting for i/o is i/o bound.
+
+   memory bound
+          a program which relies heavily on memory, either virtual or physical is said to be memory
+          bound. Such a program will have the CPU biding time waiting for the data cache to be updated
+          or for VM to get paged in.
+
+   O-notation
+          a rough measure of program time complexity. Typically expressed as O(f(N)) where the f(N) is a
+          mathematical function which defines an upper limit (times an arbitrary constant) for the
+          expected running time of the program for a given input size N. For example, many simple sort
+          programs have a running time which is proportional to the square of the number of elements
+          being sorted. These would be described as O(N^2). The O-notation can be used to describe space
+          complexity also.
+
+   optimization
+          the process of improving the speed at which a program executes. Depending on context it may
+          refer to the human process of making improvements at the source level or to a compiler's
+          efforts to re-arrange code at the assembly level (or some other low level.)
+
+   pipeline
+          a CPU architecture in which the phases of execution are interleaved in order, so that while
+          one instruction is being carried out, the next instruction is being fetched into the CPU and
+          the previous instruction's result is being written out. Some CPUs have several distinct stages
+          to their pipeline.
+
+   profiler
+          a computer program that measures the performance of another program. Typically the measurement
+          takes the form of an interval sampling of the location of the program counter or the stack.
+          After the program being measured is finished running, the profiler collects the statistics and
+          generates a report. Proper use of the profiler may require that the program being measured be
+          recompiled using a special option, and/or linked with a special library. gprof and prof are
+          two widely available profilers for Unix programs.
+
+   pure function
+          a function whose result is dependent only on its parameters and which has no side effects.
+
+   stack bound
+          a program which spends most of the available CPU time adding and removing activation records
+          from the stack is said to be stack bound. Few profilers can measure this directly but it can
+          be inferred if a profiler shows most of the time is spent in a recursive routine whose
+          statements are too simple to account for the total time.
+
+   volatile
+          a seldom-used keyword in C which has implementation-defined semantics but is usually taken to
+          mean that a variable should not be placed in a register as it may be subject to side effects
+          from hardware or signal handlers.
+
+   wait state
+          if an instruction to the CPU is complex enough, the result may not be available immediately.
+          The delay is called a wait state, and it is described by how many instruction cycles pass
+          before the result is available. A compiler or assembler for a pipelined CPU is expected to
+          fill in the wait states with other productive instructions.
+     ________________________________________________________________________________________________
+
+                                                REFERENCES
+
+   Alfred V. Aho, Ravi Sethi, Jeffrey D. Ullman Compilers: Principles, Techniques, and Tools (The
+   "Dragon Book") ISBN 0-201-10088-6
+
+     The Dragon Book has quite a bit of detail about the inner workings of optimizers and what types of
+     optimizations are easiest for the compiler to perform. By reading it you may gain some insight
+     into what you can reasonably expect a modern compiler to do for you. There is an entry in the
+     Jargon file for it as well:
+
+     "Dragon Book n. The classic text "Compilers: Principles, Techniques and Tools", by Alfred V. Aho,
+     Ravi Sethi, and Jeffrey D. Ullman (Addison-Wesley 1986; ISBN 0-201-10088-6), so called because of
+     the cover design featuring a dragon labeled `complexity of compiler design' and a knight bearing
+     the lance `LALR parser generator' among his other trappings. This one is more specifically known
+     as the `Red Dragon Book' (1986); an earlier edition, sans Sethi and titled "Principles Of Compiler
+     Design" (Alfred V. Aho and Jeffrey D. Ullman; Addison-Wesley, 1977; ISBN 0-201-00022-9), was the
+     `Green Dragon Book' (1977). (Also `New Dragon Book', `Old Dragon Book'.) The horsed knight and the
+     Green Dragon were warily eying each other at a distance; now the knight is typing (wearing
+     gauntlets!) at a terminal showing a video-game representation of the Red Dragon's head while the
+     rest of the beast extends back in normal space. See also book titles."
+
+   American National Standard for Information Systems -- Programming Language -- C. ANSI X3.159-1989 aka
+   ISO 9899-1990
+
+     Optimizers will sometimes mangle code that depends on side effects or order of evaluation so you
+     should be aware of what's legal and what's not. By sticking with the letter of the law you should
+     be able to use the highest level of optimization safely. The Rationale (available at several ftp
+     sites) points out some of the optimization-related weirdnesses of C.
+
+     I've referred to ANSI C throughout the document; substitute the term ISO C if you prefer.
+
+   Dowd, Kevin & Severance, Charles. High Performance Computing, 2nd Edition. O'Reilly & Associates.
+   ISBN 1-56592-312-X
+
+     This is a good introduction and reference for optimization of programs for RISC and other modern
+     architectures. There is coverage of programming for parallelism, techniques for minimizing memory
+     cache misses, and a lot of common sense guidelines sprinkled throughout about the proper way to
+     approach the problem. Ordering information is available at the O'Reilly & Associates web site:
+     http://www.ora.com/catalog/hpc2/
+
+   Kernighan, Brian & Ritchie, Dennis. The C Programming Language Second Edition. Prentice Hall,
+   Englewood Cliffs NJ. ISBN 0-13-110370-9
+
+     A more widely available, more readable, and cheaper reference than the Standard. There isn't any
+     specific advice about optimization though.
+
+   Knuth, Donald. The Art of Computer Programming Vol. 3 Searching and Sorting. Addison-Wesley, Reading
+   MA. ISBN 0-201-03803-X
+
+     Knuth presents in excruciating detail the time and space complexity of nearly every imaginable
+     search and sort algorithm. Since many programs are constrained either by a search or sort, or by
+     some other algorithm which boils down to one of those, you may find this interesting reading. The
+     examples are written in rather odd pseudo-assembly language called MIX which appears (to me) to
+     have been designed specifically so that you can talk about exactly how many CPU cycles something
+     takes.
+
+   Alvin R. Lebeck and David A. Wood "Cache Profiling and the SPEC Benchmarks: A Case Study,"
+   IEEE Computer, vol. 27, no. 10, Oct. 1994, pp. 15-26.
+   http://www.cs.duke.edu/~alvy/papers/cprof.html
+
+     Research paper describes a UNIX/X-windows cache-profiler system and their success in using it to
+     optimize the SPEC family of benchmarks.
+
+   Mulder, Art. comp.windows.x: Getting more performance out of X.
+   http://www.ualberta.ca/~amulder/speedup-x-faq.txt
+
+     Many nifty GUI applications are constrained by limitations of the X client/server protocol or by
+     the speed of the server itself. A profiling program run only on the application itself will not be
+     able to pinpoint the true bottlenecks since they are in a different process. This describes some
+     of the common problems and what to do about them, both from a programmer's viewpoint and for
+     regular users.
+
+   NULLSTONE Corporation. NULLSTONE Optimization Categories,
+   http://www.nullstone.com/htmls/category.htm
+
+     A laundry list of the optimizations that compilers can and should do.
+
+   Pure Atria. Performance Engineering,
+   http://www.pureatria.com/asq/glperf.html
+
+     One corporation's viewpoint on optimization strategies.
+
+   Sedgewick, R. Algorithms in C. Addison-Wesley, Reading MA, 1990. ISBN 0-201-51425-7.
+
+     Contains most of the classic algorithms, well presented.
+
+   Standish, Thomas. Data Structure Techniques. Addison-Wesley, Reading MA. ISBN 0-201-07526-4.
+
+     This has a fairly complete description of everything you could ever want to know about hash
+     tables, stacks, linked lists, arrays, strings, trees, queues and the algorithms for maintaining
+     each. My copy is fairly old so it may be out of print or revised or something by now.
+
+   Summit, Steve et al. Comp.lang.c Answers to Frequently Asked Questions.
+   http://www.eskimo.com/~scs/C-faq/top.html
+
+     Very little of this has to do with optimization specifically, but as with the ANSI standard, it is
+     valuable to know what portions of the language are safe to exercise to their limits before you go
+     a-hacking. Also available in book form.
+
+   Unix man pages. gprof(1) tcov(1) prof(1) time(1) csh(1) csh_builtins(1) monitor(3) cc(1) lorder(1)
+   tsort(1) malloc(3) Included with most installations of the Unix[tm] operating system.
+
+     Specifically, check the man pages to find out what compile options you need for profiling. The SEE
+     ALSO section of man pages will occasionally point you in interesting directions.
+
+    OTHER ITEMS OF INTEREST THAT I'VE NOT REVIEWED
+
+   Abrash, Michael. Zen of Program Optimization. ISBN 1-883577-03-9
+
+     Lots of details about optimizing Intel x86 code.
+
+   Bentley, Jon. Writing Efficient Programs. Prentice Hall. ISBN 0-13-970244-X.
+
+   Bentley, Jon. Programming Pearls. Addison-Wesley. 1986/1989 ISBN 0-201-10331-1
+
+   Jackson, Michael A. Principles of Program Design. Academic Press, London and New York, 1975.
+
+     "Jackson is the source of the quote:
+
+     There are two rules for when to optimize:
+    1. Don't do it.
+    2. (For experts only) Don't do it yet."
+
+   Kernighan, Brian W and Plauger, P.J. The Elements of Programming Style Second Edition. McGraw-Hill.
+   1978. ISBN 0-07-034207-5.
+
+     "The Elements of Programming Style has the most compelling discussions on efficiency (not to
+     mention numerous other matters) that I've ever had the pleasure to read. Many of the programming
+     blunders which the book dissects stem from misguided or heavyhanded optimization attempts; chapter
+     7 is devoted to Efficiency and Instrumentation, with some extremely convincing examples of
+     (deprecated) code which uses poor algorithms and/or simpleminded source-level slower than
+     straightforward code."
+
+   Kozen, Dexter C. The Design and Analysis of Algorithms. Springer-Verlag, New York. 1992.
+
+     "The book treats a number of advanced algorithms and data structures, among the topics covered
+     are: Splay Trees, Binomial Heaps, Fibonacci Heaps, Union-Find algorithms and Random Search Trees.
+     It is not a book that I would recommend to someone who doesn't have a good understanding of
+     algorithmics and mathematics, some of the topics covered are also very specialized, but it may be
+     a worthwhile addition to some of the more basic books on algorithmics."
+
+   Kruse, Robert L.; Bruce P. Leung; Clovis L. Tondo. Data Structures and Program Design in C. Prentice
+   Hall. ISBN 0-13-725649-3
+
+   H. Massalin, "Superoptimizer: a look at the smallest program", Proc. ASPLOS II, 1987, pp. 122-127.
+
+   Spuler, David. C++ and C Efficiency. Prentice Hall, Sydney. ISBN 0-13-096595-2
+
+   Wirth, Niklaus. Algorithms + Data Structures = Programs.
+
+
+---
+
