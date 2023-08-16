@@ -1,0 +1,222 @@
+filename: ptn_cocktail-mix-a-context-manage_20230810.txt
+https://www.bitecode.dev/p/python-cocktail-mix-a-context-manager
+
+Python cocktail: mix a context manager and an iterator in equal parts
+
+Summary
+   After the articles on context managers and iteration we can now explore a new pattern.
+
+   The tenacity library comes with an intriguing mix of iterators and context managers to allow the
+   users to retry blocks with this syntax:
+
+from tenacity import Retrying, stop_after_attempt
+
+for attempt in Retrying(stop=stop_after_attempt(3)):
+	with attempt:
+		1 / 0
+
+   You can use the same mechanism yourself, by creating and linking a custom context manager and
+   iterator:
+
+class YouAndIhaveUnfinishedBusiness:
+	def __init__(self, notify_success, attempt_number):
+		self.notify_success = notify_success
+		self.attempt = attempt_number
+
+	def __enter__(self):
+		pass
+
+	def __exit__(self, exc_type, exc_value, traceback):
+		if exc_value:
+			print(f"You have disappointed me {self.attempt} time(s).")
+		else:
+			self.notify_success()
+		return True
+
+class DoOrDoNotThereIsNoTry:
+	def __init__(self, max_attempts):
+		self.max_attempts = max_attempts
+		self.success = False
+
+	def __iter__(self):
+		for i in range(self.max_attempts):
+			yield YouAndIhaveUnfinishedBusiness(self.succeed, i+1)
+			if self.success:
+				print("You are ready for the Kumite.")
+				break
+		else:
+			print("We trained him wrong on purpose, as a joke.")
+
+	def succeed(self):
+		self.success = True
+
+   Yep. That's it. I spoiled the whole article. You don't even have to read it.
+
+Finally, the end
+   I had to take a detour about context managers and iteration so that as many people as possible
+   will be able to understand this article, but we are finally here.
+
+   The goal of all this: learning about this new pattern mixing a custom context managers and a
+   tailor-made iterator.
+
+   It has been spotted in the tenacity library, a 3rd party module dedicated to retrying code when
+   they fail for temporary reasons, such as network errors.
+
+   This looks like this:
+
+from tenacity import Retrying, stop_after_attempt
+
+for attempt in Retrying(stop=stop_after_attempt(3)):
+	with attempt:
+		1 / 0
+
+   This code will try to calculate 1/0 three times before raising a RetryError. Of course  1/0 cannot
+   succeed, but a real life code would attempt opening a file or sending an HTTP request.
+
+   If you don't see anything exceptional about this, you have to remember one thing: Python doesn't have
+   any primitive to capture a code block, unlike, say, Ruby. The only way you could manipulate one would
+   be by putting it in a function. If you want to repeat the code, you call the function several times.
+   This is why most libraries dedicated to retrying so far have been doing so using decorators.
+
+   But not this one.
+
+   Here, something very clever is happening: looping on Retrying() returns an iterator and each element
+   the iterator provides is a context manager. What's more, they communicate!
+
+   The context manager will capture the exceptions, and let the iterator know about the number of times
+   this happens. Then the latter will decide if the maximum number of attempts is reached, and if it is,
+   will raise RetryError. It's a beautiful system.
+
+   At this point, you may be wondering why not provide an API like:
+
+while Retrying(stop=stop_after_attempt(3)):
+	1 / 0
+
+   But this can't capture the ZeroDivisonError, it would break on the first loop turn. Only with can
+   capture this without needing a heavy try/except.
+
+So how to do your very own?
+   We'll do a simplified version with the following behavior:
+	 * The max number of attempts is passed as an integer.
+	 * It prints the number of attempts.
+	 * At the end it says we have reached the max and stop.
+
+   First, we need a context manager that will capture failures:
+
+class YouAndIhaveUnfinishedBusiness:
+	def __init__(self, notify_success, attempt_number):
+		self.notify_success = notify_success
+		self.attemp = attempt_number
+
+	def __enter__(self):
+		pass
+
+	def __exit__(self, exc_type, exc_value, traceback):
+		if exc_value:
+			print(f"You have disappointed me {self.attemp} time(s).")
+		else:
+			self.notify_success()
+		return True # Swallow the exception
+
+   We don't need an __enter__ but it's mandatory, so we make an empty one. The __exit__ will always
+   trigger. If there is any exception, we print the number of attempts. Else, we let the big boss know
+   that something failed. Both notify_success and attempt_number are passed to us by the
+   iterator. self.notify_success() doesn't call our method, it calls the iterator's iterable's method!
+
+   Not a typo. The iterator is produced from an iterable, remember?
+
+   Let's see how:
+
+class DoOrDoNotThereIsNoTry:
+	def __init__(self, max_attempts):
+		self.max_attempts = max_attempts
+		self.success = False
+
+	def __iter__(self):
+		for i in range(self.max_attempts):
+			yield YouAndIhaveUnfinishedBusiness(self.succeed, i + 1)
+			if self.success:
+				print("You are ready for the Kumite.")
+				break
+		else:
+			print("We trained him wrong on purpose, as a joke.")
+
+	def succeed(self):
+		self.success = True
+
+   There are three tricks here:
+	 * We make DoOrDoNotThereIsNoTry() a custom iterable by using the __iter__ dunder method. If it is
+	   read by a for loop, it will trigger this code.
+	 * We create a new context manager at every loop turn with yield and pass self.notify_success() to
+	   each of them. It means if there is an exception, they will call our own method,
+	   and self.success will be set to True.
+	 * If self.success is True, it means one of the context managers didn't catch an exception and
+	   called self.notify_success(), so we break. This exits the loop successfully. However, else is
+	   triggered if break is never reached and the for loop is over.
+
+   Let's run it three times!
+   
+for attempt in DoOrDoNotThereIsNoTry(3):
+	with attempt:
+		# This should succeed two times out of three
+		print(1 / random.randint(0, 2))
+
+$> python pattern_cocktail.py
+You have disappointed me 1 time(s).
+You have disappointed me 2 time(s).
+1.0
+You are ready for the Kumite.
+
+$> python pattern_cocktail.py
+1.0
+You are ready for the Kumite.
+
+$> python pattern_cocktail.py
+You have disappointed me 1 time(s).
+You have disappointed me 2 time(s).
+You have disappointed me 3 time(s).
+We trained him wrong on purpose, as a joke.
+
+Compact version
+   Because our use case is quite simple, we can reduce this code by using its functional equivalent.
+
+   The context manager:
+
+from contextlib import contextmanager
+
+@contextmanager
+def you_and_i_have_unfinished_business(notify_success, attempt_number):
+	try:
+		yield
+	except Exception:
+		print(f"You have disappointed me {attempt_number} time(s).")
+	else:
+		notify_success()
+
+   And the iterator:
+
+def do_or_do_not_there_is_no_try(max_attempts):
+	success = False
+
+	def succeed():
+		# this lets us modify the variable in the outer scope
+		nonlocal success
+		success = True
+
+	for i in range(max_attempts):
+		yield you_and_i_have_unfinished_business(succeed, i + 1)
+		if success:
+			print("You are ready for the Kumite.")
+			break
+	else:
+		print("We trained him wrong on purpose, as a joke.")
+
+   Often we reach for classes where they are not necessary. def blocks, and it's even more true for
+   generators, are perfectly capable of holding a state.
+
+   Now you can go on the streets and brag about your new skill to get admired and feared. It worked,
+   I've tried. Trust me.
+
+
+---
+
