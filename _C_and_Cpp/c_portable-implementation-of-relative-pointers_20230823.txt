@@ -1,0 +1,127 @@
+filename: c_portable-implementation-of-relative-pointers_20230823.txt
+https://stackoverflow.com/questions/69573681/portable-c-implementation-of-relative-pointers
+
+Portable C Implementation of Relative Pointers
+
+   I define relative pointer to mean what Ginger Bill describes as Self-Relative Pointers:
+
+     ... define the base [to which an offset will be applied] to be the memory address of the offset
+     itself
+
+   For example, consider this struct:
+
+struct house {
+	int32_t weight;
+}
+
+struct person {
+	int32_t age;
+	struct house* residence;
+}
+
+int32_t getPersonsHousesWeight(struct person* p) {
+	return p->residence->weight;
+}
+
+   The relative-pointer implementation of the same thing in C that I think might work is:
+
+struct house { ... } // same as before
+struct person {
+	int32_t age;
+	int64_t residence; // an offset from the person's address in memory
+}
+
+int32_t getPersonsHousesWeight(struct person* p) {
+	return ((struct residence*)((char*)p + (p->residence)))->weight;
+}
+
+   Assuming that alignment of everything is good (all 8 bytes), is this free of undefined behavior?
+
+***
+   @tstanisl has provided an excellent answer (which I've accepted) that thoroughly explains UB in the
+   context of stack allocations. I am curious how allocation into a large slab of contiguous heap would
+   impact this analysis. For example:
+
+int foo(void) {
+	char* base = mmap(NULL,4096,PROT_WRITE | PROT_READ,-1,MAP_PRIVATE | MAP_ANONYMOUS);
+
+	// Omitting mmap error checking
+	struct person* myPerson = (struct person*)(base + 128);
+	struct house* myHouse = (struct house*)(base + 256);
+	int32_t delta = (char*)myHouse - (char*)myPerson;
+
+	// Does the computation of delta invoke UB?
+}
+
+***
+     * For me, it depends on how you define the offset, if you set it at runtime like:
+       p->residence = (intptr_t)p - (intptr_t)h (assuming person* p, house* h) then it would work well.
+***
+     * it depends if the p and struct house object belong the same large object like struct
+       person_in_da_house { struct person p; struct house h; }. Moreover, there are some technical
+       condition on how the pointer p is constructed.
+***
+   Usually it is going to be UB. The first case is when person and house belong to separate object. In
+   such a case it will be UB because the pointer arithmetics is performed outside of the object.
+
+int foo(void) {
+	struct person p;
+	struct house h;
+	p.residence = (char*)&h - (char*)&p; // already UB
+	getPersonsHousesWeight(&p); // UB again
+}
+
+   In practice it means that the compiler is not obligated to notice that objects accessed from a
+   pointers constructed from &p can alias with object h because p and h are separete memory regions (aka
+   objects).
+
+   When both objects are placed inside a larger object then the situation is a bit better. Though it
+   still would be technical UB.
+
+int foo(void) {
+	struct ph {
+		struct person p;
+		struct house h;
+	} ph;
+	ph.p.residence = (char*)&ph.h - (char*)&ph.p; // still UB
+	getPersonsHousesWeight(&ph.p); // UB again
+}
+
+   It UB because pointer arithmetic is done outside the member object. (char*)&ph.h - 1 is a pointer
+   outside of ph.h.
+
+   Note, that this code will likely work pretty much everywhere. Otherwise, heavily used
+   container_of-like macros would not work breaking a lot of existing code including the Linux kernel.
+
+   To avoid UB the pointer must be constructed in a special way to avoid moving outside of the
+   originating object. Rather using &ph.h one should use (char*)&ph + offsetof(struct ph, h). Similarly
+   &ph.p should be replaced with (char*)&ph + offsetof(struct ph, p).
+
+   Now this code should be portable:
+
+int foo(void) {
+	struct ph {
+		struct person p;
+		struct house h;
+	} ph;
+	struct person *p_ptr = (struct person*)((char*)&ph + offsetof(struct ph, p));
+	struct house	*h_ptr = (struct house*) ((char*)&ph + offsetof(struct ph, h));
+	ph.p.residence = (char*)h_ptr - (char*)p_ptr;
+	getPersonsHousesWeight(p_ptr);
+}
+
+***
+     * Thanks! This is very thorough. I've added an edit at the end of the original question to ask more
+       specifically about the case of heap allocation. In the context of heap allocation, it is less
+       clear to me what an "originating object" is. Is it the entire block of memory that the OS hands
+       the user? Or does slicing into a block somehow change the originating pointer?
+
+***
+       @AndrewThaddeusMartin the C standard is agnostic about OS, heaps and stack. To be fully portable
+       you should treat each pointer returned from malloc as being placed in a unique address space
+       fully separated from everything else. I guess the relative pointers can only be used for object
+       created within a region returned from the same call to malloc().
+
+
+---
+
