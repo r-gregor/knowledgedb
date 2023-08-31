@@ -1,0 +1,109 @@
+filename: c_fast-simple-bump-allocator_20230831.txt
+https://codereview.stackexchange.com/questions/243228/c-fast-simple-bump-allocator
+
+C - Fast & simple bump allocator
+
+   I recently have been very interested in custom allocators, so I decided to make the very basic (this
+   should be faster than malloc) bump allocator. Here is my code in C:
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+#define KB(size) ((size_t) size * 1024)
+#define MB(size) (KB(size) * 1024)
+#define GB(size) (MB(size) * 1024)
+#define HEAP_SIZE GB(1)
+
+typedef intptr_t word_t;
+void *free_ptr = NULL;
+void *start_ptr;
+word_t end_ptr;
+
+void init() {
+	free_ptr = mmap(NULL, HEAP_SIZE, PROT_READ | PROT_WRITE,
+					MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+	if (free_ptr == MAP_FAILED) {
+		printf("unable to map memory\n");
+		abort();
+	}
+
+	start_ptr = free_ptr;
+	end_ptr = (word_t) start_ptr + HEAP_SIZE;
+}
+
+void *bump_alloc(size_t size) {
+	void *new_ptr = free_ptr;
+	free_ptr = (char *) free_ptr + size;
+	return new_ptr;
+}
+
+void free_all_mem() {
+	munmap(start_ptr, HEAP_SIZE);
+}
+
+int main() {
+	init();
+	int *x = (int *) bump_alloc(sizeof(int));
+	assert(x != NULL);
+	*x = 10000;
+	printf("x: %d\n", *x);
+	free_all_mem();
+}
+
+   This is my first custom allocator so could I get some tips on optimization, etc.
+
+***
+   Alignment loss
+   free_ptr = (char *) free_ptr + size; simply increases the next available allocation to so many bytes
+   later. This differs from malloc() whose allocations meets all possible system alignment needs.
+
+   Either document that bump_alloc() does not provide aligned allocations or change code to do so.
+
+   Error messages
+   I'd expect the error message to go out stderr - yet your call.
+
+// printf("unable to map memory\n");
+fprintf(stderr, "Unable to map memory\n");
+
+   Missing include
+   intptr_t is define in <stdint.h>. Best to include that rather than rely of a hidden inclusion.
+
+   Good type math
+   The below avoids int overflow.
+
+#define KB(size) ((size_t) size * 1024)
+
+   Better code would () each macro parameter.
+
+#define KB(size) ((size_t) (size) * 1024)
+
+   Yet I'd recommend rather than type-casting, which may narrow the math, allow gentle widening. The
+   below multiplication will occur with the wider of size_t and the type of size.
+
+#define KB(size) ((size_t) 1024 * (size))
+
+   Unneeded cast, simplify
+   Casting not needed going from void * to an object pointer. Size to the de-referenced type. Easier to
+   code right, review and maintain.
+
+// int *x = (int *) bump_alloc(sizeof(int));
+int *x = bump_alloc(sizeof *x);
+
+***
+Unit pedantry
+   Technically those are KiB and MiB since they're multiples of 1024 and not 1000.
+
+Empty arguments
+   This was a difficult lesson for me to drill into my head, but in C empty arguments() and (void)
+   arguments are not the same thing, particularly for function declarations. Technically for definitions
+   they are, but I don't like relying on inconsistent rules and recommend that (void) be used uniformly
+   - even though you only have definitions without declarations. (void) is safer and more explicit. ()
+   is closer to meaning "an unspecified number of arguments".
+
+
+---
+

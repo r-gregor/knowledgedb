@@ -1,0 +1,327 @@
+filename: c_arena-pool-allocator_20230831.txt
+https://codereview.stackexchange.com/questions/282236/c-arena-pool-allocator
+
+C Arena (pool allocator)
+
+   I wrote a pool allocator (Arena) for a compiler I'm writing.
+   My use case for this allocator is for storing the parse tree because it allows me to free all the
+   memory at once, so I don't need to keep a reference to each node (which makes the code and logic a
+   big mess).
+
+   The implementation uses a singly linked list of blocks. For each block more memory than needed is
+   allocated, and then the "tail" memory is used for allocating.
+   To align the allocated memory I used union align (a union with types that have the strictest
+   alignment requirements according to the book), a trick I learned from the book [35]C Interfaces and
+   Implementations.
+   The union header is for calculating the aligned size of the Arena struct.
+
+   The error if malloc() fails was reported using my compiler's error reporting code, so I replaced it
+   with an fprintf(stderr, ...) call to report the error, and an exit(1) call to stop the execution of
+   the program.
+
+   I'm aware that using an existing library would most likely be better, but as I'm writing the compiler
+   for learning purposes, I want to implement all the data structures I use as an exercise.
+
+   Interface:
+
+#ifndef ARENA_H
+#define ARENA_H
+
+#include <stddef.h> // size_t
+
+// The default block size is 10K
+#define ARENA_DEFAULT_BLOCK_SIZE 10 * 1024
+
+typedef struct block Block;
+
+typedef struct arena {
+	Block *blocks;
+} Arena;
+
+void arenaInit(Arena *a);
+void arenaFree(Arena *a);
+void *arenaAlloc(Arena *a, size_t size);
+void *arenaCalloc(Arena *a, size_t nmemb, size_t size);
+#endif // ARENA_H
+
+   Implementation:
+
+#include <stdlib.h> // malloc(), free()
+#include <string.h> // memset()
+#include "Arena.h"
+
+typedef struct block {
+	struct block *prev;
+	size_t size, used;
+	char data[];
+} Block;
+
+union align {
+	int i;
+	long l;
+	long *lp;
+	void *p;
+	void (*fp)(void);
+	float f;
+	double d;
+	long double ld;
+};
+
+union header {
+	Arena arena;
+	union align a;
+};
+
+static inline Block *new_block(size_t size, Block *prev) {
+	Block *b = malloc(sizeof(union header) + size);
+	// In my compiler, the following check uses the internal error
+	// reporting system. I replaced it with fprintf() and exit() calls.
+	if(b == NULL) {
+		fprintf(stderr, "Error: Arena: new_block(): failed to allocate %zu bytes.\n", size);
+		exit(1);
+	}
+	b->size = size;
+	b->used = 0;
+	b->prev = prev;
+	return b;
+}
+
+static inline void free_blocks(Block *b) {
+	while(b) {
+		Block *prev = b->prev;
+		free(b);
+		b = prev;
+	}
+}
+
+
+void arenaInit(Arena *a) {
+	a->blocks = new_block(ARENA_DEFAULT_BLOCK_SIZE, NULL);
+}
+
+void arenaFree(Arena *a) {
+	free_blocks(a->blocks);
+	a->blocks = NULL;
+}
+
+void *arenaAlloc(Arena *a, size_t size) {
+	size = (size + sizeof(union align) - 1) / sizeof(union align) * sizeof(union align);
+	if(a->blocks->used + size > a->blocks->size) {
+		// All blocks have at least 10K of memory space.
+		a->blocks = new_block(size + ARENA_DEFAULT_BLOCK_SIZE, a->blocks);
+	}
+	a->blocks->used += size;
+	return (void *)(a->blocks->data + a->blocks->used - size);
+}
+
+void *arenaCalloc(Arena *a, size_t nmemb, size_t size) {
+	void *p = arenaAlloc(a, nmemb * size);
+	memset(p, 0, nmemb * size);
+	return p;
+}
+
+***
+#include <stddef.h> // size_t
+
+   This is my personal pet peeve, but comments after preprocessor instructions are non standard. All
+   preprocessor in existence can handle it; but since I once needed to write one, I cringe little inside
+   when I see this.
+
+// The default block size is 10K
+#define ARENA_DEFAULT_BLOCK_SIZE 10 * 1024
+
+   Is there a good reason why the default block size must be in the header?
+
+typedef struct arena {
+	Block *blocks;
+} Arena;
+
+void arenaInit(Arena *a);
+
+   Have you considered changing the API to hide the implementation to Arena? As in Arena* arenaInit().
+   This has the benefit that you could change the implementation while remaining ABI compatible. The
+   obvious downside is that you would not he able to put it on the stack; but IMHO this should not be
+   that big of a deal.
+
+#include <stdlib.h> // malloc(), free()
+#include <string.h> // memset()
+#include "Arena.h"
+
+   Unless you are forced to do so (e.g. precompiled headers), you should include the matching header
+   first. This makes the compiler check for you to be sure the header compiles on it's own.
+
+typedef struct block {
+	struct block *prev;
+	size_t size, used;
+	char data[];
+} Block;
+
+   size and used should be put on their own line and have their own type.
+
+   Technically not wrong, but I find defining an array to have a pointer feels wrong. I would prefer
+   using char* data.
+
+union header {
+	Arena arena;
+	union align a;
+};
+
+static inline Block *new_block(size_t size, Block *prev) {
+	Block *b = malloc(sizeof(union header) + size);
+	// ...
+	b->size = size;
+	b->used = 0;
+	b->prev = prev;
+	return b;
+}
+
+   I understand that you allocate the header with alignment hack, plus the size of the requested data;
+   what I don't understand is why use the Arena and not Block. I think this makes size off by 2*size_t.
+
+   Here I think it would be beneficial if the block size is a power of two. Most OS allocators will
+   provide a power of two block anyway. (Or multiple of power of two for large blocks.) This means there
+   is a chance that it would create less waste.
+
+   This is a mater of taste, but using arguments as variables may not be the best idea. (Applies to all
+   other instances.)
+
+void *arenaAlloc(Arena *a, size_t size) {
+	size = (size + sizeof(union align) - 1) / sizeof(union align) * sizeof(union align);
+
+   I think you can improve readability by providing an function that does the alignment. You probably
+   should also get the sizeof one and use that. Not for performance reasons but readability.
+
+   Consider the following:
+
+static inline size_t align_size(size_t size) {
+	static const size_t a = sizeof(union align);
+	return (size + a - 1) / a * a;
+}
+
+void *arenaAlloc(Arena *a, size_t size) {
+	size = align_size(size);
+	// ...
+}
+
+	if(a->blocks->used + size > a->blocks->size) {
+		// All blocks have at least 10K of memory space.
+		a->blocks = new_block(size + ARENA_DEFAULT_BLOCK_SIZE, a->blocks);
+	}
+
+   I think the size + ARENA_DEFAULT_BLOCK_SIZE is wrong here. You are adding 10k to a random size
+   resulting in lots of differently sized blocks. I would rather use max(size, ARENA_DEFAULT_BLOCK_SIZE)
+   or just pass size to new_block and then let that round up the size to ARENA_MIN_BLOCK_SIZE (of 10k).
+
+	a->blocks->used += size;
+	return (void *)(a->blocks->data + a->blocks->used - size);
+}
+
+   This is minor, but I would rather take the resulting pointer and return that instead of first adding
+   size and then subtracting it again.
+
+   Here mere mortals like me can immediately understand what is happening:
+
+void* result = (void *)(a->blocks->data + a->blocks->used);
+a->blocks->used += size;
+return result;
+
+***
+	 * 1
+	   \$\begingroup\$ For the most part I agree with you on comments on preprocessor statements, with
+	   one exception, I like to clearly indicate what an #endif ends, since it can be off the screen
+	   from the #ifdef/#ifndef statement. There may also be intermediate #endif statements for portable
+	   code. \$\endgroup\$
+	 * 2
+	   \$\begingroup\$ I personally also like to list what I actually use from an #include, so that I
+	   know when it’s safe to remove one. \$\endgroup\$
+	 * 2
+	   \$\begingroup\$ I don’t think that comments in preprocessing directives are non-standard in C17?
+	   The Standard says, “The only white-space characters that shall appear between preprocessing
+	   tokens within a preprocessing directive (from just after the introducing # preprocessing token
+	   through just before the terminating new-line character) are space and horizontal-tab (including
+	   spaces that have replaced comments or possibly other white-space characters in translation phase
+	   3).” Preprocessing directives are also stated to be evaluated following translation phase 4.
+	 * 1
+	   \$\begingroup\$ Using char * in the block struct results in a segmentation fault (even if I
+	   initialize it in new_block() with b->data = (char *)(b + offsetof(Block, data);. I guess using
+	   char[] as the last field in a struct means that it gets automatically initialized maybe?
+	 * 1
+	   \$\begingroup\$ Also, using Arena instead of Block in union align is indeed a bug. The size of
+	   Arena is 8 bytes (on x64), the size of Block is 24 bytes and the size of union align is 16 bytes.
+	   So that means I allocated 8 bytes less (24 - 16 = 8, 16 = sizeof(union header) = sizeof(union
+	   align)) than needed for each block which was what caused some valgrind errors about writing after
+	   the allocated block I couldn't find the source of. \$\endgroup\$
+
+General Observations
+   I agree with @rioki, #include statements don't need comments.
+
+   If you are using fprint() with stderr you need to include stdio.h, the code does not compile without
+   it, at least when one is using a compiler that follows the C standard.
+
+Global Entry Points in Header Files
+   While the extern keyword is [54]optional in C, I find that it helps provide self documenting code
+   when one uses it.
+
+#ifndef ARENA_H
+#define ARENA_H
+
+#include <stddef.h> // size_t
+
+// The default block size is 10K
+#define ARENA_DEFAULT_BLOCK_SIZE 10 * 1024
+
+typedef struct block Block;
+
+typedef struct arena {
+	Block* blocks;
+} Arena;
+
+extern void arenaInit(Arena* a);
+extern void arenaFree(Arena* a);
+extern void* arenaAlloc(Arena* a, size_t size);
+extern void* arenaCalloc(Arena* a, size_t nmemb, size_t size);
+
+#endif // ARENA_H
+
+Use of the inline Keyword in C
+   In both the C programming language and the C++ programming language the inline keyword is a
+   recommendation to the compiler and the compiler can ignore it. When using the optimizing options the
+   compiler automatically inlines code based on multiple factors.
+
+   The use of the inline keyword is for performance optimization indicating that function calls can be
+   replace by the code within the function. When you are calling malloc() there is no benefit from
+   trying to inline the code since you already have function calls in the code, and the malloc()
+   function has a possible system call as well.
+
+Use System Defined Symbolic Constants
+   In the new_block() function there is a call to exit(), since the code is already including stdlib.h
+   rather than using exit(1) use exit(EXIT_FAILURE). The exit status system defined constants
+   [55]EXIT_SUCCESS and EXIT_FAILURE have been part of the C programming standard for a very long time
+   and also work in C++. They are very helpful in providing self documenting code.
+
+Declare the Variables as Needed
+   In the original version of C back in the 1970s and 1980s variables had to be declared at the top of
+   the function. That is no longer the case, and a recommended programming practice to declare the
+   variable as needed. In C the language doesn't provide a default initialization of the variable so
+   variables should be initialized as part of the declaration. For readability and maintainability each
+   variable should be declared and initialized on its own line.
+
+***
+	 * \$\begingroup\$ In Declare Variables as Needed, Do you mean to make arenaInit() return an Arena *
+	   so the user must initialize an Arena when declaring it? Otherwise I don't see any place where I
+	   declared a variable before using it. \$\endgroup\$
+	 * 1
+	   \$\begingroup\$ @ItaiNelken Here is the important part: ` In C the language doesn't provide a
+	   default initialization of the variable so variables should be initialized as part of the
+	   declaration. For readability and maintainability each variable should be declared and initialized
+	   on its own line.` \$\endgroup\$
+	 * \$\begingroup\$ I understood that. What I don't understand is what part of the implementation or
+	   interface you are referring to. \$\endgroup\$
+	 * 1
+	   \$\begingroup\$ @ItaiNelken the Block struct. You need to declare each member separately.
+	   \$\endgroup\$
+
+
+
+---
+
