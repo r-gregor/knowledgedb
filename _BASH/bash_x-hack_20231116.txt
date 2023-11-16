@@ -1,0 +1,190 @@
+filename: bash_x-hack_20231116.txt
+https://www.vidarholen.net/contents/blog/?p=1035
+
+What exactly was the point of [ "x$var" = "xval" ]?
+
+   In shell scripting you sometimes come across comparisons where each value is prefixed with "x". Here
+   are some examples from GitHub:
+
+if [ "x${JAVA}" = "x" ]; then
+if [ "x${server_ip}" = "xlocalhost" ]; then
+if test x$1 = 'x--help' ; then
+
+   I'll call this the x-hack.
+   For any POSIX compliant shell, the value of the x-hack is exactly zero: this comparison works
+   without the x 100% of the time. But why was it a thing?
+
+   Online sources like this stackoverflow Q&A are a little handwavy, saying it's an alternative to
+   quoting (oof), pointing towards issues with "some versions" of certain shells, or generally
+   cautioning against the mystic behaviors of especially ancient Unix system without concrete examples.
+
+   To determine whether or not ShellCheck should warn about this, and if so, what its long form
+   rationale should be, I decided to dig into the history of Unix with the help of The Unix Heritage
+   Society's archives. I was unfortunately unable to peer into the closely guarded world of the likes of
+   HP-UX and AIX, so dinosaur herders beware.
+
+   These are the cases I found that can fail.
+
+Left-hand side matches a unary operator
+   The AT&T Unix v6 shell from 1973, at least as found in PWB/UNIX from 1977, would fail to run test
+   commands whose left-hand side matched a unary operator. This must have been immediately obvious to
+   anyone who tried to check for command line parameters:
+$> arg="-f"
+$> test "$arg" = "-f"
+syntax error: -f
+$> test "x$arg" = "x-f"
+(true)
+
+   This was fixed in the AT&T Unix v7 Bourne shell builtin in 1979. However, test and [ were also
+   available as separate executables, and appear to have retained a variant of the buggy behavior:
+$> arg="-f"
+$> [ "$arg" = "-f" ]
+(false)
+$> [ "x$arg" = "x-f" ]
+(true)
+
+   This happened because the utility used a simple recursive descent parser without backtracking, which
+   gave unary operators precedence over binary operators and ignored trailing arguments.
+
+   The "modern" Bourne shell behavior was copied by the Public Domain KornShell in 1988, and made part
+   of POSIX.2 in 1992. GNU Bash 1.14 did the same thing for its builtin [, and the GNU shellutils
+   package that provided the external test/[ binaries followed POSIX, so the early GNU/Linux distros
+   like SLS were not affected, nor was FreeBSD 1.0.
+
+   The x-hack is effective because no unary operators can start with x.
+
+Either side matches string length operator -l
+   A similar issue that survived longer was with the string length operator -l. Unlike the normal unary
+   predicates, this one was only parsed as part as part of an operand to binary predicates:
+
+var="helloworld"
+[ -l "$var" -gt 8 ] && echo "String is longer than 8 chars"
+
+   It did not make it into POSIX because, as the rationale puts it, "it was undocumented in most
+   implementations, has been removed from some implementations (including System V), and the
+   functionality is provided by the shell", referring to [ ${#var} -gt 8 ].
+
+   It was not a problem in UNIX v7 where = took precedence, but Bash 1.14 from 1996 would parse it
+   greedily up front:
+
+$> var="-l"
+$> [ "$var" = "-l" ]
+test: -l: binary operator expected
+$> [ "x$var" = "x-l" ]
+(true)
+
+   It was also a problem on the right-hand side, but only in nested expressions. The -l check made sure
+   there was a second argument, so you would need an additional expression or parentheses to trigger it:
+
+$> [ "$1" = "-l" -o 1 -eq 1 ]
+[: too many arguments
+$> [ "x$1" = "x-l" -o 1 -eq 1 ]
+(true)
+
+   This operator was removed in Bash 2.0 later that year, eliminating the problem.
+
+Left-hand side is !
+   Another issue in early shells was when the left-hand side was the negation operator !:
+
+$> var="!"
+$> [ "$var" = "!" ]
+test: argument expected            (UNIX v7, 1979)
+test: =: unary operator expected   (bash 1.14, 1996)
+(false)                            (pd-ksh88, 1988)
+$> [ "x$var" = "x!" ]
+(true)
+
+   Again, the x-hack is effective by preventing the ! from being recognized as a negation operator.
+
+   ksh treated this the same as [ ! "=" ], and ignored the rest of the arguments. This quiety returned
+   false, as = is not a null string. Ksh continues to ignore trailing arguments to this day:
+
+$> [ -e / random words/ops here ]
+(true)                              (ksh93, 2021)
+bash: [: too many arguments         (bash5, 2021)
+
+   Bash 2.0 and ksh93 both fixed this problem by letting = take precedence in the 3-argument case, in
+   accordance with POSIX.
+
+Left-hand side is "("
+   This is by far my favorite.
+
+   The UNIX v7 builtin failed when the left-hand side was a left-parenthesis:
+
+$> left="(" right="("
+$> [ "$left" = "$right" ]
+test: argument expected
+$> [ "x$left" = "x$right" ]
+(true)
+
+   This happens because the ( takes precedence over the =, and becomes an invalid parenthesis group.
+
+   Why is this my favorite? Behold Dash 0.5.4 up until 2009:
+
+$> left="(" right="("
+$> [ "$left" = "$right" ]
+[: 1: closing paren expected
+$> [ "x$left" = "x$right" ]
+(true)
+
+   That was an active bug when the StackOverflow Q&A was posted.
+
+   But wait, there's more!
+
+   Here's Zsh in late 2015, right before version 5.3:
+
+$> left="(" right=")"
+$> [ "$left" = "$right" ]
+(true)
+$> [ "x$left" = "x$right" ]
+(false)
+
+   Amazingly, the x-hack could be used to work around certain bugs all the way up until 2015, seven
+   years after StackOverflow wrote it off as an archaic relic of the past!
+
+   The bugs are of course increasingly hard to come across. The Zsh one only triggers when comparing
+   left-paren against right-paren, as otherwise the parser will backtrack and figure it out.
+
+   Another late holdout was Solaris, whose /bin/sh was the legacy Bourne shell as late as Solaris 10 in
+   2009. However, this was undoubtedly for compatibility, and not because they believed this was a
+   viable shell. A "standards compliant" shell had been an option for a long time before Solaris 11
+   dragged it kicking and screaming into 21th century - or at least into the 90s - by switching to ksh93
+   by default in 2011.
+
+   In all cases, the x-hack is effective because it prevents the operands from being recognized as
+   parentheses.
+
+Conclusion
+   The x-hack was indeed useful and effective against several real and practical problems in multiple
+   shells.
+
+   However, the value was mostly gone by the mid-to-late 1990s, and the few remaining issues were
+   cleaned up before 2010 - shockingly late, but still over a decade ago.
+
+   The last one managed to stay until 2015, but only in the very specific case of comparing opening
+   parenthesis to a closed parenthesis in one specific non-system shell.
+
+   I think it's time to retire this idiom, and ShellCheck now offers a style suggestion by default.
+
+Epilogue
+   The Dash issue of [ "(" = ")" ] was originally reported in a form that affected both Bash 3.2.48 and
+   Dash 0.5.4 in 2008. You can still see this on macOS bash today:
+
+$> str="-e"
+$> [ \( ! "$str" \) ]
+[: 1: closing paren expected     # dash
+bash: [: `)' expected, found ]   # bash
+
+   POSIX fixes all these ambiguities for up to 4 parameters, ensuring that shells conditions work the
+   same way, everywhere, all the time.
+
+   Here's how Dash maintainer Herbert Xu put it in the fix:
+/*
+ * POSIX prescriptions: he who wrote this deserves the Nobel
+ * peace prize.
+ */
+
+
+
+---
+
