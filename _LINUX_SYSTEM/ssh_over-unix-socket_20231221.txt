@@ -1,0 +1,224 @@
+filename: ssh_over-unix-socket_20231221.txt
+https://tim.siosm.fr/blog/2023/12/19/ssh-over-unix-socket/
+
+sudo without a setuid binary or SSH over a UNIX socket
+December 19, 2023
+
+   In this post, I will detail how to replace sudo (a setuid binary) by using SSH over a local UNIX
+   socket.
+
+   I am of the opinion that setuid/setgid binaries are a UNIX legacy that should be deprecated. I
+   will explain the security reasons behind that statement in a future post.
+
+Why bother?
+   The main benefit of this approach is that it enables root access to the host from any unprivileged
+   toolbox / distrobox container. This is particularly useful on Fedora Atomic desktops (Silverblue,
+   Kinoite, Sericea, Onyx) or Universal Blue (Bluefin, Bazzite) for example.
+
+   As a side effect of this setup, we also get the following security advantages:
+	 * No longer rely on sudo as a setuid binary for privileged operations.
+	 * Access control via a physical hardware token (here a Yubikey) for each privileged operation.
+
+Setting up the server
+   Create the following systemd units:
+
+   /etc/systemd/system/sshd-unix.socket:
+
+[Unit]
+Description=OpenSSH Server Unix Socket
+Documentation=man:sshd(8) man:sshd_config(5)
+
+[Socket]
+ListenStream=/run/sshd.sock
+Accept=yes
+
+[Install]
+WantedBy=sockets.target
+
+   /etc/systemd/system/sshd-unix@.service:
+[Unit]
+Description=OpenSSH per-connection server daemon (Unix socket)
+Documentation=man:sshd(8) man:sshd_config(5)
+Wants=sshd-keygen.target
+After=sshd-keygen.target
+
+[Service]
+ExecStart=-/usr/sbin/sshd -i -f /etc/ssh/sshd_config_unix
+StandardInput=socket
+
+   Create a dedicated configuration file /etc/ssh/sshd_config_unix:
+# Deny all non key based authentication methods
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+PermitEmptyPasswords no
+GSSAPIAuthentication no
+
+# Only allow access for specific users
+AllowUsers root tim
+
+# The default is to check both .ssh/authorized_keys and .ssh/authorized_keys2
+# but this is overridden so installations will only check .ssh/authorized_keys
+AuthorizedKeysFile .ssh/authorized_keys
+
+# override default of no subsystems
+Subsystem sftp /usr/libexec/openssh/sftp-server
+
+   Enable and start the new socket unit:
+$> sudo systemctl daemon-reload
+$> sudo systemctl enable --now sshd-unix.socket
+
+   Add your SSH Key to /root/.ssh/authorized_keys.
+
+Setting up the client
+   Install socat and use the following snippet in /.ssh/config:
+
+Host host.local
+	User root
+	# We use `run/host/run` instead of `/run` to transparently work in and out of containers
+	ProxyCommand socat - UNIX-CLIENT:/run/host/run/sshd.sock
+	# Path to your SSH key. See: https://tim.siosm.fr/blog/2023/01/13/openssh-key-management/
+	IdentityFile ~/.ssh/keys/localroot
+	# Force TTY allocation to always get an interactive shell
+	RequestTTY yes
+	# Minimize log output
+	LogLevel QUIET
+
+   Test your setup:
+$> ssh host.local
+[root@phoenix ~]#
+
+Shell alias
+   Let's create a sudohost shell "alias" (function) that you can add to your Bash or ZSH config to make
+   using this command easier:
+
+# Get an interactive root shell or run a command as root on the host
+sudohost() {
+	if [[ ${#} -eq 0 ]]; then
+		ssh host.local "cd \"${PWD}\"; exec \"${SHELL}\" --login"
+	else
+		ssh host.local "cd \"${PWD}\"; exec \"${@}\""
+	fi
+}
+
+   Test the alias:
+$> sudohost id
+uid=0(root) gid=0(root) groups=0(root) context=unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023
+$> sudohost pwd
+/var/home/tim
+$> sudohost ls
+Desktop Downloads ...
+
+   We'll keep a distinct alias for now as we'll still have a need for the "real" sudo in our toolbox
+   containers.
+
+Security?
+   As-is, this setup is basically a free local root for anything running under your current user that
+   has access to your SSH private key. This is however likely already the case on most developer's
+   workstations if you are part of the wheel, sudo or docker groups, as any code runnning under your
+   user can edit your shell config and set a
+   [https://security.stackexchange.com/questions/232924/is-sudo-almost-useless]backdoored alias for sudo or
+   run arbitrary privileged containers via Docker. sudo itself is not a security boundary as commonly
+   configured by default.
+
+   To truly increase our security posture, we would instead need to remove sudo (and all other setuid
+   binaries) and run our session under a fully unprivileged, confined user, but that's for a future
+   post.
+
+Setting up U2F authentication with an sk-based SSH key-pair
+   To make it more obvious when commands are run as root, we can setup SSH authentication using U2F with
+   a Yubikey as an example. While this, by itself, does not, strictly speaking, increase the security of
+   this setup, this makes it harder to run commands without you being somewhat aware of it.
+
+   First, we need to figure out which algorithm are supported by our Yubikey:
+$> lsusb -v 2>/dev/null | grep -A2 Yubico | grep "bcdDevice" | awk '{print $2}'
+
+   If the value is 5.2.3 or higher, then we can use ed25519-sk, otherwise we'll have to use ecdsa-sk to
+   generate the SSH key-pair:
+$> ssh-keygen -t ed25519-sk
+# or
+$> ssh-keygen -t ecdsa-sk
+
+   Add the new sk-based SSH public key to /root/.ssh/authorized_keys.
+
+   Update the server configuration to only accept sk-based SSH key-pairs:
+
+   /etc/ssh/sshd_config_unix:
+# Only allow sk-based SSH key-pairs authentication methods
+PubkeyAcceptedKeyTypes sk-ecdsa-sha2-nistp256@openssh.com,sk-ssh-ed25519@openssh.com
+
+...
+
+Restricting access to a subset of users
+
+   You can also further restrict the access to the UNIX socket by configuring classic user/group UNIX
+   permissions:
+
+   /etc/systemd/system/sshd-unix.socket:
+ 1
+2
+3
+4
+5
+6
+7
+8
+
+ ...
+
+[Socket]
+...
+SocketUser=tim
+SocketGroup=tim
+SocketMode=0660
+...
+
+
+   Then reload systemd's configuration and restart the socket unit.
+
+Next steps: Disabling sudo
+   Now that we have a working alias to run privileged commands, we can disable sudo access for our user.
+
+Important backup / pre-requisite step
+   Make sure that you have a backup and are able to boot from a LiveISO in case something goes wrong.
+
+   Set a strong password for the root account. Make sure that can locally log into the system via a TTY
+   console.
+
+   If you have the classic sshd server enabled and listening on the network, make sure to disable remote
+   login as root or password logins.
+
+Removing yourself from the wheel / sudo groups
+   Open a terminal running as root (i.e. don't use sudo for those commands) and remove you users from
+   the wheel or sudo groups using:
+$> usermod -dG wheel tim
+
+   You can also update the sudo config to remove access for users that are part of the wheel group:
+# Comment / delete this line
+%wheel	ALL=(ALL)		ALL
+
+Removing the setuid binaries
+   To fully benefit from the security advantage of this setup, we need to remove the setuid binares
+   (sudo and su).
+
+   If you can, uninstall sudo and su from your system. This is usually not possible due to package
+   dependencies (su is part of util-linux on Fedora).
+
+   Another option is to remove the setuid bit from the sudo and su binaries:
+$> chmod u-s $(which sudo)
+$> chmod u-s $(which su)
+
+   You will have to re-run those commands after each update on classic systems.
+
+   Setting this up for Fedora Atomic desktops is a little bit different as /usr is read only. This will
+   be the subject of an upcoming blog post.
+
+Conclusion
+   Like most of the time with security, this is not a silver bullet solution that will make your system
+   "more secure" (TM). I have been working on this setup as part of my investigation to reduce our
+   reliance on setuid binaries and trying to figure out alternatives for common use cases.
+
+   Let me know if you found this interesting as that will likely motivate me to write the next part!
+
+
+---
+
