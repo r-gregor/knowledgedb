@@ -1,0 +1,166 @@
+filename: disable_keyboard_mouse_or_lid_from_waking_up_your_ubuntu_pc_20240826.txt
+https://ubuntuhandbook.org/index.php/2024/08/wake-up-ubuntu-pc/
+
+Disable Keyboard, Mouse, or Lid from Waking up Your Ubuntu PC
+August 24, 2024
+
+   This tutorial shows how to enable/disable Keyboard, Mouse, Lid Open, and/or other devices events from
+   waking up your Ubuntu PC or laptop from sleep.
+
+   By default, open laptop lid, press any key on keyboard, or press sleep button can wake up your
+   computer from suspend or hibernation state. If you want, you can configure Ubuntu to ignore certain
+   wakeup triggers that you don't want.
+
+   This tutorial is tested on ThinkPad t480s with Ubuntu 24.04. It should also work on other Linux and
+   other devices, but the "Lid Open" action may vary!
+
+Step 1: Tell Who Can Wake up your Computer
+   Usually, user can read the /proc/acpi/wakeup file, for a list of enabled and disabled wakeup
+   triggers.
+
+   1. First, press Ctrl+Alt+T to open up a terminal window, then run command to list enabled wakeup
+   triggers:
+$> cat /proc/acpi/wakeup | grep enabled
+
+   Skip '| grep enabled' in the command will show all the triggers either enabled or disabled.
+
+   In the output, you'll see vendor-specific code names, e.g., XHC (USB 3.0), SLPB (sleep button), LID
+   (laptop lid), their sysfs IDs, as well as in which sleep level (s3 - suspend, s4 - hibernate) they
+   can wake up from.
+
+   2. For PCI devices, you may run one more command to tell more about what they are:
+$> lspci |grep -e "xx:xx.x" -e "xx:xx.x" -e "xx:xx.x" -e "xx:xx.x"
+
+   In the command, replace xx:xx.x according to the sysfs IDs (the second half) you got in last command.
+   And, add/remove -e "xx:xx.x" according to how many PCI devices you want to list.
+
+   As the screenshot below shows you, in my case I can wake up my computer from:
+     * GLAN, pci:0000:00:1f.6, the wired network card, from S4 (also includes S3/S2/S1) hibernation
+       state.
+     * XHC, pci:0000:00:14.0, USB 3.0 device, from S3 (sleep to RAM) suspend state.
+     * PXSX, pci:0000:04:00.0, Thunderbolt 3 device, from S4 hibernate state.
+     * SLPB (sleep button), LID (laptop lid), and few other PCIe devices.
+
+Step 2: Disable Wake up from Certain PCI Device
+   All the devices listed above in last step have their own /sys/bus/ sub-folders, that are created
+   automatically on detection (usually on startup, unless you hot-plug them out, then in).
+
+   Each sub-folder contains a power/wakeup file that contain the key value to either "enabled" or
+   "disabled" wake up from sleep.
+
+   To disable one, simply run command:
+$> echo disabled | sudo tee /sys/bus/pci/devices/0000:00:14.0/power/wakeup
+
+   Here replace 0000:00:14.0 according to the ID you got in last command, to disable any PCI trigger as
+   you want. Or, replace disabled with enabled to enable the trigger.
+
+   And, you can re-run the command again and again with different sysfs IDs to disable/enable multiple
+   wakeup triggers.
+
+   To verify, either re-run cat /proc/acpi/wakeup command, or just suspend your computer and try using
+   the triggers you just disabled to wake it up.
+
+Use udev rules to make it permanent
+   The last echo command works temporarily until reboot or re-plug the devices. To make it persistent
+   even after reboot, you may create a udev rules.
+
+   1. First, run command to create (and edit) a custom udev rules file (40-disable-wakeup-triggers.rules
+   in the case):
+$> sudo gnome-text-editor /etc/udev/rules.d/40-disable-wakeup-triggers.rules
+
+   Here replace gnome-text-editor according to your desktop environment, gedit for old GNOME (22.04 and
+   earlier), musepad for XFCE, or use nano instead that works in most desktops.
+
+   2. When file opens, add the line below:
+ACTION=="add", KERNEL=="0000:00:14.0", SUBSYSTEM=="pci", ATTR{power/wakeup}="disabled"
+
+   Here:
+     * ACTION=="add" tell to do the action on detection of the device.
+     * KERNEL=="0000:00:14.0", SUBSYSTEM=="pci" are used to identify the device. Replace the ID
+       accordingly.
+     * ATTR{power/wakeup}="disabled" (here's only one "=") tell to write "disabled" to the power/wakeup
+       so to disable the trigger.
+
+   And, you may add multiple lines with different IDs (for the KERNEL value) to disable or enable
+   multiple triggers on detection.
+
+   After saving the file (for nano, press Ctrl+S then Ctrl+X), restart computer to apply changes.
+
+(Optional) Disable Wake up from Certain USB Device
+   In last step, disable XHC (pci:0000:00:14.0 in my case) will stop all USB 3.0 device from waking up
+   the computer.
+
+   However, if you want to disable certain USB device (e.g., USB keyboard), while leaving other USB
+   devices unchanged, do the steps below step by step.
+
+   NOTE: For this step to work, you need to leave XHC enabled (configured in last step).
+
+   1. First, run the command below to tell all connected USB devices as well as their IDs.
+$> lsusb
+
+   In my case, I have USB mouse with ID 1c4f:0034, and USB keyboard with ID 3151:3020. The first 4
+   hexadecimal numbers is the vendor ID, while the second 4 is the product ID.
+
+   Then, run the command below (replace product ID '3020' to yours) will tell the /sys/bus folder for
+   the USB device.
+$> grep 3020 /sys/bus/usb/devices/*/idProduct
+
+   2. To temporarily disable a USB device from waking up system from sleep, use command:
+$> echo disabled | sudo tee /sys/bus/usb/devices/1-2/power/wakeup
+
+   Here replace /sys/bus/usb/devices/1-2 with the folder PATH according to what you got in last command.
+   And, it will work until re-boot or you re-plugin the USB device.
+
+   3. To make it permanent, also create a udev rule via command (replace gnome-text-editor to your text
+   editor):
+$> sudo gnome-text-editor /etc/udev/rules.d/40-disable-wakeup-triggers.rules
+
+   When file opens, write the line below (replace 3151 and 3020 to yours):
+ACTION=="add|change", SUBSYSTEM=="usb", DRIVERS=="usb", ATTRS{idVendor}=="3151", ATTRS{idProduct}=="3020", \
+ATTR{power/wakeup}="disabled"
+
+   Here ACTION=="add|change" tells to try reapplying rules upon every device change, since USB device is
+   hot-plugable.
+
+Prevent Laptop Lid Open from Waking up Ubuntu
+   NOTE: This step MAY or MAY NOT work on your laptop!! There seems no unified way to disable the lid
+   open waking up feature. If you know, please tell me by leaving comment below.
+
+   Most laptops today support for waking up on lid open action. To enable/disable this feature, first
+   you need to try the option in BIOS settings.
+
+   If your BIOS settings page does NOT include that option, you may try the steps below one by one,
+   which however may NOT work in some laptops.
+
+   1. First, open terminal (Ctrl+Alt+T) and run the command below to find out the /sys/bus sub-folder
+   for the Lid:
+$> sudo dmesg |grep Lid
+
+   In my case, it's /devices/LNXSYSTM:00/LNXSYBUS:00/PNP0C0D:00/.
+
+   2. Then, try to send "disabled" to power/wakeup file for that device folder (replace the bold text
+   accordingly).
+$> echo disabled | sudo tee /sys/devices/LNXSYSTM:00/LNXSYBUS:00/PNP0C0D:00/power/wakeup
+
+   When done, suspend your computer then close the lid. Finally, try opening lid a few moments later and
+   see if it wakes up on the action. If it does NOT work, try setting lid switch action to ignore.
+
+   3. If the last step works, then you can create a udev rule to make it permanent.
+   First, run command to find out the key parameters to identify the device (replace bold text according
+   to last command).
+$> udevadm info -q all -a /sys/devices/LNXSYSTM:00/LNXSYBUS:00/PNP0C0D:00/
+
+   In my case (see the screenshot), KERNEL=="PNP0C0D:00", SUBSYSTEM=="acpi", and DRIVER=="button" is
+   what I need for udev rules.
+
+   Next, run command to create (and edit) a udev rule (replace gnome-text-editor accordingly):
+$> sudo gnome-text-editor /etc/udev/rules.d/40-disable-wakeup-triggers.rules
+
+   While file opens, add line below and save:
+ACTION=="add", KERNEL=="PNP0C0D:00", SUBSYSTEM=="acpi", DRIVER=="button", ATTR{power/wakeup}="disabled"
+
+   The udev rule will take action in next boot of the Ubuntu Linux system.
+
+
+---
+
