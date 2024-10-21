@@ -1,0 +1,86 @@
+filename: systemd_limit-application-memory-usage_20241021.txt
+https://blogs.kde.org/2024/10/18/limit-application-memory-usage-with-systemd/
+
+Limit Application Memory Usage with systemd
+Friday, 18 October 2024
+
+   I saw this question on KDE forum about how to limit memory usage of a specific application in KDE,
+   using systemd specifically. I did some research on that.
+
+Resource control in systemd
+   man systemd.resource-control lists plenty of options that we can set to a cgroup. E.g., to limit
+   the memory usage of a service, we can add:
+MemoryAccounting=yes
+MemoryHigh=2G
+
+   under the [Service] section of its .service file.
+
+   The difference between this and ulimit is that ulimit is per process, while systemd resource control
+   is per cgroup. I.e., the MemoryHigh is accounted to the sum of both the service process, and all
+   sub-processes it spawns, and even detached processes, i.e., daemons.
+
+   (That's actually the main point of cgroup: a process tree that a process can't escape via
+   double-forking / daemonizing.)
+
+Apps as systemd services
+   KDE Plasma launches apps as systemd services.
+
+   We can find the name of the systemd service of an app like this:
+$> systemd-cgls|grep konsole
+|    | | +-app-org.kde.konsole@0d82cb37fcd64fe4a8b7cf925d86842f.service
+|    | | | +-35275 /usr/bin/konsole
+|    | | | +-35471 grep --color=auto konsole
+
+   But the problem is:
+    1. The part of the name after @ is a random string, changes every time the app is launched.
+    2. The service is generated dynamically:
+
+$> $ systemctl --user cat app-org.kde.konsole@0d82cb37fcd64fe4a8b7cf925d86842f.service
+
+# /run/user/1000/systemd/transient/app-org.kde.konsole@0d82cb37fcd64fe4a8b7cf925d86842f.service
+# This is a transient unit file, created programmatically via the systemd API. Do not edit.
+[Service]
+Type=simple
+...
+
+   So if we want to limit the memory usage of Konsole, there's no persistent .service file on disk that
+   we can edit.
+
+   Luckily, systemd allows us to create drop-in files to partially modify a service. Also, systemd
+   considers app-org.kde.konsole@0d82cb37fcd64fe4a8b7cf925d86842f.service to be instances of a template
+   named app-org.kde.konsole@.service. (This is how things like getty@tty3.service work.) So we can
+   create a drop-in file named ~/.config/systemd/user/app-org.kde.konsole@.service.d/override.conf with
+   the content:
+[Service]
+MemoryAccounting=yes
+MemoryHigh=2G
+
+   and it will apply to all instances of app-org.kde.konsole@.service, even if there's no service file
+   with that name.
+
+   (The file doesn't have to be named "override.conf". Any name with .conf works.)
+
+   Then we need to reload the systemd user manager: systemctl --user daemon-reload.
+
+   Now we can launch Konsole, and check if the memory limit works:
+$> $ systemctl --user show 'app-org.kde.konsole@*.service'|grep MemoryHigh=
+EffectiveMemoryHigh=2147483648
+MemoryHigh=2147483648
+StartupMemoryHigh=infinity
+
+   Note: as explained above, the limit applies to the sum of Konsole and all processes it spawns. E.g.,
+   if we run kwrite in Konsole, the memory usage of kwrite will be accounted to the limit of Konsole,
+   and the limit we set to KWrite won't apply.
+
+Set defaults for all apps
+   We can put defaults in ~/.config/systemd/user/app-.service.d/override.conf, and it will match all
+   services whose name starts with app-.
+
+   Alternatively, if we run systemd-cgls, we can see that all apps are under a node named app.slice. So
+   we can also put defaults in ~/.config/systemd/user/app.slice.d/override.conf, and all apps will
+   inherit the settings. However, this is different from the previous method, as user services are also
+   under app.slice by default, so they will also inherit the settings.
+
+
+---
+
