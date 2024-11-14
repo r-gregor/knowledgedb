@@ -1,0 +1,302 @@
+filename: kvm_vms-manager-and-vms-on-external-drives_20241114.txt
+https://www.lorenzobettini.it/2023/04/kvm-virtual-machine-manager-and-virtual-machines-on-external-drives/
+
+KVM Virtual Machine Manager and Virtual Machines on external drives
+
+Last year, I blogged about my [16]first experiences with KVM and Virtual Machine Manager.
+
+Then, I stopped using [17]KVM because I've always found [18]VirtualBox easier for my experiments. In
+particular, with VirtualBox, it is trivial to store virtual machines on an external drive (I mean, a
+fast external SD, of course): you specify to use a directory on the external drive, and all
+information about the virtual machine will be stored there. Then, you attach the drive to another
+computer with VirtualBox and open the virtual machine from the external drive. Easy!
+
+Things are more complicated with KVM, QEMU, and Virtual Machine Manager. Even making QEMU access an
+external drive requires additional configuration steps.
+
+In this blog post, I'll summarize the steps to achieve that.
+
+I'll first show the manual export/import procedure for the machines' metadata information. Then, I'll
+show a different approach based on symlinks.
+
+It was time to try KVM again because it's faster than VirtualBox.
+
+I'll describe the installation steps for EndeavourOS and pure Arch Linux. I guess the steps for other
+distributions are similar.
+
+Installation and configuration
+Let's install a few packages for KVM, QEMU, and the Virtual Machine Manager:
+$> sudo pacman -S --needed virt-manager qemu-base libvirt edk2-ovmf dnsmasq vde2 bridge-utils iptables-nft dmidecode
+
+If you get this message, accept to remove "iptables":
+iptables-nft and iptables are in conflict. Remove iptables? [y/N]
+
+To use your user without entering the root password, we need to edit the file
+"/etc/libvirt/libvirtd.conf" and uncomment the following lines:
+unix_sock_group = "libvirt"
+unix_sock_rw_perms = "0770"
+
+Or, append them at the end of the file:
+$> sudo tee -a /etc/libvirt/libvirtd.conf > /dev/null <<EOT
+unix_sock_group = "libvirt"
+unix_sock_rw_perms = "0770"
+EOT
+
+Add your user account to the "libvirt" group.
+$> sudo usermod -a -G libvirt $(whoami)
+
+Now comes the crucial part for letting QEMU handle machines on external drives: we need to add our
+user to "/etc/libvirt/qemu.conf". This can be done by setting the appropriate entries in the file or
+by simply appending the entries at the end of the file:
+$> sudo tee -a /etc/libvirt/qemu.conf > /dev/null <<EOT
+user = "$(whoami)"
+group = "$(whoami)"
+EOT
+
+If you want to start the virtualization service and the default virtual network automatically at
+boot, you run:
+$> sudo systemctl enable libvirtd.service
+$> sudo virsh net-autostart default
+
+Since I'm not using virtual machines daily, I prefer to start them when needed, so I don't run the
+above commands. Of course, I must remember to run these commands (note, for the network is "start"
+instead of "autostart") before starting the "Virtual Machine Manager":
+$> sudo systemctl start libvirtd.service
+$> sudo virsh net-start default
+
+Remember you can always use:
+$> systemctl status libvirtd.service
+
+to see the service status and possible errors shown when running this command.
+OK, time to reboot now.
+
+Let's create a virtual machine on an external drive
+I created a directory "kvm/images" on my external USB SD to store the virtual machine images.
+Let's start the "Virtual Machine Manager" program. We should see "QEMU/KVM":
+Let's create a new virtual machine with the leftmost toolbar button.
+I specify a local ISO.
+I don't create a pool for ISOs and use "Browse Local" to select an ISO in my external drive.
+
+In this example, I will install EndeavourOS on the virtual machine. I have to select the operating
+system manually (start typing, and you get completions):
+Time to allocate resources for the virtual machine. I'm giving the VM half my RAM and half my cores:
+Now here's the essential part of disk selection. Remember, I want to use my external drive, so I
+select custom storage and press "Manage":
+In the following dialog, I use the "+" button in the bottom left corner to create a new pool:
+I give the pool the name "images" and specify the directory I mentioned above on my external drive:
+After pressing "Finish", I select the created pool and add a "Volume" (with the other "+" button)
+I give the disk image a proper name and enough size (recall that the image will NOT allocate all the
+size immediately, but only on-demand):
+Select the volume and press "Choose Volume":
+On the final dialog, make sure the default network is selected and that you check "Customize
+configuration before install" (note that I also changed the name for the virtual machine):
+Let's press "Finish," and get to the configuration dialog. I changed the Firmware from "BIOS" to
+"UEFI", pressed "Apply," and finally, we can start the installation with "Begin Installation".
+
+We should not get any error from QEMU because it cannot access the external drive, thanks to the
+configuration shown above in the qemu.conf file!
+
+After the GRUB menu, we should see the installer log:
+And then, the EndeavourOS installer dialog:
+Since [19]I've already blogged about EndeavourOS installation, I'll skip the detailed steps. I'll
+install the GNOME desktop environment and let the installer use the whole disk space with the BTRFS
+filesystem and SWAP with hibernate (later, I might want to check whether hibernate works in the VM).
+
+In a few minutes, the installation finishes! We get to the GRUB menu of the installed system:
+And to the installed GNOME desktop:
+The disk image is correctly created in the external drive:
+$> ll /run/media/bettini/VMs/kvm/images
+.rw------- 54G bettini 3 mar 17:46  endeavour-kvm-gnome.qcow2
+
+And the information about the virtual machine is in the:
+/etc/libvirt/qemu
++-- autostart
++-- networks
+| +-- autostart
+| | +--  default.xml -> /etc/libvirt/qemu/networks/default.xml
+| +--  default.xml
++--  eos-kvm-gnome.xml
+
+Export the virtual machine
+First, let's shut down the machine.
+
+Let's export the virtual machine to use it from another computer. I understand that having the same
+software on the other host is crucial. Since I'm using EndeavourOS or Arch on my main computers, that
+is not a problem.
+
+But isn't the virtual machine already in an external drive? Why do I have to export it?
+
+That's the main difference with VirtualBox I mentioned at the beginning. The disk image is on an
+external drive, but the virtual machine information (configuration and metadata) is on a local XML
+file (see the listing of "/etc/libvirt/qemu" above; the XML file of the virtual machine is
+"eos-kvm-gnome.xml", after the name I gave to the virtual machine when I created it).
+
+Remember that the XML has an absolute path pointing to the disk image on the external drive:
+
+<source file='/run/media/bettini/VMs/kvm/images/endeavour-kvm-gnome.qcow2'/>
+
+So, again, in the other computers, the mount point of the external drive must be the same; otherwise,
+the absolute path must be manually adapted.
+
+We could copy the XML file directly on the external drive (somewhere near the disk image to be easily
+found), e.g.:
+$> sudo cp /etc/libvirt/qemu/eos-kvm-gnome.xml /run/media/bettini/VMs/kvm
+
+Alternatively, if we don't remember the location of the XML file, we can use the "dump" command.
+
+For example, we can first list the current machines (in the example, I have only one):
+$> sudo virsh list --all
+Id   Name            State
+--------------------------------
+-    eos-kvm-gnome   shut off
+
+And then, we dump its XML configuration:
+$> sudo virsh dumpxml eos-kvm-gnome > /run/media/bettini/VMs/kvm/eos-kvm-gnome.xml
+
+We're ready to import and use the VM on another computer
+
+Import the virtual machine
+I have already installed and configured KVM on another computer, following the same procedure at the
+beginning of the post.
+
+Since I haven't enabled the services at boot time, I run the following:
+$> sudo systemctl start libvirtd.service
+$> sudo virsh net-start default
+
+I connect the external drive and ensure it's mounted (remember, on the same mount point as in the
+other computer).
+
+Then, I create the virtual machine information locally by using the XML file on the drive I created
+above:
+$> sudo virsh define /run/media/bettini/VMs/kvm/eos-kvm-gnome.xml
+Domain 'eos-kvm-gnome' defined from /run/media/bettini/VMs/kvm/eos-kvm-gnome.xml
+
+We can verify that the XML is now in the directory of QEMU:
+$> ls -l /etc/libvirt/qemu/
+total 8
+drwxr-xr-x 1 root root 0 16 gen 20.56 autostart
+-rw------- 1 root root 7693 4 mar 17.51 eos-kvm-gnome.xml
+drwxr-xr-x 1 root root 40 4 mar 17.27 networks
+
+Let's start "Virtual Machine Manager," and we can see the virtual machine:
+We can start it, and it should work as on the other computer.
+
+Cloning and Snapshots
+Let's create a clone of this virtual machine, e.g., with the context menu of the machine in the main
+user interface.
+
+The destination path is based on the path of the current machine, the external drive, which is good.
+
+Let's wait for the clone to finish, and then we have two virtual machines:
+
+If I want this clone to be usable on other computers, I repeat the export procedure for this new
+virtual machine:
+$> sudo virsh list --all
+Id   Name                  State
+--------------------------------------
+-    eos-kvm-gnome         shut off
+-    eos-kvm-gnome-clone   shut off
+
+$> sudo virsh dumpxml eos-kvm-gnome-clone > /run/media/bettini/VMs/kvm/eos-kvm-gnome-clone.xml
+
+I'll leave this clone virtual machine as it is for now, and I'll create a snapshot in the other
+virtual machine, the original one.
+
+Snapshot information is stored somewhere else, NOT in the XML of the virtual machine:
+$> ll /var/lib/libvirt/qemu/snapshot/eos-kvm-gnome
+.rw------- 8,4k root  4 mar 18:39 謹 snapshot1.xml
+
+So we need them as well if we want to use them on another computer.
+$> sudo virsh snapshot-list --name eos-kvm-gnome
+snapshot1
+
+$> sudo virsh snapshot-dumpxml --domain eos-kvm-gnome --snapshotname snapshot1 > /run/media/bettini/VMs/kvm/eos-kvm-gnome-snapshot1.xml
+
+To add the snapshot to the other computer, I have to run:
+$> sudo virsh snapshot-create --redefine eos-kvm-gnome /run/media/bettini/VMs/kvm/eos-kvm-gnome-snapshot1.xml
+Domain snapshot snapshot1 created from '/run/media/bettini/VMs/kvm/eos-kvm-gnome-snapshot1.xml'
+
+$> ll /var/lib/libvirt/qemu/snapshot/eos-kvm-gnome
+.rw------- 8,4k root  4 mar 20:27 謹 snapshot1.xml
+
+However, keep in mind that if you try to start a snapshot, you get this warning:
+
+So if you don't want to lose the current state, create another snapshot for the current state before
+restoring a previous one. Moreover, if the snapshot's state is "Shutoff", "starting" the snapshot
+only restores it. Then, you must start the virtual machine.
+
+A different approach: symlinks
+In the previous sections, I showed how machine information (including snapshots) and images could be
+put on external drives. Besides the machine images residing on external drives from the beginning,
+the machine metadata is still on your hard disk. In fact, you must first export them (e.g., on the
+external drive) and then import them on another computer.
+
+A more radical approach consists of keeping the metadata on the external drive only and creating
+symlinks in each computer's libvirt/qemu directories.
+
+On the first computer, the XML files of machine information and snapshots have to be copied onto the
+external drive. IMPORTANT: don't dump information as we did above; you need to copy the original XML
+files themselves. Dumping does not generate the exact XML files stored on the libvirt/qemu
+directories. In fact, as shown above, the dumped XML files must be imported with dedicated commands.
+
+In my case, on the first computer, I run:
+$> sudo cp -a /etc/libvirt/qemu /run/media/bettini/VMs/kvm/
+$> sudo cp -a /var/lib/libvirt/qemu/snapshot /run/media/bettini/VMs/kvm/
+
+So, on the external drive, I end up with these contents:
+
+$> tree /run/media/bettini/VMs/kvm
+/run/media/bettini/VMs/kvm
++-- images
+|   +-- endeavour-kvm-gnome-clone.qcow2
+|   +-- endeavour-kvm-gnome.qcow2
++-- qemu
+|   +-- autostart
+|   +-- eos-kvm-gnome-clone.xml
+|   +-- eos-kvm-gnome.xml
+|   +-- networks
+|       +-- autostart
+|       +-- default.xml
++-- snapshot
+   +-- eos-kvm-gnome
+	   +-- snapshot1.xml
+
+On the same computer, I run the following commands (make sure the "libvirtd.service" is not running):
+$> sudo rm -rf /etc/libvirt/qemu
+$> sudo ln -s /run/media/bettini/VMs/kvm/qemu /etc/libvirt
+
+$> sudo rm -rf /var/lib/libvirt/qemu/snapshot
+$> sudo mkdir -p /var/lib/libvirt/qemu
+$> sudo ln -s /run/media/bettini/VMs/kvm/snapshot /var/lib/libvirt/qemu/
+
+Now, I can start the "libvirtd.service" and the default network, and I make sure I can still access
+all my machines stored on the external drive, including all the machine information.
+
+Of course, if you have never created virtual machines and want to start creating them on the external
+drive, it is enough to run the above commands. Then, start creating machines. Remember to select the
+external drive for the image location.
+
+Then, on the other computers where I have already installed the same software for KVM, QEMU, etc., I
+first ensure the "libvirtd.service" is not running (in case stop it). Then, I connect my external
+drive and run the above commands (these will remove possible existing machines' information, so be
+careful).
+
+Of course, the above commands must be run only the first time.
+
+Now, I can start the "libvirtd.service" and the default network, and I can access all my machines
+stored on the external drive, including all the machine information. Every modification (an image
+content or a machine configuration) will be stored on the external drive.
+
+This approach works if you want to store ALL your machines on the external drive. You won't have to
+keep the information in sync because they are stored in a single place.
+
+If you need to keep some machines on your computers and others on different external drives, you must
+use the above-shown manual procedure for exporting and importing. It is then up to you to remember to
+re-export/re-import if you change a machine's configuration or a snapshot.
+
+PDF document with images:
+KVM_Virtual_Machine_Manager_and_Virtual_Machines_on_external_drives.pdf
+
+
+---
+
