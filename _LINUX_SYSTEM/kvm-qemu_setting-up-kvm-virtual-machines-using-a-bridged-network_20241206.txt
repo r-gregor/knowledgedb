@@ -1,0 +1,159 @@
+filename: kvm-qemu_setting-up-kvm-virtual-machines-using-a-bridged-network_20241206.txt
+https://www.dzombak.com/blog/2024/02/Setting-up-KVM-virtual-machines-using-a-bridged-network.html
+
+Setting up KVM virtual machines using a bridge network on an Ubuntu host
+February 02, 2024
+
+   I recently wanted to set up a VM on my home Ubuntu 22.04 LTS server, with the following goals:
+    1. the VM uses KVM virtualization, for performance
+    2. the guest VM is assigned an IP via DHCP by my home network router
+    3. the guest VM is accessible by everything on the home network, including the host
+    4. the setup process relies entirely on CLI tools
+
+   Requirement (2) means I'll need to set up a bridge network interface on the host. Requirement (3)
+   rules out - as far as I understand, anyway - using macvlan networking for the guest.
+
+   This (admittedly terse) blog post walks through the process I used to get this working.
+
+Basic virtualization setup
+   Install the required software:
+$> sudo apt install qemu-kvm libvirt-daemon-system libvirt-clients virtinst libguestfs-tools libosinfo-bin \
+   bridge-utils
+
+   Verify the host's CPU will support KVM virtualization:
+$> kvm-ok
+INFO: /dev/kvm exists
+KVM acceleration can be used
+
+   Add your user to the relevant groups. This will allow you to manage VMs without sudo:
+$> sudo adduser cdzombak libvirt
+$> sudo adduser cdzombak kvm
+
+   You'll need to log out and back in for those changes to take effect. Verify this change with the id
+   command.
+
+   Check that libvirtd is running:
+$> sudo systemctl status libvirtd
+      libvirtd.service - Virtualization daemon
+     Loaded: loaded (/lib/systemd/system/libvirtd.service; enabled; vendor preset: enabled)
+     Active: active (running) since Wed 2024-01-31 20:47:10 EST; 17h ago
+
+Networking setup
+   Run ip add and note the name of your Ethernet interface. In my case, it's enp0s31f6.
+
+   Examine the contents of /etc/netplan. In my case, there was one file, with these contents:
+network:
+	ethernets:
+		enp0s31f6:
+			dhcp4: true
+	version: 2
+
+   If yours differs substantially, take care to understand what this file is doing! Some of the
+   reference links below might help.
+
+   Back up the YAML file from /etc/netplan, then edit it. Add a bridges section, so the result looks
+   like the following code sample. Note that enp0s31f6 should be replaced by the name of your Ethernet
+   interface:
+network:
+	version: 2
+	ethernets:
+		enp0s31f6:
+			dhcp4: true
+	bridges:
+		br0:
+			dhcp4: yes
+			interfaces:
+				- enp0s31f6
+
+   Test it with sudo netplan try. This allows you to test the configuration and make sure it's working
+   properly. It will offer to make the changes permanent for you, and if you don't accept that prompt
+   within a minute or two the changes will be reverted automatically.
+
+   Assuming that it worked, br0 is now assigned an IP address by your local DHCP server. You can verify
+   this by running ip add.
+
+   You'll need to update DHCP reservations for the host, if you have any, to use the MAC address of the
+   bridge interface. ip add will show you this MAC address.
+
+   Finally, create a file called kvm-hostbridge.xml in a location of your choice, with the following
+   content:
+<network>
+	<name>hostbridge</name>
+	<forward mode="bridge"/>
+	<bridge name="br0"/>
+</network>
+
+   Create and enable this network by running:
+$> virsh net-define /path/to/my/kvm-hostbridge.xml
+$> virsh net-start hostbridge
+$> virsh net-autostart hostbridge
+
+iptables considerations for hosts that also run Docker
+   Installing Docker enables netfilter for bridge interfaces on the host machine. This is needed because
+   Docker creates and manages iptables rules to isolate bridge networks - the default Docker
+   network type - from each other and allow them access to the network.
+
+   These rules will, by default, break networking for your VMs. In my case I wanted all VMs to have
+   access to the network as if they were real, physical machines; and to do this I added a single
+   iptables rule on the host:
+$> sudo iptables -A FORWARD -p all -i br0 -j ACCEPT
+
+   My guest VM was unable to get a DHCP reservation until I did this.
+
+   I am far from an iptables expert, but this worked for me. I'm not too worried because this host is
+   not directly accessible on the Internet; it's only exposed to my LAN and Tailscale network. If you're
+   doing this on a host with an Internet-facing attack surface, you should probably spend more time
+   studying and understanding this.
+
+Creating a VM on this network
+   Assuming nothing has failed so far, you're ready to create a VM connected to this network.
+
+   To use this network when creating a VM, pass --network network=hostbridge to virt-install. Here's a
+   complete example which I used successfully:
+virt-install \
+  --name altdns \
+  --description "alternate DNS server for the home network" \
+  --memory 2048 \
+  --vcpus 2 \
+  --disk path=/mnt/storage/vm/altdns/disk.qcow2,size=32 \
+  --cdrom /mnt/scratch/ubuntu-22.04.3-live-server-amd64.iso \
+  --graphics vnc \
+  --os-variant ubuntu22.04 \
+  --virt-type kvm \
+  --autostart \
+  --network network=hostbridge
+
+   (virt-install --help can help you figure out what the other options do.)
+
+   After the machine boots, your router should see it as a new machine and issue it an IP address over
+   DHCP just as it would anything else on the network.
+
+Accessing the installer over VNC
+   The command above tells virt-install we want to use VNC to view the VM's display and give it
+   keyboard/mouse input. Note that you'll connect to the host and not to the guest's IP address with
+   your VNC client.
+
+   First, figure out which port to use.
+$> virsh vncdisplay altdns
+127.0.0.1:1
+
+   This tells us that we can connect to the VNC server on the host's port 5900 + 1.
+
+   It also tells us that the VNC server on this host is listening on localhost only. You can use SSH
+   port forwarding to create a tunnel from port 5999 on your desktop to port 5901 on the server:
+$> ssh -L 5999:localhost:5901 my-vm-host.local
+
+   Once that's up and running, you can open your favorite VNC client, connect to localhost:5999 (no
+   authentication required), and walk through the Ubuntu installer to get your VM up and running.
+
+Helpful commands
+   When troubleshooting or trying to understand the network state on your host VM, the following
+   commands are useful:
+$> virsh net-list
+$> virsh net-info hostbridge
+$> virsh net-dhcp-leases hostbridge
+$> sudo brctl show br0
+
+
+---
+
