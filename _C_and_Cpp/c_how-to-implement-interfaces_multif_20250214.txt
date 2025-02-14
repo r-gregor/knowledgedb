@@ -1,0 +1,1245 @@
+filname: c_how-to-implement-interfaces_multif_20250214.txt
+https://dev.to/totally_chase/implementing-functional-type-safe-polymorphism-in-c-10b9
+
+Implementing Interfaces in C
+
+Note: An extended and updated version of this demonstration can be found at typeclass-interface-pattern.
+
+This article describes an extensible and practical design pattern you can use to achieve functional
+polymorphism in pure, standard C99 (or above). You can view an implementation and usage of this pattern
+in c-iterators, where I implement lazy, type safe, rust-like iterators.
+
+Brief
+If you've written a fair amount of C, chances are you've been struck by the desire to have some sort
+of polymorphism like the higher level languages do.
+
+Maybe you want to have generic containers (i.e a linked list of generic elements), or maybe you want to
+have a function that takes in a polymorphic type, or anything in between. Chances are you're somewhat
+frustrated at the lack of native polymorphism support.
+
+Thankfully, polymorphism in C is nothing new - there are many articles, repositories, and projects in
+general explaining, and using a Virtual Method Table (aka vtable) based OOP polymorphism pattern. The
+code behind linux, cpython implementation, and many other large scale C projects implement OOP through
+vtables - a pattern that is pretty common amongst the C community.
+
+At the same time, if you've used this pattern - you may also know of its deficiencies.
+    * It's not type safe, since type safety isn't a primary concern of this pattern.
+    * It inherently depends on unsafe casts.
+    * The semantics are, arguably, very ugly and hacky.
+    * It presents a fair bit of traps.
+    * Some implementations of this pattern break standard conformance and depend on implementation defined
+      behavior. Usually, the rule they're breaking is strict aliasing. Though, this issue really isn't hard to
+      avoid. CPython actually had this issue at one point, and fixed later. But that's not necessarily the
+      only rule being broken. Many implementations will simply not use standard C, and instead some extended
+      implementation of C, such as gnuc.
+
+Oh, there's actually another drawback - but this one's totally subjective and doesn't contribute anything
+to the actual conversation - what if you just don't like OOP and prefer functional polymorphism rather
+than OOP inheritance? Well, I'd fall under that category :)
+
+Enter Type Classes
+If you're familiar with Haskell, you're already familiar with Type Classes. A way to do ad-hoc
+polymorphism. Haskell is the main language that inspired me to come up with this design pattern. Although
+the end product really isn't exactly like type classes, since type classes are inherently based on static
+dispatch (a feature impossible to implement in C in an extensible fashion), you'll probably still find
+the similarities along the way.
+
+If you're familiar with Rust, you're also already familiar with type classes! Just with a different
+name and a bit less power - Traits. Once again, the end result of this pattern will not be exactly like
+traits - rather, they'd be more similar to trait objects. You know, Dynamic traits, rust's way of doing
+dynamic dispatch.
+
+If you're not familiar with a functional language, but rather OOP languages - no worries! OOP also has
+a concept very similar to typeclasses and traits - Interfaces.
+
+If you aren't familiar with any of the concepts mentioned above, that's totally fine! The concepts aren't
+actually that complicated from a base level view. Typeclasses, Traits, Interfaces are just ways of modeling
+polymorphism around actions, rather than objects. When I ask for a type that implements a typeclass
+(or a trait, or an interface) - I'm asking for a type that can do certain things that fall under the
+typeclass. That's all there is to it. Polymorphism based around abilities, not objects and object hierarchy.
+
+Goals of the Typeclass Pattern
+    * Type safety through monomorphization and simple abstractions
+    * Extensible by using dynamic dispatch, allowing them to be used in library APIs
+    * Usable as completely normal types - allowing them to be used alongside existing container libraries such
+      as CTL (C template Library).
+    * Polymorphism constrained around actions/abilities/functions, not objects
+
+A Small Taste
+Before we go on to discussing and implementing the pattern itself, here's a tiny taste of what you can
+do with the pattern:
+
+void print(Showable showable) {
+	char *s = showable.tc->show(showable.self);
+	puts(s);
+	free(s);
+}
+
+typedef enum {
+	holy,
+	hand,
+	grenade
+} Antioch;
+
+Antioch ant = holy;
+Showable antsh = prep_antioch_show(&ant);
+
+This is the Show typeclass. It describes the ability to turn a type into its string representation.
+
+I've implemented Show for the Antioch type given above by defining prep_antioch_show. Now any Antioch
+value can be turned into a Showable, which can then be used with generic functions working on Showable types.
+
+The Typeclass Pattern
+We can finally talk about the design pattern itself. There's 3 core parts to this. I'll demonstrate
+these 3 parts by implementing the Show typeclass mentioned above.
+
+The typeclass struct definition
+This is the struct containing the function pointers related to the typeclass. For Show, we'll just be
+using the show function here, it takes in a value of the type for which Show is implemented (i.e self)
+and returns a printable string.
+
+typedef struct {
+	char *(*const show)(void *self);
+} Show;
+
+A simple struct containing the virtual function(s). When the wrapper function is first called (to convert
+a certain type to its typeclass instance), a typeclass struct of static storage duration is created
+with the function pointers for that specific type (a vtable of sorts). The pointer to this struct is
+then used in all typeclass instances. More on this will be discussed in the impl_ macro part.
+
+The typeclass_instance struct definition
+This is the concrete instance to be used as a type constraint. It should contain a pointer to the typeclass,
+and the self member containing the value to pass to the functions in the typeclass struct.
+
+typedef struct {
+	void *self;
+	Show const *tc;
+} Showable;
+
+The impl_ macro used to implement the typeclass
+This macro is the real heavy lifter when it comes to type safety.
+
+It takes in some information about the type you're implementing a typeclass for, and the exact function
+implementations that will be used for that type, and defines a function which does the following:
+    * Takes in an argument of the type the implementation is for
+    * Type checks the function implementations given. This is done by storing the given function
+      implementations into function pointers of an exact and expected type
+    * Initializes the typeclass struct to store these function pointers, with static storage duration
+    * Creates and returns the typeclass instance, which stores a pointer to the aforementioned typeclass
+      struct, and the function argument into the self member.
+
+Following these rules, this is what impl_show would look like:
+
+#define impl_show(T, Name, show_f)                                           \
+    Showable Name(T x) {                                                     \
+        char *(*const show_)(T e) = (show_f);                                \
+        (void)show_;                                                         \
+        static Show const tc = {.show = (char *(*const)(void*))(show_f) };   \
+        return (Showable){.tc = &tc, .self = x};                             \
+    }
+
+It takes the show implementation as its third argument. In the function definition, it stores that impl
+in a variable of type char* (*const show_)(T e), which is the exact type it should be - T is the specific
+type the implementation is for. It must be a pointer type. Since it's stored into void *self.
+
+The (void)show_; line is to suppress the unused variable warning emitted by compilers, since 'show_' isn't
+actually used. It's only there for typechecking purposes. These 2 typechecking lines will be completely
+eliminated by any decent compiler.
+
+Then it simply defines a static typeclass and stores the function pointer inside. Then it creates and
+returns the Showable struct, containing the x argument, and a pointer to the typeclass struct.
+
+Implementing Typeclasses for your own types!
+Once the typeclass and typeclass instance structs have been defined, all the user has to do is call
+the 'impl_' macro with their own type and the function implementation(s) required for the typeclass. The
+declaration of the function defined by said macro can then be included in a header.
+
+Here's an example of implementing the previously defined Show typeclass for a very holy enum:
+
+typedef enum {
+	holy,
+	hand,
+	grenade
+} Antioch;
+
+static inline char *strdup_(char const *x) {
+	char *s = malloc((strlen(x) + 1) * sizeof(*s));
+	strcpy(s, x);
+	return s;
+}
+
+/* The 'show' function implementation for 'Antioch*' */
+static char *antioch_show(Antioch *x) {
+	/*
+	Note: The 'show' function of a 'Showable' is expected to return a malloc'ed value
+	The users of a generic 'Showable' are expected to 'free' the returned pointer from the function 'show'.
+	*/
+	switch (*x) {
+		case holy:
+			return strdup_("holy");
+		case hand:
+			return strdup_("hand");
+		case grenade:
+			return strdup_("grenade");
+		default:
+			return strdup_("breakfast cereal");
+	}
+}
+
+/*
+Implement the 'Show' typeclass for the type 'Antioch*'
+
+This will define a function to convert a value of type 'Antioch*' into a 'Showable', the function will
+be named 'prep_antioch_show'
+
+The 'show' implementation used will be the 'antioch_show' function
+*/
+impl_show(Antioch *, prep_antioch_show, antioch_show)
+
+The impl_show macro here, simply translates to:
+
+Showable prep_antioch_show(Antioch *x) {
+	char *(*const show_)(Antioch *e) = (show_f);
+	(void)show_;
+	static Show const tc = {.show = (char *(*const)(void *)(show_f) };
+	return (Showable){.tc = &tc, .self = x};
+}
+
+Now, you can convert an Antioch into a Showable like so:
+
+Antioch ant = holy;
+Showable antsh = prep_antioch_show(&ant);
+
+And this Showable will automatically dispatch to the antioch_show function whenever someone calls the
+show function inside it.
+
+Great! Let's make a polymorphic function that works on Showables:
+
+void print(Showable showable) {
+	char *s = showable.tc->show(showable.self);
+	puts(s);
+	free(s);
+}
+
+You can now easily print an Antioch with these abstractions:
+
+Antioch ant = holy;
+print(prep_antioch_show(&ant));
+
+Where this really shines though, is when you have multiple types that implement Show - all of them can
+be used with print. Or any other function that works on a generic Showable!
+
+Combining Multiple Typeclasses
+One of the core design goals of a typeclass is to be modular. A Show typeclass should only have actions
+directly related to "showing", a Num typeclass should only have actions directly related to numerical
+operations. Unlike objects, that may contain many different methods of arbitrary relevance to each other.
+
+This means that, more often than not, you'll want a type that can do multiple different classes of
+actions. A type that implements multiple typeclasses.
+
+You can model that pretty easily with this pattern:
+
+/* Type constraint that requires both 'Show' and 'Enum' to be implemented */
+typedef struct {
+	void *self;
+	Show const *showtc;
+	Enum const *enumtc;
+} ShowableEnumerable;
+
+#define impl_show_enum(T, Name, showimpl, enumimpl)                                                 \
+    ShowableEnumerable Name(T x) {                                                                  \
+        Showable showable = showimpl(x);                                                            \
+        Enumerable enumerable = enumimpl(x);                                                        \
+        return (ShowableEnumerable){.showtc = showable.tc, .enumtc = enumerable.tc, .self = x};     \
+    }
+
+Where Enum is also a typeclass defined like:
+
+typedef struct {
+	size_t (*const from_enum)(void *self);
+	void *(*const to_enum)(size_t x);
+} Enum;
+
+typedef struct {
+	void *self;
+	Enum const *tc;
+} Enumerable;
+
+#define impl_enum(T, Name, from_enum_f, to_enum_f)                      \
+    Enumerable Name(T x) {                                              \
+        size_t (*const from_enum_)(T e) = (from_enum_f);                \
+        T (*const to_enum_)(size_t x)   = (to_enum_f);                  \
+        (void)from_enum_;                                               \
+        (void)to_enum_;                                                 \
+        static Enum const tc = {                                        \
+            .from_enum = (size_t (*const)(void *))(from_enum_f),        \
+            .to_enum = (void *(*const)(size_tx))(to_enum_f)             \
+        };                                                              \
+        return (Enumerable){.tc = &tc, .self = x};                      \
+    }
+
+Essentially, you can have a struct that stores each of the typeclass pointers you want to combine, and
+the self member. The impl macro would also be very simple. It should simply define a function that puts
+the given value into ShowableEnumerable's self, as well as use the impl functions to get the typeclass
+instances of that type.
+
+With this, if you implemented Show for Antioch* and defined the function as prep_antioch_show, and also
+implemented Enum with the function name prep_antioch_enum, you could call impl_show_enum using:
+
+impl_enum(Antioch*, prep_antioch_show_enum, prep_antioch_show, prep_antioch_enum)
+
+The defined function would have the signature:
+
+ShowableEnumerable prep_antioch_show_enum(Antioch *x);
+
+That's it!
+
+You can now have functions that require their argument to implement multiple typeclasses:
+
+void foo(ShowableEnumerable se) {
+	/* Use the enumerable abilities */
+	size_t x = se.enumtc->from_enum(se.self);
+
+	/* Use the showable abilities */
+	char *s = se.showtc->show(se.self);
+}
+
+Real World Usage
+With this pattern, I've implemented the lazy functional Iterators in pure C. It's essentially modeled
+after Rust's Iterator typeclass.
+
+But that's not all! A lazy Iterator isn't complete without cool abstractions like take, drop, map,
+filter etc. You can implement all of these abstractions using the same Typeclass pattern.
+
+It's very similar to how rust does it, the take method, for example, simply returns a Take struct in
+rust. This struct has its own Iterator implementation - which is what allows this whole abstraction to
+be completely lazy.
+
+map is even cooler! Here's an example of mapping a function over an Iterable, it:
+
+/* Map an increment function over the iterable */
+Iterable(int) mappedit = map_over(it, incr, int, int);
+
+Where incr is:
+
+/* A function that increments and returns the given integer */
+static int incr(int x) { return x + 1; }
+
+Once again, fully type safe and completely lazy. This map operation isn't performed until you explicitly
+iterate over the iterable. Which means, you can chain take_from and map_over and there won't be multiple
+iterations, just one!
+
+/* Map an increment function over the iterable */
+Iterable(int) mappedit = map_over(it, incr, int, int);
+
+/* Take, at most, the first 10 elements */
+Iterable(int) mappedit10 = take_from(mappedit, 10, int);
+
+The exact code to implement these, as well as thorough explanations of the semantics can be found in
+the c-iterators repo.
+
+
+---
+https://stackoverflow.com/questions/6304794/oop-and-interfaces-in-c
+
+OOP and interfaces in C
+
+   Straight of the bat I understand that ANSI C is not an object orientated programming language. I want
+   to learn how to apply a particular oo technique using c.
+
+   For example, I want to create several audio effect classes that all have the same function names but
+   different implementations of those functions.
+
+   If I was making this in a higher level language I would first write an interface and then implement
+   it.
+AudioEffectInterface-
+(float) processEffect
+
+DelayClass-
+(float) processEffect {
+	// do delay code
+	return result
+}
+
+FlangerClass-
+
+(float) processEffect {
+	// do flanger code
+	return result
+}
+
+(void) main {
+	effect= new DelayEffect()
+	effect.process()
+	effect = new FlangerEffect()
+	effect.process()
+}
+
+   How can I achieve such flexibility using C?
+
+***
+   There are three distinct ways you can achieve polymorphism in C:
+    1. Code it out
+       In the base class functions, just switch on a class type ID to call the specialized versions. An
+       incomplete code example:
+
+typedef enum classType {
+	CLASS_A,
+	CLASS_B
+} classType;
+
+typedef struct base {
+	classType type;
+} base;
+
+typedef struct A {
+	base super;
+	...
+} A;
+
+typedef struct B {
+	base super;
+	...
+} B;
+
+void A_construct(A *me) {
+	base_construct(&me->super);
+	super->type = CLASS_A;
+}
+
+int base_foo(base *me) {
+	switch(me->type) {
+		case CLASS_A: return A_foo(me);
+		case CLASS_B: return B_foo(me);
+		default: assert(0), abort();
+	}
+}
+
+       Of course, this is tedious to do for large classes.
+
+    2. Store function pointers in the object
+       You can avoid the switch statements by using a function pointer for each member function. Again,
+       this is incomplete code:
+
+typedef struct base {
+	int (*foo)(base *me);
+} base;
+
+//class definitions for A and B as above
+int A_foo(base *me);
+
+void A_construct(A *me) {
+	base_construct(&me->super);
+	me->super.foo = A_foo;
+}
+
+       Now, calling code may just do
+base *anObject = ...;
+(*anObject->foo)(anObject);
+
+       Alternatively, you may use a preprocessor macro along the lines of:
+#define base_foo(me) (*me->foo)(me)
+
+       Note that this evaluates the expression me twice, so this is really a bad idea. This may be
+       fixed, but that's beyond the scope of this answer.
+
+    3. Use a vtable
+       Since all objects of a class share the same set of member functions, they can all use the same
+       function pointers. This is very close to what C++ does under the hood:
+
+typedef struct base_vtable {
+	int (*foo)(base *me);
+	...
+} base_vtable;
+
+typedef struct base {
+	base_vtable *vtable;
+	...
+} base;
+
+typedef struct A_vtable {
+	base_vtable super;
+	...
+} A_vtable;
+
+
+//within A.c
+int A_foo(base *super);
+static A_vtable gVtable = {
+	.foo = A_foo,
+	...
+};
+
+void A_construct(A *me) {
+	base_construct(&me->super);
+	me->super.vtable = &gVtable;
+};
+
+       Again, this allows the user code to do the dispatch (with one additional indirection):
+base *anObject = ...;
+(*anObject->vtable->foo)(anObject);
+
+   Which method you should use depends on the task at hand. The switch based approach is easy to whip up
+   for two or three small classes, but is unwieldy for large classes and hierarchies. The second
+   approach scales much better, but has a lot of space overhead due to the duplicated function pointers.
+   The vtable approach requires quite a bit of additional structure and introduces even more indirection
+   (which makes the code harder to read), but is certainly the way to go for complex class hierarchies.
+
+***
+   Can you compromise with the following:
+
+#include <stdio.h>
+
+struct effect_ops {
+	float (*processEffect)(void *effect);
+	/* + other operations.. */
+};
+
+struct DelayClass {
+	unsigned delay;
+	struct effect_ops *ops;
+};
+
+struct FlangerClass {
+	unsigned period;
+	struct effect_ops *ops;
+};
+
+/* The actual effect functions are here
+ * Pointers to the actual structure may be needed for effect-specific parameterization, etc.
+ */
+float flangerEffect(void *flanger) {
+	struct FlangerClass *this = flanger;
+	/* mix signal delayed by this->period with original */
+	return 0.0f;
+}
+
+float delayEffect(void *delay) {
+	struct DelayClass *this = delay;
+
+	/* delay signal by this->delay */
+	return 0.0f;
+}
+
+/* Instantiate and assign a "default" operation, if you want to */
+static struct effect_ops flanger_operations = {
+	.processEffect = flangerEffect,
+};
+
+static struct effect_ops delay_operations = {
+	.processEffect = delayEffect,
+};
+
+int main() {
+	struct DelayClass delay     = {.delay = 10, .ops = &delay_operations};
+	struct FlangerClass flanger = {.period = 1, .ops = &flanger_operations};
+
+	/* ...then for your signal */
+	flanger.ops->processEffect(&flanger);
+	delay.ops->processEffect(&delay);
+	return 0;
+}
+
+***
+   You implement interfaces using structs of function pointers. You can then have the interface struct
+   embedded in your data object struct and pass the interface pointer as first parameter of every
+   interface member function. In that function you then get the pointer to your container class (which
+   is specific to your implementation) using container_of () macro. Search for "container_of linux
+   kernel" for an implementation. It is a very useful macro.
+
+
+---
+https://www.quickstart.com/blog/software-engineering/abstract-class-vs-interface-in-c-OOP-concepts/
+
+Abstract Class vs Interface in C: Understanding Object-Oriented Programming Concepts
+Posted: September 05, 2024
+
+   What is abstract class vs interface in c
+
+   Object-oriented programming (OOP) has transformed the way developers approach software design by
+   organizing code around objects, rather than functions or logic. Central to OOP are concepts like
+   encapsulation, inheritance, and polymorphism, which enable programmers to create modular, flexible,
+   and reusable code.
+
+   Encapsulation allows for the bundling of data and functions that operate on that data within a single
+   unit (an object). Inheritance facilitates the creation of new classes based on existing ones, while
+   polymorphism allows objects of different types to be treated as if they are objects of a common
+   supertype. These principles foster clean, scalable, and maintainable code.
+
+   Although C is not traditionally considered an OOP language like C++ or C#, it is still possible to
+   implement OOP-like structures using advanced techniques. Developers often use abstract classes
+   and interfaces to achieve modularity and flexibility in their design, helping to simulate some of the
+   benefits of object-oriented design.
+
+   Understanding these concepts, especially abstract classes and interfaces is essential for programmers
+   looking to create flexible, reusable, and scalable code in C, particularly those transitioning to
+   fully object-oriented languages such as C++ or C#.
+
+   In this blog, we'll break down the concepts of abstract classes and interfaces in C, and how they can
+   be applied effectively to improve the design of your programs.
+
+Key Differences Between Abstract Classes and Interfaces in C
+   Understanding the differences between abstract classes and interfaces is essential for designing
+   flexible, modular, and maintainable code, especially when transitioning from procedural C
+   programming language to object-oriented languages. These concepts are core to object-oriented
+   programming (OOP) and are often used to model real-world behaviors and system architectures.
+
+   Let's explore these differences in more depth:
+
+Implementation vs. Blueprint
+   An abstract class serves as a partial implementation of an object. It can contain both implemented
+   and non-implemented (abstract) methods. This means an abstract class not only defines a blueprint for
+   derived classes but also provides some shared functionality that child classes can inherit and use.
+   This makes abstract classes a hybrid between a concrete class and a fully abstract interface.
+
+   For instance, if you have several types of animals (e.g., Dog, Cat), you might define an abstract
+   class Animal with shared methods such as eat() or sleep(). Each specific animal class would then
+   override methods like makeSound(), which is defined as abstract in the Animal class.
+
+   By contrast, an interface defines a purely abstract contract. It does not provide any implemented
+   functionality; rather, it specifies a set of methods that must be implemented by any class that
+   adheres to the interface. In C, an interface is simulated with a structure that contains function
+   pointers, but no actual implementation. This forces all implementing classes to provide their own
+   versions of the specified methods.
+
+Inheritance
+   In languages like C++, a class can inherit from only one abstract class, meaning you can only extend
+   from one base class. This restriction encourages a clear hierarchy where a derived class extends from
+   a parent and inherits its behavior. However, in C, abstract classes are simulated using structures,
+   so direct inheritance is not a language feature. Instead, composition is used, where a structure
+   contains another structure, and function pointers are used to override behaviors.
+
+   One of the key strengths of interfaces is their flexibility - classes can implement multiple
+   interfaces. This allows a class to conform to multiple "contracts," enabling objects to perform
+   different roles or behaviors that may not be related. In C, you can simulate this by including
+   multiple structures (each representing an interface) within a single structure. This promotes a more
+   flexible design that allows mixing and matching different behaviors.
+
+Member Variables and Constructors
+   Abstract classes can have member variables, which can store state, and constructors, which allow you
+   to initialize this state when the object is created. This is particularly useful for scenarios where
+   you need to share common attributes or initialization logic across derived classes. For example, if
+   every animal has a name, an abstract Animal class could store this data, and the derived Dog and Cat
+   classes could inherit this property.
+
+   Interfaces cannot contain member variables or constructors. Their purpose is purely to define
+   behavior without specifying any implementation details or maintaining state. This keeps interfaces
+   lightweight and focused solely on defining methods. This difference in C is expressed through the
+   absence of data fields in the interface structure-only function pointers are included.
+
+Usage in Code Design
+   Use abstract classes when you have a base class that provides both common behavior and abstract
+   methods. Abstract classes work well when several related classes share some code but also need to
+   implement their own versions of certain methods. For example, if you're creating different types of
+   shapes (e.g., Circle, Rectangle), an abstract Shape class could provide methods for calculating area
+   or perimeter, but the specific formulas would vary based on the shape type.
+
+   Abstract classes are also useful when you need to maintain a shared state, such as an identifier or
+   name, and when that state needs to be passed down to all subclasses.
+
+   Interfaces are better suited for defining multiple behaviors that unrelated classes can implement.
+   For example, a class might need to be both "swimmable" and "flyable." These behaviors don't
+   necessarily have to be related, but both can be defined via interfaces, allowing unrelated classes to
+   implement the required methods. In this case, you would use separate interfaces for swimming and
+   flying.
+
+   This flexibility makes interfaces ideal for situations where different classes must share common
+   methods but don't share any implementation. For example, a Vehicle interface could define methods
+   like drive() and stop(), but a Car and a Boat could implement them in entirely different ways.
+
+Characteristics of Abstract Classes in C
+   In object-oriented programming (OOP), an abstract class serves as a blueprint for other classes and
+   cannot be instantiated directly. It often contains methods with and without implementation, providing
+   a mix of abstract and concrete behavior. While C is not an OOP language, you can simulate abstract
+   classes by combining structures with function pointers, allowing for polymorphism and modular code
+   design.
+
+   Here are a few key characteristics shared by C abstract classes:
+
+Contains Both Defined and Abstract Methods
+   Abstract classes can have both methods with implementation and abstract (pure virtual) methods. The
+   abstract methods act as placeholders for derived classes to implement, while the methods with
+   implementation provide shared functionality that can be reused by derived classes. This allows for
+   partial implementation of behavior in the abstract class while leaving some flexibility for
+   subclasses to provide their own specific implementations.
+
+   For example, an abstract class in C might have a method like makeSound(), which is left unimplemented
+   in the abstract class and must be provided by any derived class.
+
+typedef struct {
+	void (*makeSound)(void);  // Abstract method
+} Animal;
+
+Derived Classes Must Implement All Abstract Methods
+   Any class that inherits from an abstract class must implement all of its abstract methods. In C, this
+   means that structures which simulate inheritance must provide concrete implementations for any
+   function pointers declared in the abstract class. This requirement ensures that the derived classes
+   provide behavior for the abstract methods, preserving the integrity of the program design.
+
+   For example, if Animal has an abstract method makeSound(), any derived class such as Dog must provide
+   a concrete implementation for this method.
+
+// Derived class: Dog
+void dogMakeSound(void) {
+	printf("Woof!\n");
+}
+
+Abstract Classes Can Have Member Variables
+   Abstract classes in C can contain member variables. These variables allow the class to maintain a
+   state that can be shared across derived classes. In C, this can be achieved by defining variables
+   within the structure. Derived classes can then inherit these variables, providing them with a common
+   data structure while allowing them to implement different behaviors.
+
+   For example, an abstract Animal class might have a member variable such as name to store the name of
+   the animal, and derived classes like Dog or Cat can access or modify this member.
+
+Abstract Classes Can Have Constructors
+   Although C doesn't support constructors in the same way that C++ or C# does, you can simulate
+   constructors in C by creating functions that initialize structures. This allows you to set default
+   values for member variables or function pointers.
+
+   For example, an "abstract class" in C can have an initialization function that sets up the structure
+   and assigns default behaviors, which can then be modified by derived classes.
+
+Characteristics of Interfaces in C
+   In object-oriented programming (OOP), interfaces play a crucial role in defining behavior without
+   enforcing how that behavior should be implemented. While C is not inherently object-oriented, you can
+   simulate interfaces using structures with function pointers, allowing different structures to follow
+   the same contract. In C, an interface defines a set of methods without implementation, and any
+   structure that "implements" the interface must provide concrete implementations for all these
+   methods.
+
+   Here are some key characteristics of interfaces in C:
+
+No Implementation in Interfaces
+   An interface does not provide any method implementations. It is a purely abstract structure that
+   defines a set of function pointers. Unlike abstract classes, which may contain some methods with
+   implementation, an interface is solely a contract that defines what methods an implementing class (or
+   structure) must include. This enforces a clear separation between what needs to be done (the method
+   signatures) and how it should be done (the concrete implementations).
+
+   In C, an interface is represented as a structure with function pointers, but without any actual code
+   to implement the methods:
+
+typedef struct {
+	void (*start)();  // Abstract method
+	void (*stop)();   // Abstract method
+} Vehicle;
+
+No Member Variables or Constructors
+   Unlike abstract classes, interfaces cannot contain member variables or constructors. Their sole
+   purpose is to define method signatures. This keeps interfaces lightweight and focused on behavior
+   rather than state. In C, this is reflected by the absence of any data fields in the interface
+   structure. All structure contains are function pointers.
+
+   This means you cannot store attributes or maintain any internal state in an interface. The
+   responsibility of maintaining state (such as variables like speed or fuelLevel) lies with the
+   structures that implement the interface.
+
+typedef struct {
+	void (*start)();  // No member variables, only function pointers
+	void (*stop)();
+} Vehicle;
+
+Concrete Implementations Required for All Methods
+   Any structure that implements an interface must provide concrete implementations for all the methods
+   defined by the interface. This ensures that any structure claiming to implement an interface adheres
+   to the full contract of the interface, providing consistent behavior across different
+   implementations.
+
+   For example, if the Vehicle interface defines start() and stop() methods, then a Car or Motorcycle
+   structure implementing the Vehicle interface must implement both methods:
+
+// Implementing the Interface
+void carStart() {
+	printf("Car is starting\n");
+}
+
+void carStop() {
+	printf("Car is stopping\n");
+}
+
+Vehicle myCar = { .start = carStart, .stop = carStop };
+
+   The myCar instance now implements the Vehicle interface, adhering to its contract by providing
+   definitions for both start() and stop() methods.
+
+Supports Multiple Inheritance
+   One of the key advantages of interfaces is that they allow a form of multiple inheritance, which
+   abstract classes cannot. In C, a structure can implement multiple interfaces by including function
+   pointers from multiple interface structures. This allows a single structure to conform to multiple
+   behaviors without being restricted to a single inheritance hierarchy.
+
+   For instance, consider two interfaces: Vehicle (for starting and stopping) and Machine (for
+   maintenance). A Car structure can implement both:
+
+typedef struct {
+	void (*start)();
+	void (*stop)();
+} Vehicle;
+
+typedef struct {
+	void (*performMaintenance)();
+} Machine;
+
+// Implementing both interfaces
+void carStart() {
+	printf("Car is starting\n");
+}
+
+void carStop() {
+	printf("Car is stopping\n");
+}
+
+void carMaintenance() {
+	printf("Car is undergoing maintenance\n");
+}
+
+// Car structure implements both Vehicle and Machine interfaces
+typedef struct {
+	Vehicle vehicle;
+	Machine machine;
+} Car;
+
+Car myCar = { .vehicle = { .start = carStart, .stop = carStop },
+              .machine = { .performMaintenance = carMaintenance } };
+
+   In this example, Car implements both Vehicle and Machine interfaces, allowing it to adhere to both
+   sets of behaviors. This promotes greater flexibility in design by enabling multiple behavior
+   definitions that can be implemented by different structures.
+
+Interfaces are Ideal for Defining Roles or Behaviors
+   Interfaces are best suited for defining roles or behaviors that different objects can implement. For
+   example, in a program where different objects (e.g., Car, Boat, Plane) have the ability to start and
+   stop, the Vehicle interface can define those behaviors. Each object (structure) that implements the
+   Vehicle interface must provide specific implementations of those behaviors, such as how a Car starts
+   versus how a Boat starts.
+
+   The ability to define different behaviors for unrelated classes makes interfaces a powerful tool for
+   designing flexible, reusable code. This is particularly useful when multiple objects share the same
+   behavior but implement it in different ways.
+
+When to Use Abstract Classes in C
+   Abstract classes are a powerful tool in object-oriented programming, even when simulated in C. They
+   allow for code reuse, modularity, and scalability by defining common behaviors and properties that
+   multiple derived classes can inherit and modify as needed.
+
+   Here are key scenarios in which you should consider using abstract classes in C:
+     * When multiple derived classes share common functionality: Abstract classes allow you to define
+       shared behavior that can be inherited by multiple derived classes, reducing code duplication.
+     * When you anticipate future extensions: Abstract classes provide a flexible foundation that can
+       easily be extended with new features or functionality without major code changes.
+     * When different implementations share common properties or methods: Abstract classes let you
+       define common properties and methods, while allowing derived classes to implement their own
+       specific behavior.
+     * When you want to provide default implementations for some methods: Abstract classes enable you to
+       offer default behavior for some methods while requiring derived classes to override others.
+     * When you need a strong class hierarchy: Abstract classes enforce a well-organized class
+       structure, ensuring consistency and clear inheritance patterns throughout your codebase.
+
+   Abstract classes in C are useful when designing code that requires shared functionality across
+   multiple derived classes. They provide flexibility, reusability, and the ability to extend your code
+   in the future.
+
+When to Use Interfaces in C
+   Interfaces are a powerful tool in designing flexible, modular, and loosely coupled systems,
+   especially when simulating object-oriented programming concepts in C. While abstract classes provide
+   a way to share common behavior across related classes, interfaces allow you to enforce specific
+   behaviors across different, potentially unrelated, classes.
+
+   Here are key scenarios in which interfaces should be used in C:
+     * When you want to implement multiple functionalities across unrelated classes: Interfaces allow a
+       structure to implement several unrelated behaviors, providing more flexibility in design.
+     * When you want to promote loose coupling and code maintainability: Interfaces enforce a contract
+       without dictating the implementation, reducing dependencies between components and improving
+       maintainability.
+     * When you need to define a standard contract for different implementations: Interfaces ensure that
+       different classes adhere to the same set of method signatures, providing consistency across
+       varying implementations.
+     * When you want to enable flexibility through multiple implementations: Interfaces allow different
+       classes to implement the same behavior in their own unique way, promoting modularity and reuse.
+     * When you want to decouple code from specific implementations: Interfaces abstract the
+       implementation details, allowing you to switch out underlying logic without affecting
+       higher-level code.
+
+   Interfaces in C offer a way to enforce behavior while promoting flexibility, loose coupling, and
+   maintainability. They allow you to define a set of methods that must be implemented by any structure,
+   regardless of the specifics of how the methods are implemented.
+
+Best Practices for Using Abstract Classes and Interfaces
+   Understanding when and how to use abstract classes and interfaces is crucial for building scalable,
+   maintainable, and modular code.
+
+Abstract Classes Should Adhere to the Single Responsibility Principle (SRP)
+   The Single Responsibility Principle (SRP) suggests that a class should only have one reason to
+   change, meaning it should focus on providing a single set of closely related functionalities. When
+   using abstract classes, it's important to avoid cramming too many unrelated responsibilities into one
+   class. Doing so not only violates SRP but also makes the code harder to maintain, extend, and debug.
+
+   For instance, if you have an abstract class Vehicle, it should only contain methods and properties
+   related to basic vehicle behaviors like start(), stop(), or speed. Any specialized responsibilities
+   like flying or sailing should be defined in separate classes or interfaces. This keeps the class
+   hierarchy clean and ensures that the abstract class provides a clear, focused functionality.
+
+Use Abstract Classes for Shared Code, Interfaces for Multiple Inheritance or Pure Behavioral Contracts
+   One of the key considerations when choosing between abstract classes and interfaces is whether you
+   need to share code or define a strict behavioral contract:
+     * Abstract Classes: Use abstract classes when you have some shared behavior that multiple derived
+       classes can inherit and reuse. Abstract classes are ideal when there's a need for common
+       functionality across different classes, but you still want to allow flexibility in certain
+       methods (via abstract methods).
+     * Interfaces: Use interfaces when you want to enforce a specific behavior without prescribing how
+       that behavior should be implemented. Interfaces are particularly useful when you need multiple
+       inheritance or when classes need to adhere to a contract but may be unrelated.
+
+Keep Class Structure Simple and Intuitive
+   A common pitfall when working with abstract classes and interfaces is over-complicating the design.
+   It's tempting to create multiple abstract methods or use too many interfaces, but this can lead to
+   complex, difficult-to-read code that becomes hard to maintain. To avoid this, strive to keep your
+   class structure simple and intuitive by limiting the number of abstract methods or interfaces to what
+   is necessary.
+
+Leverage Abstract Classes for Code Reuse
+   One of the primary reasons to use abstract classes is to facilitate code reuse. When several classes
+   share common functionality, abstract classes allow you to centralize that shared code while still
+   leaving room for flexibility through abstract methods. This reduces code duplication and makes it
+   easier to maintain.
+
+    For example, if multiple types of vehicles (e.g., Car, Bike, Truck) need to implement start() and
+   stop() methods in the same way, placing these methods in an abstract Vehicle class makes sense.
+   Derived classes can then reuse the common code while overriding only the methods that differ, such as
+   accelerate() or refuel().
+
+Choosing Between Abstract Classes and Interfaces in C
+   Both abstract classes and interfaces serve specific purposes in object-oriented design. Abstract
+   classes allow you to define shared functionality and state, while interfaces provide a way to enforce
+   a contract of behaviors across unrelated classes.
+
+   Abstract classes are ideal when you have common behavior or code that can be inherited and reused by
+   multiple derived classes, whereas interfaces are best suited when you need multiple inheritance or
+   want to enforce a set of behaviors without dictating how those behaviors are implemented.
+
+   If your classes share common functionality, an abstract class can streamline your code by reducing
+   duplication and promoting reuse. However, if you need to define multiple behaviors that can be
+   implemented by different and unrelated classes, interfaces will provide the flexibility you need
+   while promoting loose coupling in your system design.
+
+
+---
+https://www.linkedin.com/advice/3/how-can-you-implement-interface-c-skills-programming-ybo2e
+
+How can you implement an interface in C?
+
+C is a powerful and widely used programming language, but it does not support object-oriented features like
+classes, inheritance, and polymorphism. However, you can still implement some of these concepts using
+structs, pointers, and function pointers. In this article, you will learn how to create and use an interface
+in C, which is a way of defining a set of functions that a struct must implement to perform a certain role.
+
+1 What is an interface in C?
+An interface in C is not a keyword or a built-in type, but a convention that programmers use to achieve a
+form of polymorphism. Polymorphism means that you can use different types of objects interchangeably as long
+as they have the same behavior or functionality. An interface is a way of specifying what functions a struct
+must provide to be considered as a certain type of object. For example, you can define an interface for a
+shape that has functions to calculate its area and perimeter, and then create structs for different shapes
+that implement those functions.
+
+2 How to declare an interface in C?
+To declare an interface in C, you need to define a struct that contains only function pointers. A function
+pointer is a variable that stores the address of a function, and can be used to call that function. Each
+function pointer in the struct represents a function that the interface requires. You also need to give the
+struct a name that describes the interface, such as shape_interface. Here is an example of how to declare an
+interface for a shape:
+
+// Declare an interface for a shape
+struct shape_interface {
+	// Function pointers for the interface functions
+	double (*area)(void *);
+	double (*perimeter)(void *);
+};
+
+3 How to implement an interface in C?
+To implement an interface in C, you need to create a struct that contains the data fields for the object, and
+a pointer to the interface struct. The pointer to the interface struct is used to link the object to the
+interface functions. You also need to define the functions that match the signature of the interface
+functions, and assign them to the function pointers in the interface struct. Here is an example of how to
+implement an interface for a circle:
+
+// Define a struct for a circle
+struct circle {
+	// Data fields for the circle
+	double radius;
+
+	// Pointer to the interface struct
+	struct shape_interface* shape;
+};
+
+// Define the area function for the circle
+double circle_area(void* obj) {
+	// Cast the void pointer to a circle pointer
+	struct circle* c = (struct circle*) obj;
+
+	// Return the area of the circle
+	return 3.14 * c->radius * c->radius;
+}
+
+// Define the perimeter function for the circle
+double circle_perimeter(void* obj) {
+	// Cast the void pointer to a circle pointer
+	struct circle* c = (struct circle*) obj;
+
+	// Return the perimeter of the circle
+	return 2 * 3.14 * c->radius;
+}
+
+// Create a global instance of the interface struct
+struct shape_interface circle_interface = {
+	// Assign the interface functions to the function pointers
+	circle_area,
+	circle_perimeter
+};
+
+// Create a function to initialize a circle
+struct circle* circle_new(double radius) {
+	// Allocate memory for the circle
+	struct circle* c = malloc(sizeof(struct circle));
+
+	// Set the data fields of the circle
+	c->radius = radius;
+
+	// Set the pointer to the interface struct
+	c->shape = &circle_interface;
+
+	// Return the circle
+
+	return c;
+}
+
+4 How to use an interface in C?
+To use an interface in C, you need to create a pointer to the interface struct, and assign it to the pointer
+of the object that implements the interface. Then, you can use the pointer to the interface struct to call
+the interface functions on the object. You can also use the same pointer to the interface struct to point to
+different objects that implement the same interface, and use them polymorphically. Here is an example of how
+to use an interface for a shape:
+
+// Create a pointer to the interface struct
+struct shape_interface* shape;
+
+// Create a circle and assign it to the interface pointer
+struct circle* c = circle_new(5);
+shape = c->shape;
+
+// Call the interface functions on the circle
+printf("The area of the circle is %f\n", shape->area(c));
+printf("The perimeter of the circle is %f\n", shape->perimeter(c));
+
+// Create another struct that implements the shape interface, such as a rectangle
+// Assign it to the same interface pointer
+// Call the interface functions on the rectangle
+// The code for the rectangle is omitted for brevity
+
+
+===
+Comments:
+
+***
+While C doesn't natively support interfaces like object-oriented languages, you can achieve similar
+functionality using several techniques:
+
+1. Function Pointers:
+This approach uses a struct to hold function pointers corresponding to the desired interface methods. The
+actual implementation of the methods is provided by the concrete object that "implements" the interface.
+Here's an example:
+
+#include <stdio.h>
+
+// Interface using function pointers
+typedef struct {
+	int (*add)(int a, int b);
+} MathInterface;
+
+// Concrete Imp
+int math_add(int a, int b) {
+	return a + b;
+}
+
+// Usage
+int main() {
+	MathInterface math = {math_add};
+
+	// Assign implementation to interface
+	int result = math.add(5, 3);
+	printf("5 + 3 = %d\n", result);
+
+	return 0;
+}
+
+***
+    Following is the declaration of the IAnimal Interface in C, with two void methods, which are declared but
+    not defined.
+struct IAnimal {
+	void (*color)();
+	void (*sound)();
+};
+
+***
+    To declare an interface, you typically define a struct containing function pointers. Each function
+    pointer represents a method that the interface will expose. For example:
+typedef struct {
+	void (*function1)(void);
+	int (*function2)(int);
+} MyInterface;
+
+	This struct now acts as a template for any concrete implementation that will follow this interface.
+
+***
+    In C, you can declare an interface using a header file (.h file) that contains function prototypes
+    without any implementation. Here's a simple example:
+
+#ifndef INTERFACE_H
+#define INTERFACE_H
+
+int add(int a, int b);
+int subtract(int a, int b);
+#endif
+
+	Other parts of the program can include this header file and use the declared functions. However, the
+	implementation details of these functions must be provided separately, typically in a corresponding source
+	file (.c file).
+
+***
+    It's worth noting that pointers to void in C are extremely unsafe (well, it's the nature of C, after
+    all). In C, a pointer to void works like a top type (although it's not exactly the same thing), and thus
+    can reference anything. This means that you can assign a non-function to your pointer, which will result
+    in runtime unexpected behavior. To avoid this, you have to be very careful on how you are using your
+    "interface", and can use the help of many tools available to detect these kind of problems.
+
+***
+    For an interface IAnimal with two void methods Color and Sound, the following is the implementation
+
+struct IAnimal {
+	void (*color)();
+	void (*sound)();
+};
+// Implement methods
+void implementSound() {
+	printf ("sound");
+}
+
+void implementColor() {
+	printf("color");
+}
+
+***
+// Define the interface
+typedef struct {
+	void (*print)(void);
+} Printable;
+
+// Implement the interface for a class
+typedef struct {
+	Printable printable;
+	int x;
+} MyClass;
+
+void my_class_print(void) {
+	printf("Hello from MyClass!\n");
+}
+
+MyClass *new_my_class() {
+	MyClass* instance = malloc(sizeof(MyClass));
+	instance->printable.print = my_class_print;
+	instance->x = 10; return instance;
+}
+
+int main() {
+	MyClass *my_class_instance = new_my_class();
+	my_class_instance->printable.print();
+	free(my_class_instance);
+
+	return 0; }
+
+     In this example, Printable is an interface with a single method print.
+
+***
+    In C, you can implement an interface using function pointers. Here's a basic example to demonstrate how
+    this can be done: Suppose you have an interface defined in a header file interface.h:
+
+#ifndef INTERFACE_H
+#define INTERFACE_H
+typedef struct {
+	void (*doSomething)(int);
+	int (*doSomethingElse)(char*);
+} Interface;
+
+***
+    To use the interface, you simply call the functions using the interface instance. For example:
+myInterface.function1();
+int result = myInterface.function2(5);
+
+    This way, the functions are called indirectly through the interface, enabling a form of polymorphism.
+
+***
+    Pointers represent a level of indirection in C, much like interfaces in OO languages. Hence, you use
+    pointers wherever you do not want to use the concrete representation of any item. The calling function
+    does not know what type of struct has exactly been passed as long as the pointer of one has the same
+    semantics as the pointer of another, which is what happens when you use an interface. Hence, if you have
+    an interface IVehicle, and you assign the pointer of Car, as long as they have members with the same
+    name, the code will work without knowing that the item passed is a pointer to struct Car, which helps
+    achieve high level of abstraction and modularity.
+
+***
+    Create instances of concrete types that implement the interface.Access methods through the interface's
+    function pointers.Example:
+void use_interface(Interface* obj) {
+	obj->method1();
+	// Call method1 through the interface
+	int result = obj->method2(42);
+
+	// Call method2 with argument through the interface }
+
+***
+    (example part4) To use the interface, first we have to allocate a component. Then, we write a function
+    that requires an interface as argument and the neeeded parameters.
+
+static A* new_A(const int i) {
+	A* newA=malloc(sizeof(A));
+	newA->vtbl=&A_VtblImpl;
+	newA->_i=i; return newA;
+}
+
+static void delete_A(A* pa) {
+	free(pa);
+}
+
+static void UseIMy1(void* const this, const IMy1* const piMy1, const int value)
+	{ piMy1->f(this, value);
+}
+
+static void UseIMy2(void* const this, const IMy2* const piMy2, const int value)
+	{ piMy2->g(this, value);
+}
+
+int main() {
+	A* pa1=new_A(42);
+	UseIMy1(pa1, &pa1->vtbl->_imy_vtbl_1, 84);
+	UseIMy2(pa1, &pa1->vtbl->_imy_vtbl_2, 84);
+	delete_A(pa1);
+
+	return 0;
+}
+
+***
+    To utilize the interface in C, you invoke functions by referencing the interface instance directly. For
+    instance:
+myInterface.function1();
+int result = myInterface.function2(10);
+
+    This approach enables the invocation of functions indirectly through the interface, introducing a form of
+    polymorphism. The interface instance acts as a gateway, allowing seamless interaction with various
+    implementations that adhere to the same interface contract. This flexibility fosters a polymorphic
+    behavior, where different objects can be seamlessly interchanged based on their shared interface
+    functions.
+
+
+---
+
