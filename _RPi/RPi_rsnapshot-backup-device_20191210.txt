@@ -1,0 +1,477 @@
+filename: RPi_rsnapshot-backup-device_20191210.txt
+https://dvpizone.wordpress.com/2014/03/08/using-rsnapshot-with-a-raspberry-pi-to-create-a-backup-device/
+
+Using rsnapshot with a Raspberry Pi to create a backup device
+
+   In this posting we are going to turn a Raspberry Pi into a backup device, using the excellent
+   rsnapshot utility to save full and incremental backups to an external USB hard drive. More
+   information about rsnapshot can be found at http://www.rsnapshot.org/.
+
+Preparation of the Raspberry Pi
+     * Follow the instructions at How to install the Raspbian OS on a Raspberry Pi.
+     * Change the hostname of your Raspberry Pi to something more meaningful by logging on to the device
+       as user "pi" and issuing the command:
+       sudo raspi-config
+     * Select "Advanced Options" and set the following:
+          + Hostname = pi-rsync (or whatever you want to call it).
+     * Select Finish
+     * Reboot the Raspberry Pi
+
+Install rsnapshot
+     * Installing the rsnapshot package is as easy as entering the command:
+       $> sudo apt-get install rsnapshot
+     * On completion, create a directory in which the backups will be stored. For the moment we will
+       back up to the /tmp/ directory on the Raspberry Pi's SD card, but once we are happy it is
+       working, we will mount an external hard disk and back up to that. For now, type:
+       $> mkdir /tmp/backup
+       This directory will be lost whenever the Raspberry Pi is rebooted, so it should not be used as a
+       permanent storage location. Also, we want to avoid writing to the SD card as much as possible, as
+       this will shorten it's working life.
+
+Configure the backup
+     * Create an rsnapshot configuration file by entering the command:
+       $> sudo vi /etc/rsnapshot.conf.pi-rsync
+       ...and paste the following into the file (note that tab characters are used between the parameters,
+       NOT spaces. Spaces will cause rsnapshot to fail when you test it):
+       <code>
+       #################################################
+       # rsnapshot.conf - rsnapshot configuration file #
+       #################################################
+       # #
+       # PLEASE BE AWARE OF THE FOLLOWING RULES: #
+       # #
+       # This file requires tabs between elements #
+       # #
+       # Directories require a trailing slash: #
+       # right: /home/ #
+       # wrong: /home #
+       # #
+       #################################################
+       #######################
+       # CONFIG FILE VERSION #
+       #######################
+       config_version 1.2
+       ###########################
+       # SNAPSHOT ROOT DIRECTORY #
+       ###########################
+       # All snapshots will be stored under this root directory.
+       snapshot_root /tmp/backup/
+       # If no_create_root is enabled, rsnapshot will not automatically create the
+       # snapshot_root directory. This is particularly useful if you are backing
+       # up to removable media, such as a FireWire or USB drive.
+       no_create_root 1
+       cmd_cp /bin/cp
+       cmd_rm /bin/rm
+       cmd_rsync /usr/bin/rsync
+       cmd_ssh /usr/bin/ssh
+       cmd_logger /usr/bin/logger
+       cmd_du /usr/bin/du
+       #interval hourly 6
+       interval daily 7
+       interval weekly 4
+       interval monthly 12
+       interval yearly 2
+       verbose 2
+       loglevel 3
+       logfile /var/log/rsnapshot
+       lockfile /var/run/rsnapshot.pid
+       ssh_args -o BatchMode=yes
+       #include ???
+       #include ???
+       #exclude ???
+       #exclude ???
+       #include_file /path/to/include/file
+       #exclude_file /path/to/exclude/file
+       backup /home/pi/ pi-rsync/
+       </code>
+
+     * Test that the backup works with the command:
+       $> sudo /usr/bin/rsnapshot -c /etc/rsnapshot.conf.pi-rsync daily
+       The last line of the configuration file told rsnapshot to copy the /home/pi/ directory to the
+       directory pi-rsync/ under /tmp/backup/ (which is the "snapshot_root" directory).
+     * If the test succeeded, you will find the backup by typing the command:
+       $> sudo ls -l /tmp/backup/pi-rsync
+       Below this you will find the directory daily.0 which contains a complete replica of the /home/pi/
+       directory. If you run the test again, daily.0 will be moved to daily.1, and a new daily.0 will be
+       created with the same files. However, because the files are linked, and they haven't changed, the
+       backup will be no larger than before. Clever, eh?
+
+Change the backup destination to an external USB drive
+   Once you have confirmed that rsnapshot is working correctly, an external USB hard disk can be mounted
+   on the Pi to allow for far greater storage capacity for backups. Ideally, the USB hard drive that you
+   choose should be mains powered, as the Pi cannot provide much power to external devices.
+   Alternatively, a powered USB hub could be used as an intermediary between the Pi and the USB drive.
+     * Follow the instructions at How to mount and automount a USB hard drive on the Raspberry Pi.
+     * Ensure that the USB drive is mounted to /mnt/USB/
+     * Change the rsnapshot configuration file by entering the command:
+       $> sudo vi /etc/rsnapshot.conf.pi-rsync
+       ...and change the line:
+       snapshot_root /tmp/backup/
+       ...to:
+       snapshot_root /mnt/USB/
+     * Test that the backup still works with the command:
+       $> sudo /usr/bin/rsnapshot -c /etc/rsnapshot.conf.pi-rsync daily
+       Because we changed "snapshot_root" directory, you should now fine the backup under
+       /mnt/USB/pi-rsync/daily.0
+
+Add pi-owncloud to the backup
+   In the next set of instructions, we will configure backing up the ownCloud server we created in
+   [**1]How to install ownCloud on a Raspberry Pi. Here, we will backup the /var/www/owncloud/ directory
+   owned by the user "www-data" and an export of the database, which is saved to the /home/pi/ directory
+   and owned by the user "pi".
+
+On the pi-rsync device:
+     * Open a command shell as the root user, create a directory in which to store our key pairs, and
+       then change to that directory:
+       $> sudo bash
+       $> mkdir -p ~/.ssh
+       $> cd ~/.ssh
+     * Create a key pair which will be used for authorizing access from pi-rsync to pi-owncloud:
+       $> ssh-keygen -t dsa -b 1024 -f ./pi-owncloud-rsnapshot-key
+       (Press "Enter" when asked for a passphrase, leaving the passphrase empty).
+     * Now type the command:
+       $> vi ~/.ssh/config
+       ...and paste the following to the end of the file:
+       Host remotehost-rsnapshot-pi-owncloud
+       Hostname 192.168.0.129
+       IdentityFile /root/.ssh/pi-owncloud-rsnapshot-key
+       Save it, and exit vi.
+     * Change the permissions, to increase security:
+       $> chmod 700 ~/.ssh
+       $> chmod 600 ~/.ssh/*-rsnapshot-key
+     * Exit the root user:
+       $> exit
+
+On the pi-owncloud device:
+     * Schedule a backup of the owncloud SQLLite database to occur every day at 10:50, by opening the
+       crontab file:
+       $> sudo crontab -e
+       ...and adding the following:
+       50 10 * * * sqlite3 /var/www/owncloud/data/owncloud.db .dump > /home/pi/owncloud-sqlbkp.bak
+       Save it, and exit vi. Note that this backup will be overwritten every day on the Raspberry Pi,
+       but that's fine because it will be backed up daily to pi-rsync.
+     * Add the content of the file /root/.ssh/pi-owncloud-rsnapshot-key.pub on pi-rsync to the file
+       /home/pi/.ssh/authorized_keys on pi-owncloud
+     * Add the content of the file /root/.ssh/pi-owncloud-rsnapshot-key.pub on pi-rsync to the file
+       /var/www/.ssh/authorized_keys on pi-owncloud
+     * Ensure that user "www-data" can connect to the pi-owncloud device via ssh. Issue the following
+       command:
+       $> sudo vi /etc/ssh/sshd_config
+       ...and change the "AllowUsers" line to include "www-data", for example:
+       AllowUsers pi www-data
+     * Restart ssh by running the command:
+       $> sudo service ssh restart
+
+On the pi-rsync device:
+     * Test that you can connect to pi-owncloud as user "pi" from pi-rsync with the command:
+       $> sudo ssh pi@remotehost-rsnapshot-pi-owncloud
+       ...and test that you can also connect to pi-owncloud as user "www-data" from pi-rsync with the
+       command:
+       $> sudo ssh www-data@remotehost-rsnapshot-pi-owncloud
+       ...and when you have confirmed that you have opened a shell on the remote server, quit the remote
+       shell with the command:
+       $> exit
+
+Restrict access to pi-owncloud by IP address
+     * Tighten up the security a little, so that only the IP address of pi-rsync can connect to
+       pi-owncloud using this key. You need to know the IP address of pi-rsync, which you can get by
+       entering the command:
+       $> ifconfig
+     * Edit the authorized_keys file for user "pi" on the pi-owncloud device by entering the command:
+       $> sudo vi /home/pi/.ssh/authorized_keys
+       ...and insert the following at the very start of the key you just pasted in the previous section.
+       Note that there is a trailing space character after the last double-quote, and that you need to
+       replace the IP address with that of your own pi-rsync:
+       from="192.168.0.105"
+     * Test the connection again from pi-rsync with the command:
+       $> sudo ssh pi@remotehost-rsnapshot-pi-owncloud
+       ...and when you have confirmed that you have opened a shell on the remote server, quit the remote
+       shell with:
+       $> exit
+     * Now do the same for the "www-data" user. Edit the authorized_keys file for user "pi" on the
+       pi-owncloud device by entering the command:
+       $> sudo vi /var/www/.ssh/authorized_keys
+       ...and insert the following at the very start of the key you just pasted in the previous section.
+       Note that there is a trailing space character after the last double-quote, and that you need to
+       replace the IP address with that of your own pi-rsync:
+       from="192.168.0.105"
+     * Test the connection again from pi-rsync with the command:
+       $> sudo ssh www-data@remotehost-rsnapshot-pi-owncloud
+       ...and when you have confirmed that you have opened a shell on the remote server, quit the remote
+       shell with:
+       $> exit
+
+Restrict the commands that can be run by pi-rsync on pi-owncloud
+     * To tighten up security further, so that only rsync commands can be run on pi-owncloud using this
+       key, edit the authorized_keys file on pi-owncloud with:
+       $> sudo vi /home/pi/.ssh/authorized_keys
+       ...and change the command at the start of the key with the following. Note that there is a
+       trailing space character after the last double-quote, and that you need to replace the IP address
+       with that of your own pi-rsync:
+       from="192.168.0.105",command="/usr/local/sbin/validate-rsync"
+     * Now do the same for the key in www-data.edit the authorized_keys file on pi-owncloud with:
+       $> sudo vi /var/www/.ssh/authorized_keys
+       , and change the command at the start of the key with the following. Note that there is a
+       trailing space character after the last double-quote, and that you need to replace the IP address
+       with that of your own pi-rsync:
+       from="192.168.0.105",command="/usr/local/sbin/validate-rsync"
+       .
+     * Now run the following on pi-owncloud:
+       $> sudo vi /usr/local/sbin/validate-rsync
+       ...and paste the following into the file:
+       <code>
+       #!/bin/sh
+       case "$SSH_ORIGINAL_COMMAND" in
+       *\&*)
+       echo "Rejected"
+       ;;
+       *\(*)
+       echo "Rejected"
+       ;;
+       *\{*)
+       echo "Rejected"
+       ;;
+       *\;*)
+       echo "Rejected"
+       ;;
+       *\<*)
+       echo "Rejected"
+       ;;
+       *\$(*)
+       echo "Rejected"
+       ;;
+       *\|*)
+       echo "Rejected"
+       ;;
+       rsync\ --server*)
+       $SSH_ORIGINAL_COMMAND
+       ;;
+       *)
+       echo "Rejected"
+       ;;
+       esac
+       </code>
+     * Change the permission with:
+       $> sudo chmod +x /usr/local/sbin/validate-rsync
+
+Configure rsnapshot to run
+     * Add the following 3 lines to the bottom of /etc/rsnapshot.conf.pi-rsync on pi-rsync (the spaces
+       between the fields must actually be tabs)
+       # pi-owcloud = ownCloud server on pi
+       backup www-data@remotehost-rsnapshot-pi-owncloud:/var/www/owncloud pi-owncloud/
+       backup pi@remotehost-rsnapshot-pi-owncloud:/home/pi/ pi-owncloud/
+     * Test that the backup works with:
+       $> sudo /usr/bin/rsnapshot -c /etc/rsnapshot.conf.pi-rsync daily
+
+Configure cron
+     * open the crontab by typing the command:
+       $> sudo crontab -e
+       ...and paste the following into the file:
+       45 22 * * * /usr/bin/rsnapshot -c /etc/rsnapshot.conf.pi-rsync daily
+       30 22 * * 0 /usr/bin/rsnapshot -c /etc/rsnapshot.conf.pi-rsync weekly
+       15 22 1 * * /usr/bin/rsnapshot -c /etc/rsnapshot.conf.pi-rsync monthly
+       0 22 1 12 * /usr/bin/rsnapshot -c /etc/rsnapshot.conf.pi-rsync yearly
+       Save and exit the file
+
+
+---
+[**1]
+https://dvpizone.wordpress.com/2014/03/05/how-to-install-owncloud-on-a-raspberry-pi/
+
+How to install ownCloud on a Raspberry Pi
+
+   In this posting, we are going to install a personal Cloud package, called "ownCloud", on a Raspberry
+   Pi.
+
+Preparation of the Raspberry Pi
+     * Follow the instructions at How to install the Raspbian OS on a Raspberry Pi.
+     * Change the hostname of your Raspberry Pi to something more meaningful by logging on to the device
+       as user "pi" and issuing the command:
+       $> sudo raspi-config
+     * Select "Advanced Options" and set the following:
+          + Hostname = pi-owncloud (or whatever you want to call it).
+     * Select Finish
+     * Reboot the Raspberry Pi
+
+Install PHP, SqlLite, the Nginx web server, and other support packages
+   These instructions have been modified from thos originally found at
+   http://www.techjawab.com/2013/09/how-to-setup-your-own-cloud-on.html.
+     * Create a user for the Nginx web server with the command:
+       $> sudo groupadd www-data ; sudo usermod -a -G www-data www-data
+     * Install the necessary packages with the command:
+       $> sudo apt-get install nginx openssl ssl-cert php5-cli php5-sqlite php5-gd php5-curl php5-common
+       php5-cgi sqlite3 php-pear php-apc curl libapr1 libtool curl libcurl4-openssl-dev php-xml-parser
+       php5 php5-dev php5-gd php5-fpm memcached php5-memcache varnish
+     * Create your SSL certificates (which will last for 2 years) with the commands:
+       $> sudo openssl req $@ -new -x509 -days 730 -nodes -out /etc/nginx/cert.pem -keyout
+       /etc/nginx/cert.key
+       $> sudo chmod 600 /etc/nginx/cert.pem ; sudo chmod 600 /etc/nginx/cert.key
+
+Configure the Nginx web server
+     * Open the configuration file for editing:
+       $> sudo vi /etc/nginx/nginx.conf
+     * Because the Raspberyy Pi only has 2 cores, change
+       worker_processes 4;
+       ...to:
+       worker_processes 2;
+     * Change the top of the http section to:
+       http {
+       ##
+       # Basic Settings
+       ##
+       sendfile on;
+       tcp_nopush on;
+       tcp_nodelay on;
+       # keepalive_timeout 65;
+       types_hash_max_size 2048;
+       server_tokens off;
+       client_header_timeout 10;
+       client_body_timeout 10;
+       keepalive_timeout 10 10;
+       send_timeout 10;
+     * Change the Gzip section from:
+       ##
+       # Gzip Settings
+       ##
+       gzip on;
+       gzip_disable "msie6";
+       # gzip_vary on;
+       # gzip_proxied any;
+       # gzip_comp_level 6;
+       # gzip_buffers 16 8k;
+       # gzip_http_version 1.1;
+       # gzip_types text/plain text/css application/json application/x-javascript text/xml
+       application/xml application/xml+rss text/javascript;
+       ...to:
+       ##
+       # Gzip Settings
+       ##
+       gzip on;
+       gzip_disable "msie6";
+       gzip_min_length 1100;
+       gzip_vary on;
+       gzip_proxied any;
+       gzip_comp_level 6;
+       gzip_buffers 16 8k;
+       gzip_http_version 1.1;
+       gzip_types text/plain text/css application/json application/x-javascript text/xml application/xml
+       application/xml+rss text/javascript;
+     *
+     * Now do the following:
+       $> sudo vi /etc/php5/fpm/pool.d/www.conf
+       ...and uncomment the following two lines::
+       listen.owner = www-data
+       listen.group = www-data
+     * Enter the following command:
+       $> sudo vi /etc/nginx/sites-available/default
+     * ...and replace the entire content of the file with the code below (taken from
+       http://doc.owncloud.org/server/5.0/admin_manual/installation/installation_others.html#nginx-c
+       onfiguration). Note: You'll have to replace two occurrences of 192.168.XXX.XXX with the local IP
+       address of your Raspberry Pi.
+<code>
+       server {
+           listen 80;
+           server_name 192.168.XXX.XXX;
+           return 301 https://$server_name$request_uri; # enforce https
+       }
+       server {
+           listen 443 ssl;
+           server_name 192.168.XXX.XXX;
+           ssl_certificate /etc/nginx/cert.pem;
+           ssl_certificate_key /etc/nginx/cert.key;
+           # Path to the root of your installation
+           root /var/www/owncloud;
+           client_max_body_size 1000M; # set max upload size
+           fastcgi_buffers 64 4K;
+           rewrite ^/caldav(.*)$ /remote.php/caldav$1 redirect;
+           rewrite ^/carddav(.*)$ /remote.php/carddav$1 redirect;
+           rewrite ^/webdav(.*)$ /remote.php/webdav$1 redirect;
+           index index.php;
+           error_page 403 /core/templates/403.php;
+           error_page 404 /core/templates/404.php;
+           location = /robots.txt {
+               allow all;
+               log_not_found off;
+               access_log off;
+           }
+           location ~ ^/(data|config|\.ht|db_structure\.xml|README) {
+               deny all;
+           }
+           location / {
+               # The following 2 rules are only needed with webfinger
+               rewrite ^/.well-known/host-meta /public.php?service=host-meta last;
+               rewrite ^/.well-known/host-meta.json /public.php?service=host-meta-json last;
+               rewrite ^/.well-known/carddav /remote.php/carddav/ redirect;
+               rewrite ^/.well-known/caldav /remote.php/caldav/ redirect;
+               rewrite ^(/core/doc/[^\/]+/)$ $1/index.html;
+               try_files $uri $uri/ index.php;
+           }
+           location ~ ^(.+?\.php)(/.*)?$ {
+               try_files $1 = 404;
+               include fastcgi_params;
+               fastcgi_param SCRIPT_FILENAME $document_root$1;
+               fastcgi_param PATH_INFO $2;
+               fastcgi_param HTTPS on;
+               fastcgi_pass 127.0.0.1:9000;
+               # Or use unix-socket with 'fastcgi_pass unix:/var/run/php5-fpm.sock;'
+           }
+           # Optional: set long EXPIRES header on static assets
+           location ~* ^.+\.(jpg|jpeg|gif|bmp|ico|png|css|js|swf)$ {
+               expires 30d;
+               # Optional: Don't log access to assets
+               access_log off;
+           }
+       }
+</code>
+
+Configure the maximum upload limit for php
+     * Enter the following command to edit the file:
+       $> sudo vi /etc/php5/fpm/php.ini
+     * ...and set:
+       upload_max_filesize = 1000M
+       post_max_size = 1000M
+     * At the end of the file, add  the following:
+       upload_tmp_dir = /srv/http/owncloud/data
+       extension = apc.so
+       apc.enabled = 1
+       apc.include_once_override = 0
+       apc.shm_size = 256
+
+Configure PHP
+     * Enter the following command:
+       $> sudo vi /etc/php5/fpm/pool.d/www.conf
+     * Change the following line from:
+       listen = /var/run/php5-fpm.sock
+       ...to
+       listen = 127.0.0.1:9000
+
+Increase the size of the swap file
+     * Enter the following command:
+       $> sudo vi /etc/dphys-swapfile
+       ...and change the following line from:
+       CONF_SWAPSIZE=100
+       ...to :
+       CONF_SWAPSIZE=512
+     * Restart the web server and Php with the commands:
+       $> sudo /etc/init.d/php5-fpm restart
+       $> sudo /etc/init.d/nginx restart
+
+Install ownCloud
+   Enter the following commands to install ownCloud on your Raspberry Pi (by the time you read, this
+   there may be a newer version of ownCloud available).
+     * To create a folder for ownCloud with the relevant rights, enter the following commands:
+       $> sudo mkdir -p /var/www/owncloud
+       $> sudo wget http://download.owncloud.org/community/owncloud-6.0.2.tar.bz2
+       $> sudo tar xvf owncloud-6.0.2.tar.bz2
+       $> sudo mv owncloud/ /var/www/
+       $> sudo chown -R www-data:www-data /var/www
+       $> rm -rf owncloud owncloud-6.0.2.tar.bz2
+
+Finally:
+     * Go to https://192.168.XXX.XXX/ (replace the address with your own IP address) and create an
+       Admin account.
+     * You should now have a working copy of ownCloud on your Raspberry Pi, and you can follow the
+       manual at http://owncloud.org/ to figure out how it works.
+
+
+---

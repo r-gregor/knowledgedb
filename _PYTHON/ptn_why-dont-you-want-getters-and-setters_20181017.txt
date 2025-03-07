@@ -1,0 +1,208 @@
+filename: ptn_why-dont-you-want-getters-and-setters_20181017.txt
+http://stupidpythonideas.blogspot.com/2015/01/why-dont-you-want-getters-and-setters.html
+
+Why don't you want getters and setters?
+If you've migrated to Python from C++ or one of its descendants (Java, C#, D, etc.), or to a lesser extent
+from other OO languages (Objective C, Ruby, etc.), the first time you asked for help on StackOverflow or
+CodeReview or python-list or anywhere else, the first response you got was probably: "Get rid of those
+getters and setters."
+
+If you asked why, you probably got no more of an answer than "You don't need them in Python."
+
+That's exactly the response you should get—but that doesn't mean it's a bad question, just that SO is
+the wrong place to answer it (especially in comments).
+
+To answer the question, we have to look at why getters and setters are idiomatic in those other languages,
+and see why the same idioms aren't appropriate in Python.
+Encapsulation
+The first reason you're usually given for using getters and setters is "for encapsulation: consumers of
+your class shouldn't even know that it has an attribute x, much less be able to change it willy-nilly."
+
+As an argument for getters and setters, this is nonsense. (And the people who write the C++ standard
+agree, but they can't stop people from writing misleading textbooks or tutorials.) Consumers of your
+class do know that you have an attribute x, and can change it willy-nilly, because you have a method
+named set_x. That's the conventional and idiomatic name for a setter for the x attribute, and it would
+be highly confusing to have a method with that name that did anything else.
+
+The point of encapsulation is that the class's interface should be based on what the class does, not on what
+its state is. If what it does is just represent a point with x and y values, then the x and y attributes
+themselves are meaningful, and a getter and setter don't make them any more meaningful. If what it does
+is fetch a URL, parse the resulting JSON, fetch all referenced documents, and index them, then the HTTP
+connection pool is not meaningful, and a getter and setter don't make it any more meaningful. Adding a
+getter and setter almost never improves encapsulation in any meaningful way.
+Computed properties
+"Almost always" isn't "always". Say what your class does is represent a point more abstractly, with x, y,
+r, and theta values. Maybe x and y are attributes, maybe they're computed on the fly from r and theta. Or
+maybe they're sometimes stored as attributes, sometimes computed, depending on how you constructed or
+most recently set the instance.
+
+In that case, you obviously do need getters and setters—not to hide the x and y attributes, but to
+hide the fact that there may not even be any x and y attributes.
+
+That being said, is this really part of the interface, or just an implementation artifact? Often it's
+the latter. In that case, in Python (as in some C++ derived languages, like C#, but not in C++ itself),
+you can, and often should, still present them as attributes even if they really aren't, by using @property:
+
+    class Point:
+        @property
+        def x(self):
+            if self._x is None:
+                self._x, self._y = Point._polar_to_rect(self._r, self._theta)
+            return self.x
+        @x.setter
+        def x(set, value):
+            if self._x is None:
+                _, self._y = Point._polar_to_rect(self._r, self._theta)
+            self._x = x
+            self._r, self._theta = None, None
+        # etc.
+Lifecycle management
+Sometimes, at least in C++ and traditional ObjC, even the "dumb" version of encapsulation idea isn't
+actually wrong, just oversimplified. Preventing people from setting your attribute by giving them a method
+to set your attribute is silly—but in C++, direct access to an attribute allows you to do more than
+just set the attribute, it allows you to store a reference to it. And, since C++ isn't garbage-collected,
+this means that there's nothing stopping some code from keeping that reference around after your instance
+goes out of scope, at which point they've now got a reference to garbage. In fact, this can be a major
+source of bugs in C++ code.
+
+If you instead provide a getter or setter, you can ensure that consumers can only get a copy of the
+attribute. Or, if you need to provide a reference, you can hold the object by smart pointer and return a
+new smart pointer to the object. (Of course this means that people who—usually as a misguided attempt at
+optimization—write getters that return a const reference, or that return objects that aren't copy-safe,
+like raw pointers, are defeating the entire purpose of having getters and setters in the first place…)
+
+This rationale, which makes perfect sense in C++, is irrelevant to Python. Python is garbage collected. And
+Python doesn't provide any way to take references to attributes in the first place; the only thing you
+can do is get a new (properly-GC-tracked) reference to the value of the attribute. If your instance
+goes away, but someone else is still referencing one of the values you had in an attribute, that value
+is still alive and perfectly usable.
+Interface stability
+Maybe today, you're storing x and y as attributes, but what if you want to change your implementation
+to compute them on the fly?
+
+In some languages, like C++, if you're worried about that, the only option you have is to create useless
+getters and setters today, so that if you change the implementation tomorrow, your interface doesn't
+have to change.
+
+In Python, just expose the attribute; if you change the implementation tomorrow, change the attribute
+to a @property, and your interface doesn't have to change.
+Interface inheritance
+In most languages, a subclass can change the semantics by overriding a getter and setter, but they can't
+do the same to a normal attribute.
+
+Even in languages that have properties, in most cases, defining a property with the same name as a
+base-class attribute will not affect the base class's code—or, in many languages, even consumers of
+the base class's interface; all it'll do is shadow the base class's attribute with a different attribute
+for subclasses and direct consumers of the derived class's interface.
+
+Also, in most languages without two-stage initialization, the derived class's code doesn't get a chance
+to run until the base class's initializer has finished, so it's not just difficult, but impossible,
+to affect how it stores its attributes.
+
+In Python, attribute access is fully dynamic, and two-stage initialization means that __init__ methods
+can work downward toward the root instead of upward toward the leaf, so the answer is, again, just @property.
+Design by contract
+Some tutorials and textbooks explain the need for setters by arguing that you can add pre- and post-condition
+tests to the setter, to preserve class invariants. Which is all well and good, but every case I've ever seen,
+they go on to show a simple void set_x(int x) {x_ = x; } in the first example, and every subsequent one.
+
+Needless to say, if you really are going to implement DBC today, this is just a case of "computed
+properties", and if you're just thinking you might want to implement it later, it's a case of "interface
+stability".
+Read-only attributes
+Sometimes, you want to expose an attribute, but make it read-only. In many languages, like C++, there's
+no way to do that but with a getter (and no corresponding setter). In Python, again, the answer is @property.
+
+C++, Java, etc. also give you a way to create class-wide constants. Python doesn't really have constants,
+so some people try to simulate this by adding a getter. Again, though, the answer is @property. Or,
+consider whether you really need to enforce the fact that it's a constant. Why would someone try to
+change it? What would happen if they did?
+Access control
+C++ and most of its descendants provide three levels of access control—public is the interface to
+everyone, protected is additional interface for subclasses, and private is only usable by the class's
+own methods and its friends. Sometimes you might want to make an attribute read-only for your subclasses
+but writable for your own methods (or read-only for your consumers but writable for your subclasses). The
+only way to do this is to make the attribute private (or protected) and add a protected (or public) getter.
+
+First, almost any OO design where this makes sense is probably not idiomatic for Python. (In fact, it's
+probably not even idiomatic for modern C++, but a lot of people are still programming 90s-style C++, and
+at any rate, it's much more idiomatic in Java. However, nobody is writing 90s-style OO in Python.) Often
+you can flatten out and simplify your hierarchy by passing around closures or methods, or by duck typing
+(that is, implicitly subtyping by just implementing the right methods, instead of subclassing); if you
+really do need subclassing, often you want to refactor your classes into small ABCs and/or mixins.
+
+It's also worth noting that access control doesn't provide any actual security against malicious subclasses
+or consumers. (Except in Java; see below.) In ObjC, they can just ask the runtime to inspect your ivars
+and change them through pointers. In C++, they can't do that—but everyone using your class has to be
+able to see all of your members, even if they're private, as part of the header, and if they really want
+to force your class to do something it wouldn't normally do by changing its private members, there's
+nothing stopping them from reinterpret_cast<>ing their way to any part of that structure.
+
+At any rate, in Python, even if you wanted to control access this way, you can't do it.
+
+Some people teach that _x is Python's equivalent of protected, and __x its equivalent of private, but
+that's very misleading.
+
+The single underscore has only a conventional meaning: don't count on this being part of the useful
+and/or stable interface. Many introspection tools (e.g., tab completion in the interactive interface)
+will skip over underscore-prefixed names by default, but nothing stops a consumer from writing spam._eggs
+to access the value.
+
+The double underscore mangles the name—inside your own methods, the attribute is named __x, but from
+anywhere else, it's named _MyClass__x. But this is not there to add any more protection—after all,
+_MyClass__x will still show up in dir(my_instance), and someone can still write my_instance._MyClass__x
+= 42. What it's there for is to prevent subclasses from accidentally shadowing your attributes
+or methods. (This is primarily important when the base classes and subclasses are implemented
+independently—you wouldn't want to add a new _spam attribute to your library and accidentally break
+any app that subclasses your library and adds a _spam attribute.)
+Security
+Java was designed to allow components that don't trust each other to run securely. That means that in
+some cases, access control does actually provide security. (Of course if you're just going to hide your
+x behind a public set_x method, that isn't adding anything…) That's great for Java, but it's irrelevant
+to Python, or any language without a secure class loader, etc.
+Generic attributes
+As far as I know, this one is really only relevant to C++ , because most other languages' generics
+were designed around offering most of the useful features of C++ templates without all of the mess,
+while C++'s templates were designed before anyone knew what they wanted to do with generics.
+
+There are many cases where it's hard to specify a type for an attribute in a class template. C++ has
+much more limited type inference for classes and objects (before C++11, there was none at all) than for
+functions and types. Also, a class or class template can have methods that are themselves templates,
+but there are no "object templates", so you have to simulate them with either traits classes or function
+templates—that is, templated getters and setters. And there are also cases where it's hard to specify
+a constant or initializer value for an attribute, so again you have to simulate them with either traits
+classes or function templates.
+
+Needless to say, none of these applies at all in duck-typed Python.
+Libraries and tools
+In some languages, there are libraries for reflection or serialization, observer-notification frameworks,
+code-generating wizards for UIs or network protocols, tools like IDEs and refactoring assistants, etc.,
+that expect you to use getters and setters. This is particularly true in Java, and to a lesser extent C#
+and ObjC. Obviously you don't want to fight against these tools.
+
+The tools and libraries for Python are, of course, designed around the idea that your attributes are
+attributes, not hidden behind getters and setters. But if you're, say, using PyObjC to write Python
+code that's bound to a NIB both at runtime and in InterfaceBuilder, you have to do things the way
+InterfaceBuilder wants you to.
+Breakpoints
+In some debuggers, it's impossible to place a watchpoint on a variable, or at least much harder or much
+less efficient than placing a breakpoint on a setter. If you expect this to be a problem, and you need
+to be able to debug code in the field without editing it, you might want to hide some attributes behind
+@property for easier debugging. But this doesn't come up very often.
+Other languages
+So, what if you're a Python programmer and you have to write some code in Java or D? Just as you shouldn't
+make your Python code look like Java, you shouldn't make your Java code look like Python. This means
+you'll probably want a lot more getters and setters than you're used to.
+
+In Java, C#, D, etc. many of the same motivations (both good and bad) for getters and setters apply the
+same as in C++. In some cases, some of the motivations don't apply (e.g., C# has properties, just like
+Python; Java generics don't work like C++ templates). So there are a few cases where there are additional
+reasons for getters and setters.
+
+But, more importantly, Java (and, to a lesser extent, C#, ObjC, etc.) has a much stronger culture than
+C++ of idiomatically requiring getters and setters even when there's no objectively good reason. There
+are wizards that generate them for you, linters that warn if you don't use them, IDEs that expect them
+to exist, coworkers or customers that complain… And the fact that it's idiomatic is in itself a good
+reason to follow the idiom, even if there's no objective basis for it.
+
+---

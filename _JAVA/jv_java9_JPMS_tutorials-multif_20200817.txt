@@ -1,0 +1,2469 @@
+filename: jv_java9_JPMS_tutorials-multif_20200817.txt
+https://blog.codefx.org/java/dev/jigsaw-hands-on-guide/
+
+Jigsaw Hands-On Guide
+February 2017
+
+   Project Jigsaw will bring modularization to the Java platform and according to the original plan
+   it was going to be feature complete on the 10th of December. So here we are but where is Jigsaw?
+
+   Surely a lot happened in the last six months: The prototype came out, the looming removal of
+   internal APIs caused quite a ruckus, the mailing list is full of critical discussions
+   about the project's design decisions, and JavaOne saw a series of great introductory talks by the
+   Jigsaw team. And then Java 9 got delayed for half year due to Jigsaw.
+
+   But let's ignore all of that for now and just focus on the code. In this post we'll take an existing
+   demo application and modularize it with Java 9. If you want to follow along, head over to GitHub,
+   where all of the code can be found. The setup instructions are important to get the scripts
+   running with Java 9. For brevity, I removed the prefix org.codefx.demo from all package, module, and
+   folder names in this article.
+
+   Contents
+     * The Application Before Jigsaw
+     * Entering Jigsaw Land
+          + Modules
+          + Implementation
+     * Splitting Into Modules
+          + Made-up Rationale
+          + Implementation
+     * Services
+          + Made-up Rationale
+          + Implementation
+     * Summary
+     * Share & Follow
+
+The Application Before Jigsaw
+   Even though I do my best to ignore the whole Christmas kerfuffle, it seemed prudent to have the demo
+   uphold the spirit of the season. So it models an advent calendar:
+     * There is a calendar, which has 24 calendar sheets.
+     * Each sheet knows its day of the month and contains a surprise.
+     * The death march towards Christmas is symbolized by printing the sheets (and thus the surprises)
+       to the console.
+
+   Of course the calendar needs to be created first. It can do that by itself but it needs a way to
+   create surprises. To this end it gets handed a list of surprise factories. This is what the main
+   method looks like:
+
+public static void main(String[] args) {
+    List<SurpriseFactory> surpriseFactories = Arrays.asList(
+        new ChocolateFactory(),
+        new QuoteFactory()
+    );
+    Calendar calendar =
+        Calendar.createWithSurprises(surpriseFactories);
+    System.out.println(calendar.asText());
+}
+
+   The initial state of the project is by no means the best of what is possible before Jigsaw. Quite
+   the contrary, it is a simplistic starting point. It consists of a single module (in the abstract
+   sense, not the Jigsaw interpretation) that contains all required types:
+     * "Surprise API" - Surprise and SurpriseFactory (both are interfaces)
+     * "Calendar API" - Calendar and CalendarSheet to create the calendar
+     * Surprises - a couple of Surprise and SurpriseFactory implementations
+     * Main - to wire up and run the whole thing.
+
+   Compiling and running is straight forward (commands for Java 8):
+
+# compile
+$> javac -d classes/advent ${source files}
+
+# package
+$> jar -cfm jars/advent.jar ${manifest and compiled class files}
+
+# run
+$> java -jar jars/advent.jar
+
+Entering Jigsaw Land
+   The next step is small but important. It changes nothing about the code or its organization but
+   moves it into a Jigsaw module.
+
+Modules
+   So what's a module? To quote the highly recommended State of the Module System:
+
+     A module is a named, self-describing collection of code and data. Its code is organized as a set
+     of packages containing types, i.e., Java classes and interfaces; its data includes resources and
+     other kinds of static information.
+
+     To control how its code refers to types in other modules, a module declares which other modules it
+     requires in order to be compiled and run. To control how code in other modules refers to types in
+     its packages, a module declares which of those packages it exports.
+
+   (The last paragraph is actually from an old version of the document but I like how it summarizes
+   dependencies and exports.)
+
+   So compared to a JAR a module has a name that is recognized by the JVM, declares which other modules
+   it depends on and defines which packages are part of its public API.
+
+Name
+   A module's name can be arbitrary. But to ensure uniqueness it is recommended to stick with the
+   inverse-URL naming schema of packages. So while this is not necessary it will often mean that the
+   module name is a prefix of the packages it contains.
+
+Dependencies
+   A module lists the other modules it depends on to compile and run. This is true for application and
+   library modules but also for modules in the JDK itself, which was split up into about 100 of them
+   (have a look at them with java --list-modules).
+
+   Again from the design overview:
+
+     When one module depends directly upon another in the module graph then code in the first module
+     will be able to refer to types in the second module. We therefore say that the first module reads
+     the second or, equivalently, that the second module is readable by the first.
+
+     [...]
+
+     The module system ensures that every dependence is fulfilled by precisely one other module, that
+     the module graph is acyclic, that every module reads at most one module defining a given package,
+     and that modules defining identically-named packages do not interfere with each other.
+
+   When any of the properties is violated, the module system refuses to compile or launch the code. This
+   is an immense improvement over the brittle classpath, where e.g. missing JARs would only be
+   discovered at runtime, crashing the application.
+
+   It is also worth to point out that a module is only able to access another's types if it directly
+   depends on it. So if A depends on B, which depends on C, then A is unable to access C unless it
+   requires it explicitly.
+
+Exports
+   A module lists the packages it exports. Only public types in these packages are accessible from
+   outside the module.
+
+   This means that public is no longer really public. A public type in a non-exported package is as
+   inaccessible to the outside world as a non-public type in an exported package. Which is even more
+   inaccessible than package-private types are before Java 9 because the module system does not even
+   allow reflective access
+   to them. As Jigsaw is currently implemented command line flags are the only way around this.
+
+Implementation
+   To be able to create a module, the project needs a module-info.java in its root source directory:
+
+module advent {
+   // no imports or exports
+}
+
+   Wait, didn't I say that we have to declare dependencies on JDK modules as well? So why didn't we
+   mention anything here? All Java code requires Object and that class, as well as the few others the
+   demo uses, are part of the module java.base. So literally every Java module depends on java.base,
+   which led the Jigsaw team to the decision to automatically require it. So we do not have to mention
+   it explicitly.
+
+   The biggest change is the script to compile and run (commands for Java 9):
+
+# compile (include module-info.java)
+$> javac -d classes/advent ${source files}
+
+# package (add module-info.class and specify main class)
+$> jar --create \
+    --file=mods/advent.jar \
+    --main-class=advent.Main \
+    ${compiled class files}
+    
+# run (specify a module path and simply name to module to run)
+$> java --module-path mods --module advent
+
+   We can see that compilation is almost the same - we only need to include the new module-info.java in
+   the list of classes.
+
+   The jar command will create a so-called modular JAR, i.e. a JAR that contains a module. Unlike before
+   we need no manifest anymore but can specify the main class directly. Note how the JAR is created in
+   the directory mods.
+
+   Utterly different is the way the application is started. The idea is to tell Java where to find the
+   application modules (with --module-path mods, this is called the module path) and which module we
+   would like to launch (with --module advent).
+   jigsaw-hands-on-guide-advent
+
+Splitting Into Modules
+   Now it's time to really get to know Jigsaw and split that monolith up into separate modules.
+
+Made-up Rationale
+   The "surprise API", i.e. Surprise and SurpriseFactory, is a great success and we want to separate it
+   from the monolith.
+
+   The factories that create the surprises turn out to be very dynamic. A lot of work is being done
+   here, they change frequently and which factories are used differs from release to release. So we want
+   to isolate them.
+
+   At the same time we plan to create a large Christmas application of which the calendar is only one
+   part. So we'd like to have a separate module for that as well.
+
+   We end up with these modules:
+     * surprise - Surprise and SurpriseFactory
+     * calendar - the calendar, which uses the surprise API
+     * factories - the SurpriseFactory implementations
+     * main - the original application, now hollowed out to the class Main
+
+   Looking at their dependencies we see that surprise depends on no other module. Both calendar and
+   factories make use of its types so they must depend on it. Finally, main uses the factories to create
+   the calendar so it depends on both.
+
+        +----->[calendar]--------+
+        |                        |
+        |                        v
+[main]--+                   [surprize]
+        |                        ^
+        |                        |
+        +----->[factories]-------+
+   
+   jigsaw-hands-on-splitting-into-modules
+
+Implementation
+   The first step is to reorganize the source code. We'll stick with the directory structure as proposed
+   by the official quick start guide and have all of our modules in their own folders below src:
+
+src
+ - advent.calendar: the "calendar" module
+     - org ...
+     module-info.java
+ - advent.factories: the "factories" module
+     - org ...
+     module-info.java
+ - advent.surprise: the "surprise" module
+     - org ...
+     module-info.java
+ - advent: the "main" module
+     - org ...
+     module-info.java
+.gitignore
+compileAndRun.sh
+LICENSE
+README
+
+   To keep this readable I truncated the folders below org. What's missing are the packages and
+   eventually the source files for each module. See it on GitHub in its full glory.
+
+   Let's now see what those module infos have to contain and how we can compile and run the application.
+
+surprise
+   There are no required clauses as surprise has no dependencies. (Except for java.base, which is always
+   implicitly required.) It exports the package advent.surprise because that contains the two classes
+   Surprise and SurpriseFactory.
+
+   So the module-info.java looks as follows:
+
+module advent.surprise {
+    // requires no other modules
+    // publicly accessible packages
+    exports advent.surprise;
+}
+
+   Compiling and packaging is very similar to the previous section. It is in fact even easier because
+   surprise contains no main class:
+
+# compile
+$> javac -d classes/advent.surprise ${source files}
+
+# package
+$> jar --create --file=mods/advent.surprise.jar ${compiled class files}
+
+calendar
+   The calendar uses types from the surprise API so the module must depend on surprise. Adding requires
+   advent.surprise to the module achieves this.
+
+   The module's API consists of the class Calendar. For it to be publicly accessible the containing
+   package advent.calendar must be exported. Note that CalendarSheet, private to the same package, will
+   not be visible outside the module.
+
+   But there is an additional twist: We just made
+   Calendar.createWithSurprises(List<SurpriseFactory>) publicly available, which exposes types from
+   the surprise module. So unless modules reading calendar also require surprise, Jigsaw will prevent
+   them from accessing these types, which would lead to compile and runtime errors.
+
+   Marking the requires clause as transitive fixes this. With it any module that depends on calendar
+   also reads surprise. This is called implied readability.
+
+   The final module-info looks as follows:
+
+module advent.calendar {
+    // required modules
+    requires transitive advent.surprise;
+    // publicly accessible packages
+    exports advent.calendar;
+}
+
+   Compilation is almost like before but the dependency on surprise must of course be reflected here.
+   For that it suffices to point the compiler to the directory mods as it contains the required module:
+
+# compile (point to folder with required modules)
+$> javac --module-path mods \
+    -d classes/advent.calendar \
+    ${source files}
+
+# package
+$> jar --create \
+    --file=mods/advent.calendar.jar \
+    ${compiled class files}
+
+factories
+   The factories implement SurpriseFactory so this module must depend on surprise. And since they return
+   instances of Surprise from published methods the same line of thought as above leads to a requires
+   transitive clause.
+
+   The factories can be found in the package advent.factories so that must be exported. Note that the
+   public class AbstractSurpriseFactory, which is found in another package, is not accessible outside
+   this module.
+
+   So we get:
+
+module advent.factories {
+    // required modules
+    requires transitive advent.surprise;
+    // publicly accessible packages
+    exports advent.factories;
+}
+
+   Compilation and packaging is analog to calendar.
+
+main
+   Our application requires the two modules calendar and factories to compile and run. It still has no
+   API to export.
+
+module advent {
+    // required modules
+    requires advent.calendar;
+    requires advent.factories;
+    // no exports
+}
+
+   Compiling and packaging is like with last section's single module except that the compiler needs to
+   know where to look for the required modules:
+
+#compile
+$> javac --module-path mods \
+    -d classes/advent \
+    ${source files}
+    
+# package
+$> jar --create \
+    --file=mods/advent.jar \
+    --main-class=advent.Main \
+    ${compiled class files}
+
+   With all the modules in mods , we can run the calendar.
+
+# run
+$> java --module-path mods --module advent
+
+Services
+   Jigsaw enables loose coupling by implementing the service locator pattern, where the module
+   system itself acts as the locator. Let's see how that goes.
+
+Made-up Rationale
+   Somebody recently read a blog post about how cool loose coupling is. Then she looked at our code from
+   above and complained about the tight relationship between main and factories. Why would main even
+   know factories?
+
+   Because...
+
+public static void main(String[] args) {
+    List<SurpriseFactory> surpriseFactories = Arrays.asList(
+        new ChocolateFactory(),
+        new QuoteFactory()
+    );
+    Calendar calendar =
+        Calendar.createWithSurprises(surpriseFactories);
+    System.out.println(calendar.asText());
+}
+
+   Really? Just to instantiate some implementations of a perfectly fine abstraction (the
+   SurpriseFactory)?
+
+   And we know she's right. Having someone else provide us with the implementations would remove the
+   direct dependency. Even better, if said middleman would be able to find all implementations on the
+   module path, the calendar's surprises could easily be configured by adding or removing modules before
+   launching.
+
+   this is exactly what services are there for! We can have a module specify that it provides
+   implementations of an interface. Another module can express that it uses said interface and find all
+   implementations with the ServiceLocator.
+
+   We use this opportunity to split factories into chocolate and quote and end up with these modules and
+   dependencies:
+     * surprise - Surprise and SurpriseFactory
+     * calendar - the calendar, which uses the surprise API
+     * chocolate - the ChocolateFactory as a service
+     * quote - the QuoteFactory as a service
+     * main - the application; no longer requires individual factories
+
+                    
+[mai]-------------->[calendar]------------------------------+
+  |                                                         |
+  |      (uses)                                             |
+  +---------------------+                                   |
+                        |                                   |
+                        v               (exposes)           v
+[quote]-----------<>[SurpriseFactory]<--------------------[surprise]
+                        ^
+                        |
+[chocolate]-------<>----+
+     
+   jigsaw-hands-on-services
+
+Implementation
+   The first step is to reorganize the source code. The only change from before is that
+   src/advent.factories is replaced by src/advent.factory.chocolate and src/advent.factory.quote.
+
+   Lets look at the individual modules.
+
+surprise and calendar
+   Both are unchanged.
+
+chocolate and quote
+   Both modules are identical except for some names. Let's look at chocolate because it's more yummy.
+
+   As before with factories the module requires transitive the surprise module.
+
+   More interesting are its exports. It provides an implementation of SurpriseFactory, namely
+   ChocolateFactory, which is specified as follows:
+
+   provides advent.surprise.SurpriseFactory
+   with advent.factory.chocolate.ChocolateFactory;
+
+   Since this class is the entirety of its public API it does not need to export anything else. Hence no
+   other export clause is necessary.
+
+   We end up with:
+
+module advent.factory.chocolate {
+    // list the required modules
+    requires transitive advent.surprise;
+    // specify which class provides which service
+    provides advent.surprise.SurpriseFactory
+    with advent.factory.chocolate.ChocolateFactory;
+}
+
+   Compilation and packaging is straight forward:
+
+$> javac --module-path mods \
+    -d classes/advent.factory.chocolate \
+    ${source files}
+    
+$> jar --create \
+    --file mods/advent.factory.chocolate.jar \
+    ${compiled class files}
+
+main
+   The most interesting part about main is how it uses the ServiceLocator to find implementation of
+   SurpriseFactory. From its main method:
+
+   List<SurpriseFactory> surpriseFactories = new ArrayList<>();
+   ServiceLoader.load(SurpriseFactory.class)
+        .forEach(surpriseFactories::add);
+
+   Our application now only requires calendar but must specify that it uses SurpriseFactory. It has no
+   API to export.
+
+module advent {
+    // list the required modules
+    requires advent.calendar;
+    // list the used services
+    uses advent.surprise.SurpriseFactory;
+    // exports no functionality
+}
+
+   Compilation and execution are like before.
+   
+   And we can indeed change the surprises the calendar will eventually contain by simply removing one of
+   the factory modules from the module path. Neat!
+
+Summary
+   So that's it. We have seen how to move a monolithic application into a single module and how we can
+   split it up into several. We even used a service locator to decouple our application from concrete
+   implementations of services. All of this is on GitHub so check it out to see more code!
+
+   But there is lots more to talk about! Jigsaw brings a couple of incompatibilities but also the
+   means to solve many of them. And we haven't talked about how reflection interacts with the module
+   system and how to migrate external dependencies.
+
+   If these topics interest you, watch this tag as I will surely write about them over the coming
+   months.
+
+
+---
+https://blog.codefx.org/java/java-module-system-tutorial/
+
+Code-First Java Module System Tutorial
+
+   The Java Platform Module System (JPMS) brings modularization to Java and the JVM and it changes how
+   we program in the large. To get the most out of it, we need to know it well, and the first step is to
+   learn the basics. In this tutorial I'll first show you a simple Hello World example and then we'll
+   take an existing demo application and modularize it with Java 9. We will create module declarations (
+   module-info.java) and use the module path to compile, package, and run the application - code first,
+   explanations second, so you can cut to the chase.
+
+   I use two projects in this tutorial and both can be found on GitHub: The first is a very simple
+   Hello World example, the other the ServiceMonitor, which is the same one I use in my book on
+   the module system. Check them out if you want to take a closer look. All commands like javac, jar,
+   and java refer to the Java 9 variants.
+
+   Contents
+     * Hello, Modular World
+          + Modules
+          + Module Path
+          + Compiling, Packaging, Running
+     * The ServiceMonitor
+     * Splitting Into Modules
+          + Reorganizing Source Code
+          + Declaring Modules
+          + Compiling, Packaging, And Running
+     * On The Horizon
+          + Implied Readability
+          + Optional Dependencies
+          + Qualified Exports
+          + Open Packages And Modules
+          + Services
+     * Reflection
+     * Share & Follow
+
+Hello, Modular World
+   Let's start with the simplest possible application, one that prints Hello, modular World! Here's the
+   class:
+
+package org.codefx.demo.jpms;
+
+public class HelloModularWorld {
+
+   public static void main(String[] args) {
+       System.out.println("Hello, modular World!");
+   }
+
+}
+
+   To become a module, it needs a module-info.java in the project's root source directory:
+
+module org.codefx.demo.jpms_hello_world {
+   // this module only needs types from the base module 'java.base';
+   // because every Java module needs 'java.base', it is not necessary
+   // to explicitly require it - I do it nonetheless for demo purposes
+   requires java.base;
+   // this export makes little sense for the application,
+   // but once again, I do this for demo purposes
+   exports org.codefx.demo.jpms;
+}
+
+   With the common src/main/java directory structure, the program's directory layout looks as follows:
+
+   Directory structure
+JPMS-Hello-World
++-- src/
+    +-- main/
+        +-- java/
+            +-- org.codefx.demo.jpms/
+            |    +-- HelloModularWorld.java
+            +-- module-info.java
+
+   These are the commands to compile, package and launch it:
+
+$> javac
+   -d target/classes
+   ${source-files}
+$> jar --create
+   --file target/jpms-hello-world.jar
+   --main-class org.codefx.demo.jpms.HelloModularWorld
+   -C target/classes .
+$> java
+   --module-path target/jpms-hello-world.jar
+   --module org.codefx.demo.jpms_hello_world
+
+   Very similar to what we would have done for a non-modular application, except we're now using
+   something called a "module path" and can define the project's main class (without a manifest). Let's
+   see how that works.
+
+Modules
+     Modules are like JARs with additional characteristics
+
+   The basic building block of the JPMS are modules (surprise!). Like JARs, they are a container for
+   types and resources; but unlike JARs, they have additional characteristics - these are the most
+   fundamental ones:
+     * a name, preferably one that is globally unique
+     * declarations of dependencies on other modules
+     * a clearly defined API that consists of exported packages
+
+   The JDK was split into about a hundred so-called platform modules. You can list them with java
+   --list-modules and look at an individual module with java --describe-module ${module}. Go ahead, give
+   it a try with java.sql or java.logging:
+
+$> java --describe-module java.sql
+
+> java.sql@9
+> exports java.sql
+> exports javax.sql
+> exports javax.transaction.xa
+> requires java.logging transitive
+> requires java.base mandated
+> requires java.xml transitive
+> uses java.sql.Driver
+
+   A module's properties are defined in a module declaration, a file module-info.java in the project's
+   root, which looks as follows:
+
+module ${module-name} {
+   requires ${module-name};
+   exports ${package-name};
+}
+
+   It gets compiled into a module-info.class, called module descriptor, and ends up in the JAR's root.
+   This descriptor is the only difference between a plain JAR and a modular JAR.
+
+   Let's go through the three module properties one by one: name, dependencies, exports.
+
+Name
+   The most basic property that JARs are missing is a name that compiler and JVM can use to identify it
+   with. It is hence the most prominent characteristic of a module. We will have the possibility and
+   even the obligation to give every module we create a name.
+
+     The best name for a module is the reverse-domain naming scheme that is already commonly used for
+     packages
+
+   Naming a module will often be pretty natural as most tools we use on a daily basis, be it IDEs, build
+   tools, or even issue trackers and version control systems, already have us name our projects. But
+   while it makes sense to take that name as a springboard on the search for a module name, it is
+   important to choose wisely!
+
+   The module system leans heavily on a module's name. Conflicting or evolving names in particular cause
+   trouble, so it is important that the name is:
+     * globally unique
+     * stable
+
+   The best way to achieve that is the reverse-domain naming scheme that is already commonly used for
+   packages:
+
+module org.codefx.demo.jpms {
+}
+
+Dependencies And Readability
+     All dependencies have to be made explicit with requires directives
+
+   Another thing we missed in JARs was the ability to declare dependencies, but with the module system,
+   these times are over: Dependencies have to be made explicit - all of them, on JDK modules as well as
+   on third-party libraries or frameworks.
+
+   Dependencies are declared with requires directives, which consist of the keyword itself followed by a
+   module name. When scanning modules, the JPMS builds a readability graph, where modules are nodes and
+   requires directives get turned into so-called readability edges - if module org.codefx.demo.jpms
+   requires module java.base, then at runtime org.codefx.demo.jpms reads java.base.
+
+   The module system will throw an error if it cannot find a required module with the right name, which
+   means compiling as well as launching an application will fail if modules are missing. This achieves
+   reliable configuration one of the goals of the module system, but can be prohibitively strict -
+   check my post on optional dependencies to see a more lenient alternative.
+
+   All types the Hello World example needs can be found in the JDK module java.base, the so-called base
+   module. Because it contains essential types like Object, all Java code needs it and so it doesn't
+   have to be required explicitly. Still, I do it in this case to show you a requires directive:
+
+module org.codefx.demo.jpms {
+   requires java.base;
+}
+
+Exports And Accessibility
+     A module's API is defined by its exports directives
+
+   A module lists the packages it exports. For code in one module (say org.codefx.demo.jpms) to access
+   types in another (say String in java.base), the following accessibility rules must be fulfilled:
+     * the accessed type ( String) must be public
+     * the package containing the type ( java.lang) must be exported by its module (java.base)
+     * the accessing module (org.codefx.demo.jpms) must read the accessed one (java.base), which is
+       typically achieved by requiring it
+
+     Reflection lost its superpowers
+
+   If any of these rules are violated at compile or run time, the module systems throws an error. This
+   means that public is no longer really public. A public type in a non-exported package is as
+   inaccessible to the outside world as a non-public type in an exported package. Also note that
+   reflection lost its superpowers. It is bound by the exact same accessibility rules unless command
+   line flags are used.
+
+   Since our example has no meaningful API, no outside code needs to access it and so we don't actually
+   have to export anything. Once again I'll do it nonetheless for demonstration purposes:
+
+module org.codefx.demo.jpms_hello_world {
+   requires java.base;
+   exports org.codefx.demo.jpms;
+}
+
+Module Path
+   We now know how we can define modules and their essential properties. What's still a little unclear
+   is how exactly we tell the compiler and runtime about them. The answer is a new concept that
+   parallels the class path:
+
+   The module path is a list whose elements are artifacts or directories that contain artifacts.
+   Depending on the operating system, module path elements are either separated by : (Unix-based) or ;
+   (Windows). It is used by the module system to locate required modules that are not found among the
+   platform modules. Both javac and java as well as other module-related commands can process it - the
+   command line options are --module-path and -p.
+
+   All artifacts on the module path are turned into modules. This is even true for plain JARs, which get
+   turned into automatic modules.
+
+Compiling, Packaging, Running
+   Compiling works much like without the module system:
+
+$> javac
+-d target/classes
+${source-files}
+
+   (You of course have to replace ${source-files} with an actual enumeration of the involved files, but
+   that crowds the examples, so I don't do it here.)
+
+   The module system kicks in as soon as a module-info.java is among the source files. All non-JDK
+   dependencies the module under compilation requires need to be on the module path. For the Hello World
+   example, there are no such dependencies.
+
+   Packaging with jar is unchanged as well. The only difference is that we no longer need a manifest to
+   declare an application's entry point - we can use --main-class for that:
+
+$> jar --create
+   --file target/jpms-hello-world.jar
+   --main-class org.codefx.demo.jpms.HelloModularWorld
+   -C target/classes .
+
+   Finally, launching looks a little different. We use the module path instead of the class path to tell
+   the JPMS where to find modules. All we need to do beyond that is to name the main module with
+   --module:
+
+$> java
+   --module-path target/jpms-hello-world.jar
+   --module org.codefx.demo.jpms_hello_world
+
+   And that's it! We've created a very simple, but nonetheless modular Hello-World application and
+   successfully build and launched it. Now it's time to turn to a slightly less trivial example to see
+   mechanisms like dependencies and exports in action.
+
+The ServiceMonitor
+   Let's imagine a network of services that cooperate to delight our users; maybe a social network or a
+   video platform. We want to monitor those services to determine how healthy the system is and spot
+   problems when they occur (instead of when customers report them). This is where the example
+   application, the ServiceMonitor comes in: It monitors these services (another big surprise).
+
+   As luck would have it, the services already collect the data we want, so all the ServiceMonitor needs
+   to do is query them periodically. Unfortunately not all services expose the same REST API - two
+   generations are in use, Alpha and Beta. That's why ServiceObserver is an interface with two
+   implementations.
+
+   Once we have the diagnostic data, in the form of a DiagnosticDataPoint, they can be fed to a
+   Statistician, which aggregates them to Statistics. These, in turn, are stored in a
+   StatisticsRepository as well as made available via REST by MonitorServer. The Monitor class ties
+   everything together.
+
+   All in all, we end up with these types:
+     * DiagnosticDataPoint: service data for a time interval
+     * ServiceObserver: interface for service observation that returns DiagnosticDataPoint
+     * AlphaServiceObserver and BetaServiceObserver: each observes a variant of services
+     * Statistician: computes Statistics from DiagnosticDataPoint
+     * Statistics: holds the computed statistics
+     * StatisticsRepository: stores and retrieve Statistics
+     * MonitorServer: answers REST calls for the statistics
+     * Monitor: ties everything together
+
+   ServiceMonitor's classes
+   The application depends on the Spark micro web framework and we reference it by the module name
+   spark.core. It can be found in the libs directory together with its transitive dependencies.
+
+   With what we learned so far, we already know how to organize the application as a single module.
+   First, we create the module declaration module-info.java in the project's root:
+
+module monitor {
+   requires spark.core;
+}
+
+   Note that we should choose a module name like org.codefx.demo.monitor, but that would crowd the
+   examples, so I'll stick to the shorter monitor. As explained, it requires spark.core and because the
+   application has no meaningful API, it exports no packages.
+
+   We can then compile, package, and run it as follows:
+
+$> javac
+   --module-path libs
+   -d classes/monitor
+   ${source-files}
+   
+$> jar --create
+   --file mods/monitor.jar
+   --main-class monitor.Main
+   -C classes/monitor .
+   
+$> java
+   --module-path mods
+   --module monitor
+
+   As you can see, we no longer use Maven's target directory and instead create classes in classes and
+   modules in mods. This makes the examples easier to parse. Note that unlike earlier, we already have
+   to use the module path during compilation because this application has non-JDK dependencies.
+
+   And with that we've created a single-module ServiceMonitor!
+
+Splitting Into Modules
+   Now that we got one module going, it's time to really start using the module system and split the
+   ServiceMonitor up. For an application of this size it is of course ludicrous to turn it into several
+   modules, but it's a demo, so here we go.
+
+   The most common way to modularize applications is a separation by concerns. ServiceMonitor has the
+   following, with the related types in parenthesis:
+     * collecting data from services ( ServiceObserver, DiagnosticDataPoint)
+     * aggregating data into statistics ( Statistician, Statistics)
+     * persisting statistics ( StatisticsRepository)
+     * exposing statistics via a REST API ( MonitorServer)
+
+   But not only the domain logic generates requirements. There are also technical ones:
+     * data collection must be hidden behind an API
+     * Alpha and Beta services each require a separate implementation of that API ( AlphaServiceObserver
+       and BetaServiceObserver)
+     * orchestration of all concerns ( Monitor)
+
+   This results in the following modules with the mentioned publicly visible types:
+     * monitor.observer ( ServiceObserver, DiagnosticDataPoint)
+     * monitor.observer.alpha ( AlphaServiceObserver)
+     * monitor.observer.beta ( BetaServiceObserver)
+     * monitor.statistics ( Statistician, Statistics)
+     * monitor.persistence ( StatisticsRepository)
+     * monitor.rest ( MonitorServer)
+     * monitor ( Monitor)
+
+   Superimposing these modules over the class diagram, it is easy to see the module dependencies emerge:
+   Monitor's modules
+
+Reorganizing Source Code
+   A real-life project consists of myriad files of many different types. Obviously, source files are the
+   most important ones but nonetheless only one kind of many - others are test sources, resources, build
+   scripts or project descriptions, documentation, source control information, and many others. Any
+   project has to choose a directory structure to organize those files and it is important to make sure
+   it does not clash with the module system's characteristics.
+
+   If you have been following the module system's development under Project Jigsaw and studied the
+   official quick start guide or some early tutorials, you might have noticed that they use a
+   particular directory structure, where there's a src directory with a subdirectory for each project.
+   That way ServiceMonitor would look as follows:
+
+ServiceMonitor
++ classes
++ mods
+- src
+   + monitor
+   - monitor.observer
+      - monitor
+         - observer
+            DiagnosticDataPoint.java
+            ServiceObserver.java
+      module-info.java
+   + monitor.observer.alpha
+   + monitor.observer.beta
+   + monitor.persistence
+   + monitor.rest
+   + monitor.statistics
+- test-src
+   + monitor
+   + monitor.observer
+   + monitor.observer.alpha
+   + monitor.observer.beta
+   + monitor.persistence
+   + monitor.rest
+   + monitor.statistics
+
+   This results in a hierarchy concern/module and I don't like it. Most projects that consist of several
+   sub-projects (what we now call modules) prefer separate root directories, where each contains a
+   single module's sources, tests, resources, and everything else mentioned earlier. They use a
+   hierarchy module/concern and this is what established project structures provide.
+
+   The default directory structure, implicitly understood by tools like Maven and Gradle, implement that
+   hierarchy. First and foremost, they give each module its own directory tree. In that tree the src
+   directory contains production code and resources (in main/java and main/resources, respectively) as
+   well as test code and resources (in test/java and test/resources, respectively):
+
+ServiceMonitor
++ monitor
+- monitor.observer
+   - src
+      - main
+         - java
+            - monitor
+               - observer
+                  DiagnosticDataPoint.java
+                  ServiceObserver.java
+            module-info.java
+         + resources
+      + test
+         + java
+         + resources
+   + target
++ monitor.observer.alpha
++ monitor.observer.beta
++ monitor.persistence
++ monitor.rest
++ monitor.statistics
+
+   I will organize the ServiceMonitor almost like that, with the only difference that I will create the
+   bytecode in a directory classes and JARS in a directory mods, which are both right below
+   ServiceMonitor, because that makes the scripts shorter and more readable.
+
+   Let's now see what those declarations infos have to contain and how we can compile and run the
+   application.
+
+Declaring Modules
+
+   We've already covered how modules are declared using module-info.java, so there's no need to go into
+   details. Once you've figured out how modules need to depend on one another (your build tool should
+   know that; otherwise ask JDeps), you can put in requires directives and the necessary exports
+   emerge naturally from imports across module boundaries.
+
+module monitor.observer {
+   exports monitor.observer;
+}
+
+module monitor.observer.alpha {
+   requires monitor.observer;
+   exports monitor.observer.alpha;
+}
+
+module monitor.observer.beta {
+   requires monitor.observer;
+   exports monitor.observer.beta;
+}
+
+module monitor.statistics {
+   requires monitor.observer;
+   exports monitor.statistics;
+}
+
+module monitor.persistence {
+   requires monitor.statistics;
+   exports monitor.persistence;
+}
+
+module monitor.rest {
+   requires spark.core;
+   requires monitor.statistics;
+   exports monitor.rest;
+}
+
+module monitor {
+   requires monitor.observer;
+   requires monitor.observer.alpha;
+   requires monitor.observer.beta;
+   requires monitor.statistics;
+   requires monitor.persistence;
+   requires monitor.rest;
+}
+
+   By the way, you can use JDeps to create an initial set of module declarations. Whether created
+   automatically or manually, in a real-life project you should verify whether your dependencies and
+   APIs are as you want them to be. It is likely that over time, some quick fixes introduced
+   relationships that you'd rather get rid of. Do that now or create some backlog issues.
+
+Compiling, Packaging, And Running
+
+   Very similar to before when it was only a single module, but more often:
+
+$> javac
+   -d classes/monitor.observer
+   ${source-files}
+   
+$> jar --create
+   --file mods/monitor.observer.jar
+   -C classes/monitor.observer .
+
+# monitor.observer.alpha depends on monitor.observer,
+# so we place 'mods', which contains monitor.observer.jar,
+# on the module path
+$> javac
+   --module-path mods
+   -d classes/monitor.observer.alpha
+   ${source-files}
+   
+$> jar --create
+   --file mods/monitor.observer.alpha.jar
+   -C classes/monitor.observer.alpha .
+
+# more of the same ... until we come to monitor,
+# which once again defines a main class
+$> javac
+   --module-path mods
+   -d classes/monitor
+   ${source-files}
+   
+$> jar --create
+   --file mods/monitor.jar
+   --main-class monitor.Main
+   -C classes/monitor .
+
+   Congratulations, you've got the basics covered! You now know how to organize, declare, compile,
+   package, and launch modules and understand what role the module path, the readability graph, and
+   modular JARs play.
+
+On The Horizon
+   If you weren't so damn curious this post could be over now, but instead I'm going to show you a few
+   of the more advanced features, so you know what to read about next.
+
+Implied Readability
+   The ServiceMonitor module monitor.observer.alpha describes itself as follows:
+
+module monitor.observer.alpha {
+   requires monitor.observer;
+   exports monitor.observer.alpha;
+}
+
+   Instead it should actually do this:
+
+module monitor.observer.alpha {
+   requires transitive monitor.observer;
+   exports monitor.observer.alpha;
+}
+
+   Spot the transitive in there? It makes sure that any module reading monitor.observer.alpha also reads
+   monitor.observer. Why would you do that? Here's a method from alpha's public API:
+
+public static Optional<ServiceObserver> createIfAlphaService(String service) {
+   // ...
+}
+
+   It returns an Optional<ServiceObserver>, but ServiceObserver comes from the monitor.observer module -
+   that means every module that wants to call alpha's createIfAlphaService needs to read
+   monitor.observer as well or such code won't compile. That's pretty inconvenient, so modules like
+   alpha that use another module's type in their own public API should generally require that module
+   with the transitive modifier.
+
+   There are more uses for implied readability.
+
+Optional Dependencies
+
+   This is quite straight-forward: If you want to compile against a module's types, but don't want to
+   force its presence at runtime you can mark your dependency as being optional with the static
+   modifier:
+
+module monitor {
+   requires monitor.observer;
+   requires static monitor.observer.alpha;
+   requires static monitor.observer.beta;
+   requires monitor.statistics;
+   requires monitor.persistence;
+   requires static monitor.rest;
+}
+
+   In this case monitor seems to be ok with the alpha and beta observer implementations possibly being
+   absent and it looks like the REST endpoint is optional, too.
+
+   There are a few things to consider when coding against optional dependencies.
+
+Qualified Exports
+   Regular exports have you make the decision whether a package's public types are accessible only
+   within the same module or to all modules. Sometimes you need something in between, though. If you're
+   shipping a bunch of modules, you might end up in the situation, where you'd like to share code
+   between those modules but not outside of it. Qualified exports to the rescue!
+
+module monitor.util {
+   exports monitor.util to monitor, monitor.statistics;
+}
+
+   This way only monitor and monitor.statistics can access the monitor.util package.
+
+Open Packages And Modules
+   I said earlier that reflection's superpowers were revoked - it now has to play by the same rules as
+   regular access. Reflection still has a special place in Java's ecosystem, though, as it enables
+   frameworks like Hibernate, Spring and so many others.
+
+   The bridge between those two poles are open packages and modules:
+
+module monitor.persistence {
+   opens monitor.persistence.dtos;
+}
+
+// or even
+
+open module monitor.persistence.dtos { }
+
+   An open package is inaccessible at compile time (so you can't write code against its types), but
+   accessible at run time (so reflection works). More than just being accessible, it allows reflective
+   access to non-public types and members (this is called deem reflection). Open packages can be
+   qualified just like exports and open modules simply open all their packages.
+
+Services
+   Instead of having the main module monitor depend on monitor.observer.alpha and monitor.observer.beta,
+   so it can create instances of AlphaServiceObserver and BetaServiceObserver, it could let the module
+   system make that connection:
+
+module monitor {
+   requires monitor.observer;
+   // monitor wants to use a service
+   uses monitor.observer.ServiceObserverFactory;
+   requires monitor.statistics;
+   requires monitor.persistence;
+   requires monitor.rest;
+}
+
+module monitor.observer.alpha {
+   requires monitor.observer;
+   // alpha provides a service implementation
+   provides monitor.observer.ServiceObserverFactory
+       with monitor.observer.alpha.AlphaServiceObserverFactory;
+}
+
+module monitor.observer.beta {
+   requires monitor.observer;
+   // beta provides a service implementation
+   provides monitor.observer.ServiceObserverFactory
+       with monitor.observer.beta.BetaServiceObserverFactory;
+}
+
+   This way, monitor can do the following to get an instance of each provided observer factory:
+
+List<ServiceObserverFactory> observerFactories = ServiceLoader
+   .load(ServiceObserverFactory.class).stream()
+   .map(Provider::get)
+   .collect(toList());
+
+   It uses the ServiceLoader API, which exists since Java 6, to inform the module system that it
+   needs all implementations of ServiceObserverFactory. The JPMS will then track down all modules in the
+   readability graph that provide that service, create an instance of each and return them.
+
+   There are two particularly interesting consequences:
+     * the module consuming the service does not have to require the modules providing it
+     * the application can be configured by selecting which modules are placed on the module path
+
+   Services are a wonderful way to decouple modules and its awesome that the module system gives this
+   mostly ignored concept a second life and puts it into a prominent place.
+
+Reflection
+   Ok, we're really done now and you've learned a lot. Quick recap:
+     * a module is a run-time concept created from a modular JAR
+     * a modular JAR is like any old plain JAR, except that it contains a module descriptor
+       module-info.class, which is compiled from a module declaration module-info.java
+     * the module declaration gives a module its name, defines its dependencies (with requires, requires
+       static, and requires transitive) and API (with exports and exports to), enables reflective access
+       (with open and opens to) and declares use or provision of services
+     * modules are placed on the module path where the JPMS finds them during module resolution, which
+       is the phase that processes descriptors and results in a readability graph
+
+   If you want to learn more about the module system, read the posts I linked above, check the JPMS
+   tag, or get my book The Java Module System (Manning). Also, be aware that migrating to Java 9 can
+   be challenging - check my migration guide for details.
+
+
+---
+https://blog.codefx.org/java/five-command-line-options-hack-java-module-system/
+
+Five Command Line Options To Hack The Java Module System
+
+   The Java Platform Module System (JPMS) not only comes with an entire set of new rules to
+   abide by, it also introduces a host of command line options to break them. Whether you need to access
+   internal APIs, add unforeseen modules, or extend modules with classes of your own, they have you
+   covered. In this post I want to go over the five most important command line options that you will
+   need to get your project to compile, test, and run in the face of various migration challenges.
+
+   Beyond presenting a few specific options, I close with some general thoughts on command line options
+   and particularly their pitfalls.
+
+   Contents
+     * Five Critical Command Line Options
+          + Accessing Internal APIs With --add-exports
+          + Reflectively Accessing Internal APIs With --add-opens
+          + Adding Classes To Modules With --patch-module
+          + Extending The Module Graph With --add-modules
+          + Extending The Module Graph With --add-reads
+     * Thoughts On Command Line Options
+          + Argument Files
+          + Relying On Weak Encapsulation
+          + The Pitfalls Of Command Line Options
+     * Reflection
+     * Share & Follow
+
+   By the way, I use $var as placeholders that you have to replace with the module, package, or JAR
+   names that fix your problem.
+
+Five Critical Command Line Options
+   This post covers --add-exports, --add-opens, --add-modules, --add-reads, and --patch-module. Let's
+   get it on!
+
+Accessing Internal APIs With --add-exports
+   The command line option --add-exports $module/$package=$readingmodule exports $package of $module to
+   $readingmodule. Code in $readingmodule can hence access all public types in $package but other
+   modules can not. (The option is available for the java and javac commands.)
+
+   When setting $readingmodule to ALL-UNNAMED, all code from the class path can access that package.
+   When accessing internal APIs during a migrating to Java 9, you will always use that placeholder -
+   only once your own code runs in modules does it really make sense to limit exports to specific
+   modules.
+
+   As an example, assume you have a class that uses com.sun.java.swing.plaf.nimbus.NimbusLookAndFeel -
+   during compilation you would get the following error:
+
+error: package com.sun.java.swing.plaf.nimbus is not visible
+import com.sun.java.swing.plaf.nimbus.NimbusLookAndFeel;
+                             ^
+ (package com.sun.java.swing.plaf.nimbus is declared
+  in module java.desktop, which does not export it)
+1 error
+
+   The troublesome class imports NimbusLookAndFeel from the encapsulated package
+   com.sun.java.swing.plaf.nimbus. Note how the error message points out the specific problem, including
+   the module that contains the class.
+
+   This clearly doesn't work out of the box on Java 9, but what if we want to keep using it? Then we'd
+   likely be making a mistake because there's a standardized alternative in javax.swing.plaf.nimbus, but
+   for the sake of this example let's say we still want to use this one - maybe to interact with legacy
+   code that can not be changed.
+
+   All we have to do to successfully compile against com.sun.java.swing.plaf.nimbus.NimbusLookAndFeel is
+   to add --add-exports java.desktop/com.sun.java.swing.plaf.nimbus=ALL-UNNAMED to the compiler command.
+   If we do that manually, it would like as follows:
+
+$> javac
+   --add-exports java.desktop/com.sun.java.swing.plaf.nimbus=ALL-UNNAMED
+   --class-path $dependencies
+   -d $target-folder
+   $source-files
+
+     Adding exports on the command line only changes the one compilation
+
+   This way, code happily compiles against encapsulated classes. But it is important to realize that
+   we've only pushed the problem to run time! Adding this export on the command line really only changes
+   the one compilation - there is no information put into the resulting bytecode that would allow that
+   class to access that package during execution. So we still have to figure out how to make it work at
+   run time.
+
+Reflectively Accessing Internal APIs With --add-opens
+   The java option --add-opens $module/$package=$reflectingmodule can be used to open $package of
+   $module for deep reflection to $reflectingmodule. Code in $reflectingmodule can hence reflectively
+   access all types and members in $package but other modules can not.
+
+   When setting $reflectingmodule to ALL-UNNAMED, all code from the class path can reflectively access
+   that package.When accessing internal APIs during a migrating to Java 9, you will always use that
+   placeholder - only once your own code runs in modules does it really make sense to limit exports to
+   specific modules.
+
+   A common case are dependency injection libraries like Guice that use the class loader's internal API,
+   which results in errors like the following:
+
+Caused by: java.lang.reflect.InaccessibleObjectException:
+Unable to make ClassLoader.defineClass accessible:
+module java.base does not "opens java.lang" to unnamed module
+
+   Note how the error message points out the specific problem, including the module that contains the
+   class. To make this work we simply need to open the package containing the class:
+
+$> java
+   --add-opens java.base/java.lang=ALL-UNNAMED
+   --class-path $dependencies
+   -jar $appjar
+
+Adding Classes To Modules With --patch-module
+   The compiler and runtime option --patch-module $module=$artifact merges all classes from $artifact
+   into $module. There are a few things to look out for, but let's see an example before we get to them.
+
+   When discussing split packages during migration, we looked at the example of a project that uses
+   the annotations @Generated (from the java.xml.ws.annotation module) and @Nonnull (from a JSR 305
+   implementation). We discovered three things:
+     * both annotations are in the javax.annotation package, thus creating a split
+     * we need to add the module manually because it's a Java EE module
+     * doing so makes the JSR 305 portion of the split package invisible
+
+   We can use --patch-module to mend the split:
+
+$> java
+   --add-modules java.xml.ws.annotation
+   --patch-module java.xml.ws.annotation=jsr305-3.0.2.jar
+   --class-path $dependencies
+   -jar $appjar
+
+   This way all classes in jsr305-3.0.2.jar becomes part of the module java.xml.ws.annotation and can
+   hence be loaded for a successful execution. Yay!
+
+   There are a few things to look out for, though. First, patching a module does not automatically add
+   it to the module graph. If it is not required explicitly, it might still need to be added with
+   --add-modules. Then, classes added to a module with --patch-module are subject to normal
+   accessibility rules:
+     * code that depends on them needs to read the patched module, which must export the necessary
+       packages
+     * likewise these classes' dependencies need to be in an exported package in a module read by the
+       patched one
+
+   This might require manipulating the module graph with command line options like --add-reads and
+   --add-exports. Since named modules can not access code from the class path, it might also be
+   necessary to create some automatic modules.
+
+Extending The Module Graph With --add-modules
+   The option --add-modules $modules, which is available on javac and java, allows explicitly defining a
+   comma-separated list of root modules beyond the initial module. (Root modules form the initial set of
+   modules from which the module graph is built by resolving their dependencies.) This allows you to
+   add modules (and their dependencies) to the module graph that would otherwise not show up because the
+   initial module does not depend on them (directly or indirectly).
+
+     An important use case for --add-modules are Java EE modules
+
+   A particularly important use case for --add-modules are Java EE modules, which are not resolved
+   by default when running an application from the class path. As an example, let's pick a class that
+   uses JAXBException from the Java EE module java.xml.bind. Here's how to make that module available
+   for compilation with --add-modules:
+
+$> javac
+   --class-path $dependencies
+   --add-modules java.xml.bind
+   -d ${output_dir}
+   ${source_files}
+
+   When the code is compiled and packaged, you need to add the module again for execution:
+
+$> java
+   --class-path $dependencies
+   --add-modules java.xml.bind
+   -jar $appjar
+
+   Other use cases for --add-modules are optional dependencies.
+
+   The --add-modules option has three special values: ALL-DEFAULT, ALL-SYSTEM, and ALL-MODULE-PATH. The
+   first two only work at run time and are used for very specific cases that this post does not discuss.
+   The last one can be quite useful, though: With it, all modules on the module path become root modules
+   and hence all of them make it into the module graph.
+
+   When adding modules it might be necessary to let other modules read them, so let's do that next.
+
+Extending The Module Graph With --add-reads
+   The compiler and runtime option --add-reads $module=$targets adds readability edges from $module to
+   all modules in the comma-separated list $targets. This allows $module to access all public types in
+   packages exported by those modules even though $module has no requires clauses mentioning them. If
+   $targets is set to ALL-UNNAMED, $module can even read the unnamed module.
+
+   As an example let's turn to the ServiceMonitor application, which has a monitor.statistics module
+   that could sometimes make use of a monitor.statistics.fancy module. Without resorting to optional
+   dependencies (which would likely be the proper solution for this specific case), we can use
+   --add-modules to add the fancy module and then add-reads to allow monitor.statistics to read it:
+
+$> java
+   --module-path mods
+   --add-modules monitor.statistics.fancy
+   --add-reads monitor.statistics=monitor.statistics.fancy
+   --module monitor
+
+Thoughts On Command Line Options
+   With Java 9, you might end up applying more command line options than ever before - it sure has been
+   like that for me. While doing so I had a few insights that might make your life easier.
+
+Argument Files
+   Command line options do not actually have to be applied to the command. An alternative are so-called
+   argument files (or @-files), which are plain text files that can be referenced on the command
+   line with @<file-name>. Compiler and runtime will then act as if the file content had been added to
+   the command.
+
+   The example on --patch-module showed how to run code that uses annotations from Java EE and JSR 305:
+
+$> java
+   --add-modules java.xml.ws.annotation
+   --patch-module java.xml.ws.annotation=jsr305-3.0.2.jar
+   --class-path $dependencies
+   -jar $appjar
+
+   Here, --add-modules and --patch-module are added to make the compilation work on Java 9. We could put
+   these two lines in a file called java-9-args and then launch as follows:
+
+$> java @java-9-args
+   --class-path $dependencies
+   -jar $appjar
+
+   What's new in Java 9 is that the JVM also recognizes argument files, so they can be shared between
+   compilation and execution.
+
+   Unfortunately, argument files don't work with Maven because the compiler plugin already creates a
+   file for all of its own options and Java does not supported nested argument files. Sad.
+
+Relying On Weak Encapsulation
+     Don't rely on weak encapsulation
+
+   The Java 9 runtime allows illegal access by default to code on the class path with nothing more
+   than a warning. That's great to run unprepared applications on Java 9, but I advise against relying
+   on that during a proper build because it allows new illegal accesses to slip by unnoticed. Instead, I
+   collect all the --add-exports and --add-opens I need and then activate strong encapsulation at run
+   time with --illegal-access=deny.
+
+The Pitfalls Of Command Line Options
+   Using command line options has a few pitfalls:
+     * these options are infectious in the sense that if a JAR needs them, all of its dependencies need
+       them as well
+     * developers of libraries and frameworks that require specific options will hopefully document that
+       their clients need to apply them, but of course nobody reads the documentation until it's too
+       late
+     * application developers will have to maintain a list of options that merge the requirements of
+       several libraries and frameworks they use
+     * it is not easy to maintain the options in a way that allow sharing them between different build
+       phases and execution
+     * it is not easy to determine which options can be removed due to a dependency update to a Java 9
+       compatible version
+     * it can be tricky to apply the options to the right Java processes, for example for a build tool
+       plugin that does not run in the same process as the build tool
+
+     Command line options are a fix, not a proper solution
+
+   All of these pitfalls make one thing very clear: Command line options are a fix, not a proper
+   solution, and they have their own long-term costs. This is no accident - they were designed to make
+   the undesired possible. Not easy, though, or there would be no incentive to solve the underlying
+   problem.
+
+   So do your best to only rely on public and supported APIs, not to split packages, and to generally
+   avoid picking fights with the module system. And, very importantly, reward libraries and frameworks
+   that do the same! But the road to hell is paved with good intentions, so if everything else fails,
+   use every command line option at your disposal.
+
+Reflection
+   These five options should get you through most thickets:
+     * --add-exports to export a package, which makes its public types and members accessible ( javac
+       and java)
+     * --add-opens to open a package, which makes all its types and members accessible ( java)
+     * --patch-module adds classes to a specific module
+     * --add-modules adds the listed modules and their transitive dependencies to the module graph
+     * --add-reads makes one module read another
+
+   As discussed, command line options come with a set of pitfalls, so make sure to only use them where
+   absolutely necessary and work to reduce those cases.
+
+
+---
+https://blog.codefx.org/java/java-9-migration-guide/
+
+Java 9 Migration Guide: The Seven Most Common Challenges
+
+   I'm sure you've heard that updating to Java 9 is no walk in the park, maybe even that it's an
+   incompatible update and that a migration makes no sense for large code bases. After doing exactly
+   that, migrating an old and fairly large code base, I can tell you that it's not that bad. It's more
+   work than bumping to Java 8, true, but it's time well spent. More than anything else, the migration
+   uncovered some small and a few not so small problems that needed fixing regardless of the migration
+   itself and we took the opportunity to do just that.
+
+   I collected a few surprising details over at java9.wtf but condensed the seven largest issues
+   into this Java 9 migration guide. It's as much a post as it is a resource to come back to, so put it
+   on speed dial and search it when you have a concrete problem. Also note that while you need to know a
+   bit about the module system (here's a tutorial), this is not about modularizing your
+   application - it is only about getting it to compile and run on Java 9.
+
+Overview
+   This is a list of the seven most likely problems to trip you up during a migration to Java 9:
+
+   Contents
+     * Illegal Access To Internal APIs
+     * Dependencies On Java EE Modules
+     * Split Packages
+     * Casting To URL Class Loader
+     * Rummaging Around In Runtime Images
+     * Boot Class Path
+     * New Version Strings
+     * Summary
+     * Share & Follow
+
+   Each section explains the problem, the most common symptoms that help you identify it and a set of
+   possible fixes (usually command line options for java or javac). A future post will tie
+   individual fixes into a larger migration strategy and make some recommendations based on my
+   experiences.
+
+Illegal Access To Internal APIs
+   One of the module system's biggest selling points is strong encapsulation. It makes sure non-public
+   classes as well as classes from non-exported packages are inaccessible from outside the module. First
+   and foremost, this of course applies to the platform modules shipped with the JDK, where only java.*
+   and javax.* packages are fully supported. Most com.sun.* and sun.* packages, on the other hand, are
+   internal and hence inaccessible by default.
+
+   While the Java 9 compiler behaves exactly as you would expect and prevents illegal access, the same
+   is not true for the run time. To offer a modicum of backwards compatibility it eases migration and
+   improves the chances of applications built on Java 8 to run on Java 9 by granting access to internal
+   classes. If reflection is used for the access, a warning is emitted.
+
+Symptoms
+   During compilation against Java 9 you see compile errors similar to the following:
+
+error: package com.sun.java.swing.plaf.nimbus is not visible
+import com.sun.java.swing.plaf.nimbus.NimbusLookAndFeel;
+                             ^
+   (package com.sun.java.swing.plaf.nimbus is declared
+   in module java.desktop, which does not export it)
+1 error
+
+   Warnings emitted for reflection look as follows:
+
+Static access to [Nimbus Look and Feel]
+WARNING: An illegal reflective access operation has occurred
+WARNING: Illegal reflective access by j9ms.internal.Nimbus
+   (file:...) to constructor NimbusLookAndFeel()
+WARNING: Please consider reporting this
+   to the maintainers of j9ms.internal.Nimbus
+WARNING: Use --illegal-access=warn to enable warnings
+   of further illegal reflective access operations
+WARNING: All illegal access operations will be denied in a future release
+Reflective access to [Nimbus Look and Feel]
+
+Fixes
+   The most obvious and sustainable fix for dependencies on internal APIs is to get rid of them. Replace
+   them with maintained APIs and you paid back some high-risk technical debt.
+
+   If that can't be done for whatever reason, the next best thing is to acknowledge the dependencies and
+   inform the module system that you need to access it. To that end you can use two command line
+   options:
+     * The option --add-exports $module/$package=$readingmodule can be used to export $package of
+       $module to $readingmodule. Code in $readingmodule can hence access all public types in $package
+       but other modules can not. When setting $readingmodule to ALL-UNNAMED, all code from the class
+       path can access that package. During a migration to Java 9, you will always use that placeholder.
+       The option is available for the java and javac commands.
+     * This covers access to public members of public types but reflection can do more than that: With
+       the generous use of setAccessible(true) it allows interaction with non-public classes, fields,
+       constructors, and methods (sometimes called deep reflection), which even in exported packages are
+       still encapsulated. The java option --add-opens uses the same syntax as --add-exports and opens
+       the package to deep reflection, meaning all of its types and their members are accessible
+       regardless of their visibility modifiers.
+
+   You obviously need --add-exports to appease the compiler but gathering --add-exports and --add-opens
+   for the run time has advantages as well:
+    1. the run time's permissive behavior will change in future Java releases, so you have to do that
+       work at some point anyway
+    2. --add-opens makes the warnings for illegal reflective access go away
+    3. as I will show in a minute, you can make sure no new dependencies crop up by making the run time
+       actually enforce strong encapsulation
+
+Going Further
+   Compiling against Java 9 helps hunting down dependencies on internal APIs in the project's code base.
+   But the libraries and frameworks your project uses are just as likely to make trouble.
+
+   JDeps is the perfect tool to find compile dependencies on JDK-internal APIs in your project and your
+   dependencies. If you're not familiar with it, I've written a tutorial that gets you started.
+   Here's how to use it for the task at hand:
+
+$> jdeps --jdk-internals -R --class-path 'libs/*' $project
+
+   Here, libs is a folder containing all of your dependencies and $project your project's JAR. Analyzing
+   the output is beyond this article's scope but it's not that hard - you'll manage.
+
+   Finding reflective access is a little tougher. The run time's default behavior is to warn you once
+   for the first illegal access to a package, which is insufficient. Fortunately, there's the
+   --illegal-access=$value option, where $value can be:
+     * permit: Access to all JDK-internal APIs is permitted to code on the class path. For reflective
+       access, a single warning is issued for the first access to each package. (Default in Java 9, but
+       will be removed in a future release.)
+     * warn: Behaves like permit but a warning is issued for each reflective access.
+     * debug: Behaves like warn but a stack trace is included in each warning.
+     * deny: The option for those who believe in strong encapsulation:
+       All illegal access is forbidden by default.
+
+   Particularly deny is very helpful to hunt down reflective access. It is also a great default value to
+   set once you've collected all required --add-exports and --add-opens options. This way, no new
+   dependencies can crop up without you noticing it.
+
+Dependencies On Java EE Modules
+   There's a lot of code in Java SE that's actually Java EE related. It ended up in these six modules:
+     * java.activation with javax.activation package
+     * java.corba with javax.activity, javax.rmi, javax.rmi.CORBA, and org.omg.* packages
+     * java.transaction with javax.transaction package
+     * java.xml.bind with all javax.xml.bind.* packages
+     * java.xml.ws with javax.jws, javax.jws.soap, javax.xml.soap, and all javax.xml.ws.* packages
+     * java.xml.ws.annotation with javax.annotation package
+
+   For various compatibility reasons (one of them being split packages, which we will look at next),
+   code on the class path does not see these modules by default, which leads to compile or run time
+   errors.
+
+Symptoms
+
+   Here's a compile error for a class using JAXBException from the java.xml.bind module:
+
+error: package javax.xml.bind is not visible
+import javax.xml.bind.JAXBException;
+               ^
+   (package javax.xml.bind is declared in module java.xml.bind,
+       which is not in the module graph)
+1 error
+
+   If you get it past the compiler but forget to massage the run time, you'll get a
+   NoClassDefFoundError:
+
+Exception in thread "main" java.lang.NoClassDefFoundError: javax/xml/bind/JAXBException
+   at monitor.Main.main(Main.java:27)
+Caused by: java.lang.ClassNotFoundException: javax.xml.bind.JAXBException
+   at java.base/jdk.internal.loader.BuiltinClassLoader.loadClass(BuiltinClassLoader.java:582)
+   at java.base/jdk.internal.loader.ClassLoaders$AppClassLoader.loadClass(ClassLoaders.java:185)
+   at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:496)
+   ... 1 more
+
+Fixes on Java 9 and 10
+   Once you modularized your code, you can declare a regular dependency in the module's declaration.
+   Until then, --add-modules $module comes to your rescue, which makes sure $module is available and can
+   be added to both java and javac. If you add java.se.ee, you'll have access to all Java EE modules.
+
+Fixes on Java 11 and later
+   Java 11 removes the Java EE modules, so from then on you will need third-party implementations
+   instead. This StackOverflow answer contains a list of alternatives. Note that using third-party
+   dependencies already works from Java 9 on, so you don't have to use --add-modules as a stopgap.
+
+Split Packages
+   This one is a little tricky... To enforce consistency a module is not allowed to read the same package
+   from two different modules. The actual implementation is stricter, though, and no two modules are
+   allowed to even contain the same package (exported or not). The module system operates under that
+   assumption and whenever a class needs to be loaded, it looks up which module contains that package
+   and goes looking for the class in there (which should boost class loading performance).
+
+   To safeguard the assumption the module system checks that no two named modules split a package and
+   barfs if it finds any that do. During migration you're not quite in that situation, though. Your code
+   comes from the class path, which puts it into the so-called unnamed module. To maximize compatibility
+   it is not scrutinized and no module-related checks are applied to it.
+
+   Now, in the case of split packages, this means a split between a named module (e.g. in the JDK) and
+   the unnamed module is not discovered. Which may sound very fortunate, is the opposite if you mix in
+   the class loading behavior: If a package is split between a module and the class path, for classes
+   from that package class loading will always and only look into the module. This means classes in the
+   class path portion of the package are effectively invisible.
+
+Symptoms
+   The symptom is that a class from the class path can not be loaded even though it's definitely there,
+   leading to compile errors like this:
+
+error: cannot find symbol
+   symbol:   class Nonnull
+   location: package javax.annotation
+
+   Or, at run time, to NoClassDefFoundErrors like above.
+
+   One example where this can occur is with the various JSR-305 implementations. A project using, for
+   example, the annotations javax.annotation.Generated (from java.xml.ws.annotation) and
+   java.annotation.Nonnull (from com.google.code.findbugs:jsr305) will have trouble compiling. It is
+   either missing the Java EE annotations or, when the module is added like described above, will
+   encounter a split package and not see the JSR 305 module.
+
+Fixes
+   The migration path will be different, depending on the artifact that splits the JDK package. In some
+   cases it might be more than just some classes that go into a random JDK package but a replacement for
+   an entire JDK module, for example because it overrides an endorsed standard. In that case, you
+   are looking for the --upgrade-module-path $dir option - modules found in $dir are used to replace
+   upgradeable modules in the run time.
+
+   If you indeed just have a couple of classes that split a package, the long-term solution is to remove
+   the split. In case that is not possible in the short-term, you can patch the named module with the
+   content from the class path. The option --patch-module $module=$artifact will merge all classes from
+   $artifact into $module, putting all portions of the split package into the same module, thus mending
+   split.
+
+   In the case of java.xml.ws.annotation and @Nonnull that would be
+   --patch-module java.xml.ws.annotation=path/to/jsr305-3.0.2.jar. For this particular problem, there
+   are other viable solutions, though, which I explore in a separate post.
+
+   There are a few things to look out for, though. First of all, the patched module must actually make
+   it into the module graph, for which it might be necessary to use --add-modules. Then, it must have
+   access to all the dependencies that it needs to run successfully. Since named modules can not access
+   code from the class path, this might make it necessary to start creating some automatic modules,
+   which goes beyond the scope of this post.
+
+Going Further
+   Finding split package by try and error is pretty unnerving. Fortunately JDeps reports them, so if
+   you analyze your project and its dependencies, the first lines of output will report split packages.
+   You can use the same command as above:
+
+$> jdeps --jdk-internals -R --class-path '$libs/*' project.jar
+
+Casting To URL Class Loader
+   The class loading strategy that I just described is implemented in a new type and in Java 9 the
+   application class loader is of that type. That means it is not a URLClassLoader, anymore, so the
+   occasional (URLClassLoader) getClass().getClassLoader() or (URLClassLoader)
+   ClassLoader.getSystemClassLoader() sequences will no longer execute. This is another typical example
+   where Java 9 is backwards compatible in the strict sense (because that it's a URLCassLoader was never
+   specified) but which can nonetheless cause migration challenges.
+
+Symptoms
+   This one is very obvious. You'll get a ClassCastException complaining that the new AppClassLoader is
+   no URLClassLoader:
+
+Exception in thread "main" java.lang.ClassCastException:
+   java.base/jdk.internal.loader.ClassLoaders$AppClassLoader
+   cannot be cast to java.base/java.net.URLClassLoader
+       at monitor.Main.logClassPathContent(Main.java:46)
+       at monitor.Main.main(Main.java:28)
+
+Fixes
+   The class loader was probably cast to access methods specific to URLClassLoader. If so, your chances
+   to do a migration with only small changes are slim. The only supported (and hence accessible) super
+   types of the new AppClassLoader are SecureClassLoader and ClassLoader and only few methods were
+   added here in 9. Still, have a look, they might do what you're looking for.
+
+   If you've used the URLClassLoader to dynamically load user provided code (for example as part of a
+   plugin infrastructure) by appending to the class path, then you have to find a new way to do that as
+   it can not be done with Java 9. You should instead consider creating a new class loader for that.
+   This has the added advantage that you'll be able to get rid of the new classes as they are not loaded
+   into the application class loader. If you're compiling against Java 9, you should read up on
+   layers - they give you a clean abstraction for loading an entirely new module graph.
+
+Rummaging Around In Runtime Images
+   With the JDK being modularized the layout of the run time image fundamentally changed. Files like
+   rt.jar, tools.jar, and dt.jar are gone; the JDK classes are now bundled into jmod files (one per
+   module), a purposely unspecified file format that allows future optimizations without regards to
+   backwards compatibility. Furthermore the distinction between JRE and JDK is gone.
+
+   All of this has been unspecified but that doesn't mean that there's no code out there depending on
+   these details. Particularly tools like IDEs (although these have mostly been updated already) will
+   have compatibility problems with these changes and will stop working in unpredictable ways unless
+   they're updated.
+
+   As a consequence of these changes, the URL you get for system resources, e.g. from
+   ClasLoader::getSystemResource, changed. It used to be of the following form:
+   jar:file:$javahome/lib/rt.jar!$path, where $path is something like java/lang/String.class. It now
+   looks like jrt:/$module/$path. Of course all APIs that create or consume such URLs were updated but
+   non-JDK code handcrafting these URLs will have to be updated for Java 9.
+
+   Furthermore, the Class::getResource* and ClassLoader::getResource* methods no longer read
+   JDK-internal resources. Instead use Module::getResourceAsStream to access module-internal resources
+   or create a JRT file system as follows:
+
+FileSystem fs = FileSystems.getFileSystem(URI.create("jrt:/"));
+fs.getPath("java.base", "java/lang/String.class"));
+
+Boot Class Path
+   I'm in murky waters here because I never used the -Xbootclasspath option, which is mostly removed.
+   Apparently its features are replaced by various new command line options (paraphrasing from JEP
+   220 here):
+     * the javac option --system can be used to specify an alternate source of system modules
+     * the javac option --release can be used to specify an alternate platform version
+     * the java option --patch-module option, mentioned above, can be used to inject content into
+       modules in the initial module graph
+
+New Version Strings
+   After more than 20 years, Java has finally and officially accepted that it's no longer on version
+   1.x. Hooray! So from Java 9 on, the system property java.version and its siblings no longer start
+   with 1.x but with x, i.e. 9 in Java 9.
+
+Symptoms
+   There are no clear-cut symptoms - pretty much everything could go wrong if some utility function
+   determines the wrong version. It's not too hard to find, though. A full text search for the following
+   strings should lead to all version-string-specific code: java.version, java.runtime.version,
+   java.vm.version, java.specification.version, java.vm.specification.version.
+
+Fixes
+   If you are willing to raise your project's requirements to Java 9, you can eschew the whole system
+   property prodding and parsing and instead use the new Runtime.Version type, which makes all of
+   this much easier. If you want to stay compatible to pre Java 9, you could still use the new API by
+   creating a multi-release JAR. If that's also out of the question, it looks like you actually have
+   to write some code (uch!) and branch based on the major version.
+
+Summary
+   Now you know how to use internal APIs ( --add-export and --add-opens), how to make sure Java EE
+   modules are present ( --add-modules), and how to deal with split packages ( --patch-module). These
+   are the most likely problems you'll encounter during a migration. Less common and also less easy to
+   fix without access to the problematic code are casts to URLClassLoader, problems due to the new
+   runtime image layout and resource URLs, the removed -Xbootclasspath, and new version strings.
+
+   Knowing how to fix these will give you very good chances to overcome all your migration challenges
+   and make your application compile and run on Java 9. If not, take a look at JEP 261's Risks and
+   Assumptions sections, which lists a few other potential pitfalls.
+
+   If you're a little overwhelmed by all this, wait for my next post, which gives some advice on how
+   to string these individual fixes into a comprehensive migration strategy, for example by including
+   build tools and continuous integration. Or get my book, where I explain all of this and more.
+
+
+---
+https://blog.codefx.org/tools/jdeps-tutorial-analyze-java-project-dependencies/
+
+A JDeps Tutorial - Analyze Your Project's Dependencies
+
+   JDeps is the Java Dependency Analysis Tool, a command line tool that processes Java bytecode,
+   meaning .class files or the JARs that contain them, and analyzes the statically declared dependencies
+   between classes. The results can be filtered in various ways and can be aggregated to package or JAR
+   level. JDeps can also tell you which JDK-internal APIs your project is using and is fully aware of
+   the module system. All in all it is a very useful tool to examine various forms of dependency
+   graphs.
+
+   In this tutorial, I'll introduce you to how JDeps works - follow-up posts will show you some great
+   use cases for it.
+
+Overview
+   Contents
+     * Getting To Know JDeps
+     * Including Dependencies
+     * Configuring JDeps' Output
+     * Drilling Deeper
+     * JDeps And Modules
+     * Reflection
+     * Share & Follow
+
+   For this tutorial, I encourage you to follow along, preferably with one of your projects. It will be
+   easiest if you have a JAR of your project and next to it a folder with all its transitive
+   dependencies. If you're using Maven, you can achieve the latter with the
+   maven-dependency-plugin's copy-dependencies goal. With Gradle, you can use a Copy task, setting
+   from to configurations.compile or configurations.runtime.
+
+   As my sample project I picked Scaffold Hunter:
+
+     Scaffold Hunter is a Java-based open source tool for the visual analysis of data sets with a focus
+     on data from the life sciences, aiming at an intuitive access to large and complex data sets. The
+     tool offers a variety of views, e.g. graph, dendrogram, and plot view, as well as analysis
+     methods, e.g. for clustering and classification.
+
+   I downloaded the 2.6.3 release ZIP and copied all dependencies into libs.
+
+   When showing output, I abbreviate scaffoldhunter (in package names) and scaffold-hunter (in file
+   names) to sh to make it shorter.
+
+Getting To Know JDeps
+   You can find the JDeps executable jdeps in your JDK's bin folder since Java 8. Working with it is
+   easiest if it is available on the command line, for which you might have to perform some setup steps
+   specific to your operating systems. Make sure that jdeps --version works and shows that the Java 9
+   version is running.
+
+   Next step is to grab a JAR and set JDeps loose on it. Used without further command line options it
+   will first list the JDK modules the code depends on. That is followed by a list of package-level
+   dependencies, which is organized as <package> -> <package> <module/JAR>.
+
+   Calling jdeps sh-2.6.3.jar results in the following output:
+
+$> jdeps sh-2.6.3.jar
+
+sh-2.6.3.jar -> java.base
+sh-2.6.3.jar -> java.datatransfer
+sh-2.6.3.jar -> java.desktop
+sh-2.6.3.jar -> java.logging
+sh-2.6.3.jar -> java.prefs
+sh-2.6.3.jar -> java.sql
+sh-2.6.3.jar -> java.xml
+sh-2.6.3.jar -> not found
+  edu.udo.sh -> com.beust.jcommander  not found
+  edu.udo.sh -> edu.udo.sh.data       sh-2.6.3.jar
+  edu.udo.sh -> edu.udo.sh.gui        sh-2.6.3.jar
+  edu.udo.sh -> edu.udo.sh.gui.util   sh-2.6.3.jar
+  edu.udo.sh -> edu.udo.sh.util       sh-2.6.3.jar
+  edu.udo.sh -> java.io               java.base
+  edu.udo.sh -> java.lang             java.base
+  edu.udo.sh -> javax.swing           java.desktop
+  edu.udo.sh -> org.slf4j             not found
+[... truncated many more package dependencies ...]
+
+   You can see that Scaffold Hunter depends on the modules java.base (of course), java.desktop (it's a
+   Swing application), java.sql (data sets are stored in SQL data bases), and a few others. This is
+   followed by the long list of package dependencies, which is a little too much to take in. Note that
+   some dependencies are marked as not found, which makes sense as I did not tell JDeps where to look
+   for them.
+
+   Now it's time to configure JDeps with the various options. You can list them with jdeps -h.
+   JDeps dependency analysis
+
+Including Dependencies
+   An important aspect of JDeps is that it allows you to analyze your dependencies as if they were part
+   of your code. A first step to that goal is putting them onto the class path with --class-path.
+
+   That enables JDeps to follow the paths into your dependencies' JARs and rids you of the not found
+   indicators. To actually analyze the dependencies as well you need to make JDeps recurse into them
+   with -recursive or -R.
+
+   To include Scaffold Hunter's dependencies, I execute JDeps with --class-path 'libs/*' and -recursive:
+
+$> jdeps --class-path 'libs/*' -recursive sh-2.6.3.jar
+
+[... truncated split package warnings ...]
+[... truncated some module/JAR dependencies...]
+sh-2.6.3.jar -> libs/commons-codec-1.6.jar
+sh-2.6.3.jar -> libs/commons-io-2.4.jar
+sh-2.6.3.jar -> libs/dom4j-1.6.1.jar
+sh-2.6.3.jar -> libs/exp4j-0.1.38.jar
+sh-2.6.3.jar -> libs/guava-18.0.jar
+sh-2.6.3.jar -> libs/heaps-2.0.jar
+sh-2.6.3.jar -> libs/hibernate-core-4.3.6.Final.jar
+sh-2.6.3.jar -> java.base
+sh-2.6.3.jar -> java.datatransfer
+sh-2.6.3.jar -> java.desktop
+sh-2.6.3.jar -> java.logging
+sh-2.6.3.jar -> java.prefs
+sh-2.6.3.jar -> java.sql
+sh-2.6.3.jar -> java.xml
+sh-2.6.3.jar -> libs/javassist-3.18.1-GA.jar
+sh-2.6.3.jar -> libs/jcommander-1.35.jar
+[... truncated more module/JAR dependencies...]
+  edu.udo.sh -> com.beust.jcommander  jcommander-1.35.jar
+  edu.udo.sh -> edu.udo.sh.data       sh-2.6.3.jar
+  edu.udo.sh -> edu.udo.sh.gui        sh-2.6.3.jar
+  edu.udo.sh -> edu.udo.sh.gui.util   sh-2.6.3.jar
+  edu.udo.sh -> edu.udo.sh.util       sh-2.6.3.jar
+  edu.udo.sh -> java.io               java.base
+  edu.udo.sh -> java.lang             java.base
+  edu.udo.sh -> javax.swing           java.desktop
+  edu.udo.sh -> org.slf4j             slf4j-api-1.7.5.jar
+[... truncated many, many more package dependencies ...]
+
+   In this specific case the output begins with a few split package warnings that I'm going to ignore
+   for now. The following module/JAR and package dependencies are like before but now all are found, so
+   there are much more of them. This makes the output all the more overwhelming, though, so it is high
+   time to look into how we can make sense from so much data.
+
+Configuring JDeps' Output
+   There are various ways to configure JDeps' output. Maybe the best option to use in a first analysis
+   of any project is -summary or -s, which only shows dependencies between JARs and leaves out the
+   package dependencies. The following table lists various other ways to get different perspectives on
+   the dependencies:
+   Option Description
+
+   --package or -p
+
+   Followed by a package name it only considers dependencies on that package, which is a great way to
+   see all the places where those utils are used.
+
+   --regex or -e
+
+   Followed by a regular expression it only considers dependencies on classes that match the regex.
+   (Note that unless -verbose:class is used, output still shows packages.)
+
+   -filter or -f
+
+   Followed by a regular expression it excludes dependencies on classes that match the regex.
+   (Note that unless -verbose:class is used, output still shows packages.)
+
+   -filter:archive
+
+   In many cases dependencies within an artifact are not that interesting.
+   This option ignores them and only shows dependencies across artifacts.
+
+   --api-only
+
+   Sometimes, particularly if you're analyzing a library, you only care about a JARs API.
+   With this option, only types mentioned in the signatures of public and protected members of public
+   classes are examined.
+
+   Output on the command line is a good way to examine details and drill deeper into interesting bits.
+   It doesn't make for the most intuitive overview, though - diagrams are much better at that.
+   Fortunately, JDeps has the --dot-output option, which creates .dot files for each of the
+   individual analyses. These files are pure text but other tools, e.g. Graphviz, can then be used
+   to create images from them.
+
+   These two commands yield the following diagram:
+
+$> jdeps --class-path 'libs/*' -recursive --dot-output dots sh-2.6.3.jar
+$> dot -Tpng -O dots/summary.dot
+
+Drilling Deeper
+   If you want to go into more details, -verbose:class will list dependencies between classes instead of
+   aggregating them to package level.
+
+   Sometimes, listing only direct dependencies on a package or class is not enough because they might
+   not actually be in your code but in your dependencies. In that case --inverse or -I might help. Given
+   a specific package or regex to look for it tracks the dependencies back as far as they go, listing
+   the artifacts along the way. Unfortunately, there seems to be no straight-forward way to see the
+   result on the level of classes instead of artifacts.
+
+   There are a few more options that might help you in your specific case - as mentioned you can list
+   them with jdeps -h.
+
+JDeps And Modules
+   Just like the compiler and the JVM can operate on a higher level of abstraction thanks to the
+   module system, so can JDeps. The module path can be specified with --module-path (note that -p is
+   already reserved, so it is not a shorthand of this option) and the initial module with --module or
+   -m. From there, the analyses we made above can be made just the same.
+
+   Because Scaffold Hunter is not yet modularized, I'll switch to the example project I use in my
+   book about the Java 9 module system, the Monitor application. Here, I'm creating a summary
+   analysis of the module relations:
+
+# on `master` branch
+$> jdeps --module-path mods:libs -m monitor -summary -recursive
+
+[... truncated some module dependencies...]
+monitor -> java.base
+monitor -> monitor.observer
+monitor -> monitor.observer.alpha
+monitor -> monitor.observer.beta
+monitor -> monitor.persistence
+monitor -> monitor.rest
+monitor -> monitor.statistics
+monitor.observer -> java.base
+monitor.observer.alpha -> java.base
+monitor.observer.alpha -> monitor.observer
+monitor.observer.beta -> java.base
+monitor.observer.beta -> monitor.observer
+monitor.persistence -> java.base
+monitor.persistence -> monitor.statistics
+monitor.rest -> java.base
+monitor.rest -> monitor.statistics
+monitor.rest -> spark.core
+monitor.statistics -> java.base
+monitor.statistics -> monitor.observer
+slf4j.api -> java.base
+slf4j.api -> not found
+spark.core -> JDK removed internal API
+spark.core -> java.base
+spark.core -> javax.servlet.api
+spark.core -> jetty.server
+spark.core -> jetty.servlet
+spark.core -> jetty.util
+spark.core -> slf4j.api
+spark.core -> websocket.api
+spark.core -> websocket.server
+spark.core -> websocket.servlet
+[... truncated more module dependencies...]
+
+   Beyond that, there are some Java 9 and module-specific options. With --require <modules> you can list
+   all modules that require the named ones. You can use --jdk-internals to analyze a project's
+   problematic dependencies and --generate-module-info or --generate-open-module to create first drafts
+   of module descriptors. As mentioned in passing, JDeps will also always report all split packages
+   it finds.
+
+   In a future post, I will show you how to use these flags to help your project's modularization along.
+   But even before that, JDeps is an important tool when migrating to Java 9.
+
+Reflection
+   With JDeps you can analyze your project's statically declared dependencies. It operates on the class
+   level but aggregates results to package and artifact levels. With various filters you can focus on
+   the aspects that matter most to you. Maybe the most basic analysis is a graph of artifact
+   dependencies across your code and third party libraries:
+
+$> jdeps --class-path 'libs/*' -summary -recursive sh-2.6.3.jar
+
+   It can be used to perform some very interesting analyses, particularly on larger code bases. I'll
+   soon show you some examples for that.
+
+
+---
+https://blog.codefx.org/java/module-system-optional-dependencies/
+
+Optional Dependencies with 'requires static'
+
+   The Java Platform Module System (JPMS) has a strong opinion on dependencies: By default, they
+   need to be required (to be accessible) and then they need to be present both at compile and at run
+   time. This does not work with optional dependencies, though, where code is written against artifacts
+   that are not necessarily present at run time. Fortunately, the JPMS has a requires static clause that
+   can be used in these exact situations.
+
+   I will show you a couple of examples in which the default behavior's strictness leads to problems and
+   then introduce the module system's solution to optional dependencies: requires static. Coding against
+   them is not trivial, though, so we will have a close look at that as well.
+
+Overview
+   If you don't know much about the module system yet, you should read this tutorial, so you've for
+   the basics covered. Some examples build on the optional-dependencies branch of a small demo
+   application, called the ServiceMonitor.
+
+   Contents
+     * The Conundrum Of Unrequired Dependencies
+          + The Utility Library
+          + The Fancy Statistics Library
+     * Optional Dependencies With 'requires static'
+     * Resolution Of Optional Dependencies
+     * Coding Against Optional Dependencies
+          + Established Dependency
+          + Internal Dependency
+     * Summary
+     * Share & Follow
+
+The Conundrum Of Unrequired Dependencies
+   To nail down where exactly the strictness of regular requires clauses leads to problems, I want to
+   start with two examples. While similar in some aspects there are differences that become important
+   later when we discuss how we code against potentially missing dependencies.
+
+The Utility Library
+   Let's start with an imaginary library we're maintaining, uber.lib, that integrates with a handful of
+   other libraries. Its API offers functionality that builds on them and thus exposes their types. We'll
+   play this through with the example of com.google.guava, which in our hypothetical scenario was
+   already turned into a Java module that uber.lib wants to code against.
+
+   As maintainers of uber.lib we assume that nobody who is not already using Guava is ever going to call
+   the Guava portion of our library. This makes sense in certain cases: Why would you call a method in
+   uber.lib that creates a nice report for a com.google.common.graph.Graph instance if you don't have
+   such a graph?
+
+   For uber.lib that means that it can function perfectly without com.google.guava: If Guava makes it
+   into the module graph, clients might call into that portion of the uber.lib API. If it doesn't,
+   they won't and the library will be fine as well. We can say that uber.lib never needs the dependency
+   for its own sake.
+
+     With regular dependencies optional relationships can not be implemented.
+
+   With regular requires clauses, such an optional relationship can not be implemented, though.
+   According to the rules for readability and accessibility, uber.lib has to require
+   com.google.guava to compile against its types but this forces all clients to always have Guava on the
+   module path when launching their application.
+
+   If uber.lib integrates with a handful of libraries, it would make clients depend on all of them even
+   though they might never use more than one.
+   That's not a nice move from us.
+
+The Fancy Statistics Library
+   The second example comes from the demo application, which contains a module monitor.statistics.
+   Let's assume there was some advanced statistics library containing a module stats.fancy that
+   monitor.statistics wants to use but which could not be present on the module path for each deployment
+   of the application. (The reason for that is irrelevant but let's go with a license that prevents the
+   fancy code from being used "for evil" but, evil masterminds that we are, we occasionally want to do
+   just that.)
+
+   We would like to write code in monitor.statistics that uses types from the fancy module but for that
+   to work we need to depend on it with a requires clause. If we do that, though, the module system
+   would not let the application launch if stats.fancy is not present.
+
+   The conundrum of optional dependencies
+
+   Deadlock. Again.
+
+Optional Dependencies With 'requires static'
+   When a module needs to be compiled against types from another module but does not want to depend on
+   it at run time, it can use a requires static clause. If foo requires static bar, the module system
+   behaves different at compile and run time:
+     * At compile time, bar must be present or there will be an error. During compilation bar is
+       readable by foo.
+     * At run time, bar might be absent and that will cause neither error nor warning. If it is present,
+       it is readable by foo.
+
+   We can immediately put this into action and create an optional dependency from monitor.statistics to
+   stats.fancy:
+
+module monitor.statistics {
+   requires monitor.observer;
+   requires static stats.fancy;
+   exports monitor.statistics;
+}
+
+   If stats.fancy is missing during compilation, we get an error when the module declaration is
+   compiled:
+
+monitor.statistics/src/main/java/module-info.java:3:
+   error: module not found: stats.fancy
+       requires static stats.fancy;
+                            ^
+1 error
+
+   At launch time, though, the module system does not care whether stats.fancy is present or not.
+
+   Similarly, the module descriptor for uber.lib declares all dependencies as optional:
+
+module uber.lib {
+   requires static com.google.guava;
+   requires static org.apache.commons.lang;
+   requires static org.apache.commons.io;
+   requires static io.javaslang;
+   requires static com.aol.cyclops;
+}
+
+   Now that we know how to declare optional dependencies, two questions remain to be answered:
+     * Under what circumstances will it be present?
+     * How can we code against an an optional dependency?
+
+   We will answer both questions next.
+
+Resolution Of Optional Dependencies
+   Module resolution is the process that, given an initial module and a universe of observable
+   modules, builds a module graph by resolving requires clauses. When a module is being resolved, all
+   modules it requires must be found in the universe of observable modules. If they are, they are added
+   to the module graph; otherwise an error occurs. It is important to note that modules that did not
+   make it into the module graph during resolution are not available later during compilation or
+   execution, either.
+
+   At compile time, module resolution handles optional dependencies just like regular dependencies. At
+   run time, though, requires static clauses are mostly ignored. When the module system encounters one
+   it does not try to fulfill it, meaning it does not even check whether the named module is present in
+   the universe of observable modules.
+
+     A module that is only an optional dependency will not be available at run time.
+
+   As a consequence even if a module is present on the module path (or in the JDK for that matter), it
+   will not be added to the module graph just because of an optional dependency. It will only make it
+   into the graph if it is also a regular dependency of some other module that is being resolved or
+   because it was added explicitly with the command line flag --add-modules.
+
+   Maybe you stumbled across the phrase that optional dependencies "are mostly ignored". Why mostly?
+   Well, one thing the module system does is if an optional dependency makes it into a graph, a
+   readability edge is added. This ensures that if the optional module is present, its types can be
+   accessed straight away.
+
+Coding Against Optional Dependencies
+   Optional dependencies require a little more thought when writing code against them because this is
+   what happens when monitor.statistics uses types in stats.fancy but the module isn't present at run
+   time:
+
+Exception in thread "main" java.lang.NoClassDefFoundError:
+   stats/fancy/FancyStats
+       at monitor.statistics/monitor.statistics.Statistician
+           .<init>(Statistician.java:15)
+       at monitor/monitor.Main.createMonitor(Main.java:42)
+       at monitor/monitor.Main.main(Main.java:22)
+Caused by: java.lang.ClassNotFoundException: stats.fancy.FancyStats
+       ... many more
+
+   Oops. We usually don't want our code to do that.
+
+   Generally speaking, when the code that is currently being executed references a type, the Java
+   Virtual Machine checks whether it is already loaded. If not, it tells the class loader to do that and
+   if that fails, the result is a NoClassDefFoundError, which usually crashes the application or at
+   least fails out of the chunk of logic that was being executed.
+
+     With optional dependencies we opt out of the checks that make the module system safe.
+
+   This is something JAR hell was famous for and that the module system wants to overcome by
+   checking declared dependencies when launching an application. But with requires static we opt out of
+   that check, which means we can end up with a NoClassDefFoundError after all. What can we do against
+   that?
+
+Established Dependency
+   Before looking into solutions, though, we need to see whether we really have a problem. In the case
+   of uber.lib we expect to only use types from an optional dependency if the code calling into the
+   library already uses them, meaning class loading already succeeded.
+
+   In other words, when uber.lib gets called all required dependencies must be present or the call would
+   not have been possible. So we don't have a problem after all and don't need to do anything.
+
+   An optional dependency might always be present when the calling code gets executed
+
+Internal Dependency
+   The general case is different, though. It might very well be the module with the optional dependency
+   that first tries to load classes from it, so the risk of a NoClassDefFoundError is very real.
+
+   An optional dependency might only be used internally
+
+   One solution for this is to make sure that all possible calls into the module with the optional
+   dependency have to go through a checkpoint before accessing the dependency. That checkpoint has to
+   evaluate whether the dependency is present and send all code that arrives at it down a different
+   execution path if it isn't.
+
+   It might be necessary to check presence of an optional dependency
+
+   The module system offers a way to check whether a module is present. I explained in my newsletter
+   how to get there and why I use the new stack-walking API, so here you'll just have to trust me
+   when I say that this is the way to go:
+
+import static java.lang.StackWalker.Option.RETAIN_CLASS_REFERENCE;
+import java.lang.StackWalker.StackFrame;
+
+public class ModuleUtils {
+
+   public static boolean isModulePresent(String moduleName) {
+       return StackWalker
+               .getInstance(RETAIN_CLASS_REFERENCE)
+               .walk(frames -> frames
+                       .map(StackFrame::getDeclaringClass)
+                       .filter(declaringClass ->
+                               declaringClass != ModuleUtils.class)
+                       .findFirst()
+                       .orElse((Class) ModuleUtils.class))
+               .getModule()
+               .getLayer()
+               .findModule(moduleName)
+               .isPresent();
+       // chain all the methods!
+   }
+
+}
+
+   (In a real application it might make sense to cache the value as to not always repeat the same
+   check.)
+
+   Calling this method with an argument like "stats.fancy" will return whether that module is present.
+   If called with the name of a regular dependency (simple requires clause), the result will always be
+   true because otherwise the module system would not have let the application launch. If called with
+   the name of an optional dependency ( requires static clause), the result will either be true or
+   false.
+
+   If an optional dependency is present, the module system established readability and so it is safe to
+   go down an execution path that uses types from the module. If it is absent, choosing such a path
+   would lead to a NoClassDefFoundError, so a different one has to be found.
+
+Summary
+   Sometimes you want to write code against a dependency that might not always be present at run time.
+   To make the dependency's types available at compile time but not enforce its presence at launch time,
+   the module system offers the requires static clause. Note, though, that a module does not get picked
+   up during resolution if it is only referenced this way and that special care needs to be taken to
+   make sure code does not crash if the optional dependency is absent at run time.
+
+   To learn more about the module system check out the JPMS tag or get my book The Java 9 Module
+   System (with Manning). If you're interested in the historical perspective, check the Project
+   Jigsaw tag.
+
+
+---
+https://blog.codefx.org/java/implied-readability/
+
+Implied Readability With `requires transitive`
+
+   The module system tutorial brushes past a feature I would like to discuss in more detail: implied
+   readability, which is expressed with requires transitive. With it, a module can reexport another
+   module's API to its own dependents.
+
+   The post was updated in February 2017.
+
+Overview
+   This post is based on a section of an article I've recently written for InfoQ. If you are
+   interested in a Jigsaw walkthrough, you should read the entire piece.
+
+   All non-attributed quotes are from the excellent State Of The Module System.
+
+   Contents
+     * Definition Of (Implied) Readability
+          + Recap: Readability
+          + Implied Readability
+     * Examples
+          + From The JDK
+          + From The Jigsaw Advent Calendar
+     * Beyond Module Boundaries
+     * Aggregation And Decomposition
+     * Reflection
+     * Share & Follow
+
+Definition Of (Implied) Readability
+   A module's dependency on another module can take two forms.
+
+Recap: Readability
+   First, there are dependencies that are consumed internally without the outside world having any
+   knowledge of them. In that case, the dependent module depends upon another but this relationship is
+   invisible to other modules.
+
+   Take, for example, Guava, where the code depending on a module does not care at all whether it
+   internally uses immutable lists or not.
+                    
++-------------------+       +-------------------+       +-------------------+
+|  Other modules    |       |  Dependent        |       |  Dependent-upon   |
+| (can not read     |------>| (uses Guava's     |------>| (Guava containing | 
+|    Guava)         |       |  ImmutableList    |       |  ImmutableList)   |
++-------------------+       |  internally)      |       +-------------------+
+                            +-------------------+                            
+
+   implied-readability-requires
+
+   This is the most common case and it is covered by the concept of readability:
+
+     When one module depends directly upon another [...] then code in the first module will be able to
+     refer to types in the second module. We therefore say that the first module reads the second or,
+     equivalently, that the second module is readable by the first.
+
+   Here, a module can only access another module's API if it declares its dependency on it. So if a
+   module depends on Guava, other modules are left in the dark about that and would not have access to
+   Guava without declaring their own explicit dependencies on it.
+
+Implied Readability
+   But there is another use case where the dependency is not entirely encapsulated, but lives on the
+   boundary between modules. In that scenario one module depends on another, and exposes types from the
+   depended-upon module in its own public API.
+
+   In the example of Guava a module's exposed methods might expect or return immutable lists.
+
+                    
++-------------------+                                 +-------------------+
+|  Other modules    |                                 |  Dependent-upon   |
+| (implicitly read  |-------------------------------->| (Guava containing |
+|    Guava)         |                                 |  ImmutableList)   |
++-------------------+                                 +-------------------+
+           |                                                    ^          
+           |                +-------------------+               |          
+           |                |  Dependent        |               |          
+           |                | (uses Guava's     |               |          
+           +--------------->|  ImmutableList    |---------------+          
+                            |  in its public    |
+                            |  API)             |                          
+                            +-------------------+                          
+
+   implied-readability-requires-public
+
+   So code that wants to call the dependent module might have to use types from the depended-upon
+   module. But it can't do that if it does not also read the second module. Hence for the dependent
+   module to be at all usable, client modules would all have to explicitly depend on that second module
+   as well. Identifying and manually resolving such hidden dependencies would be a tedious and
+   error-prone task.
+
+   This is where implied readability comes in:
+
+     [We] extend module declarations so that one module can grant readability to additional modules,
+     upon which it depends, to any module that depends upon it. Such implied readability is expressed
+     by including the transitive modifier in a requires clause.
+
+   In the example of a module's public API using immutable lists, the module would require Guava with
+   this modifier, thus granting transitive readability to Guava to all other modules depending on it.
+   This way, its API is immediately usable.
+
+Examples
+From The JDK
+   Let's look at the java.sql module. It exposes the interface Driver, which returns a Logger via its
+   public method getParentLogger(). Logger belongs to java.logging. Because of that, java.sql requires
+   transitive java.logging, so any module using Java's SQL features can also access the logging API.
+
+   So the module descriptor of java.sql might look as follows:
+
+module java.sql {
+requires transitive java.logging;
+requires java.xml;
+// exports ...
+}
+
+From The Jigsaw Advent Calendar
+   The calendar contains a module advent.calendar, which holds a list of 24 surprises, presenting
+   one on each day. Surprises are part of the advent.surprise module. So far this looks like a open and
+   shut case for a regular requires clause.
+
+   But in order to create a calendar we need to pass factories for the different kinds of surprises to
+   the calendar's static factory method, which is part of the module's public API. So we used
+   implied readability to ensure that modules using the calendar would not have to explicitly require
+   the surprise module.
+
+module org.codefx.demo.advent.calendar {
+requires transitive org.codefx.demo.advent.surprise;
+// exports ...
+}
+
+   implied-readability
+
+Beyond Module Boundaries
+   The State Of The Module System recommends when to use implied readability:
+
+     In general, if one module exports a package containing a type whose signature refers to a package
+     in a second module then the declaration of the first module should include a requires public
+     dependence upon the second. This will ensure that other modules that depend upon the first module
+     will automatically be able to read the second module and, hence, access all the types in that
+     module's exported packages.
+
+   But how far should we take this?
+
+   Looking back on the example of java.sql, should a module using it require java.logging as well?
+   Technically such a declaration is not needed and might seem redundant.
+
+   To answer this question we have to look at how exactly our fictitious module uses java.logging. It
+   might only need to read it so we are able to call Driver.getParentLogger(), change the logger's log
+   level and be done with it. In this case our code's interaction with java.logging happens in the
+   immediate vicinity of its interaction with Driver from java.sql. Above we called this the boundary
+   between two modules.
+
+   Alternatively our module might actually use logging throughout its own code. Then, types from
+   java.logging appear in many places independent of Driver and can no longer be considered to be
+   limited to the boundary of our module and java.sql.
+
+   A similar juxtaposition can be created for our advent calendar: Does the main module advent, which
+   requires advent.calendar, only use advent.surprise for the surprise factories that it needs to create
+   the calendar? Or does it have a use for the surprise module independently of its interaction with the
+   calendar?
+
+     A module should be explicitly required if it is used on more than just the boundary to another
+     module.
+
+   With Jigsaw being cutting edge, the community still has time to discuss such topics and agree on
+   recommended practices. My take is that if a module is used on more than just the boundary to another
+   module, it should be explicitly required. This approach clarifies the system's structure and also
+   future-proofs the module declaration for various refactorings.
+
+Aggregation And Decomposition
+   Implied readability enables some interesting techniques. They rely on the fact that with it a client
+   can consume various modules' APIs without explicitly depending on them if it instead depends on a
+   module that requires transitive the used ones.
+
+     Aggregator modules bundle the functionality of related modules into a single unit.
+
+   One technique is the creation of so-called aggregator modules, which contain no code on their own but
+   aggregate a number of other APIs for easier consumption. This is already being employed by the Jigsaw
+   JDK, which models compact profiles as modules that simply expose the very modules whose packages
+   are part of the profile.
+
+   Another is, what Alex Buckley calls downward decomposability: A module can be decomposed into
+   more specialized modules without compatibility implications if it turns into an aggregator for the
+   new modules.
+
+   But creating aggregator modules brings clients into the situation where they internally use APIs of
+   modules on which they don't explicitly depend. This can be seen as conflicting with what I said
+   above, i.e. that implied readability should only be used on the boundary to other modules. But I
+   think the situation is subtly different here.
+
+   Aggregator modules have a specific responsibility: to bundle the functionality of related modules
+   into a single unit. Modifying the bundle's content is a pivotal change. "Regular" implied
+   readability, on the other hand, will often manifest between not immediately related modules (as with
+   java.sql and java.logging), where the implied module is used more incidentally.
+
+   This is somewhat similar to the distinction between composition and aggregation but (a) it's
+   different and (b), lamentably, aggregator modules would be more on the side of composition. I'm happy
+   to hear ideas on how to precisely express the difference.
+
+Reflection
+   We have seen how implied readability can be used to make a module's public API immediately usable,
+   even if it contains types from another module. It enables aggregator modules and downwards
+   decomposability.
+
+   We discussed how far we should take implied readability and I opined that a module should only lean
+   on implied readability if it merely uses the implied module's API on the boundary to a module it
+   explicitly depends on. This does not touch on aggregator module as they use the mechanism for a
+   different purpose.
+
+
+---

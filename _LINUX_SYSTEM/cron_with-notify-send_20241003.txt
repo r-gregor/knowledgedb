@@ -1,0 +1,156 @@
+filename: cron_with-notify-send_20241003.txt
+https://stackoverflow.com/questions/16519673/cron-with-notify-send
+
+Cron with notify-send
+
+I need to show a notification from a cron job. My crontab is something like:
+
+$> crontab -l
+# m h  dom mon dow   command
+  * *   *   *   *    Display=:0.0 /usr/bin/notify-send Hey "How are you"
+
+   I checked /var/log/syslog and the command is actually executed every minute but it doesn't pop up the
+   notification. Can anybody help me understand why?
+
+***
+   I use i3 on Ubuntu 18.04. My way to solve this is:
+
+   * * * * * XDG_RUNTIME_DIR=/run/user/$(id -u) notify-send Hey "this is dog!"
+
+   Edit 2020: I still use it on Ubuntu 20.04.
+
+***
+   I found the answer:
+$> crontab -l
+# m h  dom mon dow   command
+  * *   *   *   *    export DISPLAY=:0.0 && export XAUTHORITY=/home/ravi/.Xauthority && sudo -u ravi \
+  /usr/bin/notify-send Hey "How are you"
+
+***
+   In Ubuntu 14.04 exporting the display did not work for me. Below is a cron script I'm using to
+   shutdown a virtual machine when a laptop's battery state becomes too low. The line setting
+   DBUS_SESSION_BUS_ADDRESS is the modification that finally got the warnings working correctly.
+
+<code>
+#!/bin/bash
+
+# if virtual machine is running, monitor power consumption
+if pgrep -x vmware-vmx; then
+	bat_path="/sys/class/power_supply/BAT0/"
+	if [ -e "$bat_path" ]; then
+		bat_status=$(cat $bat_path/status)
+		if [ "$bat_status" == "Discharging" ]; then
+			bat_current=$(cat $bat_path/capacity)
+			# halt vm if critical; notify if low
+			if [ "$bat_current" -lt 10 ]; then
+				/path/to/vm/shutdown/script
+				echo "$( date +%Y.%m.%d_%T )" >> "/home/user/Desktop/VM Halt Low Battery"
+			elif [ "$bat_current" -lt 15 ]; then
+				eval "export $(egrep -z DBUS_SESSION_BUS_ADDRESS /proc/$(pgrep -u $LOGNAME gnome-session)/environ)";
+				notify-send -i "/usr/share/icons/ubuntu-mono-light/status/24/battery-caution.svg" \
+				"Virtual machine will halt when battery falls below 10% charge."
+			fi
+		fi
+	fi
+fi
+
+exit 0
+</code>
+
+   The relevant line is here:
+eval "export $(egrep -z DBUS_SESSION_BUS_ADDRESS /proc/$(pgrep -u $LOGNAME gnome-session)/environ)";
+
+   I found the solution here: https://askubuntu.com/a/346580/255814
+
+***
+   add DBUS_SESSION_BUS_ADDRESS:
+
+* * * * * DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus /usr/bin/notify-send 'helloworld..' 'msg...'
+
+***
+   Only this works for me (Xubuntu)
+eval "export $(egrep -z DBUS_SESSION_BUS_ADDRESS /proc/$(pgrep -u $LOGNAME xfce4-session)/environ)"; notify-send  "hello world"
+
+   If you are in gnome enviroment, you need change xfce4-session to gnome-session
+
+   refer: https://askubuntu.com/questions/298608/notify-send-doesnt-work-from-crontab
+
+***
+   Work for me on fedora 22:
+
+   Put this line in the .sh script before notify-send get called:
+eval "export $(egrep -z DBUS_SESSION_BUS_ADDRESS /proc/$(pgrep -u $LOGNAME gnome-session)/environ)"
+
+
+***
+On recent Ubuntu versions, the following should work.
+
+<code>
+#notify_me.sh, can be placed e.g. in your home directory
+
+#!/bin/bash
+eval "export $(egrep -z DBUS_SESSION_BUS_ADDRESS /proc/$(pgrep -u $LOGNAME gnome-session)/environ)";
+# the actual notification
+DISPLAY=:0 notify-send "Notify me!"
+</code>
+
+***
+   Simple and reduced answer:
+01 * * * * export DISPLAY=:0.0 && notify-send Hey "How are you"
+
+   If you need Xauthority permission, here's a generalizable form using the $LOGNAME variable
+01 * * * * export DISPLAY=:0.0 && && export XAUTHORITY=/home/$LOGNAME/.Xauthority notify-send Hey "How are you"
+
+   As pointed out by @tripleee, there's no real need for sudo here
+
+***
+   Under Manjaro (Arch), I had to do this:
+
+   Figure out the value of DBUS_SESSION_BUS_ADDRESS:
+$> echo $DBUS_SESSION_BUS_ADDRESS
+unix:path=/run/user/1000/bus
+
+   Edit the crontab file (crontab -e):
+DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
+
+* * * * * /path/to/script_that_calls_notify-send.sh
+
+***
+   Similar to nmax above, I also solved the issue by setting DBUS_SESSION_BUS_ADDRESS environment
+   variable. However, I am using a combination of Linux Mint 19 (xfce4) and XMonad and for some reason,
+   I don't have the process xfce4-session running. Instead, I found that xfce4-terminal is (usually)
+   running, which resulted in the following line in the beginning of my script:
+
+eval "export $(egrep -z DBUS_SESSION_BUS_ADDRESS /proc/$(pgrep -u $LOGNAME xfce4-terminal)/environ)"
+
+   This resolved the issue for me.
+
+***
+   I created a /usr/bin script that uses the DISPLAY-:0.0 technique http://pastebin.com/h11p2HtN
+
+   It doesn't take XAUTHORITY into account. I'll have to investigate that further.
+
+***
+   In my case, the issue was with using root user with notify-send. I realized this when I saw that sudo
+   notify-send didn't work on the terminal but just notify-send (i.e. with current user) did. So instead
+   of editing the usual /etc/crontab which is used by root, I had a custom cron script created for
+   myusername. Please check my whole answer [https://unix.stackexchange.com/a/710326/534253]here.
+
+***
+   If you are having issue that your notify-send script is working fine locally but it is not working
+   with cron jobs then use this command. and replace "saurav" with your username.
+sudo -u saurav DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus notify-send "Your message goes here"
+
+***
+   May be you can try:
+
+   * * * * * env DISPLAY=:0.0 sudo -u ravi /usr/bin/notify-send Hey "How are you"
+
+***
+   Try this when you call notify-send in your script:
+
+   echo "PASSWORD" | sudo -u USER notify-send "your alert message"
+
+
+---
+

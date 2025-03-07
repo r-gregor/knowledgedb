@@ -1,0 +1,241 @@
+filename: c_5p_dynamic-arrays_20240125.txt
+https://bytesbeneath.com/p/dynamic-arrays-in-c
+
+Dynamic Arrays in C
+
+The most useful data-structure, in C
+Jan 18, 2024
+
+   There is no doubt that the dynamic array is the most useful data structure. It's the go-to for most
+   programmers until they may need something more specialised because they are fast and simple.
+
+   Some algorithms require an unknown number of values to be stored, either temporarily during the
+   running of algorithm, or as the result. In cases like this, the caller of the algorithm must either
+   know the upper bound and allocate an array with enough space, or use a dynamic array that can grow in
+   size as required.
+
+   More recent languages almost universally deal with this problem for the programmer. Some
+   implementations are more egregious than others. Here are just two examples of ones you may have seen.
+
+   JavaScript:
+// Declare an array
+const my_array = []
+
+// Assign a value to any index
+my_array[69] = 420
+
+// Now the array has a length of 70
+// The first 69 items are empty
+
+   C++:
+std::vector<int> my_array;
+
+for (int i = 0; i < 70; i += 1) {
+	my_array.push_back(i);
+}
+
+// [0,1,2,3,4,5..69]
+
+   As you can see, in both these examples, we did not have to specify the size of the array. In C,
+   however, something like this is not a language feature nor part of the standard library. There is a
+   concept called a Variable Length Array, however these are not quite the same and as of C11 are only
+   optionally included in the spec, so they are not recommended.
+
+Implementation
+   I'll skip the cruft and get straight to how to implement one in C. We'll use a a combination of a
+   trick I learnt from Sean Barrett, the creator of the stb libraries, and custom memory allocators.
+
+   The trick is that we allocate space for the array plus some metadata. In our case, we'll define a
+   header struct to store the metadata.
+
+typedef struct {
+	size_t length;
+	size_t capacity;
+	size_t padding_or_something; // prefer 16-byte alignment
+	Allocator *a;
+}
+
+   The padding field here is added so that the size of the header is 32 bytes. This is important because
+   unaligned data causes the CPU to do more work to read from and write to the memory.
+
+   On x64, we want mostly 16-byte aligned data. There are some exceptions to this: SIMD (Single
+   Instruction Multiple Data) types - specifically any SIMD types that are larger than 128 bits.
+
+   We won't go into more details here, but I have confidence that if you are looking to exploit SIMD,
+   then forward-aligning your dynamic array through either the allocator or the header definition should
+   be no problem for you.
+
+   The Allocator type is quite simple, and will be expanded upon in further articles. For now, I'll show
+   the structure and suggested values to get started without worrying too much.
+
+typedef struct {
+	void *(*alloc)(size_t bytes, void *context);
+	void *(*free)(size_t bytes, void *ptr, void *context);
+	void *context;
+} Allocator;
+
+   A simple setup without custom allocators:
+
+void *my_alloc(size_t bytes, void *context) {
+	(void)context;
+	return malloc(bytes);
+}
+
+void *my_free(size_t bytes, void *ptr, void *context) {
+	(void)ptr;
+	(void)context;
+	free(ptr);
+}
+
+Allocator my_allocator = {my_alloc, my_free, 0};
+
+   This may all seem a bit redundant when you can just stick a malloc directly into the code we're about
+   to write - but custom allocators are one of the most powerful concepts that a programmer can learn.
+   As our machines are generally cache-bound, using the correct memory allocation strategy for the
+   problem is very important. At the very least, we can simply make our code not slow, and it'll beat
+   99% of the stuff out there.
+
+   "How is your program so fast?"
+   "I didn't make it slow."
+
+   First, I'll show you the usage code:
+
+int *my_array = array(int, my_allocator);
+array_append(my_array, 69);
+array_append(my_array, 420);
+// ...
+
+   That looks pretty simple - and we get an array type back (a pointer to a type in C) so we can pass it
+   to any functions that expect that - nice.
+
+   We'll need some way to initialise a dynamic array. Since C doesn't have a type type, we'll have to
+   use a macro here.
+
+#define ARRAY_INITIAL_CAPACITY 16
+
+#define array(T, a) array_init(sizeof(T), ARRAY_INITIAL_CAPACITY, a)
+
+void *array_init(size_t item_size, size_t capacity, Allocator *a) {
+	void *ptr = 0;
+	size_t size = item_size * capacity + sizeof(Array_Header);
+	Array_Header *h = a->alloc(size);
+
+	if (h) {
+		h->capacity = capacity;
+		h->length = 0;
+		h->a = a;
+		ptr = h + 1;
+	}
+
+	return ptr;
+}
+
+   What we have done here is allocate enough space for our initial array size plus the metadata
+   Array_Header. We then increment h by 1 which gives the address the array items start at.
+
+   Now we have our array, how can we add items to it? Well, we know it has space for 16 items, so we
+   could just use the subscript operator directly:
+
+my_array[0] = 23;
+
+   However, in this case the metadata is not updated - so the length is still 0. Let's add a macro to
+   append items.
+
+#define array_append(a, v) (                       \
+	(a) = array_ensure_capacity(a, 1, sizeof(v)),  \
+	(a)[array_header(a)->length] = (v),            \
+	&(a)[array_header(a)->length++])
+
+   Admittedly, this is a bit tough to follow, so let's break it down.
+
+   The parameters a and v refer to the array and the value (not pointers), respectively.
+
+   We wrap the entire macro in parentheses with statements separated by commas. This is intentional, and
+   a little (as far as I've seen) used language feature of C. The comma operator will evaluate each item
+   separated by commas from left to right and resolve to the rightmost one. All but the result of the
+   final expression will be discarded.
+
+   There's a lot of parentheses in these macros because I have been burnt by not using them enough. It
+   may be overkill, but since there's no type checking and you can't really step through the C in a
+   debugger unless you do a partial compilation, I prefer to err on the side of caution.
+
+   So in our code above, we assign the array variable a to the result of array_ensure_capacity (we will
+   fill this out shortly). Then, we assign the value using another macro we have yet to define:
+   array_header. Using this macro we get a pointer to the metadata and then get the length field. That
+   gives us the next available slot in the array which we assign v to.
+
+   Finally, we get a pointer to the place we just put v and postfix increment the length at the same
+   time. So our macro does 3 things:
+	1. Ensure there is enough space to put the value.
+	2. Set the value.
+	3. Increment the length.
+
+   Returning a pointer to the new item is nice when you want to do something with the inserted value
+   right away.
+
+   Ensuring the capacity is quite a long function (not a macro this time!). I'll present it in its
+   entirety:
+
+void *array_ensure_capacity(void *a, size_t item_count, size_t item_size) {
+	Array_Header *h = array_header(a);
+	size_t desired_capacity = h->length + item_count;
+
+	if (h->capacity < desired_capacity) {
+		size_t new_capacity = h->capacity * 2;
+		while (new_capacity < desired_capacity) {
+			new_capacity *= 2;
+		}
+
+		size_t new_size = sizeof(Array_Header) + new_capacity * item_size;
+		Array_Header *new_h = h->a->alloc(new_size, h->a->context);
+
+		if (new_h) {
+			size_t old_size = sizeof(*h) + h->length * item_size;
+			memcpy(new_h, h, old_size);
+
+			if (h->a->free) {
+				h->a->free(old_size, h, h->a->context);
+			}
+
+			new_h->capacity = new_capacity;
+			h = new_h + 1;
+		} else {
+			h = 0;
+		}
+	}
+
+	return h;
+}
+
+   Despite the fact that this function is named "ensure capacity", if the memory allocation fails, we
+   assign the array to 0 and assume this is a critical error. In the array_append macro, the next line
+   will cause a crash when we try to write to 0x0[array_header→length].
+
+   Here are some convenience macros:
+
+#define array_header(a) ((Array_Header *)(a) - 1)
+#define array_length(a) (array_header(a)->length)
+#define array_capacity(a) (array_header(a)->capacity)
+
+   I rarely use remove, and even even more rarely use something like pop_back, but for the sake of
+   completion I'll add the implementations below:
+
+#define array_remove(a, i) do {          \
+	Array_Header *h = array_header(a);   \
+	if (i == h->length - 1) {            \
+		h->length -= 1;                  \
+	} else if (h->length > 1) {          \
+		void *ptr = &a[i];               \
+		void *last = &a[h->length - 1];  \
+		h->length -= 1;                  \
+		memcpy(ptr, last, sizeof(*a));   \
+	}                                    \
+} while (0);
+
+#define array_pop_back(a) (array_header(a)->length -= 1)
+
+   That's it - if there's something you would like to add, please do so in the comments!
+
+
+---
+

@@ -1,0 +1,1030 @@
+filename: python_incremental-backup-multif_20170912.txt
+https://stackoverflow.com/questions/17637809/how-can-i-create-in-incremental-backups-of-mysql-databases
+
+How can i create in incremental backups of mysql databases
+
+   I have linux centos 6.4 server with mysql5.6
+
+   I have the cron job for making hourly mysql database backups like this
+
+   Its in python
+os.popen("mysqldump -u %s --password=%s -h %s -e --opt --skip-lock-tables  --skip-extended-insert -c %s | gzip
+ -c > %s.gz" % (username, password, hostname, database, filename))
+
+   The problem is very little data gets chnaged but every time i have to backup all databases 24 times ,
+   which takes too much space.
+
+   What is best alternative for that
+
+   Is there any way to have incremental backups so that i take 1 full backup of database evry week and
+   then only incremental backups.
+
+   I want to have separate files for separate databases not all mysql so that if i need to restore
+   single database then i can do that as well
+
+***
+   One hacky way may be, once you have taken full data base to a file. diff it against the weekly backup
+   and store the patch on disk. When you want to retrieve, just apply diff to the weekly backup and get
+   full db
+
+   To store
+  mysqldump -u $USERNAME --password=$PASSWORD -h $HOSTNAME -e --opt --skip-lock-tables  --skip-extended-insert
+ -c $DATABASE >hourlyFile
+  diff weeklyFile hourlyFile >hourlyFile.patch
+  rm hourlyFile
+
+   To retrieve:
+  cp weeklyFile hourlyFile
+  patch hourlyFile <hourlyFile.patch
+
+   I am not really aware what kind of output sqldump gives. if it's text above would work. Otherwise
+   bsdiff may help you here : http://www.daemonology.net/bsdiff/
+
+***
+   that looks good to me , are people use these thing in production – [43]user22 Jul 14 '13 at 10:24
+
+   I get this error: diff weeklyFile hourlyFile >hourlyFile.patch diff: memory exhausted – [44]VaTo May
+
+***
+   Since your concern is space rather than speed you could always go for a pattern something like: Only
+   keep the hourly backup for the last 24 hours. Keep the midnight backup for each weekday as that days
+   backup. Weekly - archive backups to offline storage.
+
+   A lot of this could almost certainly be mostly automated by some careful file name choices - e.g.
+   Midnight backups being called Backup_Mon, etc., other hours Backup_00_00, Backup_01_00, etc.
+
+   You could go for a even smaller latest_backup, prev_backup, prev_prev_backup by simply renaming the
+   files at the start of each backup.
+
+   You could also consider using zip, (which python can do for you), to reduce the file size.
+
+***
+   one file per db can be achieved by looping over all databases in a shell script:
+   https://stackoverflow.com/a/10867549/2536029
+
+   for space reduction, diffs as suggested by ajain are one good idea, or deduplication of the backups
+   with tools like rsnapshot or obnam are another. rsnapshot and obnam (might) require that (parts of)
+   the files are identical to save noteworthy amounts of space. diffs can cope with some amount of
+   changes as long as not everything changed because there is no "order by" or some ids shifted.
+
+***
+   You will not find a better solution, below is a script created by myself and has been used on many
+   production servers. I have used python 3.
+import os
+import time
+import datetime
+date1 = time.strftime('%Y%m%d%H%M%S')
+f = open('/root/mypython/dblist.txt') # this files contains the name of databases
+line = f.readline()
+f.close()
+words = line.split()
+for word in words:
+    cmd = "mysqldump -u root -pabhishek {0} > {0}_{1}.sql".format(word, date1)
+# takes backup in the same location as script
+
+    cmd2 = "zip {0}_{1}.zip {0}_{1}.sql".format(word, date1)
+
+# zips the backup just taken
+
+    cmd3 = "rm -f {0}_{1}.sql".format(word, date1)
+
+# deletes the .sql backup just taken. after this step only .zip backup remains. remove this line if u need bot
+h .sql and .zip
+
+    cmd4 = " scp {0}_{1}.zip root@192.168.1.105:/home/dev_test ".format(word, date1)
+    os.system(cmd)
+    os.system(cmd2)
+    os.system(cmd3)
+    if os.system(cmd4)== 0:
+        result = "Backup Successful"
+print(result)
+     ________________________________________________________________________________________________
+
+   Things to be remember
+    1. The cmd4 command do a scp. You must have key based login enable from your server to remote server
+       otherwise you will be asked password of remote server, which the script can't provide.
+
+   To enable key based login, see below:
+
+   http://pc2solution.blogspot.in/2013/03/how-to-enable-key-based-login-in-linux.html
+    1. The first line of the script makes it executable, so for scheduling backup, you just need to
+       enter full path in crontab, e.g. if you want to run this script every ten minutes do following
+       entry in crontab
+       */10 * * * * /home/myscript.py
+    2. Make script executable by chmod 777 or whatever permission you want. This script works for linux.
+
+***
+   I don't see how this is INCREMENTAL. You seem to be just copying the entire database dump each time.
+   Also, "you will not find a better solution" is a very strong statement, and needs justification, if
+   at all possible.
+
+
+---
+https://codereview.stackexchange.com/questions/66546/backup-files-script
+
+Backup files script
+
+   I'm creating own script for backup user's directories.
+
+   CentOS 6.5; Python 2.6.
+
+   Directories looks like:
+# tree -L 2 -d /var/www/vhosts/
+/var/www/vhosts/
+├── freeproxy
+│   └── freeproxy.in.ua
+├── hudeem
+│   └── hudeem.kiev.ua
+├── profy
+│   └── profy.kiev.ua
+├── rtfm
+│   └── rtfm.co.ua
+├── setevoy
+│   ├── forum.setevoy.kiev.ua
+│   ├── postfixadmin.setevoy.org.ua
+│   ├── setevoy.org.ua
+│   └── webmail.setevoy.org.ua
+├── worlddesign
+│   └── worlddesign.org.ua
+└── zabbix
+    └── zabbix.setevoy.org.ua
+
+   As script big enought, I'll post only three 'most important' functions. So please note, that they
+   using some additional functions.
+
+   First - function to create backup directories:
+# global const for user's directory
+VHOSTSPATH = '/var/www/vhosts/'
+
+def back_dir_create(user, day):
+
+    backdir = '/home/setevoy/backups/temp_new_test/'
+
+    # weekly are kept 4 last, daily - 7 copies
+    # thus - better have separate directories
+
+    if day == 'Sun':
+        type = '/weekly/'
+    else:
+        type = '/daily/'
+
+    dirname = ('%s%s%s%s-files/' % (backdir, user, type, time.strftime('%Y-%m-%d')))
+
+    if not os.path.exists(dirname):
+        print('Creating directory: %s' % dirname)
+        os.makedirs(dirname)
+        return(dirname)
+
+   Second - 'incremental' backup, for files changed last twenty-four hours:
+def inc_backup(dir_to_backup, backupname):
+
+    now = time.time()
+    cutoff = 86400
+
+    print('Creating archive %s...' % backupname)
+    out = tarfile.open(backupname, mode='w:bz2')
+
+    # start walk via all files to find changed last 24 hours
+
+    for root, dirs, files in  os.walk(dir_to_backup, followlinks=True):
+        for file in files:
+            file = os.path.join(root, file)
+            try:
+                filemodtime = os.stat(file).st_mtime
+                if now - filemodtime < cutoff:
+                    if os.path.isfile(file):
+                        print('Adding file: %s...' % file)
+                        out.add(file)
+                        print('File modified: %s' % time.ctime(os.path.getmtime(file)))
+            except OSError as error:
+                print('ERROR: %s' % error)
+
+    print 'Closing archive.'
+    out.close()
+
+   And both this function used in 'main' function:
+def run_backup():
+
+    # here is two functions, not listed here
+    # both rerurns lists[] - with users
+    # like just username
+    # and dirs
+    # like /var/www/vhosts/username
+    userlist = arch_users_list(VHOSTSPATH)
+    userpaths = arch_users_path(VHOSTSPATH, userlist)
+
+    # day of week
+    curday = time.strftime('%a')
+
+    for hostdir, username in zip(userpaths, userlist):
+        os.chdir(hostdir)
+        print('\nWorking in: %s' % os.getcwd())
+        print('Under user: %s' % username)
+
+        # call first function, listed above
+
+        backup_dir = back_dir_create(username, curday)
+
+        if backup_dir:
+
+            virtual_hosts = arch_vhosts_names(hostdir)
+
+            for host in virtual_hosts:
+                archname = (backup_dir + host + '.tar.bz2')
+
+                # once in week I want have full backup
+                # other time - 'incremental'
+
+                if curday == 'Sun':
+                    full_backup(host, archname)
+                else:
+                    inc_backup(host, archname)
+
+        else:
+            print('Backup already present, skip.')
+
+   It works fine for now, but I'm newbie in Python, so - what can be improved here or fixed?
+
+***
+   Just like you have defined the VHOSTSPATH global variable at the very top, it will make sense to do
+   the same for this too:
+
+backdir = '/home/setevoy/backups/temp_new_test/'
+
+   So that if you move your script to another machine, all the local customizations will be in one very
+   visible place.
+
+   For even more benefits, move these files to a dedicated settings.py module and make your script
+   import these values from it. then it will be really perfectly clear where to customize the script
+   parameters, and it will be separated from the rest of the code, which will be easily redistributable.
+     ________________________________________________________________________________________________
+
+   This could be done better:
+
+if day == 'Sun':
+    type = '/weekly/'
+else:
+    type = '/daily/'
+
+dirname = ('%s%s%s%s-files/' % (backdir, user, type, time.strftime('%Y-%m-%d')))
+
+   type is a keyword in Python. Intelligent code editors should highlight it for you. It's better to
+   avoid variable names that overlap with keywords. How about subdir?
+
+   The way you assign dirname is a bit hard to read, and just by reading that line it's not clear that
+   this is intended as a nested directory layout. If I look at the type variable I see that all possible
+   values are prefixed and suffixed with the / directory separator, but the code doesn't make it obvious
+   why it is this way. A better way would be like this:
+if day == 'Sun':
+    subdir = 'weekly'
+else:
+    subdir = 'daily'
+
+dirname = os.path.join(backdir, user, subdir, '%s-files' % time.strftime('%Y-%m-%d'))
+
+   In this version, thanks to the os.path.join, now it is explicit that we're talking about a nested
+   hierarchy. Also, you don't need to worry anymore if all components have a / prefix or suffix or not.
+   Just make all components not have such prefix or suffix and let os.path.join take care of it.
+
+   Finally, os.path.join is portable: it will work on any operating system. Sure, you may not care about
+   that now, but you never know.
+     ________________________________________________________________________________________________
+
+   Don't reassign the value of a loop variable:
+
+for file in files:
+    file = os.path.join(root, file)
+
+   Use a different name for it, for example:
+for file in files:
+    path = os.path.join(root, file)
+
+   The reason is that this can be confusing in various ways. The same is true for function parameters:
+   don't reassign them, use different names for local variables.
+     ________________________________________________________________________________________________
+
+   The if condition here seems pointless:
+
+for file in files:
+    file = os.path.join(root, file)
+    # ...
+    if os.path.isfile(file):
+        # ...
+
+   By virtue of the way os.walk works, I think os.path.join(root, file) is always a valid file. Except
+   in some extreme conditions where the file might get removed in the middle of walking. If you are in
+   such environment, then it's fine.
+     ________________________________________________________________________________________________
+
+   I'm not familiar with tarfile.open, but instead of this:
+
+out = tarfile.open(backupname, mode='w:bz2')
+# ... do work
+out.close()
+
+   you can probably do this, which will be better:
+with tarfile.open(backupname, mode='w:bz2') as out:
+    # ... do work
+
+   If this indeed works, then you don't need to worry about closing the out handle, it will be properly
+   closed automtically by Python. In the original code, if an error happens after out =, the out.close()
+   might never be reached. The with open(...) as fh: idiom is the recommended way to work with resources
+   that need to be closed when you're done with them.
+
+***
+   backdir - yep, already changed; type - I'm writing in VIM, so there no highlights of warnings like
+   this :-) thanks, will change; os.path.join - good point, doesn't thought about such solution.
+   – [44]setevoy Oct 13 '14 at 15:51
+
+   with tarfile.open(backupname, mode='w:bz2') as out: AttributeError: 'TarFile' object has no attribute
+   'exit' // if change to with-open() – [45]setevoy Oct 13 '14 at 19:02
+
+   Ah, that's too bad... – [46]janos♦ Oct 13 '14 at 21:46
+
+
+---
+http://things.m31.ch/?p=288
+
+backur: A Configurable Python Utility for Optimized Incremental Backups
+October 14, 2012
+
+   I have been on the lookout for an efficient small utility to incrementally backup my Linux server to
+   an external drive. I have looked at various options like [17]Back in Time and [18]Backup PC. They are
+   however too advanced and too automated for my purpose. My requirements are the following:
+    1. Incremental backups
+    2. Console based
+    3. Preservation of file times, permissions, user and group
+    4. Easy configuration
+    5. Logging support
+    6. Mirror mode
+
+   I have been using [19]rsync for some time in bash scripts. As Python is becoming more and more my
+   language of scripting, so I wanted to write it in Python. With that background information, here
+   comes “backur”. backur is very easy to configure and use. backur.conf, as given below, is
+   self-explanatory. It also provides customizable logging including log-file rotation. Th backup and
+   source paths are very easy to enter, and allow spaces, thanks to shlex split method. You can run
+   backur either manually, or through as a cron job, as it suits you.
+#! /usr/bin/python
+
+# Title:    backur.py
+# Author:   Asif Iqbal (aiqbalrana@gmail.com)
+# Date:     11OCT2012
+# Info:     "backur" can be used to automatically backup given folder locations
+#           to another backup location. backur is easily configurable through a
+#           configuration file. backur uses rsync to achieve highly optimized
+#           data transfers by doing only the incremental updates.
+
+import ConfigParser
+import re, os
+import glob
+import logging
+import logging.handlers
+import subprocess
+import datetime
+import shlex
+
+def splitNStripArgs(inputStr, charToStrip):
+    data = inputStr.split(',')
+    retData = []
+    for item in data:
+        retData.append((item.strip()).strip(charToStrip))
+    return retData
+
+# Read configuration data
+confpath = os.path.dirname(__file__)
+config = ConfigParser.ConfigParser()
+config.read(confpath + "/backur.conf")
+
+rsyncflags = splitNStripArgs((config.get("Config", "RSYNCFlags")),'"')
+rsyncexe   = config.get("Config", "RSYNC")
+folderlist = splitNStripArgs((config.get("Folders", "FolderList")),'"')
+backuploc  = config.get("Config","BackupLocation")
+backupsize = int(config.get("Config","MaxLogFileSize"))
+numbackups = int(config.get("Config","NumBackups"))
+logfile    = config.get("Config","LogFile")
+
+# Setup logging
+my_logger = logging.getLogger('MyLogger')
+my_logger.setLevel(logging.DEBUG)
+handler = logging.handlers.RotatingFileHandler(logfile, maxBytes=backupsize, backupCount=numbackups)
+my_logger.addHandler(handler)
+
+# Do the job
+my_logger.info("#########################################################################################")
+my_logger.info("-----------------------------------------------------------------------------------------")
+my_logger.info("Starting backup")
+my_logger.info("Time: " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+my_logger.info("-----------------------------------------------------------------------------------------")
+
+# Run individual backups
+for jobfolder in folderlist:
+    command = rsyncexe + " " + ' '.join(rsyncflags) + " -s \"" + jobfolder + "\" \"" + backuploc + "\""
+    my_logger.info("Executing: " + command)
+    out = subprocess.check_output(shlex.split(command))
+    my_logger.info(out)
+
+my_logger.info("-----------------------------------------------------------------------------------------")
+my_logger.info("Backup Complete")
+my_logger.info("Time: " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+my_logger.info("-----------------------------------------------------------------------------------------")
+my_logger.info("#########################################################################################")
+
+   backur can be configure using backur.conf which look like the following:
+[Config]
+BackupLocation: /media/usb/backup/
+LogFile: /var/log/backur.log
+MaxLogFileSize: 2097152
+NumBackups: 5
+RSYNCFlags: "-a",
+                "-v",
+                "--delete"
+RSYNC: /usr/bin/rsync
+
+[Folders]
+FolderList: "/mnt/Drv1/pics",
+                "/mnt/Drv2/my data",
+                "/mnt/Drv3/docs"
+
+   backur can also be downloaded in a [20]zip file. I have written and tested backur only on Linux.
+   However, it should also run on Windows provided that Python is installed on the system. Do let me
+   know about your experiences or issues if you use backur.
+
+   [21]Setting up svn+ssh on Ubuntu Server and Tortoise SVN as client on Windows PC [22]Using svn+ssh
+   from Eclipse through Pageant & Plink under Windows 7 64-bit
+
+
+---
+http://mattshaw.org/news/incremental-backups-with-rsync-and-python/
+
+Incremental Backups with rsync and Python
+
+   Firstly, if you are not using SSL for all your sites, you should step it up! NameCheap's [8]SSL
+   certificates start at only $9. There's no excuse!
+   Firstly, if you have not tried Digital Ocean's [9]SSD Virtual Servers for only $5/mo, I highly
+   recommend them!
+
+   This uses [10]rsync to do an incremental backup to another drive. You could easily change this to do
+   remote backups. It uses rsync’s –backup and –backup-dir [11]arguments which will keep incremental
+   backups. The latest backup will have all your files. Older backups will have the old versions of
+   changed files. e.g. if you only changed blah.txt the latest folder will have all your files, while
+   the folder from the day before will only have the old blah.txt.
+
+   This is meant to be run once a day, no more no less. Else, it will not work.
+   You’ll end up with a folder structure like this:
+   backups/20080428
+   backups/20080429
+   backups/20080430
+   etc
+
+   Python script is below:
+#!python
+
+# Folders to Backup
+SOURCE_DIRS=( "C:/Backups", "C:/OtherStuff" )
+
+# Backup to: (maybe ssh would work here, I haven't tried it)
+BACKUP_DIR="D:/"
+
+######################################################
+
+import datetime
+import platform
+import os
+
+IS_WINDOWS = platform.uname()[0]=='Windows'
+
+# Make backup dir, should only happen once
+if not os.path.isdir( BACKUP_DIR ):
+    os.mkdir( BACKUP_DIR )
+
+today = datetime.datetime.today()
+yesterday = today - datetime.timedelta(1)
+
+today_tstamp = '%d%02d%02d' % (today.year,today.month,today.day)
+yesterday_tstamp = '%d%02d%02d' % (yesterday.year,yesterday.month,yesterday.day)
+
+today_folder = '%s/%s' % (BACKUP_DIR,today_tstamp)
+yesterday_folder = '%s/%s' % (BACKUP_DIR,yesterday_tstamp)
+
+if os.path.isdir( yesterday_folder ):
+    os.system('mv %s %s' % (yesterday_folder,today_folder))
+    os.mkdir( yesterday_folder )
+else:
+    os.mkdir( today_folder )
+
+# Stupid Windows Fix for Cygwin
+if IS_WINDOWS:
+    today_folder = today_folder.split(':')
+    today_folder = '/cygdrive/%s%s' % (today_folder[0],today_folder[1])
+
+for SOURCE_DIR in SOURCE_DIRS:
+
+    # Stupid Windows Fix for Cygwin
+        if IS_WINDOWS:
+        SOURCE_DIR = SOURCE_DIR.split(':')
+        SOURCE_DIR = '/cygdrive/%s%s' % (SOURCE_DIR[0],SOURCE_DIR[1])
+
+    print "%s --> %s" % (SOURCE_DIR,today_folder)
+
+    rsync_options="-v -r -a --delete --backup --exclude=.svn --delete-excluded --backup-dir=%s" % yesterday_fo
+lder
+    rsync_cmd = 'rsync %s %s %s' % (rsync_options,SOURCE_DIR,today_folder)
+
+    os.system(rsync_cmd)
+
+
+---
+https://thomassileo.name/blog/2013/12/12/tracking-changes-in-directories-with-python/
+
+Tracking Changes in Directories with Python
+Thu 12 December 2013
+
+   My initial requirement is to track/find changes in directories over time, but without duplicating it
+   or without having direct access to it, and for the background, I need this to help me compute deltas
+   for an incremental backup module ([13]incremental-backups-tools).
+
+   (If you want to compare local directories, you should take a look at the [14]filecmp module.)
+
+   My approach is to take a "snapshot" / compute an "index" of a directory which will contains:
+     * list of files
+     * list of subdirectories
+     * a mapping filename => last modified time or the file hash
+
+   You can easily dump it as JSON.
+
+   Later, when you want to compute changes, you just need to compare the previous index, with the
+   current one, and track:
+     * deleted files
+     * new files
+     * updated files
+     * deleted subdirectories
+
+   I create a directory for testing:
+   In [1]:
+!rm -rf /tmp/test_tracking
+!mkdir /tmp/test_tracking
+!mkdir /tmp/test_tracking/subdir1
+!mkdir /tmp/test_tracking/subdir2
+!echo content1 > /tmp/test_tracking/file1
+!echo content2 > /tmp/test_tracking/file2
+!echo content3 > /tmp/test_tracking/subdir1/file3
+!echo content4 > /tmp/test_tracking/subdir2/file4
+!ls -lR /tmp/test_tracking/
+
+/tmp/test_tracking/:
+total 16
+-rw-rw-r-- 1 thomas thomas    9 déc.  12 21:45 file1
+-rw-rw-r-- 1 thomas thomas    9 déc.  12 21:45 file2
+drwxrwxr-x 2 thomas thomas 4096 déc.  12 21:45 subdir1
+drwxrwxr-x 2 thomas thomas 4096 déc.  12 21:45 subdir2
+
+/tmp/test_tracking/subdir1:
+total 4
+-rw-rw-r-- 1 thomas thomas 9 déc.  12 21:45 file3
+
+/tmp/test_tracking/subdir2:
+total 4
+-rw-rw-r-- 1 thomas thomas 9 déc.  12 21:45 file4
+
+
+Files and subdir
+   First, we need to get a list of files and subdirectories relative to the root, using [15]os.walk is
+   the easiest way.
+   In [2]:
+import os
+
+path = '/tmp/test_tracking/'
+files = []
+subdirs = []
+
+for root, dirs, filenames in os.walk(path):
+    for subdir in dirs:
+        subdirs.append(os.path.relpath(os.path.join(root, subdir), path))
+
+    for f in filenames:
+        files.append(os.path.relpath(os.path.join(root, f), path))
+
+   We check the result:
+   In [3]:
+files
+
+   Out[3]:
+[ʼfile2ʼ, ʼfile1ʼ, ʼsubdir2/file4ʼ, ʼsubdir1/file3ʼ]
+
+   In [4]:
+subdirs
+
+   Out[4]:
+[ʼsubdir2ʼ, ʼsubdir1ʼ]
+
+Create an index
+   Once we have the list of files and subdirectories, we need to create the actual index, which will
+   help us detect updated files.
+
+   There is two ways to check if a file has been modified that meet the requirement, the slow way:
+   compute a hash (md5, sha256...) and the fast way: rely on the last modified time (even rsync relies
+   on last modified time by default).
+
+Last modified time
+   Using [16]os.path:
+   In [5]:
+file_mtime = os.path.getmtime(os.path.join(path, files[0]))
+
+   We can convert it easily to a datetime object:
+   In [6]:
+from datetime import datetime
+file_mtime, datetime.fromtimestamp(file_mtime)
+
+   Out[6]:
+(1386881105.388609, datetime.datetime(2013, 12, 12, 21, 45, 5, 388609))
+
+Sha256 hash
+   Using [17]hashlib:
+   In [7]:
+import hashlib
+
+def filehash(filepath, blocksize=4096):
+    """ Return the hash hexdigest for the file `filepath', processing the file
+    by chunk of `blocksize'.
+
+    :type filepath: str
+    :param filepath: Path to file
+
+    :type blocksize: int
+    :param blocksize: Size of the chunk when processing the file
+
+    """
+    sha = hashlib.sha256()
+    with open(filepath, 'rb') as fp:
+        while 1:
+            data = fp.read(blocksize)
+            if data:
+                sha.update(data)
+            else:
+                break
+    return sha.hexdigest()
+
+   In [8]:
+file_hash = filehash(os.path.join(path, files[0]))
+
+   In [9]:
+file_hash
+
+   Out[9]:
+ʼe0763097d2327a89fb7fc6a1fad40f87d2261dcdd6c09e65ee00b200a0128e1cʼ
+
+   Since I don't want to spend hours computing changes, I often choose the mtime. We can build an index,
+   basically a dictionnary, that maps filepath (relative to its own root) to its last modified time.
+   In [10]:
+index = {}
+for f in files:
+    index[f] = os.path.getmtime(os.path.join(path, files[0]))
+
+   In [11]:
+index[files[0]]
+
+   Out[11]:
+1386881105.388609
+
+Final index
+   So to be able to find differences between directory we need:
+     * The list of files
+     * A list of every subdirectory
+     * And a index (last mtime or hash)
+
+   In [12]:
+import os
+
+def compute_dir_index(path):
+    """ Return a tuple containing:
+    - list of files (relative to path)
+    - lisf of subdirs (relative to path)
+    - a dict: filepath => last
+    """
+    files = []
+    subdirs = []
+
+    for root, dirs, filenames in os.walk(path):
+        for subdir in dirs:
+            subdirs.append(os.path.relpath(os.path.join(root, subdir), path))
+
+        for f in filenames:
+            files.append(os.path.relpath(os.path.join(root, f), path))
+
+    index = {}
+    for f in files:
+        index[f] = os.path.getmtime(os.path.join(path, files[0]))
+
+    return dict(files=files, subdirs=subdirs, index=index)
+
+diff = compute_dir_index(path)
+
+Computing changes
+
+   I make some changes and recompute a new diff:
+   In [13]:
+!rm -rf /tmp/test_tracking/subdir2
+!echo newcontent1 > /tmp/test_tracking/file1
+!echo content5 > /tmp/test_tracking/file5
+!ls -lR /tmp/test_tracking/
+
+/tmp/test_tracking/:
+total 16
+-rw-rw-r-- 1 thomas thomas   12 déc.  12 21:45 file1
+-rw-rw-r-- 1 thomas thomas    9 déc.  12 21:45 file2
+-rw-rw-r-- 1 thomas thomas    9 déc.  12 21:45 file5
+drwxrwxr-x 2 thomas thomas 4096 déc.  12 21:45 subdir1
+
+/tmp/test_tracking/subdir1:
+total 4
+-rw-rw-r-- 1 thomas thomas 9 déc.  12 21:45 file3
+
+
+   In [14]:
+diff2 = compute_dir_index(path)
+
+   Computing the difference is easy, we need few things actually:
+     * Deleted files (just a set substraction)
+     * New files (just a set substraction)
+     * Updated files (thanks to the index)
+     * Deleted subdirectories
+
+   Here is the compute_diff:
+   In [15]:
+def compute_diff(dir_base, dir_cmp):
+    data = {}
+    data['deleted'] = list(set(dir_cmp['files']) - set(dir_base['files']))
+    data['created'] = list(set(dir_base['files']) - set(dir_cmp['files']))
+    data['updated'] = []
+    data['deleted_dirs'] = list(set(dir_cmp['subdirs']) - set(dir_base['subdirs']))
+
+    for f in set(dir_cmp['files']).intersection(set(dir_base['files'])):
+        if dir_base['index'][f] != dir_cmp['index'][f]:
+            data['updated'].append(f)
+
+    return data
+
+   We can check with our previously created diffs:
+   In [16]:
+compute_diff(diff2, diff)
+
+   Out[16]:
+{ʼcreatedʼ: [ʼfile5ʼ],
+ ʼdeletedʼ: [ʼsubdir2/file4ʼ],
+ ʼdeleted_dirsʼ: [ʼsubdir2ʼ],
+ ʼupdatedʼ: [ʼfile2ʼ, ʼfile1ʼ, ʼsubdir1/file3ʼ]}
+
+Dirtools
+   I recently added this feature in [18]Dirtools, pull requests and feedback are welcome!
+   In [19]:
+from dirtools import Dir, DirState
+
+d = Dir(path)
+dir_state = DirState(d)
+
+state_file = dir_state.to_json()
+
+# Later... after some changes
+
+dir_state = DirState.from_json(state_file)
+dir_state2 = DirState(d)
+
+changes = dir_state2 - dir_state
+
+
+---
+http://opensourceforu.com/2015/10/secured-de-duplicated-backup-using-python-tools/
+
+Secured, De-duplicated Backup Using Python Tools
+October 24, 2015
+
+   Python Visual
+   Critical data on any system can be safeguarded against accidental erasure, corruption, damage, etc,
+   by an efficient backup system. Backup and recovery are integral to any well-managed computer system,
+   be it for personal computing or enterprise computing. Explore the essentials of a backup system in
+   this article and take a tutorial on the Python tools, Bakthat and Attic.
+
+   Backup and recovery of heterogeneous and unstructured data is a time consuming process. A number of
+   software products and tools have been developed for this purpose, yet the backup of files, folders
+   and repository maintenance is an ongoing process for higher efficiency, integrity, security and
+   de-duplication of content.
+   Whenever routine office or personal work is done on our laptops or systems, only a small percentage
+   of data on the full hard disk is modified. Lets suppose there is 500GB of hard disk space in a
+   laptop. After regular office or personal tasks, some of the files are changed. Some files and
+   documents can be downloaded from the Internet and stored on the local system. This means there is a
+   change of only a few MBs per day. But when we take a backup, all the drives are copied to a portable
+   hard disk or any other storage medium. This type of backup, which is very time consuming and not
+   implemented on a regular and frequent basis, is known as a full backup.
+   There are a number of mechanisms by which the modified or newly created files can be stored in your
+   system in very little time.
+   First of all, lets get familiar with the basic taxonomy of the backup paradigm. Broadly, there are
+   three types of backups in classical computing for multiple domains.
+   First, there is differential backup, during which only the data that was not present in the last full
+   backup, is stored and saved. If a full backup is taken on July 1, the differential backup on July 2
+   will copy only the files changed since July 1. All other files will not be copied. Such a backup
+   system is more flexible, efficient and very fast compared to full backups. Differential backup is
+   also known as cumulative incremental backup.
+   Incremental backup, the second type, supports the copying of files that were modified since the last
+   backup whether it was a differential backup or full backup. For example, if a full backup was done
+   on July 27, 2015, the incremental backup on July 28 will copy all the files which were changed since
+   July 27, 2015. Similarly, if incremental backup is performed on the next day, only the changed files
+   will be copied. This is also known as differential incremental backup.
+   The third variety, full backup, is performed periodically, like once a week or twice a month. This
+   type of backup is done when major changes on the disk are performed, which can include a software
+   install/uninstall, an upgrade or any such similar task. In a full backup, all the files are fetched,
+   but this process is very time consuming. If any segment of the disk does not have any data, even the
+   empty backup from that location is taken, which leads to the consumption of processor time and
+   overhead.
+
+   Features of an effective backup tool
+   Effective and efficient software is required for backing up data. Some of the major features a backup
+   tool for personal as well as corporate computing must have are:
+     * Non-redundant data/ de-duplication
+     * Security with multi-layered encryption
+     * Dynamic compression and archiving
+     * Dynamic repository management
+     * Automatic backups
+     * Cloud based backup and recovery
+     * Import/export for multiple platforms
+     * Version tracking
+     * Configurability, with the scope for extensions using plugins
+     * Command line as well as GUI panels for better usability
+     * Transaction fault tolerance to avoid data loss
+     * Volume oriented to support compression, splitting and merging for multiple devices and platforms
+     * Malware scanning
+     * Universal view and updates
+     * Cross-platform
+     * Support for multiple data formats
+     * Support for multiple databases
+     * Generation of reports, alerts and logs
+
+   Free and open source Python tools
+   Python is a powerful programming language used for many high performance computing domains including
+   cloud computing, parallel architectures, Big Data, data mining, machine learning, grid computing,
+   heterogeneous databases, and many others.
+   It is enriched by a number of libraries to enable de-duplicating, secured and cloud based backup
+   implementations, etc. Bakthat and Attic are very effective tools which are based on Python and can be
+   used for a general-purpose and highly efficient backup system.
+
+   Bakthat, a local and cloud based backup tool
+   Bakthat is a Python based framework developed for secured and efficient backup. It is available with
+   the command line as well as the module for Python to support cloud backups on Amazon Cloud
+   Infrastructure like Amazon S3, Amazon Glacier as well as OpenStack Swift. This tool is able to
+   compress, encrypt and upload documents to cloud servers. The base licence of Bakthat is MIT.
+   Features of Bakthat include the following:
+     * Dynamic compression
+     * Encryption using Beefish
+     * Uploading/downloading to Glacier or S3 with Python Boto Programming
+     * Maintaining the local backups in the SQLite database using Peewee
+     * Deletion of older files and documents as per the grandfather-father-son method
+     * Ability to sync the backups database between multiple clients via a centralised server
+     * Exclude files using .gitignore
+     * Usage of plugins and extensions for better performance
+
+   Installing Bakthat: Bakthat can be installed very easily using Pip as the Linux distribution:
+$ pip install bakthat
+
+   You can auto configure Bakthat as shown below:
+$ bakthat configure
+
+   Then, create a backup, as follows:
+$ bakthat backup MyBackup
+Backing up MyBackup
+Password (blank to disable encryption):
+Password confirmation:
+Compressing...
+Encrypting...
+Uploading...
+Upload completion: 0%
+Upload completion: 100%
+
+   There is an alternate method too:
+$ cd MyDirectory
+$ bakthat backup
+INFO: Backing up MyDirectory
+
+   You can show and restore the backup, as follows:
+$ bakthat show
+<TimeStamp> MyBackup.tgz.enc
+$ bakthat restore mydir
+
+   You can also back up to Amazon Glacier (Bakthat on Amazon Cloud Infrastructure):
+$ bakthat backup -d glacier
+INFO: Backing up MyDirectory
+Password (blank to disable encryption):
+
+   The latest version of a backup can be restored from Amazon Glacier by specifying the beginning of the
+   file name, as shown below:
+$ bakthat restore -f bak
+INFO: Restoring MyBackUp.tgz.enc
+Password:
+INFO: Downloading...
+INFO: Decrypting...
+INFO: Uncompressing...
+$ bakthat restore -f MyRemoteFile -d glacier
+INFO: Restoring MyRemoteFile20150808.ttgz
+INFO: Downloading...
+INFO: Job ArchiveRetrieval: InProgress
+
+   You can delete a backup as follows:
+$ bakthat delete MyBackup.tgz.enc
+INFO: Deleting MyBackup.tgz.enc
+$ bakthat delete -f MyRemoteFile
+INFO: Deleting MyRemoteFile201520274848.ttgz.enc
+
+   You can view backup information by using the following code:
+$ bakthat info
+INFO: Last backup date: <Backup TimeStamp> (1 versions)
+
+   Attic, a de-duplicating backup tool
+   Attic is a cross-platform backup tool for Linux distributions, Mac OS X and FreeBSD. This tool is
+   developed and used for the secured and de-duplicated storage of data so that only the modified files
+   and changes can be stored rather than the full backup, every time.
+   Attic is developed in the Python programming language in association with implementations of Cython
+   and C.
+   Its features include:
+     * De-duplication/non-redundant backup
+     * Encryption of data
+     * Backup on remote hosts
+     * Backup with Mount as file systems
+     * Backup validation, verification and restore
+
+   Attic installation: To install Attic, Python 3.2 or later is required. To install Attic using Pip,
+   use the following command:
+$ pip3 install Attic
+
+   To install from source tarballs, use the following code:
+$ curl -O https://pypi.python.org/packages/source/A/Attic/Attic-0.16.tar.gz
+$ tar -xvzf Attic-0.16.tar.gz
+$ cd Attic-0.16
+$ python setup.py install
+
+   To install from git, use the following commands:
+$ git clone https://www.github.com/jborg/attic.git
+$ cd attic
+$ python setup.py install
+
+   Creating the repository: First of all, a new backup repository is initialised, as follows:
+$ attic init /MyDirectory/my-repository.attic
+After initializing, the creation of repository is done
+$ attic create /MyDirectory /my-repository.attic::SundayEvening ~/MyDocuments
+$ attic create --stats / MyDirectory /my-repository.attic::MondayEvening ~/ MyDocuments
+Archive name: MondayEvening
+Archive fingerprint: 178a5e3f9b0e792e91ce98673b0f4bfe45213d 9248cb7879f3fbf3a8e679808a
+Start time: Mon Jul 27 12:00:10 2015
+End time: Mon Jul 27 12:00:10 2015
+Number of files: 1000
+Original size Compressed size Deduplicated size
+This archive: 97.36 MB 66.28 MB 298.17 kB
+All archives: 82.12 MB 80.42 MB 38.29 MB
+
+   Another example of code for initialising the backup repository and creating a backup archive is shown
+   below:
+$ attic init /MyUSBDrive/MyBackUp.attic
+$ attic create -v / MyUSBDrive / MyBackUp.attic::documents ~/AllDocuments
+
+   Restore the MondayEvening archive, as follows:
+$ attic extract /MyDirectory/ MyBackup.attic::MondayEvening
+
+   Recover disk space by manually deleting the MondayEvening archive, using the following command:
+$ attic delete / MyDirectory /MyBackup.attic:: MondayEvening
+
+   Initialise and create a remote repository, as follows:
+$ attic init [103][email protected]:mybackuprepo.attic
+
+OR
+
+$ attic init [104][email protected]:repository.attic
+
+OR
+
+$ attic init ssh://[105][email protected]:port/repository.attic
+
+   In case Attic cannot be installed on a remote host, the latter can be used for storing the repository
+   by using mount with the remote file system using sshfs, as shown below:
+$ sshfs [106][email protected]:/PathToDirectory/ /tmp/MountLocation
+$ attic init /tmp/ MountLocation /repository.attic
+$ fusermount -u /tmp/ MountLocation
+
+   Encrypt a remote repository, using the following command:
+$ attic init --encryption=passphrase [107][email protected]:backuprepository.attic
+
+   Create a backup in the root filesystem named YYYY-MM-DD-MySystem, using the command shown below:
+NAME= `date +%Y-%m-%d`- MySystem 
+$ attic create /MyDirectory/MyRepository.attic::$NAME / --do-not-cross-mountpoints
+
+   Extract an entire archive, as follows:
+$ attic extract /MyDirectory/MyRepository::MyDataFiles
+
+   Extract an entire archive and list files while processing, using the command given below:
+$ attic extract -v /MyDirectory/MyRepository::my-files
+
+   Extract the src directory using the following command:
+$ attic extract /MyDirectory/MyRepository::my-files home/USERNAME/src
+
+   To extract the src directory but exclude object files, use the following command:
+$ attic extract /MyDirectory/MyRepository::my-files home/USERNAME/src --exclude *.o
+
+   Repository pruning: The repository is pruned to remove archives that do not match any of the
+   mentioned preservation or storage options. Pruning is used to keep specific historic backups. For
+   example, -d 2 refers to keeping the last two days backup.

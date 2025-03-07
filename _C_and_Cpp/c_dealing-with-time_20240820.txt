@@ -1,0 +1,139 @@
+filename: c_dealing-with-time_20240820.txt
+https://boston.conman.org/2024/08/17.1
+
+Dealing with time in C
+August 17, 2024
+
+For a few hours yesterday, I felt as if I was taking crazy pills. Then again, I was dealing with time
+in C
+
+   Over the past year or two, I've been cleaning up my posts here. Largely making sure the HTML is
+   valid, but also that all internal links (links where I link to previous posts) are valid to cut down
+   on needless redirects or "404 Not Found" responses, in addition to fixing errors with my web
+   server configuration. So along those lines, yesterday, I thought it might be time to add conditional
+   responses to mod_blog. Given that it's mostly autonomous web crawling agents that read my site, I
+   might as well tell them that most of the links here haven't changed since the last time they came by.
+
+   There are two headers involved with this-Last-Modified and If-Modified-Since. The server sends a
+   Last-Modified header with the last modification date of the resource in question. The client can then
+   send in a If-Modified-Since header with this date, and if the resource hasn't changed, then the
+   server can send back a "304 Not Modified" response, saving a lot of bandwidth. So all I had to do was
+   generate a Last-Modified header (easy, as I already read that information) and then deal with the
+   If-Modified-Since header.
+
+   And then I spent way too much time dealing with time in C, which is odd, because there were only fix
+   functions I was dealing with:
+
+time_t time(time_t *tp)
+	This returns the "calendar date and time" in a scalar value. On POSIX, this is an integer
+	value of the number of seconds since midnight, January 1^st, 1970 UTC. The tp paramter is
+	optional.
+
+time_t mktime(struct tm *tm)
+		This converts a structure containing the year, month, day, hour, minute and second into a
+		scalar value. The C standard does not mention time zones at all; POSIX does.
+
+struct tm *gmtime(time_t const *tp)
+		This converts the "calendar date and time" scalar value pointed to by tp into a broken down
+		structure that reflects time in UTC.
+
+struct tm *localtime(time_t const *tp)
+		This converts the "calendar data and time" scalar value pointed to by tp into a broken down
+		structure that reflects the time local to the server.
+
+size_t strftime(char *s, size_t smax, char const *format, struct tm const *tp)
+		This will convert the tp structure into a string based on the format string.
+
+char *strptime(char const *s, char const *format, struct tm *tp)
+		This will parse a string that contains a date, per the given format and return the data into a
+		structure.
+
+   All but the last are standard C functions. The last one, strptime() is mandated by POSIX. That's
+   okay, because I'm working on a POSIX system.
+
+   It turns out, strptime() is not an easy function to use. Oh, it may look easy, but there are some
+   subtleties that left me dazed and confused for hours yesterday.
+
+   The following does not work:
+struct tm tm;
+time_t     t;
+
+strptime("Fri, 20 May 2005 02:23:22 EDT", "%a, %d %b %Y %H:%M:%S %Z", &tm);
+t = mktime(&tm);
+
+   When I was running this code in mod_blog, the resulting times would come back four or five hours off.
+   When I wrote some standalone test code, it would sometimes be correct, sometimes it would be an hour
+   off.
+
+   It got to the point where I totally lost the plot of what I was even trying to do.
+
+   Now with yesterday behind me, I finally figured out what I was doing wrong.
+
+   The POSIX specification states:
+     It is unspecified whether multiple calls to strptime() using the same tm structure will update the
+     current contents of the structure or overwrite all contents of the structure. Conforming
+     applications should make a single call to strptime() with a format and all data needed to
+     completely specify the date and time being converted.
+
+   This text is near the bottom of the page, and really understates the issue in my opinion.
+
+   The Linux man pages I found all mention the following:
+     In principle, this function does not initialize tm but stores only the values specified. This
+     means that tm should be initialized before the call.
+
+   It too, is near the bottom of the page.
+
+   And yet, for Mac OS X:
+     If the format string does not contain enough conversion specifications to completely specify the
+     resulting struct tm, the unspecified members of tm are left untouched. For example, if format is
+     "%H:%M:%S", only tm_hour, tm_sec and tm_min will be modified. If time relative to today is
+     desired, initialize the tm structure with today's date before passing it to strptime().
+
+   The Mac OS X page contains no sample code. The Linux man page contains some sample code that
+   "initializes" the structure with memset(&tm, 0, sizeof(struct tm)).
+
+   Adding the memset() call to my sample code just made the code always an hour off. Hmmm ...
+
+   The POSIX page also contains sample code:
+struct tm tm;
+time_t t;
+
+if (strptime("6 Dec 2001 12:33:45", "%d %b %Y %H:%M:%S", &tm) == NULL)
+	/* Handle error */;
+
+tm.tm_isdst = -1; /* Not set by strptime(); tells mktime()
+					 to determine whether daylight saving time
+					 is in effect */
+t = mktime(&tm);
+if (t == -1)
+	/* Handle error */;
+
+   Remember when I mentioned that the test code I wrote would sometimes be an hour out? The tm.tm_isdst
+   field, which is part of the C Standard, wasn't set correctly!
+
+   Aaaaaaaaaaaaaaaaaaaarg!
+
+   Changing my sample code to:
+struct tm tm;
+time_t     t;
+
+strptime("Fri, 20 May 2005 02:23:22 EDT","%a, %d %b %Y %H:%M:%S %Z",&tm);
+tm.tm_isdst = -1; /* I WAS MISSING THIS LINE! */
+t = mktime(&tm);
+
+   And it works.
+
+   Except in mod_blog, the time is always four hours out.
+
+   I finally tracked that one down, and it's Apache's fault. I found that if I set the Last-Modified
+   header to something like "Fri, 20 May 2005 02:23:22 EDT", Apache will ever so helpfully convert that
+   to "Fri, 20 May 2005 02:23:22 GMT".
+
+   Let me repeat that-Apache will replace just the timezone with "GMT"! It does not try to convert the
+   time, just the zone.
+
+   At least now I think I can get conditional requests working.
+
+
+---
+

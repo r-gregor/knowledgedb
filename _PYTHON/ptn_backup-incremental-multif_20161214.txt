@@ -1,0 +1,578 @@
+filename: /c/Users/gregor.redelonghi/Dropbox/ODPRTO/_PYTHON/python_backup-incremental-multif_20161214.txt
+http://codereview.stackexchange.com/questions/66546/backup-files-script
+
+   I'm creating own script for backup user's directories.
+
+   CentOS 6.5; Python 2.6.
+
+   Directories looks like:
+# tree -L 2 -d /var/www/vhosts/
+/var/www/vhosts/
+├── freeproxy
+│   └── freeproxy.in.ua
+├── hudeem
+│   └── hudeem.kiev.ua
+├── profy
+│   └── profy.kiev.ua
+├── rtfm
+│   └── rtfm.co.ua
+├── setevoy
+│   ├── forum.setevoy.kiev.ua
+│   ├── postfixadmin.setevoy.org.ua
+│   ├── setevoy.org.ua
+│   └── webmail.setevoy.org.ua
+├── worlddesign
+│   └── worlddesign.org.ua
+└── zabbix
+    └── zabbix.setevoy.org.ua
+
+   As script big enought, I'll post only three 'most important' functions. So please note, that they
+   using some additional functions.
+
+   First - function to create backup directories:
+# global const for user's directory
+VHOSTSPATH = '/var/www/vhosts/'
+
+def back_dir_create(user, day):
+
+    backdir = '/home/setevoy/backups/temp_new_test/'
+
+    # weekly are kept 4 last, daily - 7 copies
+    # thus - better have separate directories
+
+    if day == 'Sun':
+        type = '/weekly/'
+    else:
+        type = '/daily/'
+
+    dirname = ('%s%s%s%s-files/' % (backdir, user, type, time.strftime('%Y-%m-%d')))
+
+    if not os.path.exists(dirname):
+        print('Creating directory: %s' % dirname)
+        os.makedirs(dirname)
+        return(dirname)
+
+   Second - 'incremental' backup, for files changed last twenty-four hours:
+def inc_backup(dir_to_backup, backupname):
+
+    now = time.time()
+    cutoff = 86400
+
+    print('Creating archive %s...' % backupname)
+    out = tarfile.open(backupname, mode='w:bz2')
+
+    # start walk via all files to find changed last 24 hours
+
+    for root, dirs, files in  os.walk(dir_to_backup, followlinks=True):
+        for file in files:
+            file = os.path.join(root, file)
+            try:
+                filemodtime = os.stat(file).st_mtime
+                if now - filemodtime < cutoff:
+                    if os.path.isfile(file):
+                        print('Adding file: %s...' % file)
+                        out.add(file)
+                        print('File modified: %s' % time.ctime(os.path.getmtime(file)))
+            except OSError as error:
+                print('ERROR: %s' % error)
+
+    print 'Closing archive.'
+    out.close()
+
+   And both this function used in 'main' function:
+def run_backup():
+
+    # here is two functions, not listed here
+    # both rerurns lists[] - with users
+    # like just username
+    # and dirs
+    # like /var/www/vhosts/username
+    userlist = arch_users_list(VHOSTSPATH)
+    userpaths = arch_users_path(VHOSTSPATH, userlist)
+
+    # day of week
+    curday = time.strftime('%a')
+
+    for hostdir, username in zip(userpaths, userlist):
+        os.chdir(hostdir)
+        print('\nWorking in: %s' % os.getcwd())
+        print('Under user: %s' % username)
+
+        # call first function, listed above
+
+        backup_dir = back_dir_create(username, curday)
+
+        if backup_dir:
+
+            virtual_hosts = arch_vhosts_names(hostdir)
+
+            for host in virtual_hosts:
+                archname = (backup_dir + host + '.tar.bz2')
+
+                # once in week I want have full backup
+                # other time - 'incremental'
+
+                if curday == 'Sun':
+                    full_backup(host, archname)
+                else:
+                    inc_backup(host, archname)
+
+        else:
+            print('Backup already present, skip.')
+
+   It works fine for now, but I'm newbie in Python, so - what can be improved here or fixed?
+
+
+***
+   Just like you have defined the VHOSTSPATH global variable at the very top, it will make sense to do
+   the same for this too:
+backdir = '/home/setevoy/backups/temp_new_test/'
+
+   So that if you move your script to another machine, all the local customizations will be in one very
+   visible place.
+
+   For even more benefits, move these files to a dedicated settings.py module and make your script
+   import these values from it. then it will be really perfectly clear where to customize the script
+   parameters, and it will be separated from the rest of the code, which will be easily redistributable.
+     ________________________________________________________________________________________________
+
+   This could be done better:
+
+if day == 'Sun':
+    type = '/weekly/'
+else:
+    type = '/daily/'
+
+dirname = ('%s%s%s%s-files/' % (backdir, user, type, time.strftime('%Y-%m-%d')))
+
+   type is a keyword in Python. Intelligent code editors should highlight it for you. It's better to
+   avoid variable names that overlap with keywords. How about subdir?
+
+   The way you assign dirname is a bit hard to read, and just by reading that line it's not clear that
+   this is intended as a nested directory layout. If I look at the type variable I see that all possible
+   values are prefixed and suffixed with the / directory separator, but the code doesn't make it obvious
+   why it is this way. A better way would be like this:
+if day == 'Sun':
+    subdir = 'weekly'
+else:
+    subdir = 'daily'
+
+dirname = os.path.join(backdir, user, subdir, '%s-files' % time.strftime('%Y-%m-%d'))
+
+   In this version, thanks to the os.path.join, now it is explicit that we're talking about a nested
+   hierarchy. Also, you don't need to worry anymore if all components have a / prefix or suffix or not.
+   Just make all components not have such prefix or suffix and let os.path.join take care of it.
+
+   Finally, os.path.join is portable: it will work on any operating system. Sure, you may not care about
+   that now, but you never know.
+     ________________________________________________________________________________________________
+
+   Don't reassign the value of a loop variable:
+
+for file in files:
+    file = os.path.join(root, file)
+
+   Use a different name for it, for example:
+for file in files:
+    path = os.path.join(root, file)
+
+   The reason is that this can be confusing in various ways. The same is true for function parameters:
+   don't reassign them, use different names for local variables.
+     ________________________________________________________________________________________________
+
+   The if condition here seems pointless:
+
+for file in files:
+    file = os.path.join(root, file)
+    # ...
+    if os.path.isfile(file):
+        # ...
+
+   By virtue of the way os.walk works, I think os.path.join(root, file) is always a valid file. Except
+   in some extreme conditions where the file might get removed in the middle of walking. If you are in
+   such environment, then it's fine.
+     ________________________________________________________________________________________________
+
+   I'm not familiar with tarfile.open, but instead of this:
+
+out = tarfile.open(backupname, mode='w:bz2')
+# ... do work
+out.close()
+
+   you can probably do this, which will be better:
+with tarfile.open(backupname, mode='w:bz2') as out:
+    # ... do work
+
+   If this indeed works, then you don't need to worry about closing the out handle, it will be properly
+   closed automtically by Python. In the original code, if an error happens after out =, the out.close()
+   might never be reached. The with open(...) as fh: idiom is the recommended way to work with resources
+   that need to be closed when you're done with them.
+
+***
+   backdir - yep, already changed; type - I'm writing in VIM, so there no highlights of warnings like
+   this :-) thanks, will change; os.path.join - good point, doesn't thought about such solution.
+   – [43]setevoy Oct 13 '14 at 15:51
+
+   with tarfile.open(backupname, mode='w:bz2') as out: AttributeError: 'TarFile' object has no attribute
+   'exit' // if change to with-open() – [44]setevoy Oct 13 '14 at 19:02
+
+
+
+---
+http://thinkpython.blogspot.si/2004/09/simple-backup-script.html
+
+Thursday, September 09, 2004
+A simple backup script
+
+   #backup.py
+   #
+   #backupdirs  - a list of complete paths of directories to backup
+   #excludes    - a list of subdirectories to be excluded
+   #backupdir   - the path to the directory where the backup should be written
+   #machinename - the name of the machine
+   backupdirs = []
+   excludes = []
+   backupdir = "."
+   machinename = "the_box"
+   from zipfile import ZipFile
+   import time
+   try:
+       from itertools import chain
+   except:
+       def chain(*iterators):
+           for i in iterators:
+               for j in i:
+                   yield j
+   def getAllFilesInPath(path):
+       from os import listdir
+       from os.path import isdir, join
+       dirs = chain(*[getAllFilesInPath(join(path, filename))
+              for filename in listdir(path)
+              if isdir(join(path, filename)) and join(path, filename) not in excludes])
+       files = [join(path,filename)
+              for filename in listdir(path)
+              if not isdir(join(path, filename))]
+       return chain(files, dirs)
+
+   def backup():
+       from os.path import join
+       zf = ZipFile(time.strftime(join(backupdir,machinename+"%-d-%m-%Y.zip")),"w")
+       for backupdir in backupdirs:
+           for filename in getAllFilesInPath(backupdir):
+               zf.write(filename)
+       zf.close()
+   if __name__ == "__main__":
+       backup()
+
+   posted by monkeeboi @ [5]5:07 AM   [6]2 comments
+
+***
+          Maybe you would like to take a look at the ASPN recipe
+          http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/191017
+          which provides a simple recipe for backing up files in a directory with versioning.
+
+***
+          Sadly this script never got used we ended up using something in perl instead.
+          One interesting thing my script does is that it lets you can set multiple backup directories
+          and even exclude some subdirectories.
+          There is a later version of my script that would ftp the zipped file to a common repository.
+          There was even one that did an incremental backup. No idea where that one is anymore.
+
+
+
+---
+https://openovation.wordpress.com/2011/03/20/python-incremental-backup-scripts/
+
+Python Incremental Backup Scripts
+
+   While interning at Honeywell, I found this small problem that I had to solve. We arent allowed to
+   move flash drives around since they are quite a security risk to computers running Windows XP, and if
+   you want to backup your files between a home computer and a work computer, there is really no better
+   way than a flash drive. Given that we couldnt use them though, I had to come up with a clean solution
+   to the probem. I tried taking differential backups with 7zip which does a pretty great job at this,
+   bu the problem is that its “differential” is based on timestamps. The home computer runs Linux and
+   the Office one Windows. For some weird reason, the timestamps on windows are of different precision
+   than those on linux, so basically, the same file modified at the same time looks different to 7zip on
+   a windows box and a linux box.
+
+   I had to come up with some kind of solution for this, so I wrote the following python scripts. One is
+   for backing up a custom folder (say Project) and the other is for restoring the backup on another
+   machine. These scripts take an md5 sum of the contents of the files, so timestamps dont matter.
+
+   [ * ]backup.py
+
+   [ ** ]restore.py
+
+   The usage is simple. Just copy these scripts to the folder which contains the folder you want to
+   backup. For example, If you want to backup D:\Games , just copy the scripts to D:\ . Now edit the
+   scripts and change the line :-
+
+   dir_backup=”Directory” to
+
+   dir_backup=”Your Folder Name”
+
+   In the above example, that would be :-
+
+   dir_backup=”Games”
+
+   Now youre good to go. Just double click the scripts (in windows) or run the scripts from the terminal
+   (in linux) to run the backup. When you first backup, some files will be created. Just take the
+   scripts to some other computer and copy delta.7z and remove.txt to the same directory, and run the
+   restore script on it. This would generate the folder you backed up in the same directory as the
+   scripts.
+
+   From here on, you just need to run backup.py on one machine and copy the 2 mentioned files to the
+   other and run restore.py. The scripts will make sure that everything is up to date between the
+   folders.
+
+   As an example, suppose you have a home computer and an office computer and youre trying to backup the
+   folder “Project”(assume we begin at home),
+
+   Run backup.py at home
+
+   Mail yourself the delta.7z and the remove.txt
+
+   Copy the scripts and the 2 files to some directory on the office comp.
+
+   Run restore.py on the office comp.
+
+   Make changes to the Project folder at office
+
+   Run backup.py at office
+
+   Mail delta.7z and remove.txt to home comp.
+
+   Copy (and replace) these files into the directory where the scripts are located.
+
+   Run restore.py
+
+   And so on …
+
+
+---
+http://pastebin.com/MBYCCm99
+
+[ * ] backup.py
+
+    1. import sys
+    2. import os
+    3. import hashlib
+    4. import cPickle
+    5. import zipfile
+    6. dir_backup="Directory"
+    7. dict={}
+    8.
+    9. for (path,dirs,files) in os.walk(dir_backup):
+   10.   if ((dirs == [] ) & (files == [])):
+   11.     os.rmdir(path)
+   12.
+   13. try:
+   14.   checksum=open(os.path.join(dir_backup,"..","chksm.txt"),'r')
+   15.   dict=cPickle.load(checksum)
+   16.   checksum.close()
+   17. except IOError:
+   18.
+   19.   checksum=open(os.path.join(dir_backup,"..","chksm.txt"),'w')
+   20.
+   21.   for (path,dirs,files) in os.walk(dir_backup):
+   22.     for filename in files:
+   23.       f_temp=open(os.path.join(path,filename),'r')
+   24.       content=f_temp.read()
+   25.       m=hashlib.md5()
+   26.       m.update(content)
+   27.       dict[os.path.join(path,filename)]=m.hexdigest()
+   28.       f_temp.close()
+   29.
+   30.   cPickle.dump(dict,checksum)
+   31.   checksum.close()
+   32.   delta=zipfile.ZipFile(os.path.join(dir_backup,"..","delta.zip"),'w')
+   33.
+   34.   for (path,dirs,files) in os.walk(dir_backup):
+   35.     for filename in files:
+   36.       delta.write(os.path.join(path,filename))
+   37.   delta.close()
+   38.
+   39.   os.system("7za -mx=9 a delta.7z delta.zip")
+   40.   os.remove("delta.zip")
+   41.
+   42.   remove=open(os.path.join(dir_backup,"..","remove.txt"),'w')
+   43.   remove.close()
+   44.   exit()
+   45.
+   46. remove=open(os.path.join(dir_backup,"..","remove.txt"),'w')
+   47. for key in dict.keys():
+   48.   if(os.path.exists(key) != 1):
+   49.     remove.write(key)
+   50.     remove.write('\n')
+   51.     del dict[key]
+   52. remove.close()
+   53.
+   54. delta=zipfile.ZipFile(os.path.join(dir_backup,"..","delta.zip"),'w')
+   55. for (path,dirs,files) in os.walk(dir_backup):
+   56.   for filename in files:
+   57.     f_temp=open(os.path.join(path,filename),'r')
+   58.     content=f_temp.read()
+   59.     m=hashlib.md5()
+   60.     m.update(content)
+   61.     f_temp.close()
+   62.     try:
+   63.       if(dict[os.path.join(path,filename)] != m.hexdigest()):
+   64.         delta.write(os.path.join(path,filename))
+   65.         dict[os.path.join(path,filename)] = m.hexdigest()
+   66.     except KeyError:
+   67.       delta.write(os.path.join(path,filename))
+   68.       dict[os.path.join(path,filename)] = m.hexdigest()
+   69. f=open(os.path.join(dir_backup,"..","chksm.txt"),'w')
+   70. cPickle.dump(dict,f)
+   71. f.close()
+   72. delta.close()
+   73. os.system("7za -mx=9 a delta.7z delta.zip")
+   74. os.remove("delta.zip")
+
+
+
+---
+http://pastebin.com/qSTZcqFB
+
+[ ** ] restore.py
+
+    1. import sys
+    2. import os
+    3. import hashlib
+    4. import cPickle
+    5. import zipfile
+    6. dir_backup="Directory"
+    7. os.system("7za x delta.7z")
+    8. os.system("7za -y x delta.zip")
+    9. os.remove("delta.7z")
+   10. os.remove("delta.zip")
+   11. remove=open("remove.txt","r")
+   12. for line in remove:
+   13.   line=line.rstrip('\n')
+   14.   os.remove(line)
+   15. remove.close()
+   16. os.remove("remove.txt")
+   17. dict={}
+   18. checksum=open(os.path.join(dir_backup,"..","chksm.txt"),'w')
+   19.
+   20. for (path,dirs,files) in os.walk(dir_backup):
+   21.   if ((dirs == [] ) & (files == [])):
+   22.     os.rmdir(path)
+   23.
+   24. for (path,dirs,files) in os.walk(dir_backup):
+   25.   for filename in files:
+   26.     f_temp=open(os.path.join(path,filename),'r')
+   27.     content=f_temp.read()
+   28.     m=hashlib.md5()
+   29.     m.update(content)
+   30.     dict[os.path.join(path,filename)]=m.hexdigest()
+   31.     f_temp.close()
+   32. cPickle.dump(dict,checksum)
+
+
+---
+http://deneb.homedns.org/things/?p=288
+
+backur: A Configurable Python Utility for Optimized Incremental Backups
+
+   I have been on the lookout for an efficient small utility to incrementally backup my Linux server to
+   an external drive. I have looked at various options like [15]Back in Time and [16]Backup PC. They are
+   however too advanced and too automated for my purpose. My requirements are the following:
+    1. Incremental backups
+    2. Console based
+    3. Preservation of file times, permissions, user and group
+    4. Easy configuration
+    5. Logging support
+    6. Mirror mode
+
+   I have been using [17]rsync for some time in bash scripts. As Python is becoming more and more my
+   language of scripting, so I wanted to write it in Python. With that background information, here
+   comes “backur”. backur is very easy to configure and use. backur.conf, as given below, is
+   self-explanatory. It also provides customizable logging including log-file rotation. Th backup and
+   source paths are very easy to enter, and allow spaces, thanks to shlex split method. You can run
+   backur either manually, or through as a cron job, as it suits you.
+   
+#! /usr/bin/python
+
+# Title:    backur.py
+# Author:   Asif Iqbal (aiqbalrana@gmail.com)
+# Date:     11OCT2012
+# Info:     "backur" can be used to automatically backup given folder locations
+#           to another backup location. backur is easily configurable through a
+#           configuration file. backur uses rsync to achieve highly optimized
+#           data transfers by doing only the incremental updates.
+
+import ConfigParser
+import re, os
+import glob
+import logging
+import logging.handlers
+import subprocess
+import datetime
+import shlex
+
+def splitNStripArgs(inputStr, charToStrip):
+    data = inputStr.split(',')
+    retData = []
+    for item in data:
+        retData.append((item.strip()).strip(charToStrip))
+    return retData
+
+# Read configuration data
+confpath = os.path.dirname(__file__)
+config = ConfigParser.ConfigParser()
+config.read(confpath + "/backur.conf")
+
+rsyncflags = splitNStripArgs((config.get("Config", "RSYNCFlags")),'"')
+rsyncexe   = config.get("Config", "RSYNC")
+folderlist = splitNStripArgs((config.get("Folders", "FolderList")),'"')
+backuploc  = config.get("Config","BackupLocation")
+backupsize = int(config.get("Config","MaxLogFileSize"))
+numbackups = int(config.get("Config","NumBackups"))
+logfile    = config.get("Config","LogFile")
+
+# Setup logging
+my_logger = logging.getLogger('MyLogger')
+my_logger.setLevel(logging.DEBUG)
+handler = logging.handlers.RotatingFileHandler(logfile, maxBytes=backupsize, backupCount=numbackups)
+my_logger.addHandler(handler)
+
+# Do the job
+my_logger.info("#########################################################################################")
+my_logger.info("-----------------------------------------------------------------------------------------")
+my_logger.info("Starting backup")
+my_logger.info("Time: " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+my_logger.info("-----------------------------------------------------------------------------------------")
+
+# Run individual backups
+for jobfolder in folderlist:
+    command = rsyncexe + " " + ' '.join(rsyncflags) + " -s \"" + jobfolder + "\" \"" + backuploc + "\""
+    my_logger.info("Executing: " + command)
+    out = subprocess.check_output(shlex.split(command))
+    my_logger.info(out)
+
+my_logger.info("-----------------------------------------------------------------------------------------")
+my_logger.info("Backup Complete")
+my_logger.info("Time: " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+my_logger.info("-----------------------------------------------------------------------------------------")
+my_logger.info("#########################################################################################")
+
+   backur can be configure using backur.conf which look like the following:
+[Config]
+BackupLocation: /media/usb/backup/
+LogFile: /var/log/backur.log
+MaxLogFileSize: 2097152
+NumBackups: 5
+RSYNCFlags: "-a",
+                "-v",
+                "--delete"
+RSYNC: /usr/bin/rsync
+
+[Folders]
+FolderList: "/mnt/Drv1/pics",
+                "/mnt/Drv2/my data",
+                "/mnt/Drv3/docs"
+
+   backur can also be downloaded in a [18]zip file. I have written and tested backur only on Linux.
+   However, it should also run on Windows provided that Python is installed on the system. Do let me
+   know about your experiences or issues if you use backur.

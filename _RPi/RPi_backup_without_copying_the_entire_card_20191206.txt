@@ -1,0 +1,307 @@
+filename: RPi_backup_without_copying_the_entire_card_20191206.txt
+https://www.raspberrypi.org/forums/viewtopic.php?t=219525
+Aug 02, 2018
+Backup Without Copying the Entire Card
+
+   The standard advice given for backing up the Raspberry Pi is to make images of the entire SD card and
+   store them on a Windows PC. While this method works, it has drawbacks. Upon backup, sectors on the SD
+   card which do not hold data are copied and as well as data that hasn't changed since the last backup.
+   Upon restore, sectors which don't contain data are written to the new SD card. This depletes the
+   number of non-used sectors the SD card has available for wear leveling, which wears the new card out
+   and decreases performance. Note that a filesystem trim may be used to return the written but unused
+   sectors to the wear-leveling pool after the restore is finished, however, this final step is missing
+   in the official documentation.
+   A different approach to backing up is described here that uses rsync and a copy-on-write filesystem
+   to make incremental backups of files which have changed over time. As you can never have too many
+   backups, one approach is to use the method described here for frequent backups while continuing to
+   make occasional copies of the entire SD card. Having said this, I will admit that I have never made
+   an image of an SD card for backup nor lost any data due to lack of backups. Note, however, in
+   addition to being occasionally lucky, I also keep backups using dump and tar on separate drives and,
+   of course, upload the really important stuff (like these notes) to other peoples computers.
+   In addition to a Raspberry Pi, the equipment needed consists of a suitable USB hard disk and a USB SD
+   card reader. I will be using a Raspberry Pi 3B+, a Seagate 8TB desktop USB hard disk and a thumb
+   sized SD card reader called Everything But Stromboli. These instructions have been tested with
+   Raspbian Stretch up-to-date as of August 1, 2018. In what follows, a # indicates the prompt for a
+   command that should be executed as root while $ indicates a command that can be executed as an
+   unprivileged user. Do not type the # or $ symbols.
+   First, plug the hard disk into the Pi. In my case the drive was detected as /dev/sdb. Make sure it
+   did not automount; otherwise unmount it. Next install gdisk and partition the drive using
+
+#> apt-get install gdisk
+#> gdisk /dev/sdb
+Command (? for help): o
+This option deletes all partitions and creates a new protective MBR.
+Proceed? (Y/N): y
+Command (? for help): n
+Partition number (1-128, default 1): 1
+First sector (34-15628053133, default = 2048) or {+-}size{KMGTP}:
+Last sector (2048-15628053133, default = 15628053133) or {+-}size{KMGTP}:
+Current type is 'Linux filesystem'
+Hex code or GUID (L to show codes, Enter = 8300):
+Command (? for help): c
+Using 1
+Enter name: BTRFS Backup
+
+Command (? for help): p
+Disk /dev/sdb: 15628053167 sectors, 7.3 TiB
+Logical sector size: 512 bytes
+Disk identifier (GUID): C2F3503A-285F-4B87-87E4-3991095CA22B
+Partition table holds up to 128 entries
+First usable sector is 34, last usable sector is 15628053133
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 2014 sectors (1007.0 KiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            2048     15628053133   7.3 TiB     8300  BTRFS Backup
+
+Command (? for help): w
+
+Final checks complete. About to write GPT data. THIS WILL OVERWRITE EXISTING
+PARTITIONS!!
+
+Do you want to proceed? (Y/N): y
+OK; writing new GUID partition table (GPT) to /dev/sdb.
+The operation has completed successfully.
+
+   Format and mount the BTRFS filesystem using
+
+$> mkfs.btrfs -L Backup /dev/sdb1
+btrfs-progs v4.7.3
+See http://btrfs.wiki.kernel.org for more information.
+
+Label:              Backup
+UUID:
+Node size:          16384
+Sector size:        4096
+Filesystem size:    7.28TiB
+Block group profiles:
+  Data:             single            8.00MiB
+  Metadata:         DUP               1.00GiB
+  System:           DUP               8.00MiB
+SSD detected:       no
+Incompat features:  extref, skinny-metadata
+Number of devices:  1
+Devices:
+   ID        SIZE  PATH
+    1     7.28TiB  /dev/sdb1
+$> mkdir /mnt/Backup
+$> mount LABEL=Backup /mnt/Backup
+
+   Make a directory to hold the backup subvolumes and create a subvolume to hold a backup of the boot
+   directory and another for the operating system root.
+
+$> cd /mnt/Backup
+$> mkdir raspberrypi
+$> cd raspberrypi
+$> btrfs sub creat boot
+Create subvolume './boot'
+$> btrfs sub creat root
+Create subvolume './root'
+
+   We now make a simple script that uses rsync to update the boot and root subvolumes using the
+   copy-on-write semantics of the BTRFS filesystem and then clones them into snapshots labeled by date.
+   Note that each dated snapshot will appear as a complete backup of the corresponding boot and root
+   filesystems even though only the files that changed between each backup are stored. Using your editor
+   of choice create a script called dobackup in the /mnt/Backup/raspberrypi directory that contains the
+   following lines.
+
+#!/bin/sh
+if cd /mnt/Backup/raspberrypi
+then
+    bdir=boot-`date +'%Y.%m.%d'`
+    echo Creating snapshot $bdir...
+    rsync -glopqrtxDH --numeric-ids --delete /boot/ boot &&
+    btrfs sub snap -r boot $bdir
+
+    bdir=root-`date +'%Y.%m.%d'`
+    echo Creating snapshot $bdir...
+    rsync -glopqrtxDH --numeric-ids --delete / root &&
+    btrfs sub snap -r root $bdir
+fi
+
+   Note that the # symbol appearing on the first line of the above dobackup script is not a prompt and
+   must be explicitly entered. Finally, make the script executable with
+
+$> chmod +x dobackup
+
+   Everything is now configured. Incremental backups can be made each day (or less often if you desire)
+   using the command
+
+$> ./dobackup
+Creating snapshot boot-2018.08.02...
+Create a readonly snapshot of 'boot' in './boot-2018.08.02'
+Creating snapshot root-2018.08.02...
+Create a readonly snapshot of 'root' in './root-2018.08.02'
+
+   Note that the first time the dobackup command is run it will take longer because all the files on the
+   SD card need to be copied to the hard disk. Subsequent backups, however, will be much quicker as only
+   the changed files will be copied. In a subsequent post I will describe how to restore one of these
+   backup subvolumes to create a new bootable Raspbian SD card. For now, it is worth mentioning that if
+   you accidentally delete or corrupt a file, it is easy to navigate to the correct subdirectory of a
+   suitable snapshot in /mnt/Backup/raspberrypi to retrieve an older version of the file.
+
+***
+   The above method will attempt to back up a live root filesystem. While there is a minor risk that one
+   or two files will change as they are backed up, rsync does a good job of coping and the changes are
+   usually restricted to log files which don't affect the usefulness of the backup.
+
+   Unless the purpose of the system is to log information into log files that are continuously being
+   updated. A corner case I admit :roll:
+   PeterO
+
+   In this case it would be more useful to backup these logfiles only and not the entire system.
+   And of course it would be a good idea too, to write down and backup the statements to setup the
+   system, just in case that Raspbian Stretch suddenly gets outdated. It would be at least a good
+   starting point for the setup with the next generation Raspbian...
+   We are talking about alternatives to image backup here, not what the saved system is good for. An
+   image backup is good for duplicating a system or for recreating a system in case of damage and not to
+   backup data, that are collected by the system.
+   rsync can be used instead of image backup. What is actually missing here is how to recover if you
+   need to.
+
+***
+   My solution to that problem is to run the PiShrink script on the image file after I create it.
+   https://github.com/Drewsif/PiShrink
+   It not only shrinks the disk image down it also configures it so that the system does file system
+   expand and reboot on first use just like stock Raspbian images do.
+   Been doing this a lot lately, I also found that there is a status=progress command line option in the
+   current dd that displays the progress of dd's execution.
+
+***
+   This post describes how to restore a bootable SD card from the BTRFS snapshots created by the
+   dobackup script. To restore one of the backups from the USB harddisk, a working Linux system is
+   needed. An x86 PC already configured with a recent version of Linux can be used as can a Raspberry
+   Pi. In the case that only the Pi is available, you will need two SD cards: one card configured with a
+   freshly downloaded version of Raspbian and a second card that will be formatted with the restored
+   backup image. In what follows it will be assumed that a single Raspberry Pi is the only Linux
+   computer available.
+   
+   Boot the Pi using the SD card that contains the freshly downloaded version of Raspbian, place the
+   second SD card in the USB card reader, insert it and log in. In my case, the second SD card appeared
+   as /dev/sdc. Use fdisk to partition the second card with boot and root partitions as follows.
+
+$> fdisk /dev/sdc
+
+Welcome to fdisk (util-linux 2.29.2).
+Changes will remain in memory only, until you decide to write them.
+Be careful before using the write command.
+
+
+Command (m for help): p
+Disk /dev/sdc: 59.5 GiB, 63864569856 bytes, 124735488 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disklabel type: dos
+Disk identifier: 0x00000000
+
+Device     Boot Start       End   Sectors  Size Id Type
+/dev/sdc1       32768 124735487 124702720 59.5G  7 HPFS/NTFS/exFAT
+
+Command (m for help): o
+Created a new DOS disklabel with disk identifier 0x2225652c.
+
+Command (m for help): n
+Partition type
+   p   primary (0 primary, 0 extended, 4 free)
+   e   extended (container for logical partitions)
+Select (default p): p
+Partition number (1-4, default 1): 1
+First sector (2048-124735487, default 2048):
+Last sector, +sectors or +size{K,M,G,T,P} (2048-124735487, default 124735487): +92M
+
+Created a new partition 1 of type 'Linux' and of size 92 MiB.
+
+Command (m for help): t
+Selected partition 1
+Partition type (type L to list all types): c
+Changed type of partition 'Linux' to 'W95 FAT32 (LBA)'.
+
+Command (m for help): t
+Selected partition 1
+Partition type (type L to list all types): c
+Changed type of partition 'Linux' to 'W95 FAT32 (LBA)'.
+
+Command (m for help): n
+Partition type
+   p   primary (1 primary, 0 extended, 3 free)
+   e   extended (container for logical partitions)
+Select (default p): p
+Partition number (2-4, default 2): 2
+First sector (190464-124735487, default 190464):
+Last sector, +sectors or +size{K,M,G,T,P} (190464-124735487, default 124735487):
+
+Created a new partition 2 of type 'Linux' and of size 59.4 GiB.
+
+Command (m for help): p
+Disk /dev/sdc: 59.5 GiB, 63864569856 bytes, 124735488 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disklabel type: dos
+Disk identifier: 0x2225652c
+
+Device     Boot  Start       End   Sectors  Size Id Type
+/dev/sdc1         2048    190463    188416   92M  c W95 FAT32 (LBA)
+/dev/sdc2       190464 124735487 124545024 59.4G 83 Linux
+
+Command (m for help): w
+The partition table has been altered.
+Calling ioctl() to re-read partition table.
+Syncing disks.
+
+   Note that the FAT32 partition in the standard Raspbian image is currently 42M, whereas a larger 92M
+   partition has been created here to allocate a little extra space just in case. Since the boot
+   partition is so small, making it slightly bigger doesn't significantly change the size of the root
+   partition.
+   Format the boot and root partitions and then plug in and mount the BTRFS-formatted USB backup drive
+   with all the archived files. For safety don't plug the backup drive in until the boot and root
+   partitions have been formatted.
+
+$> mkdosfs -F32 -n BOOT /dev/sdc1
+$> mke2fs -text4 -L ROOT /dev/sdc2
+$> cd /mnt
+$> mkdir Backup
+$> mkdir newboot
+$> mkdir newroot
+$> mount LABEL=Backup Backup
+$> mount /dev/sdc1 newboot
+$> mount /dev/sdc2 newroot
+
+   Choose a backup snapshot to restore, use rsync to copy the files to the newly formatted SD card and
+   then unmount the SD card. For example, to restore the snapshots made August 9, 2018 type the
+   following commands
+
+   Code: [95]Select all
+$> cd /mnt/Backup/raspberrypi
+$> rsync -glopqrtxDH --numeric-ids boot-2018.08.09/ /mnt/newboot
+$> rsync -glopqrtxDH --numeric-ids root-2018.08.09/ /mnt/newroot
+
+   We are almost done; however, the second SD card won't boot yet because the disk partition universally
+   unique identifiers are wrong. To avoid needless complication with UUIDs, it is easiest to revert to
+   standard block device names for the SD card. To do this edit the file /mnt/newboot/cmdline.txt and
+   replace
+   root=XXXXXXXXX
+   with
+   root=/dev/mmcblk0p2
+   Further edit /mnt/newroot/etc/fstab so it looks like
+
+   Code: [96]Select all
+proc            /proc           proc    defaults          0       0
+/dev/mmcblk0p1  /boot           vfat    defaults          0       2
+/dev/mmcblk0p2  /               ext4    defaults,noatime  0       1
+
+   Finally unmount the SD card using the commands
+
+$> cd /mnt
+$> umount newboot
+$> umount newroot
+$> sync
+$> sync
+$> sync
+
+   The restored backup is now ready. Remove the SD card from the card reader, shut down the Raspberry Pi
+   if necessary, insert the new SD card into to Pi and boot the restored backup.
+
+
+---

@@ -1,0 +1,989 @@
+filename: bash_process-substitution-multif_20150402.txt
+http://wiki.bash-hackers.org/syntax/expansion/proc_subst
+
+                                        Process substitution
+
+   Process substitution is a form of redirection where the input or output of a process (some
+   sequence of commands) appear as a temporary file.
+
+<( <LIST> )
+
+>( <LIST> )
+
+   Process substitution is performed simultaneously with parameter expansion, command
+   substitution and arithmetic expansion.
+
+   The command list <LIST> is executed and its
+     * standard output filedescriptor in the <( … ) form or
+     * standard input filedescriptor in the >( … ) form
+
+   is connected to a FIFO or a file in /dev/fd/. The filename (where the filedescriptor is
+   connected) is then used as a substitution for the <(…)-construct.
+
+   That, for example, allows to give data to a command that can't be reached by pipelining
+   (that doesn't expect its data from stdin but from a file).
+
+  Scope
+   If a process substitution is expanded as an argument to a function, expanded to an
+   environment variable during calling of a function, or expanded to any assignment within a
+   function, the process substitution will be "held open" for use by any command within the
+   function or its callees, until the function in which it was set returns. If the same
+   variable is set again within a callee, unless the new variable is local, the previous
+   process substitution is closed and will be unavailable to the caller when the callee
+   returns.
+
+   In essence, process substitutions expanded to variables within functions remain open until
+   the function in which the process substitution occured returns - even when assigned to
+   locals that were set by a function's caller. Dynamic scope doesn't protect them from
+   closing.
+
+Examples
+   This code is useless, but it demonstrates how it works:
+$> echo <(ls)
+/dev/fd/63
+
+   The output of the ls-program can then be accessed by reading the file /dev/fd/63.
+
+   Consider the following:
+diff <(ls $first_directory) <(ls $second_directory)
+
+   This will compare the contents of each directory. In this command, each process is
+   substituted for a file, and diff doesn't see <(bla), it sees two files, so the effective
+   command is something like
+diff /dev/fd/63 /dev/fd/64
+
+   where those files are written to and destroyed automatically.
+
+  Avoiding subshells
+   See Also: BashFAQ/024 – I set variables in a loop that's in a pipeline. Why do they
+   disappear after the loop terminates? Or, why can't I pipe data to read?
+
+   One of the most common uses for process substitutions are to avoid the final subshell that
+   results from executing a pipeline. The following is a wrong piece of code to count all
+   files in /etc is:
+
+counter=0
+
+find /etc -print0 | while IFS= read -rd '' _; do
+	((counter++))
+done
+
+echo "$counter files" # prints "0 files"
+
+   Due to the pipe, the while read; do … done part is executed in a subshell (in Bash, by
+   default), which means counter is only incremented within the subshell. When the pipeline
+   finishes, the subshell is terminated, and the counter visible to echo is still at "0"!
+
+   Process substitution helps us avoid the pipe operator (the reason for the subshell):
+
+counter=0
+
+while IFS= read -rN1 _; do
+	((counter++))
+done < <(find /etc -printf ' ')
+
+echo "$counter files"
+
+   This is the normal input file redirection < FILE, just that the FILE in this case is the
+   result of process substitution. It's important to note that the space is required in order
+   to disambiguate the syntax from here documents.
+
+: < <(COMMAND) # Good.
+: <<(...) # Wrong. Will be parsed as a heredoc. Bash fails when it comes across the unquoted metacharacter "("
+: ><(...) # Technically valid but pointless syntax. Bash opens the pipe for writing, while the comma
+nds within the process substitution have their stdout connected to the pipe.
+
+  Process substitution assigned to a parameter
+   This example demonstrates how process substitutions can be made to resemble "passable"
+   objects. This results in converting the output of f's argument to uppercase.
+
+f() {
+	cat "$1" >"$x"
+}
+
+x=>(tr '[:lower:]' '[:upper:]') f <(echo 'hi there')
+
+   See the above section on scope
+
+Bugs and Portability Considerations
+     * Process substitution is not specified by POSIX.
+     * Process substitution is disabled completely in Bash POSIX mode.
+     * Process substitution is implemented by Bash, Zsh, Ksh{88,93}, but not (yet) pdksh
+       derivatives (mksh). Coprocesses may be used instead.
+     * Process substitution is supported only on systems that support either named pipes (FIFO
+       - a special file) or the /dev/fd/* method for accessing open files. If the system
+       doesn't support /dev/fd/*, Bash falls back to creating named pipes. Note that not all
+       shells that support process substitution have that fallback.
+     * Bash evaluates process substitutions within array indices, but not other arithmetic
+       contexts. Ksh and Zsh do not. (Possible Bug)
+
+# print "moo"
+dev=fd=1 _[1<(echo moo >&2)]=
+# fork bomb
+${dev[${dev='dev[1>(${dev[dev]})]'}]}
+     * Issues with wait, race conditions, etc:
+       https://groups.google.com/forum/?fromgroups=#!topic/comp.unix.shell/GqLNzUA4ulA
+
+
+
+---
+http://en.wikipedia.org/wiki/Process_substitution
+
+Process substitution
+
+   In computing, process substitution is a form of inter-process communication that allows
+   the input or output of a command to appear as a file. The command is substituted in-line,
+   where a file name would normally occur, by the command shell. This allows programs that
+   normally only accept files to directly read from or write to another program.
+
+   The following examples use Bash syntax.
+
+   The Unix diff command normally accepts the names of two files to compare, or one
+   file name and standard input. Process substitution allows you to compare the output of two
+   programs directly:
+$> diff <(sort file1) <(sort file2)
+
+   The <(command) expression tells the command interpreter to run command and make its output
+   appear as a file. The command can be any arbitrarily complex shell command.
+
+   Without process substitution, the alternatives are:
+
+   1. Save the output of the command(s) to a temporary file, then read the temporary file(s).
+$> sort file2 > /tmp/file2.sorted
+$> sort file1 | diff - /tmp/file2.sorted
+$> rm /tmp/file2.sorted
+
+   2. Create a named pipe (also known as a FIFO), start one command writing to the
+   named pipe in the background, then run the other command with the named pipe as input.
+$> mkfifo /tmp/sort2.fifo
+$> sort file2 > /tmp/sort2.fifo &
+$> sort file1 | diff - /tmp/sort2.fifo
+$> rm /tmp/sort2.fifo
+
+   Both alternatives are more cumbersome.
+
+   Process substitution can also be used to capture output that would normally go to a file,
+   and redirect it to the input of a process. The Bash syntax for writing to a process is
+   >(command). Here is an example using the tee, wc and gzip commands that counts
+   the lines in a file with wc -l and compresses it with gzip in one pass:
+$> tee >(wc -l >&2) < bigfile | gzip > bigfile.gz
+
+Advantages
+   The main advantages of process substitution over its alternatives are:
+     * Simplicity: The commands can be given in-line; there is no need to save temporary files
+       or create named pipes first.
+     * Performance: Reading directly from another process is often faster than having to write
+       a temporary file to disk, then read it back in. This also saves disk space.
+     * Parallelism: The substituted process can be running concurrently with the command
+       reading its output or writing its input, taking advantage of multiprocessing to
+       reduce the total time for the computation.
+
+Mechanism
+   Under the hood, process substitution works by creating a named pipe, and then
+   substituting its name on the command line. (Because of this, process substitution is
+   sometimes known as "anonymous named pipes.") To illustrate the steps involved, consider the
+   following simple command substitution:
+diff file1 <(sort file2)
+
+   The steps the shell performs are:
+    1. Create a new named pipe. This special file is often named something like /dev/fd/63 on
+       Unix-like systems; you can see it with a command like echo <(true).
+    2. Execute the substituted command in the background (sort file2 in this case), piping its
+       output to the named pipe.
+    3. Execute the primary command, replacing the substituted command with the name of the
+       named pipe. In this case, the full command might expand to something like diff file1
+       /dev/fd/63.
+    4. When execution is finished, remove the named pipe.
+
+Limitations
+   Process substitution has some limitations: the "files" created are not seekable, which
+   means the process reading or writing to the file cannot perform random access; it must
+   read or write once from start to finish. Programs that explicitly check the type of a file
+   before opening it may refuse to work with process substitution, because the "file"
+   resulting from process substitution is not a regular file. "It is not possible to
+   obtain the exit code of a process substitution command from the shell that created the
+   process substitution."
+
+
+
+---
+http://mywiki.wooledge.org/ProcessSubstitution
+
+Process Substitution
+
+   Process substitution is a very useful BASH extension. It is similar to awk's
+   "command" | getline and is especially important for bypassing subshells caused by
+   pipelines.
+
+   Process substitution comes in two forms: <(some command) and >(some command). Each form
+   either causes a FIFO to be created under /tmp or /var/tmp, or uses a named file
+   descriptor (/dev/fd/*), depending on the operating system. The substitution syntax is
+   replaced by the name of the FIFO or FD, and the command inside it is run in the background.
+   The substitution is performed at the same time as parameter expansion and command
+   substitution.
+
+   One of the most common uses of this feature is to avoid the creation of temporary files,
+   e.g. when using diff(1):
+
+diff <(sort list1) <(sort list2)
+
+   This is (roughly) equivalent to:
+mkfifo /var/tmp/fifo1
+mkfifo /var/tmp/fifo2
+sort list1 >/var/tmp/fifo1 &
+sort list2 >/var/tmp/fifo2 &
+diff /var/tmp/fifo1 /var/tmp/fifo2
+rm /var/tmp/fifo1 /var/tmp/fifo2
+
+   Note that the diff command actually receives two filename arguments.
+
+   Another common use is avoiding the loss of variables inside a loop that is part of a
+   pipeline. For example, this will fail:
+
+# This example will fail, unless run in ksh88/ksh93
+i=0
+sort list1 | while read line; do
+	i=$(($i + 1))
+	...
+done
+echo "$i lines processed" # Always prints 0
+
+   But this works:
+
+# Working example, using bash syntax.
+i=0
+while read line; do
+	((i++))
+  ...
+done < <(sort list1)
+echo "$i lines processed"
+
+   The difference between <(...) and >(...) is merely which way the redirections are done.
+   With <(...) one is expected to read from the substitution, and the command is set up to use
+   it as stdout. With >(...) one is expected to write to the substitution, and the command
+   inside is set up to use it as stdin.
+
+   >(...) is used less frequently; the most common situation is in conjunction with tee(1).
+
+exec > >(tee logfile)
+
+# Rest of script goes here
+# Stdout of everything is logged, and also falls through to real stdout.
+# Beware of buffering issues, especially if you also have stderr (e.g.
+# prompts for user input may appear before the previous line of stdout).
+
+   >(...) is handy when redirecting the output to multiple files, based on some criteria.
+
+# For example:
+some_command | tee >(grep A > A.out) >(grep B > B.out) >(grep C > C.out) > /dev/null
+
+   See Bash FAQ #106 for more discussion of that usage.
+
+   Here's a more complicated example:
+
+hasFile='Note: the (top-|highly )?secret plans are backed up at:(.*)'
+criticalFile=
+while IFS= read -r line; do
+	[[ $line ]] || continue
+	case $line in
+		'!!! '*)
+			errMsg "${line#'!!! '}" ;;
+		*important* )
+			echo "$line" ;;
+		* )
+			if [[ $line =~ $hasFile ]]; then
+				criticalFile=${BASH_REMATCH[2]}
+				warn "File at $criticalFile"
+			else
+				spin
+			fi
+			;;
+	esac
+done < <(someCommand "${options[@]}" "${param[@]}" 2>&1 | tee "$logfile")
+[[ $criticalFile ]] || abort 'File not found'
+
+   Piping the command to a while loop would mean any variables set would be lost. Note that
+   the actual command can be a pipeline. In fact you can continue to type a whole script in
+   that side as well. Be aware that this is running in a subshell, and also that it will
+   continue to run when your script exits (unless you manage your child processes.)
+
+   In the above example the regex could as easily be done with a case:
+    'Note: the '*'secret plans are backed up at:'*) criticalFile=${line#*'secret plans are backed up at:'}
+
+   Process substitution where the external is an awk command, is particularly powerful and
+   flexible.
+
+Portability
+   Bash, Zsh, and AT&T ksh{88,93} (but not pdksh/mksh) support process substitution. Process
+   substitution isn't specified by POSIX. You may use NamedPipes to accomplish the same
+   things. Coprocesses can also do everything process substitutions can, and are slightly more
+   portable (though the syntax for using them is not).
+
+Pitfalls
+   It is not possible to obtain the exit code of a process substitution command, from the
+   shell that created the process substitution:
+
+commandA <(commandB; [commandB's exit code is available here from $?])
+[commandB's exit code cannot be obtained from here.  $? holds commandA's exit code]
+
+   If you need the exit code in the main script, you'll need to rewrite your code and get
+   commandB out of the process substitution. Depending on your actual problem these options
+   may be open to you:
+# If commandA can read the data from stdin
+commandB | commandA                 # You can now get the exit code of commandB from PIPESTATUS.
+commandB > >(commandA)              # You can now get the exit code of commandB from $? (or by putti
+ng this in an if)
+
+# If commandA cannot read it from stdin, but requires a file argument
+commandB > >(commandA <(cat))       # Again, commandB's exit code is available from $?
+
+# You can also keep commandB's output in memory.  When you do this, you can get commandB's exit code
+ from $? or put the assignment in an if
+b=$(commandB); commandA <<< "$b"    # Here, commandA reads commandB's output from stdin
+
+
+
+---
+http://www.linuxtopia.org/online_books/advanced_bash_scripting_guide/process-sub.html
+
+Chapter 22. Process Substitution
+
+   Process substitution is the counterpart to command substitution. Command substitution
+   sets a variable to the result of a command, as in dir_contents=`ls -al` or xref=$( grep
+   word datafile). Process substitution feeds the output of a process to another process (in
+   other words, it sends the results of a command to another command).
+
+   Command substitution template
+
+   command within parentheses
+          >(command)
+
+          <(command)
+
+          These initiate process substitution. This uses /dev/fd/<n> files to send the results
+          of the process within parentheses to another process.
+
+Note
+   There is no space between the the "<" or ">" and the parentheses. Space there would give an
+   error message.
+
+$> echo >(true)
+/dev/fd/63
+
+$> echo <(true)
+/dev/fd/63
+
+   Bash creates a pipe with two file descriptors, --fIn and fOut--. The stdin of true
+   connects to fOut (dup2(fOut, 0)), then Bash passes a /dev/fd/fIn argument to echo. On
+   systems lacking /dev/fd/<n> files, Bash may use temporary files. (Thanks, S.C.)
+
+   Process substitution can compare the output of two different commands, or even the output
+   of different options to the same command.
+$> comm <(ls -l) <(ls -al)
+total 12
+-rw-rw-r--    1 bozo bozo       78 Mar 10 12:58 File0
+-rw-rw-r--    1 bozo bozo       42 Mar 10 12:58 File2
+-rw-rw-r--    1 bozo bozo      103 Mar 10 12:58 t2.sh
+        total 20
+        drwxrwxrwx    2 bozo bozo     4096 Mar 10 18:10 .
+        drwx------   72 bozo bozo     4096 Mar 10 17:58 ..
+        -rw-rw-r--    1 bozo bozo       78 Mar 10 12:58 File0
+        -rw-rw-r--    1 bozo bozo       42 Mar 10 12:58 File2
+        -rw-rw-r--    1 bozo bozo      103 Mar 10 12:58 t2.sh
+
+   Using process substitution to compare the contents of two directories (to see which
+   filenames are in one, but not the other):
+   diff <(ls $first_directory) <(ls $second_directory)
+
+   Some other usages and uses of process substitution:
+
+cat <(ls -l)
+# Same as     ls -l | cat
+
+sort -k 9 <(ls -l /bin) <(ls -l /usr/bin) <(ls -l /usr/X11R6/bin)
+# Lists all the files in the 3 main 'bin' directories, and sorts by filename.
+# Note that three (count 'em) distinct commands are fed to 'sort'.
+
+diff <(command1) <(command2)    # Gives difference in command output.
+
+tar cf >(bzip2 -c > file.tar.bz2) $directory_name
+# Calls "tar cf /dev/fd/?? $directory_name", and "bzip2 -c > file.tar.bz2".
+#
+# Because of the /dev/fd/<n> system feature,
+# the pipe between both commands does not need to be named.
+#
+# This can be emulated.
+#
+bzip2 -c < pipe > file.tar.bz2&
+tar cf pipe $directory_name
+rm pipe
+#        or
+exec 3>&1
+tar cf /dev/fd/4 $directory_name 4>&1 >&3 3>&- | bzip2 -c > file.tar.bz2 3>&-
+exec 3>&-
+
+# Thanks, Staphane Chazelas
+
+   A reader sent in the following interesting example of process substitution.
+
+# Script fragment taken from SuSE distribution:
+
+while read  des what mask iface; do
+# Some commands ...
+done < <(route -n)
+
+# To test it, let's make it do something.
+while read  des what mask iface; do
+	echo $des $what $mask $iface
+done < <(route -n)
+
+# Output:
+# Kernel IP routing table
+# Destination Gateway Genmask Flags Metric Ref Use Iface
+# 127.0.0.0 0.0.0.0 255.0.0.0 U 0 0 0 lo
+
+
+
+# As St�phane Chazelas points out, an easier-to-understand equivalent is:
+route -n |
+while read des what mask iface; do   # Variables set from output of pipe.
+	echo $des $what $mask $iface
+done	#  This yields the same output as above.
+		#  However, as Ulrich Gayer points out . . .
+		#+ this simplified equivalent uses a subshell for the while loop,
+		#+ and therefore the variables disappear when the pipe terminates.
+
+
+
+#  However, Filip Moritz comments that there is a subtle difference
+#+ between the above two examples, as the following shows.
+
+(
+route -n | while read x; do ((y++)); done
+echo $y # $y is still unset
+
+while read x; do ((y++)); done < <(route -n)
+echo $y # $y has the number of lines of output of route -n
+)
+
+More generally spoken
+(
+: | x=x
+# seems to start a subshell like
+: | ( x=x )
+# while
+x=x < <(:)
+# does not
+)
+
+# This is useful, when parsing csv and the like.
+# That is, in effect, what the original SuSE code fragment does.
+
+   This has the same effect as a named pipe (temp file), and, in fact, named pipes were at
+   one time used in process substitution.
+
+
+---
+http://www.linuxjournal.com/content/shell-process-redirection
+
+Bash Process Substitution
+Thu, 05/22/2008
+
+   In addition to the fairly common forms of input/output redirection the shell recognizes
+   something called process substitution. Although not documented as a form of input/output
+   redirection, its syntax and its effects are similar.
+
+   The syntax for process substitution is:
+  <(list)
+or
+  >(list)
+
+   where each list is a command or a pipeline of commands. The effect of process substitution
+   is to make each list act like a file. This is done by giving the list a name in the file
+   system and then substituting that name in the command line. The list is given a name either
+   by connecting the list to named pipe or by using a file in /dev/fd (if supported by the
+   O/S). By doing this, the command simply sees a file name and is unaware that its reading
+   from or writing to a command pipeline.
+
+   To substitute a command pipeline for an input file the syntax is:
+  command ... <(list) ...
+
+   To substitute a command pipeline for an output file the syntax is:
+  command ... >(list) ...
+
+   At first process substitution may seem rather pointless, for example you might imagine
+   something simple like:
+  uniq <(sort a)
+
+   to sort a file and then find the unique lines in it, but this is more commonly (and more
+   conveniently) written as:
+  sort a | uniq
+
+   The power of process substitution comes when you have multiple command pipelines that you
+   want to connect to a single command.
+
+   For example, given the two files:
+$> cat a
+e
+d
+c
+b
+a
+
+$> cat b
+g
+f
+e
+d
+c
+b
+
+   To view the lines unique to each of these two unsorted files you might do something like
+   this:
+$> sort a | uniq >tmp1
+$> sort b | uniq >tmp2
+$> comm -3 tmp1 tmp2
+a
+      f
+      g
+$> rm tmp1 tmp2
+
+   With process substitution we can do all this with one line:
+$> comm -3 <(sort a | uniq) <(sort b | uniq)
+a
+f
+g
+
+   Depending on your shell settings you may get an error message similar to:
+  syntax error near unexpected token `('
+
+   when you try to use process substitution, particularly if you try to use it within a shell
+   script. Process substitution is not a POSIX compliant feature and so it may have to be
+   enabled via:
+  set +o posix
+
+   Be careful not to try something like:
+if [[ $use_process_substitution -eq 1 ]]; then
+	set +o posix
+	comm -3 <(sort a | uniq) <(sort b | uniq)
+fi
+
+   The command set +o posix enables not only the execution of process substitution but the
+   recognition of the syntax. So, in the example above the shell tries to parse the process
+   substitution syntax before the "set" command is executed and therefore still sees the
+   process substitution syntax as illegal.
+
+   Of course, note that all shells may not support process substitution, these examples will
+   work with bash.
+
+
+
+---
+http://docstore.mik.ua/orelly/unix/upt/ch09_18.htm
+
+9.18 Process Substitution
+
+   Do you find yourself making temporary files, then giving those files to some commands to
+   read? For example, maybe you want to compare two files with comm ( 28.12 ) - but comm
+   needs sorted files, and these files aren't sorted. So you have to type:
+
+$> sort file1 > /tmp/file1.sort
+$> sort file2 > /tmp/file2.sort
+$> comm /tmp/file1.sort /tmp/file2.sort
+
+   There are easier ways to do that.
+
+9.18.1 bash Process Substitution
+   bash has the operator <( process ) . It runs a process and gives the output to a named
+   pipe. Then the filename of the named pipe becomes a command-line argument. Here's an
+   example that shows two unsorted files and the result:
+
+$> cat file1
+
+rcsdiff.log
+runsed
+runsed.new
+echo.where
+foo
+
+
+$> cat file2
+
+newprogram
+runsed
+echo.where
+foo
+
+$> comm <(sort file1) <(sort file2)
+                echo.where
+                foo
+        newprogram
+rcsdiff.log
+                runsed
+runsed.new
+
+   (In the first column, comm shows lines only in file1 . The second column shows lines only
+   in file2 . The third column shows lines that were in both files.)
+
+   Let's take a closer look at how that works. By setting the -x option ( 8.17 ) , the
+   shell will display the processes it runs with a + before each top-level process and ++
+   before second-level processes:
+
+$> set -x
+$> comm <(sort file1) <(sort file2)
+
++ comm /tmp/sh-np-a11167 /tmp/sh-np-b11167
+++ sort file1
+++ sort file2
+                echo.where
+                foo
+        newprogram
+rcsdiff.log
+                runsed
+runsed.new
+
+   The script made its named pipes in /tmp . bash ran each sort command, sent its output to a
+   named pipe, and put the pipe's filename on the command line. When the comm program
+   finished, the named pipes were deleted.
+
+   I've run into problems with this operator in some cases: when the process reading from a
+   named pipe "hung" and never made any output. For example, that happened when I replaced
+   comm with diff : I'd get no output from diff . I worked around the problem by closing the
+   standard output of each process with the >&- operator ( 45.21 ) , like this:
+
+diff <(sort file1; exec >&-) <(sort file2; exec >&-)
+
+   That made diff happy; it showed me the differences between the two sorted files.
+
+   bash also has a similar operator, >( ) , which takes the input of a process from a named
+   pipe.
+
+9.18.2 Automatic Temporary Files with !
+   If you don't have bash , you can use the shell script named ! (an exclamation point) 
+   that runs a command, stores its output in a temporary file, then puts the temporary
+   filename on its standard output. You use it with backquotes ( 9.16 ) ( `` ). Here's how
+   to write the example from the previous section:
+
+      The C shell also uses an exclamation point as its history character ( 11.1 ,
+     11.15 ) , but not if there's a space after the exclamation point. This script
+     doesn't conflict with csh history. bash uses the exclamation point to reverse the exit
+     status of a command - but then, if you're using bash , you don't need our ! script.
+
+$> comm `! sort file1` `! sort file2`
+
+
+                echo.where
+                foo
+        newprogram
+rcsdiff.log
+                runsed
+runsed.new
+
+   Why didn't I use the command line below, without the ! script?
+
+$> comm `sort file1` `sort file2`
+
+   That's because the comm program (like most UNIX programs) needs filename arguments. Using
+   backquotes by themselves would place the list of names (the sorted contents of the files
+   file1 and file2 ) on the comm command line.
+
+   To see what's happening, you can use a Bourne shell and set its -x option ( 8.17 ) ;
+   the shell will display the commands it runs with a + before each one:
+
+$> set -x
+$> comm `! sort file1` `! sort file2`
+
++ ! sort file1
++ ! sort file2
++ comm /tmp/bang3969 /tmp/bang3971
+                echo.where
+                foo
+        newprogram
+rcsdiff.log
+                runsed
+runsed.new
+
+   The script made its temporary files ( 21.3 ) in /tmp . You should probably remove them.
+   If you're the only one using this script, you might be able to get away with a command
+   like:
+
+$> rm /tmp/bang[1-9]*
+
+   If your system has more than one user, it's safer to use find ( 17.1 ) :
+$> find /tmp -name 'bang*' -user
+
+myname
+
+-exec rm {} \;
+   If you use this script much, you might make that cleanup command into an alias ( 10.2 )
+   or a shell script - or start it in the background ( 1.26 ) from your .logout file (
+   3.1 , 3.2 ) .
+
+   Here's the ! script. Of course, you can change the name to something besides ! if you want.
+
+#! /bin/sh
+temp=/tmp/bang$$
+
+case $# in
+0)  echo "Usage: `basename $0` command [args]" 1>&2
+    echo $temp
+    exit 1
+    ;;
+
+*)  "$@" > $temp
+    echo $temp
+    ;;
+esac
+
+   - JP
+
+
+
+---
+http://stackoverflow.com/questions/9229077/bash-script-variable-expansion-of-process-substitution
+
+bash script - variable expansion of process substitution
+
+   I'm trying to perform analyses on each column of a multi-column file, and using paste, to
+   rejoin the columns together. I don't know a priori how many columns there are, so I use "wc
+   -w" and a loop to define an array of commands. Each command then is a process substitution.
+   The following script shows what I'm trying, and the output is shown after. Notably if I
+   echo the array of commands to the terminal, then, with the mouse, cut-n-paste it, it works
+   fine, so it must be the order of variable expansion and process substitution.
+
+   In short, I need to have a process substitution inside a shell variable. Any ideas? Thanks
+   in advance.
+
+   -------------- script.sh ----------------
+#!/bin/bash
+f="file.txt";
+echo "File contents"
+cat $f;
+
+# simple solution
+echo; echo "First try";
+paste <(cat $f) <(tac $f)
+# now define cmd[1] and cmd[2] and merge together with paste
+echo; echo "Second try";
+cmd[0]="paste";
+cmd[1]="cat $f";
+cmd[2]="tac $f";
+${cmd[0]} <(${cmd[1]}) <(${cmd[1]})
+
+# but what I really want is something like:
+echo; echo "Third try";
+cmd[1]="<(cat $f)";
+cmd[2]="<(tac $f)";
+${cmd[0]} ${cmd[1]} ${cmd[2]}
+
+# or even better:
+echo; echo "Fourth try";
+${cmd[*]}
+echo; echo "Show the array";
+echo ${cmd[*]}
+
+   ------------- output --------------------
+$> ./scipt.sh
+File contents
+A B C
+D E F
+G H I
+
+First try
+A B C   G H I
+D E F   D E F
+G H I   A B C
+
+Second try
+A B C   A B C
+D E F   D E F
+G H I   G H I
+
+Third try
+paste: <(cat: No such file or directory
+
+Fourth try
+paste: <(cat: No such file or directory
+
+Show the array
+paste <(cat file.txt) <(tac file.txt)
+$> paste <(cat file.txt) <(tac file.txt)
+A B C   G H I
+D E F   D E F
+G H I   A B C
+
+   In reply to shellter, here is some sample input.
+    7.74336e-08 7.30689e-08 0.359106        19.981796       -0.160611       0.027
+    7.74336e-08 7.30689e-08 0.363938        19.985069       0.041319        0.035
+    7.74336e-08 7.30689e-08 0.363133        19.982094       0.041319        0.068
+    7.74336e-08 7.30689e-08 0.360716        19.981796       -0.160611       0.006
+    7.74336e-08 7.30689e-08 0.361522        19.981796       0.243249        0.049
+    7.74336e-08 7.30689e-08 0.357897        19.986260       0.041319        0.035
+
+   There might be 100 million lines of data like this. I need to separate off each column,
+   separate each column into blocks of (say) 1000, then perform an average of each element in
+   the blocks, then merge the averaged columns back together again. For the example below, if
+   I were averaging over just 2 blocks of 3 elements each (instead of 100K of 1000 each), then
+   the output from column 6 would be:
+0.0165     # =(0.027+0.006)/2 - 1st row from each size-3 block
+0.042      # =(0.035+0.049)/2 - 2nd row
+0.0515     # =(0.068+0.035)/2 - 3rd row
+
+   I already have the program to do this averaging (that's "Some_Complicated_Analysis") and it
+   works fine. So all I need to for my script to separate off the columns, feed it into
+   Some_Comp_Analysis, then merge the various outputs back into columns again with paste. But,
+   the files are v. large, and I don't know a priori how many columns there are. If I knew
+   there would be only 2 columns, then paste <(${cmd[1]}) <(${cmd[2]}) would work fine.
+
+   SOLUTION FOUND
+   UPDATE: an answer has been found - it is as shown in the reply update by glenn jackman
+   below. The paste command must be preceded by eval. I don't know exactly why this is
+   necessary, but without them, the variable expansion ${cmd[]} messes up the process
+   substitution <(...). The answer above also puts double-quotes around the array expansion
+   "${cmd[*]}" however these seem not so important - though without them some other expansions
+   within cmd[] might fail. However, the eval is necessary.
+
+***
+   bash scripting process substitution
+   do you need to be using tac, or is that just to 'randomize(ish)' your data? . if you really
+   just need to get a bunch of columns side by side, what's wrong with paste files* ? Good
+   luck. –  shellter Feb 10 '12 at 14:22
+
+   I only use tac in the example. What I actually have is something like: cols=$(head -n 1
+   $f|wc -w); for (( i=1 ; i<=cols ; i++ )); do cmd[i]="<(cat $f|cut
+   -f$i|Some_Complicated_Analysis)"; done; paste ${cmd[*]} –  fergalish Feb 10 '12 at
+
+   is there any reason you're not using awk or perl? Take an hour to read
+   grymoire.com/Unix/Awk.html and you'll see your problem in a whole new light. If you
+   change your posting to show simplified sample input, expected output, we can probably help
+   you. So you already have code for your 'Some_Complicated_Alanysis'? Good luck. –
+
+   I am reasonably good as using awk, better than with bash. But awk seems inappropriate to me
+   here. Unfortunately, I'm not so good as to be able to put into words exactly why it seems
+   inappropriate. I have changed my above posting in reply. –  fergalish Feb 10 '12 at
+
+   so if your input file has 100Mill rows, your final output will be 100Mill/1000 over N
+   columns? (I'm not going to be around much today, but if you don't get a better solution,
+   I'll try an awk solution as I have the time). Good luck and +1 for good sample data! –
+   shellter Feb 10 '12 at 16:24
+
+***
+   define each of "cmd1" and "cmd2" as individual arrays
+$> cmd1=(cat $f)
+$> cmd2=(tac $f)
+$> paste <("${cmd1[@]}") <("${cmd2[@]}")
+A B C   G H I
+D E F   D E F
+G H I   A B C
+
+   update: You just need to eval your constructed process substitutions:
+cols=$(head -n 1 $f|wc -w)
+for (( i=1 ; i<=cols ; i++ )); do
+	cmd[i]="<(cat $f|cut -f$i|Some_Complicated_Analysis)"
+done
+
+eval paste "${cmd[*]}"   # quotes are important here
+
+***
+   Thanks, but I think this doesn't avoid the fact that, on the final command, I need to put a
+   specific number of <(...) as arguments to paste. I do not no a priori how many columns
+   there are in the input data. I need to be able to do paste ${cmd[@]} such that the variable
+   expansion inserts the process substitution strings into the command, and then each process
+   substitution is run independently. –  fergalish Feb 10 '12 at 16:14
+
+   Thank you, this seems to have worked though, as usual with bash, I don't understand why. I
+   would have thought the "" would have substituted $cmd[*] as a single word; but evidently
+   not. The eval seems crucial. @shelter I'm not so worried about the time - this way each
+   Some_Complicated_Analysis runs in its own process on its own CPU core. With awk I think it
+   would all run on a single core... right? But I timed it for you, on an Intel I7 x4 HT, the
+   6 columns of data took 4 minutes real time. Thanks to both for your help. I'll post a
+   conclusive reply later and close the thread. –  fergalish Feb 10 '12 at 19:38
+
+***
+   This may be additionally helpful if your script is still not working. Still follow glenn
+   jackman's answer but in addition you may want to do this inside the script
+
+   set +o posix
+
+   http://www.linuxjournal.com/content/shell-process-redirection
+
+   From link: "Process substitution is not a POSIX compliant feature and so it may have to be
+   enabled via: set +o posix"
+
+***
+   Try this:
+{
+cat -<<EOS
+10 7.74336e-08 7.30689e-08 0.359106        19.981796       -0.160611       0.027
+10 7.74336e-08 7.30689e-08 0.363938        19.985069       0.041319        0.035
+10 7.74336e-08 7.30689e-08 0.363133        19.982094       0.041319        0.068
+10 7.74336e-08 7.30689e-08 0.360716        19.981796       -0.160611       0.006
+10 7.74336e-08 7.30689e-08 0.361522        19.981796       0.243249        0.049
+10 7.74336e-08 7.30689e-08 0.357897        19.986260       0.041319        0.035
+EOS
+} |
+awk '
+  BEGIN { binSz=3; binSzLim=binSz ; binSzLim++ }
+  NR==1{
+    # base error checking on number of cols in first record
+    maxCols=NF
+    maxColsLim=maxCols ; maxColsLim++
+    r=0
+  }
+  {
+    if (NF != maxCols) {
+      print "Skipping record, Mismatch in data, expected " maxCols ", found " NF " recs at " NR ":"
+$0
+      next
+    }
+    r++
+    #dbg print "r="r" NR=" NR ":$0=" $0
+
+    # load data into temp arr[] by column
+    for (c=1;c<maxColsLim;c++) {
+      arr[r,c]+=$c
+      #dbg printf ("arr["r","c"]=" arr[r,c] " " )
+
+      avgArr[r,c]++
+      #dbg print "avgArr["r","c"]="avgArr[r,c]
+    }
+
+    if(r>=binSz) {
+      r=0
+    }
+  }
+  END {
+    for (r=1;r<binSzLim;r++) {
+      #dbg print "r=" r " binSzLim=" binSzLim " " (r<binSzLim) "\t"
+      for (c=1;c<maxColsLim;c++) {
+        #dbg printf("arr["r","c"]=" arr[r,c] "\tavg=" arr[r,c]/binSz "\t")
+        printf(  arr[r,c]/avgArr[r,c] " ")
+      }
+      printf "\n"
+    }
+  }
+'
+
+   Produces output
+10 7.74336e-08 7.30689e-08 0.359911 19.9818 -0.160611 0.0165
+10 7.74336e-08 7.30689e-08 0.36273 19.9834 0.142284 0.042
+10 7.74336e-08 7.30689e-08 0.360515 19.9842 0.041319 0.0515
+
+   I added the first column with 10 into the data to make it easy to debug that sum and avg
+   were working correctly.
+
+   An interesting problem, thanks for posting and thanks for your good will in continuing to
+   answer my questions;-)
+
+   The { cat -<<EOS ... EOS }| was just to make it easy to run the whole thing in one
+   copy/paste and see that it is working. You can put the awk code if a file with #!/bin/awk
+   -f at the top, chmod 755 myScript.awk and run it as myScript.awk BigFile > AvgsFile.
+
+   You should only need to change to binSz=1000 in the BEGIN block to process your files as
+   you intended.
+
+   I'd be interested to know what the timing is on this version.
+
+
+   ---
+

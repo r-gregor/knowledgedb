@@ -1,0 +1,355 @@
+filename: c_optimization-tutorial_20230302.txt
+http://www.it.uom.gr/teaching/c_optimization/tutorial.html
+
+C optimisation tutorial
+
+Introduction
+   This document has evolved over time and contains a number of the best ways to hand-optimise your
+   C-code. Compilers are good, but they can't do everything, and here I hope to help you squeeze the
+   best performance out of your code. This is not intended for beginners, but for more experienced
+   programmers.
+
+Disclaimer
+   Depending on your particular hardware and compiler, some of these techniques may actually slow down
+   your code. Do some timings with and without them, as modern compilers may well be able to do things
+   better at a low level. Improving the overall algorithm used will often produce better results than
+   localised code tweaking. This document was originally written as a set of personal notes for myself -
+   do not consider it to be an authoritative paper on the subject of optimisation. I may have made
+   mistakes! If you have anything to add to this, or just have some constructive criticism (flames
+   ignored), please contact me at the address below.
+
+Coding for speed
+   How to squeeze those last few T-states out of your C code. This only applies where you are more
+   concerned with maximum speed and are less concerned with readability of code.
+
+   No error-checking is shown here as this article is only concerned with the fundamentals. By the time
+   the application gets down to the low-level routines, you should have filtered out any bad data
+   already.
+
+Using array indices
+   If you wished to set a variable to a particular character, depending upon the value of something, you
+   might do this :
+switch ( queue ) {
+	case 0 :   letter = 'W';
+	break;
+	case 1 :   letter = 'S';
+	break;
+	case 2 :   letter = 'U';
+	break;
+}
+
+   or maybe
+if ( queue == 0 )
+	letter = 'W';
+else if ( queue == 1 )
+	letter = 'S';
+	else
+	letter = 'U';
+
+   A neater ( and quicker ) method is to simply use the value as an index into a character array, eg.
+static char *classes="WSU";
+
+letter = classes[queue];
+
+Aliases
+   Consider the following:
+void func1( int *data ) {
+	int i;
+
+	for(i=0; i<10; i++) {
+		somefunc2( *data, i);
+	}
+}
+
+   Even though "*data" may never change, the compiler does not know that somefunc2() did not alter it,
+   and so the program must read it from memory each time it is used - it may be an alias for some other
+   variable that is altered elsewhere. If you know it won't be altered, you could code it like this
+   instead:
+void func1( int *data ) {
+	int i;
+	int localdata;
+
+	localdata = *data;
+	for(i=0; i<10; i++) {
+		somefunc2( localdata, i);
+	}
+}
+
+   This gives the compiler better opportunity for optimisation.
+
+Integers
+   Use unsigned ints instead of ints if you know the value will never be negative. Some processors can
+   handle unsigned integer arithmetic considerably faster than signed ( this is also good practise, and
+   helps make for self-documenting code).
+   So the best declaration for an int variable in a tight loop would be
+register unsigned int   var_name;
+
+   (although it is not guaranteed that the compiler will take any notice of "register", and "unsigned"
+   may make no difference to the processor.)
+   Remember, integer arithmetic is much faster than floating-point arithmetic, as it can be usually be
+   done directly by the processor, rather than relying on external FPUs or floating point maths
+   libraries. If you only need to be accurate to two decimal places (e.g. in a simple accounting
+   package), scale everything up by 100, and convert it back to floating point as late as possible.
+
+Loop jamming
+   Never use two loops where one will suffice:
+for(i=0; i<100; i++) {
+	stuff();
+}
+
+for(i=0; i<100; i++) {
+	morestuff();
+}
+
+   It would be better to do:
+
+for(i=0; i<100; i++) {
+	stuff();
+	morestuff();
+}
+
+   Note, however, that if you do a lot of work in the loop, it might not fit into your processor's
+   instruction cache. In this case, two separate loops may actually be faster as each one can run
+   completely in the cache.
+
+Loop Unrolling and Dynamic Loop Unrolling
+   This can make a BIG difference.
+   It is well known that unrolling loops can produce considerable savings, e.g.
+for(i=0; i<3; i++) {
+	something(i);
+}
+
+   is less efficient than
+something(0);
+something(1);
+something(2);
+
+   because the code has to check and increment the value of i each time round the loop. Compilers will
+   often unroll simple loops like this, where a fixed number of iterations is involved, but something
+   like
+for(i=0;i<limit;i++){ ... }
+
+   is unlikely to be unrolled, as we don't know how many iterations there will be. It is, however,
+   possible to unroll this sort of loop and take advantage of the speed savings that can be gained. A
+   good example of this was given in the "Graphic Gems" series of books, as a way of speeding up the
+   display of pixels in a scanline during graphics rendering, but can also be applied to any situation
+   which involves the same operation being applied to a large amount of data.
+   The following code (listing 1) is obviously much larger than a simple loop, but is much more
+   efficient. The block-size of 8 was chosen just for demo purposes, as any suitable size will do - you
+   just have to repeat the "loop-contents" the same amount. In this example, the loop-condition is
+   tested once every 8 iterations, instead of on each one. If you know that you will working with arrays
+   of a certain size, you could make the blocksize the same size as (or divisible into the size of) the
+   array. I find 8 to be an adequate size though. I tried some performance tests using this technique on
+   a Sun Sparcstation, and block-sizes of 8 and 16 worked fine, but when I went up to 32, it slowed
+   right down again (again, I suspect this was to do with the size of the machines cache).
+   I have used code similar to this in an image-processing application, to negate a large monochrome
+   bitmap (of about 3000x2000 pixels), and it was significantly faster than using a simple for() type
+   loop, as the processor was able to get on with the job of processing the data rather than
+   incrementing counters and testing the loop conditions.
+
+    Listing 1
+#include<stdio.h>
+
+#define BLOCKSIZE (8)
+
+void main(void) {
+	int i = 0;
+	int limit = 33;  /* could be anything */
+	int blocklimit;
+
+	/* The limit may not be divisible by BLOCKSIZE,
+	 * go as near as we can first, then tidy up.
+	 */
+	blocklimit = (limit / BLOCKSIZE) * BLOCKSIZE;
+
+	/* unroll the loop in blocks of 8 */
+	while( i < blocklimit ) {
+		printf("process(%d)\n", i);
+		printf("process(%d)\n", i+1);
+		printf("process(%d)\n", i+2);
+		printf("process(%d)\n", i+3);
+		printf("process(%d)\n", i+4);
+		printf("process(%d)\n", i+5);
+		printf("process(%d)\n", i+6);
+		printf("process(%d)\n", i+7);
+
+		/* update the counter */
+		i += 8;
+	}
+
+	/*
+	 * There may be some left to do.
+	 * This could be done as a simple for() loop,
+	 * but a switch is faster (and more interesting)
+	 */
+
+	if( i < limit ) {
+		/* Jump into the case at the place that will allow
+		 * us to finish off the appropriate number of items.
+		 */
+
+		switch( limit - i ) {
+			case 7 : printf("process(%d)\n", i); i++;
+			case 6 : printf("process(%d)\n", i); i++;
+			case 5 : printf("process(%d)\n", i); i++;
+			case 4 : printf("process(%d)\n", i); i++;
+			case 3 : printf("process(%d)\n", i); i++;
+			case 2 : printf("process(%d)\n", i); i++;
+			case 1 : printf("process(%d)\n", i);
+		}
+	}
+}
+
+   Another simple trick to use with loops is to count down, instead of up. Look at this code, which will
+   go through the values of i=0 to i=9 :
+for(i=0; i<10; i++) {
+	do stuff...
+}
+
+   If the order in which the loop contents are executed does not matter, you can do this instead:
+for( i=10; i--; )
+
+   which will step through i=9, down to i=0.It is important to use "i--" rather than "--i", otherwise
+   the loop will terminate early.
+
+Faster for() loops
+   Simple but effective.
+   Ordinarily, you would code a simple for() loop like this:
+for( i=0;  i<10;  i++){ ... }
+
+   i loops through the values 0,1,2,3,4,5,6,7,8,9
+
+   If you don't care about the order of the loop counter, you can do this instead:
+for( i=10; i--; ) { ... }
+
+   Using this code, i loops through the values 9,8,7,6,5,4,3,2,1,0, and the loop should be faster.
+   This works because it is quicker to process "i--" as the test condition, which says "is i non-zero?
+   If so, decrement it and continue.".
+   For the original code, the processor has to calculate "subtract i from 10. Is the result non-zero? if
+   so, increment i and continue.". In tight loops, this make a considerable difference.
+
+   The syntax is a little strange, put is perfectly legal. The third statement in the loop is optional
+   (an infinite loop would be written as "for( ; ; )" ). The same effect could also be gained by coding:
+for(i=10; i; i--){}
+
+   or (to expand it further)
+for(i=10; i!=0; i--){}
+
+   The only things you have to be careful of are remembering that the loop stops at 0 (so if you wanted
+   to loop from 50-80, this wouldn't work), and the loop counter goes backwards.It's easy to get caught
+   out if your code relies on an ascending loop counter.
+
+switch() instead of if...else...
+   For large decisions involving if...else...else..., like this:
+if( val == 1)
+	dostuff1();
+else if (val == 2)
+	dostuff2();
+else if (val == 3)
+	dostuff3();
+
+   it may be faster to use a switch:
+switch( val ) {
+	case 1: dostuff1(); break;
+
+	case 2: dostuff2(); break;
+
+	case 3: dostuff3(); break;
+}
+
+   In the if() statement, if the last case is required, all the previous ones will be tested first. The
+   switch lets us cut out this extra work. If you have to use a big if..else.. statement, test the most
+   likely cases first.
+
+Pointers
+   Whenever possible, pass structures by reference ( ie. pass a pointer to the structure ), otherwise
+   the whole darn thing will be copied onto the stack and passed, which will slow things down a tad
+   (I've seen programs that pass structures several megabytes in size by value, when a simple pointer
+   will do the same thing).
+   Functions receiving pointers to structures as arguments should declare them as pointer to const if
+   the function is not going to alter the contents of the structure, e.g.
+void print_data( const bigstruct  *data_pointer) {
+	...printf contents of structure...
+}
+
+   This example informs the compiler that the function does not alter the contents (pointer to constant
+   structure) of the external structure, and does not need to keep re-reading the contents each time
+   they are accessed. It also ensures that the compiler will trap any accidental attempts by your code
+   to write to the read-only structure.
+
+Early loop breaking
+   It is often not necessary to process the entirety of  a loop. For example, if you are searching an
+   array for a particular item, break out of the loop as soon as you have got what you need.
+   Example:
+   This loop searches a list of 10000 numbers to see if there is a -99 in it.
+
+found = FALSE;
+
+for(i=0;i<10000;i++) {
+	if( list[i] == -99 ) {
+		found = TRUE;
+	}
+}
+
+if( found ) printf("Yes, there is a -99. Hooray!\n");
+
+   This works well, but will process the entire array, no matter where the search item occurs in it.
+   A better way is to abort the search as soon as you've found the desired entry.
+
+found = FALSE;
+
+for(i=0; i<10000; i++) {
+	if( list[i] == -99 ) {
+		found = TRUE;
+		break;
+	}
+}
+
+if( found ) printf("Yes, there is a -99. Hooray!\n");
+
+   If the item is at, say position 23, the loop will stop there and then, and skip the remaining 9977
+   iterations.
+
+Misc.
+     * In general, savings can be made by trading off memory for speed. If you can cache any often used
+       data rather than recalculating or reloading it, it will help. Examples of this would be
+       sine/cosine tables, or tables of pseudo-random numbers (calculate 1000 once at the start, and
+       just reuse them if you don't need truly random numbers).
+     * Avoid using ++ and -- etc. within loop expressions, eg. while(n--){}, as this can sometimes be
+       harder to optimise.
+     * Minimize the use of global variables.
+     * Declare anything within a file (external to functions) as static, unless it is intended to be
+       global.
+     * Use word-size variables if you can, as the machine can work with these better ( instead of char,
+       short, double, bitfields etc. ).
+     * Don't use recursion. Recursion can be very elegant and neat, but creates many more function calls
+       which can become a large overhead.
+     * Avoid the sqrt() square root function in loops - calculating square roots is very CPU intensive.
+     * Single dimension arrays are faster than multi-dimensioned arrays.
+     * Compilers can often optimise a whole file - avoid splitting off closely related functions into
+       separate files, the compiler will do better if can see both of them together (it might be able to
+       inline the code, for example).
+     * Single precision maths may be faster than double precision - there is often a compiler switch for
+       this.
+     * Floating point multiplication is often faster than division - use val * 0.5 instead of val / 2.0.
+     * Addition is quicker than multiplication - use val + val + val instead of val * 3
+     * puts() is quicker than printf(), although less flexible.
+     * Use #defined macros instead of commonly used tiny functions - sometimes the bulk of CPU usage can
+       be tracked down to a small external function being called thousands of times in a tight loop.
+       Replacing it with a macro to perform the same job will remove the overhead of all those function
+       calls, and allow the compiler to be more aggressive in it's optimisation..
+     * Binary/unformatted file access is faster than formatted access, as the machine does not have to
+       convert between human-readable ASCII and machine-readable binary. If you don't actually need to
+       read the data in a file yourself, consider making it a binary file.
+     * If your library supports the mallopt() function (for controlling malloc), use it. The MAXFAST
+       setting can make significant improvements to code that does a lot of malloc work.If a particular
+       structure is created/destroyed many times a second, try setting the mallopt options to work best
+       with that size.
+     * Last but definitely not least - turn compiler optimisation on! Seems obvious, but is often
+       forgotten in that last minute rush to get the product out on time. The compiler will be able to
+       optimise at a much lower level than can be done in the source code, and perform optimisations
+       specific to the target processor.
+
+
+---
+

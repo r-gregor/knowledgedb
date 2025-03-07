@@ -1,0 +1,370 @@
+filename: c_temporary-allocations_20230803.txt
+https://jonahmgoldsmith.hashnode.dev/temporary-allocations-in-cc
+
+Temporary Allocations in C/C++
+
+And why they are useful...
+Jan 11, 2023·
+
+   Memory management is a very important part of programming in low-level languages. But you don't
+   always need memory to last forever. Sometimes you might need memory only for a short amount of time,
+   maybe to format a string or to load temporary data into a buffer so it can be written to disk and
+   then discarded. If you allocate and deallocate memory for all these short allocations you will slow
+   down your application by a lot!
+
+Efficient Allocation Strategies
+   So how can we deal with these small allocations efficiently? The easiest way to do this is to create
+   a bump allocator. Also known as a linear allocator, stack allocator, arena allocator, etc. The idea
+   is very simple:
+
+struct linear_allocator {
+	size_t total_size;
+	size_t offset;
+	void* start_ptr;
+}
+
+void create_linear_allocator(linear_allocator* alloc, size_t size) {
+	alloc->total_size = size;
+	alloc->start_ptr = malloc(size);
+	alloc->offset = 0;
+}
+
+   All the linear allocator contains is a pointer to the memory buffer, an offset, and the total size of
+   the buffer (which may not ever be used). Now, whenever we want memory we just use the offset to find
+   the location of the buffer we can use for the allocation. Here is what that looks like:
+
+void* linear_alloc(linear_allocator* alloc, size_t size) {
+	size_t cur_address = (size_t)alloc->start_ptr + alloc->offset;
+	size_t next_address = cur_address;
+	alloc->offset += size;
+	return (void*)next_address;
+}
+
+//Now use it
+int main() {
+
+	linear_allocator alloc = NULL;
+	create_linear_allocator(&alloc, 12*1024) //12KB
+
+	char* name = linear_alloc(&alloc, 3);
+	name[0] = 'b';
+	name[1] = 'o';
+	name[2] = 'b';
+
+	puts(name); //This will display - bob - to the console!
+
+}
+
+   Using the linear allocator is very simple and now as long as our allocations fit into the size of the
+   linear allocator we will only actually allocate memory once! Now this is already useful but now let's
+   make our allocator reset every frame so that all allocations in the frame are "temporary"
+
+void linear_allocator_reset(linear_allocator* alloc) {
+	alloc->offset = 0;
+}
+
+int main() {
+
+	linear_allocator alloc = NULL;
+	create_linear_allocator(&alloc, 12*1024) //12KB
+
+	while(true) {
+		char* name = linear_alloc(&alloc, 3);
+		name[0] = 'b';
+		name[1] = 'o';
+		name[2] = 'b';
+
+		puts(name); //This will display - bob - to the console!
+
+		//This "erases" all memory we allocated this frame
+		linear_allocator_reset(&alloc);
+	}
+}
+
+   Now we call can allocate memory every frame without actually calling "malloc".
+
+   This simple allocator is extremely powerful and can provide a crazy speed boost to your projects.
+   But... we can do better.
+
+Stack and Heap Teamwork
+   I'm warning you, get ready for code examples...
+
+   Something I have started to do is allow the creation of a temporary allocator with a local stack
+   buffer as storage, and if we need more memory than the stack buffer provided then we can use the
+   linear allocator to get the memory.
+
+   First, we will take a look at only using the stack for allocation. Yay pointer arithmetic!
+
+int main() {
+	char buffer[1024];
+	char* name = buffer + 3;
+	name[0] = 'b';
+	name[1] = 'o';
+	name[2] = 'b';
+
+	puts(name); //This will display - bob - to the console!
+                //But this time no memory was allocated on the heap!
+}
+
+   If you did not know. You can use char buffers as backing "memory" for other objects. One of the best
+   features of C/C++ in my opinion. Let's expand on this and create an allocator that first uses a char
+   buffer as backing memory but then switches to a linear allocator when it runs out.
+
+//Our Temporary Buffer
+typedef struct temp_allocator_buffer {
+	char buffer[1024];
+} temp_allocator_buffer;
+
+//Our Temp Allocator Structure
+typedef struct temp_allocator {
+	struct temp_allocator_o* inst;
+	void* (*realloc)(struct temp_allocator_o* data, void* ptr, size_t old_size, size_t new_size);
+} temp_allocator;
+
+//Represents the current allocation
+struct temp_allocator_item {
+	size_t size;
+	size_t used;
+};
+
+//The internal data of our allocator
+typedef struct temp_allocator_o {
+	char* buffer;
+	struct linear_allocator* backing;
+	struct temp_allocator_item* item;
+} temp_allocator_o;
+
+   Here are the structure definitions we will need. Nothing too crazy.
+void* temp_realloc(struct temp_allocator_o* data, void* ptr, size_t old_size, size_t new_size) {
+	struct temp_allocator_item* item = (struct temp_allocator_item *) data->item;
+	//Since temp allocations cannot free we do nothing...
+	if (new_size == 0)
+		return NULL;
+
+	//Does it fit in our static buffer?
+	if (item && item->size - item->used >= new_size) {
+		void *new = (char *)item + item->used;
+		item->last_used = item->used;
+		item->used += new_size;
+
+		if(!ptr) {
+			return new;
+		}
+
+		if (new != ptr && old_size && new_size)
+			memcpy(res, ptr, old_size < new_size ? old_size : new_size);
+		return new;
+
+	}else if(ptr && new_size) {
+		void *new = linear_alloc(data->backing, new_size);
+		memcpy(new, ptr, old_size);
+		return new;
+	}else
+		return linear_alloc(data->backing, new_size);
+
+}
+
+   We will work through the code one snippet at a time. This is our allocation function. My style is to
+   have a single realloc function that takes care of malloc, realloc, and free. I also require the user
+   of my allocators to pass the old size of allocations because then I do not have to store it in my
+   allocator object.
+
+   First, we retrieve the item from our instance data pointer. Then, we check to see if no new size was
+   given (meaning it is a free operation) if so, we do nothing. Next, we deal with our static buffer. We
+   check to see if our "item" (basically the total size of our buffer and how much we used so far) has
+   space for our new allocation. If it does we bump the pointer up to account for the new allocation. If
+   the user passed a ptr into the function it means we are doing a realloc so we memcpy the old data
+   into the new pointer. Doing this is not really necessary because bumping the pointer doesn't discard
+   old data but I left it here for visualization purposes of what's going on.
+
+   Now if we do not have enough space in our static buffer we use the linear allocator we will pass to
+   the create_temp_allocator function to allocate data and we memcpy any existing data into this new
+   pointer. The last else statement is if the first allocation was greater than our static buffer size.
+   Now let's see the other functions.
+
+temp_allocator* create_temp_allocator_with_buffer(void* buffer, size_t size, linear_allocator* alloc) {
+	temp_allocator *ta = (temp_allocator *)buffer;
+	*ta = (temp_allocator){
+		.inst = (struct temp_allocator_o *)buffer+ sizeof(temp_allocator),
+		.realloc = temp_realloc,
+	};
+	ta->inst->buffer = buffer + sizeof(temp_allocator)+sizeof(temp_allocator_o);
+	ta->inst->backing = alloc;
+	ta->inst->first = (struct temp_allocator_item *)(ta->inst->buffer);
+	ta->inst->item->size = size;
+	ta->inst->item->used = sizeof(struct temp_allocator_item) + sizeof(temp_allocator) + sizeof(temp_allocator_o);
+	return ta;
+
+}
+
+   This function creates our temporary allocator and returns it to the user. First, we use the static
+   buffer as memory for our allocator. Then we bump the pointer and allocate the data for our instance
+   data. We also point the realloc function pointer to our temp_realloc function. Next, we set our
+   instance data buffer pointer to be the location in the static buffer after the allocator and the
+   allocator data. Lastly, we pass the backing allocator (our linear allocator) to our instance data and
+   create our "temp item" to hold the size and usage. These are the only two functions we need! It is
+   that simple! Here is a usage example:
+
+int main() {
+
+	linear_allocator alloc = NULL;
+	create_linear_allocator(&alloc, 12*1024); //12KB
+
+	while(true) {
+		temp_allocator_buffer b;
+		temp_allocator* temp = create_temp_allocator_with_buffer(b, 1024, &alloc);
+
+		//Lets display bob again...
+		char* name = temp->realloc(temp->inst, 0, 0, 3);
+
+		//We allocate a size of 3, old size of 0, and no current ptr
+		name[0] = 'b';
+		name[1] = 'o';
+		name[2] = 'b';
+		puts(name);
+
+		//So far we only used static memory...
+		//Now lets make our temp allocator use the linear allocator
+		//We will ask for 2KB of space for our new_name
+		char* new_name = temp->realloc(temp->inst, name, 3, 2*1024);
+
+		//this still works because we copied the data over
+		puts(new_name);
+
+		//but now we are using the linear allocators memory.
+
+		//reset the allocator and start the loop over!
+		linear_allocator_reset(&alloc);
+	}
+}
+
+   This tiny example does not show the true power of this allocator but hopefully, it has inspired you
+   or taught you a thing or two about pointers. I have started using this allocation strategy in my game
+   engine and it is working nicely. My next idea is to have a separate linear allocator per thread in
+   thread local storage so that I do not need any synchronization primitives to use a temp allocator in
+   my game loop!
+
+   In my next post [**1], I will talk about a simple dynamic array implementation and a version that uses this
+   temporary allocator for fast temporary dynamic arrays!
+
+
+---
+[**1]
+https://jonahmgoldsmith.hashnode.dev/simple-dynamic-array-in-c
+
+Simple Dynamic Array in C
+
+Otherwise known as Stretchy Buffers...
+Jan 13, 2023·
+
+   Vectors/Dynamic Arrays are one of the most important data structures used in almost all programs. In
+   C there is no notion of a dynamic array so the programmer must create their own. There are many ways
+   to do this but my favorite way is Sean Barret's stretchy buffer.
+
+   The way it works is your "array" is a normal pointer to a type of data. For example:
+uint32_t* number_array = NULL;
+
+   Then when you allocate memory for this pointer you add a little extra space for a struct containing
+   the capacity, and size of the array. If you have not used a dynamic array before, capacity is the
+   number of slots in the array while the size is the number of slots being used.
+uint32_t* number_array = NULL;
+
+typedef struct array_header {
+	size_t capacity;
+	size_t size;
+} array_header;
+
+   Above is what the array header would look like. Now, let's write a simple function that allocates
+   memory for this array.
+
+void* set_capacity(void* arr, size_t new_cap, size_t elem_size) {
+	//Create a pointer to the array or 0 if the array is NULL
+	uint8_t* array = (arr) ? (uint8_t*) get_array_header(arr) : 0;
+
+	//Get the current size of the array
+	const size_t current_size = array_size(arr);
+	
+	//Get the extra byte size of the header
+	const size_t extra = sizeof(array_header);
+
+	//Size for our array
+	const size_t new_size = new_capacity ? elem_size * new_capacity + extra : 0;
+
+	//Allocate Memory for the array
+	array = realloc(array, new_size);
+
+	//Bump the array pointer foward past the header data
+	void *copy = array? array + extra : array;
+
+	//If the copy exists set the size and capacity
+	if (copy) {
+		get_array_header(copy)->size = current_size;
+		get_array_header(copy)->capacity = new_capacity;
+	}
+	return copy;
+}
+
+   Let's break down what is going on in this function:
+	 * The function returns a void* which will be the allocated array.
+	 * The function takes in a void* array, the new capacity, and the size of the type the array is
+	   equal to.
+	 * First, we create a pointer to the array but notice how we call a macro "get_array_header" this
+	   returns us the point of the array where the header data is being stored. If the array is NULL we
+	   set the pointer to NULL.
+	 * We then calculate the size the array needs to be and realloc the pointer.
+	 * Lastly, we set the new capacity and size of the array and return it to the user.
+
+   So this function allocates the memory for our array but we still need a few more pieces for a
+   functional implementation.
+
+#define get_array_header(a) (array_header*)(uint8_t*)(a) - sizeof(array_header);
+
+#define array_size(a) ((a) ? get_array_header(a)->size : 0)
+
+#define array_capacity ((a) ? get_array_header(a)->capacity : 0)
+
+   These 3 macros let us access the header data for our array.
+
+void* grow_array(void *arr, size_t least, size_t elem_size) {
+	const size_t capacity = arr ? array_capacity(arr) : 0;
+	if (capacity >= least)
+		return arr;
+	const size_t min_new_capacity = capacity ? capacity * 2 : 16;
+	const size_t new_capacity = MAX(min_new_capacity, least);
+	return set_capacity(arr, new_capacity, elem_size);
+}
+
+   This function will calculate the needed capacity based on the "least" capacity needed, then call our
+   "set_capacity" function.
+
+   Now we only need a few more macros for our dynamic array implementation to be usable
+
+//Returns true if array needs to grow to hold n elements
+#define array_needs_growth(a, n) ((n) > array_capacity(a))
+
+#define array_grow(a, v) ((*(void **)&(a)) = grow_array((void *)a, v, sizeof(*(a))))
+
+#define array_check(a, v) (array_needs_growth(a, v) ? array_grow(a, v) : 0)
+
+#define array_push(a, v) (array_check(a, array_size(a) + 1), (a)[get_array_header(a)->size++] = (v), (a) + get_array_header(a)->size - 1)
+
+   These macros may look complicated but they are very simple!
+	 * "array_needs_growth" checks to see if "n" is greater than the current capacity of our array
+	 * "array_grow" takes the address of our array, dereferences it and then sets it equal to whatever
+	   "grow_array" returns to us. Look closely at how we pass the array as a void* and for elem_size we
+	   pass the size of (*a) which is the type of our array.
+	 * "array_check" is a convenience macro that calls "array_check" and if it is true calls
+	   "array_grow"
+	 * "array_push" puts everything together and makes the array usable. First, it checks and grows the
+	   array, passing the "current size + 1" as the minimum capacity needed. Then, we add "v" to our
+	   array at the current size, increasing the size after placing the value. Lastly, we bump our array
+	   pointer to the current size.
+
+   Now we have a usable stretchy buffer that can store any type of value and can be iterated over like a
+   normal C99 array! I hope this has inspired you to use stretchy buffers or has helped you in
+   understanding them more. For more information take a look at Saun Barretts stretchy buffer
+   implementation at https://github.com/nothings/stb/blob/master/stb_ds.h
+
+
+---
+

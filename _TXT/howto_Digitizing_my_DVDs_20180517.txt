@@ -1,0 +1,122 @@
+filename: howto_Digitizing_my_DVDs_20180517.txt
+https://grep.be/blog//en/computer/play/Digitizing_my_DVDs/
+
+   I have a rather sizeable DVD collection. The database that I created of them a few years back after
+   I'd had a few episodes where I accidentally bought the same movie more than once claims there's over
+   300 movies in the cabinet. Additionally, I own a number of TV shows on DVD, which, if you count
+   individual disks, will probably end up being about the same number.
+
+   A few years ago, I decided that I was tired of walking to the DVD cabinet, taking out a disc, and
+   placing it in the reader. That instead, I wanted to digitize them and use [18]kodi to be able to
+   watch a movie whenever I felt like it. So I made some calculations, and came up with a system with
+   enough storage (on [19]ZFS, of course) to store all the DVDs without needing to re-encode them.
+
+   I got started on ripping most of the DVDs using [20]dvdbackup, but it quickly became apparent that
+   I'd made a miscalculation; where I thought that most of the DVDs would be 4.7G ones, it turns out
+   that most commercial DVDs are actually of the 9G type. Come to think of it, that does make a lot of
+   sense. Additionally, now that I had a home server that had some significant reduntant storage, I
+   found that I had some additional uses for such things. The storage that I had, vast enough though it
+   may be, wouldn't suffice.
+
+   So, I gave this some more thought, but then life interfered and nothing happened for a few years.
+
+   Recently however, I've picked it up again, changing my workflow. I started using [21]handbrake to
+   re-encode the DVDs so they wouldn't take up quite so much space; having chosen VP9 as my preferred
+   codec, I end up storing the DVDs as about 1 to 2 G per main feature, rather than the 8 to 9 that it
+   used to be -- a significant gain. However, my first workflow wasn't very efficient; I would run the
+   handbrake GUI from my laptop on ssh -X sessions to multiple machines, encoding the videos directly
+   from DVD that way. That worked, but it meant I couldn't shut down my laptop to take it to work
+   without interrupting work that was happening; also, it meant that if a DVD finished encoding in the
+   middle of the night, I wouldn't be there to replace it, so the system would be sitting idle for
+   several hours. Clearly some form of improvement was necessary if I was going to do this in any
+   reasonable amount of time.
+
+   So after fooling around a bit, I came up with the following:
+     * First, I use dvdbackup -M -r a to read the DVD without re-encoding anything. This can be done at
+       the speed of the optical medium, and can therefore be done much more efficiently than to use
+       handbrake directly from the DVD. The -M option tells dvdbackup to read everything from the DVD
+       (to make a mirror of it, in effect). The -r a option tells dvdbackup to abort if it encounters a
+       read error; I found that DVDs sometimes can be read successfully if I eject the drive and
+       immediately reinsert it, or if I give the disk another clean, or even just try again in a
+       different DVD reader. Sometimes the disk is just damaged, and then using dvdbackup's default mode
+       of skipping the unreadable blocks makes sense, but not in a first attempt.
+     * Then, I run a small little perl script that I wrote. It basically does two things:
+         1. Run HandBrakeCLI -i <dvdbackup output> --previews 1 -t 0, parse its stderr output, and
+            figure out what the first and the last titles on the DVD are.
+         2. Run qsub -N <movie name> -v FILM=<dvdbackup output> -t <first title>-<last title>
+            convert-film
+     * The convert-film script is a bash script, which (in its first version) did this:
+mkdir -p "$OUTPUTDIR/$FILM/tmp"
+HandBrakeCLI -x "threads=1" --no-dvdnav -i "$INPUTDIR/$FILM" -e vp9 -E copy -T -t $SGE_TASK_ID --all-audio \
+--all-subtitles -o "$OUTPUTDIR/$FILM/tmp/T${SGE_TASK_ID}.mkv"
+
+       Essentially, that converts a single title to a VP9-encoded matroska file, with all the subtitles
+       and audio streams intact, and forcing it to use only one thread -- having it use multiple threads
+       is useful if you care about a single DVD converting as fast as possible, but I don't, and having
+       four DVDs on a four-core system all convert at 100% CPU seems more efficient than having two
+       convert at about 180% each. I did consider using HandBrakeCLI's options to only extract the
+       "interesting" audio and subtitle tracks, but I prefer to not have dubbed audio (to have subtitled
+       audio instead); since some of my DVDs are originally in non-English languages, doing so gets
+       rather complex. The audio and subtitle tracks don't take up that much space, so I decided not to
+       bother with that in the end.
+
+   The use of qsub, which submits the script into [22]gridengine, allows me to hook up several encoder
+   nodes (read: the server plus a few old laptops) to the same queue.
+
+   That went pretty well, until I wanted to figure out how far along something was going. HandBrakeCLI
+   provides progress information on stderr, and I can just do a tail -f of the stderr output logs, but
+   that really works well only for one one DVD at a time, not if you're trying to follow along with
+   about a dozen of them.
+
+   So I made a database, and wrote another perl script. This latter will parse the stderr output of
+   HandBrakeCLI, fish out the progress information, and put the completion percentage as well as the ETA
+   time into a database. Then it became interesting:
+CREATE OR REPLACE FUNCTION transjob_tcn() RETURNS trigger AS $$
+BEGIN
+  IF (TG_OP = 'INSERT') OR (TG_OP = 'UPDATE' AND (NEW.progress != OLD.progress) OR NEW.finished = TRUE) THEN
+    PERFORM pg_notify('transjob', row_to_json(NEW)::varchar);
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER transjob_tcn_trigger
+  AFTER INSERT OR UPDATE ON transjob
+  FOR EACH ROW EXECUTE PROCEDURE transjob_tcn();
+
+   This uses PostgreSQL's asynchronous notification feature to send out a notification whenever an
+   interesting change has happened to the table.
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use Mojolicious::Lite;
+use Mojo::Pg;
+
+...
+
+helper dbh => sub { state $pg = Mojo::Pg->new->dsn("dbi:Pg:dbname=transcode"); };
+
+websocket '/updates' => sub {
+    my $c = shift;
+    $c->inactivity_timeout(600);
+    my $cb = $c->dbh->pubsub->listen(transjob => sub { $c->send(pop) });
+    $c->on(finish => sub { shift->dbh->pubsub->unlisten(transjob => $cb) });
+};
+
+app->start;
+
+   This uses the Mojolicious framework and Mojo::Pg to send out the payload of the "transjob"
+   notification (which we created with the FOR EACH ROW trigger inside PostgreSQL earlier, and which
+   contains the JSON version of the table row) over a [25]WebSocket. Then it's just a small matter of
+   programming to write some javascript which dynamically updates the webpage whenever that happens, and
+   Tadaa! I have an online overview of the videos that are transcoding, and how far along they are.
+
+   That only requires me to keep the queue non-empty, which I can easily do by running dvdbackup a few
+   times in parallel every so often. That's a nice saturday afternoon project...
+
+   From my experience some DVDs can be read only if you ignore read errors as vendor though that it will
+   help with copy protecting.
+
+   Also consider using graphics card as encoding accelerator. My GTX 1050 Ti encodes video stream to
+   HEVC few times faster than i7-2600K cpu.

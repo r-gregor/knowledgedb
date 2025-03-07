@@ -1,0 +1,158 @@
+filename: go_parsing-complicated-json_20200314.txt
+https://stackoverflow.com/questions/30341588/how-to-parse-a-complicated-json-with-go-unmarshal
+
+How to parse a complicated JSON with Go unmarshal?
+
+   In go the standard package encoding/json exposes json.Unmarshal function to parse JSON.
+
+   It's possible to either unmarshal the JSON string in a predefined struct, or use the interface{} and
+   iterate the result for unexpected JSON data structure.
+
+   That said, I can't parse complex JSON properly. Can someone tell me how to achieve this?
+ {
+    "k1" : "v1",
+    "k2" : "v2",
+    "k3" : 10,
+    "result" : [
+        [
+            ["v4", v5, {"k11" : "v11", "k22" : "v22"}]
+            , ... ,
+            ["v4", v5, {"k33" : "v33", "k44" : "v44"}]
+        ],
+        "v3"
+    ]
+}
+
+***
+   Citing from JSON and Go:
+
+Without knowing this data's structure, we can decode it into an interface{} value with Unmarshal:
+
+b := []byte(`{
+    "k1" : "v1",
+    "k3" : 10,
+    "result":["v4",12.3,{"k11" : "v11", "k22" : "v22"}]
+}`)
+var f interface{}
+err := json.Unmarshal(b, &f)
+
+     At this point the Go value in f would be a map whose keys are strings and whose values are
+     themselves stored as empty interface values:
+
+f = map[string]interface{}{
+    "k1": "v1",
+    "k3":  10,
+    "result": []interface{}{
+        "v4",
+        12.3,
+        map[string]interface{}{
+            "k11":"v11",
+            "k22":"v22",
+        },
+    },
+}
+
+To access this data we can use a type assertion to access f's underlying map[string]interface{}:
+
+m := f.(map[string]interface{})
+
+We can then iterate through the map with a range statement and use a type switch to access its
+values as their concrete types:
+
+for k, v := range m {
+    switch vv := v.(type) {
+        case string:
+            fmt.Println(k, "is string", vv)
+
+        case int:
+            fmt.Println(k, "is int", vv)
+
+        case []interface{}:
+            fmt.Println(k, "is an array:")
+            for i, u := range vv {
+                fmt.Println(i, u)
+            }
+
+            default:
+                fmt.Println(k, "is of a type I don't know how to handle")
+    }
+}
+
+     In this way you can work with unknown JSON data while still enjoying the benefits of type safety.
+
+***
+   More recently, [https://github.com/tidwall/gjson]gjson offers selection of properties in JSON
+k1 := gjson.Get(json, "k1")
+k33 : = gjson.Get(json, "result.#.#.k33")
+
+***
+Using standard library encoding/json package
+
+   I've worked of JSON and Go article, and it turned out that case int doesn't work and it need to
+   be case float64 now, and there is plenty of nesting in real-world JSON.
+> go version
+go version go1.7.1 darwin/amd64
+
+   I've also looked at JSON decoding in Go, but it didn't help me very much as I needed to do
+   proceduralrly traform it into a series of calls to mruby binding, and the author of that article is
+   happy with Go structs for most part.
+
+   I've spent a little while fiddling with this and final iterating dumper function looked like this:
+func dumpJSON(v interface{}, kn string) {
+    iterMap := func(x map[string]interface{}, root string) {
+        var knf string
+        if root == "root" {
+            knf = "%q:%q"
+        } else {
+            knf = "%s:%q"
+        }
+        for k, v := range x {
+            dumpJSON(v, fmt.Sprintf(knf, root, k))
+        }
+    }
+
+    iterSlice := func(x []interface{}, root string) {
+        var knf string
+        if root == "root" {
+            knf = "%q:[%d]"
+        } else {
+            knf = "%s:[%d]"
+        }
+        for k, v := range x {
+            dumpJSON(v, fmt.Sprintf(knf, root, k))
+        }
+    }
+
+    switch vv := v.(type) {
+        case string:
+            fmt.Printf("%s => (string) %q\n", kn, vv)
+
+        case bool:
+            fmt.Printf("%s => (bool) %v\n", kn, vv)
+
+        case float64:
+            fmt.Printf("%s => (float64) %f\n", kn, vv)
+
+        case map[string]interface{}:
+            fmt.Printf("%s => (map[string]interface{}) ...\n", kn)
+            iterMap(vv, kn)
+
+        case []interface{}:
+            fmt.Printf("%s => ([]interface{}) ...\n", kn)
+            iterSlice(vv, kn)
+
+        default:
+            fmt.Printf("%s => (unknown?) ...\n", kn)
+    }
+}
+
+   With b being a byte slice with a JSON representing either an array or an object at the top-level, you
+   can call it like this:
+var f interface{}
+if err := json.Unmarshal(b, &f); err != nil {
+    panic(err)
+}
+dumpJSON(f, "root")
+
+
+---

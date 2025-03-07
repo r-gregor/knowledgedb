@@ -1,0 +1,227 @@
+filename: c_shifted-pointers_20230824.txt
+https://hex-rays.com/blog/igors-tip-of-the-week-54-shifted-pointers/
+
+Igor's tip of the week #54: Shifted pointers
+27 Aug 2021
+
+   [https://hex-rays.com/blog/igors-tip-of-the-week-52-special-attributes/]Previously we briefly mentioned
+   shifted pointers but without details. What are they?
+
+   Shifted pointers is another custom extension to the C syntax. They are used by IDA and decompiler to
+   represent a pointer to an object with some offset or adjustment (positive or negative). Let's see how
+   they work and several situations where they can be useful.
+
+Shifted pointer description and syntax
+   A shifted pointer is a regular pointer with additional information about the name of the parent
+   structure and the offset from its beginning. For example, consider this structure:
+
+struct mystruct {
+	char buf[16];
+	int dummy;
+	int value;     // <- myptr points here
+	double fval;
+};
+
+   And this pointer declaration:
+
+int *__shifted(mystruct,20) myptr;
+
+   It means that myptr is a pointer to int and if we decrement it by 20 bytes, we end up with
+   mystruct*.
+
+   In fact, the offset value is not limited to the containing structure and can even be negative. Also,
+   the "parent" type does not have to be a structure but can be any type except void. This can be useful
+   in some situations.
+
+   Whenever a shifted pointer is used with an adjustment, it will be displayed using the ADJ helper, a
+   pseudo-operator which returns the pointer to the parent type (in our case mystruct). For example, if
+   the pointer is dereferenced after adding 4 bytes, it can be represented like this:
+
+ADJ(myptr)->fval
+
+Optimized loop on array of structures
+   When compiling code which is processing an array of structures, a compiler may optimize the loop so
+   that the "current item" pointer points into a middle of the structure instead of the beginning. This
+   is especially common when only a small subset of fields are being accessed. Consider this example:
+
+struct mydata {
+	int a, b, c;
+	void *pad[2];
+	int d, e, f;
+	char path[260];
+};
+
+int sum_c_d(struct mydata *arr, int count) {
+	int sum=0;
+
+	for (int i=0; i< count; i++) {
+		sum+=arr[i].d+arr[i].c*43;
+	}
+	return sum;
+}
+
+   When compiled with Microsoft Visual C++ x86, it can produce the following code:
+
+?sum_c_d@@YAHPAUmydata@@H@Z proc near
+
+arg_0 = dword ptr  4
+arg_4 = dword ptr  8
+
+      mov      edx, [esp+arg_4]
+      push     esi
+      xor      esi, esi
+      test     edx, edx
+      jle      short loc_25
+      mov      eax, [esp+4+arg_0]
+      add      eax, 14h
+
+loc_12:                                    ; CODE XREF: sum_c_d(mydata *,int)+23↓j
+      imul     ecx, [eax-0Ch], 2Bh ; '+'
+      add      ecx, [eax]
+      lea      eax, [eax+124h]
+      add      esi, ecx
+      sub      edx, 1
+      jnz      short loc_12
+
+loc_25:                                    ; CODE XREF: sum_c_d(mydata *,int)+9↑j
+      mov      eax, esi
+      pop      esi
+      retn
+
+   And initial decompilation looks quite strange even after adding and specifying the correct types:
+
+int __cdecl sum_c_d(struct mydata *arr, int count) {
+	int v2; // edx
+	int v3; // esi
+	int *p_d; // eax
+	int v5; // ecx
+
+	v2 = count;
+	v3 = 0;
+	if ( count <= 0 )
+		return v3;
+	p_d = &arr->d;
+	do {
+		v5 = *p_d + 43 * *(p_d - 3);
+		p_d += 73;
+		v3 += v5;
+		--v2;
+	} while ( v2 );
+	return v3;
+}
+
+   Apparently the compiler decided to use the pointer to the d field and accesses c relative to it.  How
+   can we make this look nicer?
+
+   We can find out the offset at which d is situated in the structure via manual calculation, by
+   inspecting disassembly, or by hovering the mouse over it in pseudocode.
+
+   Thus, we can change the type of p_d to int * __shifted(mydata, 0x14) to get improved pseudocode:
+
+int __cdecl sum_c_d(struct mydata *arr, int count) {
+	int v2; // edx
+	int v3; // esi
+	int *__shifted(mydata,0x14) p_d; // eax
+	int v5; // ecx
+
+	v2 = count;
+	v3 = 0;
+	if ( count <= 0 )
+		return v3;
+	p_d = &arr->d;
+
+	do {
+		v5 = ADJ(p_d)->d + 43 * ADJ(p_d)->c;
+		p_d += 73;
+		v3 += v5;
+		--v2;
+	} while ( v2 );
+	return v3;
+}
+
+Prepended metadata
+   This technique is used in situations where a raw block of memory needs to have some management info
+   attached to it, i.e. heap allocators, managed strings and so on.
+
+   As a specific example, let's consider the classic MFC 4.x CString class. It uses a structure placed
+   before the actual character array:
+
+struct CStringData {
+	long  nRefs;          // reference count
+	int   nDataLength;    // length of data (including terminator)
+	int   nAllocLength;   // length of allocation
+	                      // TCHAR data[nAllocLength]
+
+	TCHAR* data()         // TCHAR* to managed data
+	{
+		return (TCHAR*)(this+1);
+	}
+};
+
+   The CStringclass itself has just one data member:
+
+class CString {
+	public:
+		// Constructors
+		[...skipped]
+	private:
+			LPTSTR	 m_pchData;		   // pointer to ref counted string data
+
+			// implementation helpers
+			CStringData* GetData() const;
+			[...skipped]
+};
+
+inline CStringData* CString::GetData() const {
+	ASSERT(m_pchData != NULL);
+	return ((CStringData*)m_pchData)-1;
+}
+
+   Here's how it looks in memory:
+               ┌---------------┐
+               |   nRefs       |
+               +---------------┤
+ CStringData   | nDataLength   |
+               +---------------┤
+               | nAllocLength  |
+               +---------------┴-----┐
+           ┌--►|'H','e','l','l','o',0|
+           |   +---------------------┘
+           |
+           |
+         ┌-┴--------┐
+CString  |m_pchData |
+         +----------┘
+
+   Here's how the CString's destructor looks like in initial decompilation:
+
+void __thiscall CString::~CString(CString *this) {
+	if ( *(_DWORD *)this - (_DWORD)off_4635E0 != 12 && InterlockedDecrement((volatile LONG *)(*(_DWORD *)this -
+					12)) <= 0 )
+		operator delete((void *)(*(_DWORD *)this - 12));
+}
+
+   Even after  creating a CString structure with a single memberchar *m_pszDatait's still somewhat
+   confusing:
+
+void __thiscall CString::~CString(CString *this) {
+	if ( this->m_pszData - (char *)off_4635E0 != 12 && InterlockedDecrement((volatile LONG *)this->m_pszData - 3
+				) <= 0 )
+		operator delete(this->m_pszData - 12);
+}
+
+   Finally, if we create theCStringDatastruct as described above and change the type of  the CString
+   member to: char *__shifted(CStringData,0xC) m_pszData:
+
+void __thiscall CString::~CString(CString *this) {
+	if ( ADJ(this->m_pszData)->data - (char *)off_4635E0 != 12 && InterlockedDecrement(&ADJ(this->m_pszData)->nR
+				efs) <= 0 )
+		operator delete(ADJ(this->m_pszData));
+}
+
+   Now the code is more understandable: if the decremented reference count becomes zero, the
+   CStringDatainstance is deleted.
+
+
+---
+

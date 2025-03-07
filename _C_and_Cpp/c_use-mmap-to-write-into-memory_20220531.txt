@@ -1,0 +1,186 @@
+filename: c_use-mmap-to-write-into-memory_20220531.txt
+https://stackoverflow.com/questions/26259421/use-mmap-in-c-to-write-into-memory
+
+use mmap in C to write into memory
+
+   I want to use mmap() to create a file containing some integers. I want to write to this file by
+   writing to memory. I know that the data in memory is binary format and hence the data in file will
+   also be in binary. Can I use mmap for this purpose? where can I find good resources on how to use
+   mmap? I didn't find a good manual to start with.
+
+***
+	   man 2 mmap will pretty much tell you everything you need to know.
+	 * 5
+	   other way around. you create a file, then mmap it. then any access to the memory occupied by that
+	   file will automatically be written out to the on-disk file.
+	 * 1
+	   Note that if you ware writing memory-integers using mmap to a file, the byte ordering on
+	   different platforms can keep those files from being able to be exchanged between different
+	   architectures that run your program. If that matters to you, try looking at this question
+	 * @MarcB: Automatically, but not immediately. The system writes it to the disk only when it needs
+	   to free some physical memory and it needs to swap that memory off to disk. Until then, changes in
+	   memory are not autimatically visible in the file and doesn't affect the file in any way (heck, it
+	   may not affect it at all if one used MAP_PRIVATE!). The data is saved to disk on munmap or when
+	   you specifically request it with msync.
+
+***
+   Here is an example:
+
+<code>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/mman.h> /* mmap() is defined in this header */
+#include <fcntl.h>
+
+void err_quit(char *msg) {
+	printf(msg);
+	return 0;
+}
+
+int main (int argc, char *argv[]) {
+	int fdin, fdout;
+	char *src, *dst;
+	struct stat statbuf;
+	int mode = 0x0777;
+
+	if (argc != 3)
+	err_quit ("usage: a.out <fromfile> <tofile>");
+
+	/* open the input file */
+	if ((fdin = open (argv[1], O_RDONLY)) < 0) {
+		printf("can't open %s for reading", argv[1]);
+		return 0;
+	}
+
+	/* open/create the output file */
+	if ((fdout = open (argv[2], O_RDWR | O_CREAT | O_TRUNC, mode )) < 0)//edited here
+	{
+		printf ("can't create %s for writing", argv[2]);
+		return 0;
+	}
+
+	/* find size of input file */
+	if (fstat (fdin,&statbuf) < 0) {
+		printf ("fstat error");
+		return 0;
+	}
+
+	/* go to the location corresponding to the last byte */
+	if (lseek (fdout, statbuf.st_size - 1, SEEK_SET) == -1)
+	{
+		printf ("lseek error");
+		return 0;
+	}
+
+	/* write a dummy byte at the last location */
+	if (write (fdout, "", 1) != 1) {
+		printf ("write error");
+		return 0;
+	}
+
+	/* mmap the input file */
+	if ((src = mmap (0, statbuf.st_size, PROT_READ, MAP_SHARED, fdin, 0)) == (caddr_t) -1) {
+		printf ("mmap error for input");
+		return 0;
+	}
+
+	/* mmap the output file */
+	if ((dst = mmap (0, statbuf.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fdout, 0)) == (caddr_t) -1) {
+		printf ("mmap error for output");
+		return 0;
+	}
+
+	/* this copies the input file to the output file */
+	memcpy (dst, src, statbuf.st_size);
+	return 0;
+
+} /* main */
+</code>
+
+***
+	 * Thanks. When I want to compile it I get this error: " error: 'FILE_MODE' undeclared (first use in
+	   this function)".
+	 * where should i specify the input file
+	   Yes, from input : "usage: a.out <fromfile> <tofile>"
+	   FILE_MODE should contain the permissions, set it to FILE_MODE = 0x0777 for example.
+	   FILE_MODE should be an int. See edits in code, I already did it.
+
+***
+   Examples : Linux's cp by fahmy
+
+	if ((dst = mmap (0, statbuf.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fdout, 0)) == (caddr_t) -1) {
+		   err_sys ("mmap error for output");
+	}
+
+	 /* this copies the input file to the output file */
+	 memcpy (dst, src, statbuf.st_size);
+
+And the mmap wiki example:
+
+<code>
+#include <sys/types.h>
+#include <sys/mman.h>
+#include <err.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+/* Does not work on OS X, as you can't mmap over /dev/zero */
+int main(void) {
+	const char str1[] = "string 1";
+	const char str2[] = "string 2";
+	int parpid = getpid(), childpid;
+	int fd = -1;
+	char *anon, *zero;
+
+	if ((fd = open("/dev/zero", O_RDWR, 0)) == -1) {
+		err(1, "open");
+	}
+
+	anon = (char*)mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_ANON|MAP_SHARED, -1, 0);
+	zero = (char*)mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_FILE|MAP_SHARED, fd, 0);
+
+	if (anon == MAP_FAILED || zero == MAP_FAILED) {
+		errx(1, "either mmap");
+	}
+
+	strcpy(anon, str1);
+	strcpy(zero, str1);
+
+	printf("PID %d:\tanonymous %s, zero-backed %s\n", parpid, anon, zero);
+	switch ((childpid = fork())) {
+		case -1:
+			err(1, "fork");
+			/* NOTREACHED */
+		case 0:
+			childpid = getpid();
+			printf("PID %d:\tanonymous %s, zero-backed %s\n", childpid, anon, zero);
+			sleep(3);
+
+			printf("PID %d:\tanonymous %s, zero-backed %s\n", childpid, anon, zero);
+			munmap(anon, 4096);
+			munmap(zero, 4096);
+			close(fd);
+			return (EXIT_SUCCESS);
+	}
+
+	sleep(2);
+	strcpy(anon, str2);
+	strcpy(zero, str2);
+
+	printf("PID %d:\tanonymous %s, zero-backed %s\n", parpid, anon, zero);
+	munmap(anon, 4096);
+	munmap(zero, 4096);
+	close(fd);
+
+	return (EXIT_SUCCESS);
+}
+</code>
+
+***
+
+
+---
+

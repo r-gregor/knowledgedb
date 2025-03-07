@@ -1,0 +1,214 @@
+filename: c_refactoring-introduce-dispatch-map_20231116.txt
+https://adam.younglogic.com/2023/11/refactoring-in-c-introduce-dispatch-map/
+
+Refactoring in C: Introduce Dispatch Map
+November 13, 2023
+
+   There is a pretty common pattern in C coding that uses a Key, often an integer, to select a function
+   to call. However, code may not start there, and there is a pretty common set of interim steps you
+   might go to get there.
+
+   The growth is often like this:
+
+Table of contents
+     * Handle the first case in the main method.
+     * Use an If statement to handle the error case
+     * Use an extended if/else clause to handle the second case
+     * Use a switch statement to handle more than one case
+     * Extract function
+     * Handle a missing function
+
+   If the logic for each case is similar and/or small, the switch statement may well be the final state.
+   However, if the logic inside each of the case blocks gets too complex, then an common step that can
+   be injected as soon as step 2 is to execute the refactoring of extract method except that we will
+   call it extract function, we don't have methods in C.
+
+   To give a concrete example, I am working with [27]MCTP, a protocol where a message is delivered in a
+   buffer. We take the payload of the buffer and select a specific offset to see the "type" of the
+   message, and based on that type code, we need to perform a different operation. The Type code is the
+   first byte of the payload, and it states what the higher level protocol is. In its current state of
+   evolution, that can be one of three things: MCTP control messages, PLDM, or SPDM. Thus, the code
+   evolution looks like this.
+
+Handle the first case in the main method.
+
+static void mctpserv_deliver(struct mbox_client *cl, void *data) {
+	struct mctp_pcc_packet *mpp;
+	mpp  = (struct mctp_pcc_packet *)data;
+	//do Simple MCTP stuff
+	//send back status
+}
+
+Use an If statement to handle the error case
+
+static void mctpserv_deliver(struct mbox_client *cl, void *data) {
+	struct port_handler mapping;
+	struct mctp_pcc_packet *mpp;
+	mpp  = (struct mctp_pcc_packet *)data;
+	pr_info("%s signature = %x \n", __func__,
+			(u32)mpp->pcc_header.signature);
+	if (mpp->payload[0]  == MCTP_CONTROL) {
+		//do Simple MCTP stuff
+		//send back success status
+	} else {
+		//send back error code
+	}
+}
+
+
+Use an extended if/else clause to handle the second case
+
+static void mctpserv_deliver(struct mbox_client *cl, void *data) {
+	struct port_handler mapping;
+	struct mctp_pcc_packet *mpp;
+	mpp = (struct mctp_pcc_packet *)data;
+	pr_info("%s signature = %x \n", __func__,
+			(u32)mpp->pcc_header.signature);
+	if (mpp->payload[0] == MCTP_CONTROL_CODE) {
+		//do Simple MCTP stuff
+		//send back success status
+	} else if((mpp->payload[0] == SPDM_CODE)) {
+		//do SPDM stuff
+	} else {
+		//send back error code
+	}
+}
+
+Use a switch statement to handle more than one case
+
+static void mctpserv_deliver(struct mbox_client *cl, void *data) {
+	struct port_handler mapping;
+	struct mctp_pcc_packet *mpp;
+	mpp  = (struct mctp_pcc_packet *)data;
+	pr_info("%s signature = %x \n", __func__,
+			(u32)mpp->pcc_header.signature);
+	switch (mpp->payload[0]) {
+		case MCTP_CONTROL_CODE: {
+			//do Simple MCTP stuff
+			//send back success status
+		};
+		break;
+
+		case SPDM_CODE: {
+			//do SPDM stuff
+		};
+		break;
+
+		default:
+			//send back error code
+	}
+}
+
+Extract function
+
+void handle_mctp(struct mctp_pcc_packet *mpp) {
+	//...
+}
+
+void handle_spdm(struct mctp_pcc_packet *mpp) {
+	//...
+}
+
+void handle_pldm(struct mctp_pcc_packet *mpp) {
+	//...
+}
+
+
+static void mctpserv_deliver(struct mbox_client *cl, void *data) {
+	struct port_handler mapping;
+	struct mctp_pcc_packet *mpp;
+	mpp  = (struct mctp_pcc_packet *)data;
+	pr_info("%s signature = %x \n", __func__,
+			(u32)mpp->pcc_header.signature);
+	switch (mpp->payload[0]) {
+		case MCTP_CONTROL_CODE:
+			handle_mctp(mpp);
+			break;
+		case SPDM_CODE:
+			handle_spdm(mpp);
+			break;
+		case PLDM_CODE:
+			handle_pldm(mpp);
+			break;
+		default:
+			//send back error code
+	}
+}
+
+   Note that when we extract the function, we use the same function signature. This is deliberate so we
+   can use a function pointer in the next step without having to change the parameters passed to it. In
+   order to define the function signature and the key used to select it, we put both inside a structure.
+   for added type safety, use an enum to limit the values to the acceptable range.
+
+enum MCTP_MSG_TYPE {
+	MCTP_MSG_TYPE_CTRL = 0,
+	MCTP_MSG_TYPE_PLDM = 1,
+	MCTP_MSG_TYPE_SPDM = 5,
+};
+
+struct port_handler {
+	enum MCTP_MSG_TYPE code;
+	void (* handler )(struct mctp_pcc_packet *mpp);
+};
+
+struct port_handler handlers[]  = {
+	{MCTP_MSG_TYPE_CTRL, handle_mctp },
+	{MCTP_MSG_TYPE_PLDM, handle_pldm},
+	{MCTP_MSG_TYPE_SPDM, handle_spdm}
+};
+
+   One thing this example shows is why not to use the index of the array as the key; a sparse and non
+   contiguous integer sequence means you would have a lot of wholes in that array. We need 0, 4, and 5
+   only.
+
+   Since our sequence is short, we can iterate through it using a linear search:
+
+for (int i = 0;  i <  sizeof(handlers)  / sizeof(struct port_handler )  ; i++) {
+	if (handlers[i].code == mpp-> payload[0]) {
+		handlers[i].handler(mpp);
+		break;
+	}
+}
+
+   For longer lists, it might be necessary to use a binary search. I am not going to show an example of
+   that here, as I have not written it, and my example would certainly be buggy.
+
+Handle a missing function
+   This example does not show how to handle a missing function. There are two ways I have done this:
+   either set a boolean when the handler is called, or have the default case be an error handler. Here
+   is the default case as a function.
+
+void default_handler(struct mctp_pcc_packet *mpp) {
+	pr_info("%s unsupported protocol \n", __func__);
+}
+
+struct port_handler default_mapping = {
+	MCTP_MSG_TYPE_MAX,
+	default_handler,
+};
+
+static void mctpserv_deliver(struct mbox_client *cl, void *data) {
+	struct port_handler *mapping = &default_mapping;
+	struct mctp_pcc_packet *mpp;
+
+	pr_info("%s\n", __func__);
+
+	mpp  = (struct mctp_pcc_packet *)data;
+	pr_info("%s signature = %x \n", __func__,
+			(u32)mpp->pcc_header.signature);
+	pr_info("%s type code = %d \n", __func__, mpp-> payload[0] );
+
+
+	for (int i = 0;  i <  sizeof(handlers)  / sizeof(struct port_handler )  ; i++) {
+		if (handlers[i].code == mpp-> payload[0]) {
+			mapping = &handlers[i];
+			break;
+		}
+	}
+	mapping->handler(mpp);
+}
+
+
+
+---
+

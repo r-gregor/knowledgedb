@@ -1,0 +1,247 @@
+filname: c_function-pointers-into-c-struct-to-simulate-objects_20250219.txt
+https://www.quora.com/Can-I-put-function-pointers-into-a-C-struct-to-simulate-objects-If-so-how-and-what-are-the-caveats
+
+Can I put function pointers into a C struct to simulate objects? If so, how and what are the caveats?
+
+***
+Sure. In fact, I did that in my Intellivision emulator, jzIntv (1). Now granted, I did that ~20 years ago, and
+what I came up with was somewhat clunky. But, it worked well enough.
+
+There are multiple ways to go about this.
+
+The simplest method is to simply define a structure that contains a set of related function pointers and no
+state of its own. Define a separate structure that contains the actual state. Something like this:
+
+struct io_state {
+	// ...state details
+};
+
+struct io_handlers {
+	int (*open)(struct io_state*, int /* flags */);
+	void (*close)(struct io_state*);
+	int (*read)(struct io_state*, void*, int);
+	int (*write)(struct io_state*, const void*, int);
+	int (*ioctl)(struct io_state*, void*, int);
+};
+
+[EDIT: See the addendum for a much nicer way to write those function pointers.]
+
+This example roughly mimics the classic UNIX I/O model. Define instances of struct io_handlers with the
+pointers initialized to the handler functions for that device. Now you can pass instances of struct io_state
+to them to manipulate the device.
+
+That's not exactly OO, though. With more proper OO, you want to combine behavior and data in the same object.
+
+One approach would be to embed the function pointers directly in the state object. This works, but it starts
+wasting space quickly. (For the record, this is basically what I did in jzIntv.)
+
+struct io_state {
+	// ...state details
+
+	int  (*open) (struct io_state*, int);
+	void (*close)(struct io_state*);
+	int  (*read) (struct io_state*, void*, int);
+	int  (*write)(struct io_state*, const void*, int);
+	int  (*ioctl)(struct io_state*, void*, int);
+};
+
+Now, every time you create a struct io_state you also have to populate those function pointers. That's kinda
+gross, although it does offer you a lot of flexibility. It's probably not flexibility you need, though.
+
+Instead, the next step is to keep the structures separate, but include a pointer from one to the other:
+
+struct io_handlers;  // forward decl.
+struct io_state {
+	const struct io_handlers* vtbl;
+	// ...state details
+};
+
+struct io_handlers {
+	int  (*open) (struct io_state*, int);
+	void (*close)(struct io_state*);
+	int  (*read) (struct io_state*, void*, int);
+	int  (*write)(struct io_state*, const void*, int);
+	int  (*ioctl)(struct io_state*, void*, int);
+};
+
+Now you can declare a series of struct io_handlers and even make them const, and all you have to do when you
+make an instance of struct io_state is populate the vtbl field with a pointer to the correct one.
+
+This starts to look a lot like inheriting from an abstract base class in C++. That's due to the fact you can
+provide different struct io_handlers to different instances of struct io_state.
+
+How do you make it look even more like inheriting from an abstract base class? Well, you can take advantage of
+a guarantee that C offers: You can always cast between a pointer to a struct and a pointer to its first member
+and back. What does that buy you?
+
+Consider if we retooled struct io_handlers like so:
+
+struct io_handlers {
+	int  (*open) (struct io_handlers**, int);
+	void (*close)(struct io_handlers**);
+	int  (*read) (struct io_handlers**, void*, int);
+	int  (*write)(struct io_handlers**, const void*, int);
+	int  (*ioctl)(struct io_handlers**, void*, int);
+};
+
+Well, now that looks a bit weird, right? A pointer-to-a-pointer? Hang in there.
+
+struct io_state_foo {
+	const struct io_handlers *vtbl;
+	// details
+};
+
+struct io_state_bar {
+	const struct io_handlers *vtbl;
+	// details
+};
+
+struct io_state_baz {
+	const struct io_handlers *vtbl;
+	// details
+};
+
+const struct io_handlers io_state_foo_vtbl = {
+	// pointers to handlers for struct io_state_foo
+};
+
+const struct io_handlers io_state_bar_vtbl = {
+	// pointers to handlers for struct io_state_bar
+};
+
+const struct io_handlers io_state_baz_vtbl = {
+	// pointers to handlers for struct io_state_baz
+};
+
+Do you see where I'm going with this? I now have three different structures, each with the same type for their
+first member. Each type should be initialized to point to its own corresponding vtbl.
+
+If someone hands me a pointer to struct io_state_foo, I can call its handlers by saying
+foo->vtbl->read(&foo->vtbl, buf, size);.
+
+That's ugly, but now we're getting somewhere. Still, it's a little weird to pass around a
+pointer-to-a-pointer-to-a-struct as that first argument. We can clean that up slightly:
+
+struct io_state;  // forward decl.
+
+struct io_handlers {
+	int  (*open) (struct io_state*, int /* flags */);
+	void (*close)(struct io_state*);
+	int  (*read) (struct io_state*, void*, int);
+	int  (*write)(struct io_state*, const void*, int);
+	int  (*ioctl)(struct io_state*, void*, int);
+};
+
+struct io_state {
+	const struct io_handlers *vtbl;
+};
+
+struct io_state_foo {
+	struct io_state base;
+	// details
+};
+
+struct io_state_bar {
+	struct io_state base;
+	// details
+};
+
+struct io_state_baz {
+	struct io_state base;
+	// details
+};
+
+const struct io_handlers io_state_foo_vtbl = {
+	// pointers to handlers for struct io_state_foo
+};
+
+const struct io_handlers io_state_bar_vtbl = {
+	// pointers to handlers for struct io_state_bar
+};
+
+const struct io_handlers io_state_baz_vtbl = {
+	// pointers to handlers for struct io_state_baz
+};
+
+With that additional wrapper, now we can pass around pointers to struct io_state and the recipient doesn't
+need to know what's wrapped:
+
+int read_from_io(struct io_state *const io,
+		char *const buf, const int size) {
+	return io->vtbl->read(io, (void *)buf, size);
+}
+
+Now that's starting to look a little more reasonable. It's still a little verbose, but at least the types are
+sane at the point of the caller. The caller doesn't need to know about the object type.
+
+What about the callee?
+Well, they just need to perform a cast locally to the actual type:
+
+int io_struct_foo_read(struct io_state *const io,
+		void *const buf, const int size) {
+	struct io_state_foo *const me = (struct io_state_foo *)io;
+
+	// Now operate in terms of me->whatever.  
+	// 'me' acts like C++'s this.
+}
+
+And ta-da! You now have mechanisms for single inheritance and virtual methods! You can extend it further with
+additional levels of inheritance.
+
+What's the drawback? It's all incredibly manual, error prone, and verbose.
+
+But... you can do it and not leave C(2).
+
+Addendum
+There is a much cleaner way to write these function pointers. When I wrote this answer around 5 years ago, I
+don't know whether I was aware of this technique. I will say it deserves wider exposure, as I find it much
+more pleasant to work with.
+
+In the example above, I had:
+
+struct io_handlers {
+	int  (*open) (struct io_state*, int /* flags */);
+	void (*close)(struct io_state*);
+	int  (*read) (struct io_state*, void*, int);
+	int  (*write)(struct io_state*, const void*, int);
+	int  (*ioctl)(struct io_state*, void*, int);
+};
+
+I have 5 different functions here. I can use typedef to define nice aliases for each of those function
+signatures. And here's the neat part: By leaving the pointer portion out of the typedef, the syntax looks like
+an ordinary prototype with typedef in front.
+
+typedef int  io_open_fxn (struct io_state*, int);
+typedef void io_close_fxn(struct io_state*);
+typedef int  io_read_fxn (struct io_state*, void*, int);
+typedef int  io_write_fxn(struct io_state*, const void*, int);
+typedef int  io_ioctl_fxn(struct io_state*, void*, int);
+
+Each of those new type aliases has a function type, not a pointer-to-function type. In general, I've learned
+it's better to leave the pointer portion of a type outside the type alias, unless it's a very specific kind of
+alias(3).
+
+Now I can rewrite the struct in terms of those aliases, and each of the fields will just look like a more
+typical pointer:
+
+struct io_handlers {
+	io_open_fxn  *open;
+	io_close_fxn *close;
+	io_read_fxn  *read;
+	io_write_fxn *write;
+	io_ioctl_fxn *ioctl;
+};
+
+I don't know why this syntax isn't more widely known or used, but I think it really ought to be.
+
+Doesn't that look a whole lot cleaner?
+
+(1) - Link: http://spatula-city.org/~im14u2c/intv/jzintv/
+(2) - And as Jörgen Sigvardsson points out in the comments, you could also hide much of the noise with some well
+    designed macros.
+
+(3) - D++ iterator types come to mind. You could build a similar abstraction in C, I suppose.
+
+
+---
+

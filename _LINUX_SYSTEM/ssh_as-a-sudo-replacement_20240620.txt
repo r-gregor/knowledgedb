@@ -1,0 +1,129 @@
+filename: ssh_as-a-sudo-replacement_20240620.txt
+https://whynothugo.nl/journal/2024/06/13/ssh-as-a-sudo-replacement/
+
+SSH as a sudo replacement
+2024-06-13
+
+   A major caveat in tools like sudo and doas for that matter is that they rely on setuid binaries
+   and privilege escalation in order to run commands as root.
+
+   The design is not ideal, and also drags in a few limitations:
+    1. The whole user session needs to retain capabilities to perform privilege escalation.
+    2. They don't work when running an entire user session in a restricted user namespace.
+    3. setuid binaries limitations on how the whole system is secured.
+
+   An interesting alternative with a is s6-sudod, which splits the program into two parts: a privileged
+   server and an unprivileged client.
+
+   This is a summary of an experiment from a few weeks ago where I experimented with using ssh locally
+   to perform the same role as sudo, without exposing this sshd instance to the network.
+
+Goals
+     * Enable authorised users (and only authorised users) to run commands as root.
+     * Don't use privilege escalation.
+
+Implementation
+   First, I configured a dedicated SSH key that will be authorised for authentication as root. This key
+   is not in the regular authorized_keys file, but in a separate file which will only be used for this
+   purpose:
+
+$> mkdir /root/.ssh/
+$> echo ssh-ed25519 AAAAC3Nza... > /root/.ssh/local_keys
+
+   I then ran an sshd server instance bound to a unix domain socket. Permissions are tightened so
+   unauthorised users cannot even access the socket. This instance overrides the PermitRootLogin option
+   to enable logging in as root and uses the newly created /root/.ssh/local_keys as a source for
+   authorised keys:
+
+$> mkdir /run/sshd/
+$> chown root:wheel /run/sshd/
+$> chmod 750 /run/sshd/
+$> s6-ipcserver /run/sshd/sshd.sock sshd -ie -o AuthorizedKeysFile=/root/.ssh/local_keys -o PermitRootLogin=yes
+
+   The root account was locked to disallow logging in via any mechanism. This was done by prefixing the
+   password's hash with ! (so no password's hash can ever match this value). sshd interprets this
+   special prefix as the account being locked and won't allow logging in as root.
+
+   I changed the root password in /etc/passwd and replaced the ! with an *. sshd won't give new value
+   any special interpretation, and will allow logging in as root. The value * will never match the hash
+   of any password either, so logging in via password remains effectively disabled.
+
+   I then needed to connect to the local sshd instance. While sshd has a -i flag which allows passing an
+   existing socket to it, ssh has no equivalent flag. The ProxyCommand option can be (ab)used for this:
+
+$> ssh -o ProxyCommand='socat STDIO UNIX-CONNECT:/run/sshd/sshd.sock' \
+    -i .ssh/root-key.pub \
+    -t \
+    root@root \
+    "cd $(pwd); '$SHELL' --login"
+
+   I'm using a hardware-bound SSH key in this case, which means that I need to tap the physical device
+   to authorise this connection. I could also use an ssh-agent that requires explicit approval before
+   disclosing keys (e.g.: hissh-agent).
+
+   A little caveat here is that socat will read all input from ssh, and then write it into the socket,
+   effectively duplicating the overhead of the connection. I read the relevant manual pages a few more
+   times, and couldn't find a solution. I came across ProxyUseFdpass, but wasn't entirely sure how
+   to make it work.
+
+   After some more research online (and some major frustration), I found a clear usage example from
+   2016. It turnes out that ProxyUseFdpass was quite straightforward and allows me to specify a command
+   that sends the socket file descriptor (via stdout) to ssh, and ssh then connects over this socket.
+
+   I saved the following script into /home/hugo/tmp/passfd.py:
+
+#!/usr/bin/env python3
+# From: https://www.gabriel.urdhr.fr/2016/08/07/openssh-proxyusefdpass/
+
+import sys
+import socket
+import array
+
+# Create the file descriptor:
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect("/run/sshd/sshd.sock")
+
+# Pass the file descriptor:
+fds = array.array("i", [s.fileno()])
+ancdata = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)]
+socket.socket(fileno = 1).sendmsg([b'\0'], ancdata)
+
+   And the command to connect to ssh now becomes:
+
+$> ssh -o ProxyCommand='/home/hugo/tmp/passfd.py' \
+    -i .ssh/root-key.pub \
+    -o ProxyUseFdpass=yes \
+    -t \
+    root@root \
+    "cd $(pwd); '$SHELL' --login"
+
+   The linked article mentioned using nc (for a somewhat different use case). Initially, it would seem
+   that nc -FU /run/sshd/sshd.sock would work, but the manual page actually specifies that this is not
+   supported:
+
+-F              Pass the first connected socket using sendmsg(2) to stdout and exit. This
+                is useful in conjunction with -X to have nc perform connection setup
+                with a proxy but then leave the rest of the connection to another
+                program (e.g. ssh(1) using the ssh_config(5) ProxyUseFdpass option).
+                Cannot be used with -c or -U.
+
+Conclusion
+   This technique works. It relies mainly on OpenSSH for all the sensitive security details. Not only
+   does OpenSSH have a great track record, but it also enables various forms of authentication including
+   using a hardware-based SSH key.
+
+   Configuring this on a new host has no complex steps, and the above ipcserver command can just be
+   executed via the system's service manager.
+
+   The above passfd.py script is a quick hack to move the experiment forward; for daily usage it would
+   be best to write a tiny executable that does the same thing and put it into /usr/local/bin. The whole
+   ssh command could also be placed in a tiny wrapper.
+
+    1. I didn't edit /etc/ssh/sshd_config because I don't want to enable logging in as root over the
+       network-bound sshd instance. It still contains the usual PermitRootLogin no. 
+    2. I have PasswordAuthentication no in my sshd_config anyway; it is always a good idea to disable
+       password-based authentication for sshd.
+
+
+---
+

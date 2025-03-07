@@ -1,0 +1,195 @@
+filename: rst_simd-stable-rust_20241114.txt
+https://pythonspeed.com/articles/simd-stable-rust/
+
+Using portable SIMD in stable Rust
+12 Nov 2024
+
+   In [rst_optimizing-with-simd_20241114.txt]a previous post we saw that you can speed up code significantly
+   on a single core using SIMD: Single Instruction Multiple Data. These specialized CPU instructions allow you
+   to, for example, add 4 values at once with a single instruction, instead of the usual one value at a time.
+   The performance improvement you get compounds with multi-core parallelism: you can benefit from both SIMD
+   and threading at the same time.
+
+   Unfortunately, SIMD instructions are specific both to CPU architecture and CPU model. Thus ARM CPUs
+   as used on modern Macs have different SIMD instructions than x86-64 CPUs. And even if you only care
+   about x86-64, different models support different instructions; the i7-12700K CPU in my current
+   computer doesn't support AVX-512 SIMD, for example.
+
+   One way to deal with this is to write custom versions for each variation of SIMD instructions.
+   Another is to use a portable SIMD library, that provides an abstraction layer on top of these various
+   instruction sets.
+
+   In the previous post we used the std::simd library. It is built-in to the Rust standard library...
+   but unfortunately it's currently only available when using an unstable ("nightly") compiler.
+
+   How you can write portable SIMD if you want to use stable Rust? In this article we'll:
+     * Introduce the wide crate, that lets you write portable SIMD in stable Rust.
+     * Show how it can be used to reimplement the Mandelbrot algorithm we previously implemented with
+       std::simd.
+     * Go over the pros and cons of these alternatives.
+
+wide: Portable SIMD in stable Rust
+   The wide crate implements a portable SIMD abstraction that then gets compiled to x86-64 or ARM
+   SIMD instructions. When the underlying instructions don't support the operation, the code is written
+   in a way that hopefully allows the compiler to generate SIMD instructions on its own
+   ("autovectorization").
+
+   To see how it differs from std::simd, here's the Mandelbrot implementation we originally looked
+   at using std::simd:
+
+use std::simd::prelude::*;
+
+type u64s = u64x8;
+type u32s = u32x8;
+type f64s = f64x8;
+
+#[derive(Clone)]
+struct Complex {
+	real: f64s,
+	imag: f64s,
+}
+
+fn get_count(start: &Complex) -> u32s {
+	let mut current = start.clone();
+	let mut count = u64s::splat(0);
+	let threshold_mask = f64s::splat(THRESHOLD);
+
+	for _ in 0..ITER_LIMIT {
+		let rr = current.real * current.real;
+		let ii = current.imag * current.imag;
+
+		let undiverged_mask = (rr + ii).simd_le(
+			threshold_mask
+		);
+		if !undiverged_mask.any() {
+			break;
+		}
+
+		count += undiverged_mask.select(
+			u64s::splat(1),
+			u64s::splat(0)
+		);
+
+		let ri = current.real * current.imag;
+
+		current.real = start.real + (rr - ii);
+		current.imag = start.imag + (ri + ri);
+	}
+	count.cast()
+}
+
+// ... a bunch more code here drives get_count() ...
+
+   Here's the same code ported to use wide:
+
+use wide::*;
+
+type i64s = i64x4;
+type f64s = f64x4;
+
+#[derive(Clone)]
+struct Complex {
+	real: f64s,
+	imag: f64s,
+}
+
+fn get_count(start: &Complex) -> i64s {
+	let mut current = start.clone();
+	let mut count = f64s::splat(0.0);
+	let threshold_mask = f64s::splat(THRESHOLD);
+
+	for _ in 0..ITER_LIMIT {
+		let rr = current.real * current.real;
+		let ii = current.imag * current.imag;
+
+		let undiverged_mask = (rr + ii).cmp_le(
+			threshold_mask
+		);
+		if !undiverged_mask.any() {
+			break;
+		}
+
+		count += undiverged_mask.blend(
+			f64s::splat(1.0),
+			f64s::splat(0.0)
+		);
+
+		let ri = current.real * current.imag;
+		current.real = start.real + (rr - ii);
+		current.imag = start.imag + (ri + ri);
+	}
+	count.round_int()
+}
+
+   The code is quite similar, with only minor differences:
+     * There's no 8-value ("lane") structure for f64 and i64, so we're limited to 4 lanes.
+     * simd_le() is called cmp_le(), and returns a f64x4 instead of a Mask<i64, 4>.
+     * select() is called blend(), and we end up having to use f64x4 there.
+
+     Note: You can see all the code, and other implementations, in the GitHub repo.
+
+The benefits of using wide, and one downside
+   The biggest benefit of using wide is that it runs on stable Rust, you don't need an unstable
+   ("nightly") version of the compiler. Because it's not stable, std::simd could change at any time, and
+   it therefore requires you to pin the compiler version to a specific nightly build. In contrast, wide
+   is just another Rust crate, with the same API stability guarantees any library has, and the ability
+   to use the latest version of Rust with no risk of breakage.
+
+   How about performance? In this particular case, the code written with wide is somewhat slower than
+   std::simd, although both are much faster than the scalar Mandelbrot implementation:
+
+   --------------------------------------------------------
+   Version  Runtime (single core)     Runtime (multi-core)
+   --------------------------------------------------------
+   Scalar    617 ms                   45 ms
+   std::simd 135 ms                   16 ms
+   wide      223 ms                   19 ms
+   --------------------------------------------------------
+
+   This doesn't necessarily mean wide will always be slower. I haven't done any profiling, or looked at
+   the generated code, to try to figure out why they differ.
+
+A lack of API docs, and how to deal with it
+   The main downside I see to using wide is the limited API documentation. For example, the following
+   APIs have no documentation as of 0.7.28:
+     * wide::f64x4::blend(), which we saw in use above. I deduced what it did because it had the
+       same signature as std::simd::f64x8::select().
+     * wide::f64x4::move_mask(). If you already know SIMD programming, you might know what this
+       does, but otherwise it's completely unclear.
+
+   That being said, many of the APIs are pretty straightforward: it's pretty clear what log10() does.
+   Some APIs are documented. And some APIs you can figure out with a bit of research.
+
+   In particular, wide is a wrapper around the safe_arch crate, which is maintained by the same author.
+   And the APIs in safe_arch do have documentation, so you should be able to map from the more abstract
+   API in wide to specific APIs in safe_arch to figure out what is going on.
+
+   For our two undocumented APIs above:
+     * safe_arch has a variety of blend variants, which give you some sense of what it does.
+     * safe_arch::move_mask_m128 gives both an explanation and an example.
+
+A reminder: you need to enable SIMD CPU features
+
+   As discussed more extensively in the original post, you need to ensure the compiler actually uses
+   SIMD extensions. This will compile your code targeting your particular CPU:
+$> RUSTFLAGS="-C target-cpu=native" cargo build --release
+
+   Again, I hope to write a follow-up article about how to release portable binaries, which will be
+   linked from here when I do.
+
+Another alternative: pulp
+   The pulp is another high level SIMD abstraction for Rust that runs on stable. It is a
+   higher-level abstraction, in that it does the batching for you (not shown in this article), as well
+   as having per-CPU-architecture runtime dispatch built-in. It's also better documented than wide! It's
+   architecturally different enough that it's harder to write a one-to-one function comparable to
+   std::simd, but it's definitely worth checking out.
+
+You can use SIMD now!
+   Using SIMD can make your code faster, in a completely different and complementary way to other
+   optimizations. Portable SIMD libraries allow you to write more abstract, portable code, so you can
+   take advantage of SIMD across CPU models and architectures. And wide and pulp are available in stable
+   Rust, so you can start using SIMD now, whether in Rust applications or in Python extensions.
+
+
+---
+

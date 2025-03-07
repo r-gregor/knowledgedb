@@ -1,0 +1,370 @@
+filename: cups_how-to-resume-printer-from-cli-multif_20150611.txt
+http://superuser.com/questions/280396/how-to-resume-cups-printer-from-command-line
+
+[25]How to resume CUPS printer from command line?
+
+   I have printer in CUPS that due to driver problems (HP 1010) from time to time goes into
+   pause.
+
+   I would like to write a shell script that will execute once per hour to resume a printer in
+   CUPS. But I have no idea after googling for couple of minutes how to resume printer from
+   shell command line.
+
+***
+   There's the cupsenable command.
+
+   cupsenable printer
+
+   starts a disabled printer (to find out the printername you can list your printers with
+   lpstat -p or lpc status).
+
+   You may have to run the command as root or through sudo. So if you have to enable the
+   printer in a shell script, you would have to add the shell to root's crontab, or edit your
+   sudoers file.
+
+***   
+   Your problem could be tackled in different ways, depending on the version of CUPS you're
+   running.
+    1. More recent versions of CUPS (version 1.2 and above) come with a builtin functionality
+       that could help here. It's called "ErrorPolicy". It's default setting is selected in
+       cupsd.conf, and determines how cupsd should handle print queues which do not behave as
+       expected. You have 3 choices to tag to each queue individually:
+ErrorPolicy abort-job
+ErrorPolicy retry-job
+ErrorPolicy retry-this-job
+ErrorPolicy stop-printer
+
+       Explanation:
+          + abort-job
+            -- Abort this job and proceed with next job in same queue
+          + retry-job
+            -- Retry this job after waiting for N seconds (where N is determined by
+            cupsd.conf's "JobRetryInterval" directive).
+          + retry-this-job
+            -- Retry current job immediately and indefinitely.
+          + stop-printer
+            -- Stop current print queue and keep the job for future printing. This is still
+            the default, unless you define otherwise as per above mentioned alternatives It
+            also was default + only possible behaviour for all queues in previous versions of
+            CUPS (the one you do want to get rid of as per your question).
+       Additionally, you can set individual ErrorPolicies to each separate print queue. This
+       setting would be noted in the printers.conf file. (Set it from a commandline with
+       lpadmin -p printername -o printer-error-policy=retry-this-job).
+    2. For older versions of CUPS I'd recommend to have a look at beh, the CUPS [46]BackEnd
+       Handler. beh is a wrapper which can be applied to any CUPS backend.
+       Assuming your print queue currently has defined a backend of
+       socket://192.168.1.111:9100, and it behaves in the way you don't like (being disabled
+       by cupsd from time to time due to network connection problems). With beh you'd
+       re-define your backend like this:
+beh:/0/20/120/socket://192.168.1.111:9100
+
+       This would retry a job 20 times in two minute intervals, and disable the queue only
+       when still not succeeding. Or you could do this:
+beh:/1/3/5/socket://192.168.1.111:9100
+
+       This retries the job 3 times with 5 second delays between the attempts. If the job
+       still fails, it is discarded, but the queue is not disabled. You want to let cupsd try
+       indefinitely to connect to the device? Good, try this:
+beh:/1/0/30/socket://192.168.1.111:9100
+
+       Try infinitely until printer comes back. Intervals between connection attempts are 30
+       seconds. The job does not get lost when the printer is turned off. You can
+       intentionally delay printing simply by switching off the printer. A good configuration
+       for desktop printers and/or home users.
+     ______________________________________________________________________________________
+
+   Overall, there is no need to mess around with bash scripts, cron jobs, lpadmin, cupsenable
+   or sudo in order to re-activate CUPS queues going down erratically.
+
+***   
+   How can we set the retry interval for more recent versions of CUPS? –  [51]Sepero Feb 4 at
+   2:10
+
+***   
+   @Sepero: Yes. For example: you can try JobRetryInterval 58 to try every 58 seconds. Other
+   possible values are 1w (1 week), 3d (3 days), 7h(7 hours) or 4m (4 minutes). –  [52]Kurt
+   Pfeifle Feb 4 at 10:50
+
+   @Sepero: All possible cupsd.conf parameters up to CUPS v1.7 are documented here:
+   [53]http://www.cups.org/documentation.php/doc-1.7/ref-cupsd-conf.html. Check the
+   annotations for each parameter on the right edge of the page: it will tell you which CUPS
+   release was the first to support it. Happy discovery of more useful params! :-) –  [54]Kurt
+
+***   
+   My printer is HP CP1215 had also an error: [55]Printer Paused - "/usr/lib/cups/backend/hp
+   failed"
+
+   After restarting both cups and avahi-daemon and identifying printer with lpstat -p and
+   enabling with cupsenable, I was able to print again. Restarting only cups and enabling did
+   not do the trick.
+
+   I also changed default policy to retry-job and finally ended up avoiding errors in future
+   with cronjob:
+* * * * * lpstat -p |grep "poissa käytöstä" && service avahi-daemon restart; service cups restart; c
+upsenable HP_Tuloostin
+
+   where poissa käytöstä is Finnish localization text for maintenance "out of order" and
+   HP_Tuloostin is name of my printer.
+
+   In my experience both default-policy and current printer policies should be configured to
+   be retry-job. Default policy is just policy which you get when you are installing a new
+   printer.
+
+***   
+   The -E option of lpadmin should do that. You can probably just create a cron job with the
+   lpadmin command.
+lpadmin [ -E ] [-U username ] [ -h server[:port] ] -p printer option(s)
+
+   Hourly cron entry:
+0 * * * * /usr/sbin/lpadmin -E -p your_printer
+
+   You can add that by running:
+sudo crontab -e
+
+***
+   This is wrong. -E in this context is a printer option, and must go AFTER the printer name,
+   otherwise you are just turning on communication encryption.
+   [64]developer.apple.com/library/mac/documentation/Darwin/Reference/… -- When specified
+   before the -d, -p, or -x options, the -E option forces encryption when connecting to the
+   server. –  [65]scragar Apr 28 '14 at 17:23
+
+***   
+ls /etc/cups/ppd/ |cut -d "." -f1 |grep -v VMware |xargs -i cupsenable {}
+
+   This lists all ppd files which represent an installed printer, cuts off the ppd extension,
+   ignores a VMware ppd included on a lot of VMware servers (if you don't need this just
+   remove |grep -v VMware), and passes the other names to xargs which unpauses all of the
+   printers.
+
+   A cron job should make this work well.
+
+***   
+   As others have already said, 'cupsenable' or 'lpadmin -E' should do the trick.
+
+   A related issue is IIRC that by default CUPS configures the printer such that if printing a
+   job fails somehow, the printer is disabled. You can change this to abort the job instead.
+
+***   
+   I updated cupsd.conf with the line:
+
+   ErrorPolicy abort-job
+
+   Then I restarted cupsd using: /etc/init.d/cups restart
+
+   But when I look at the printers.conf file, the ErrorPolicy is not updated. According to the
+   cups documentation, line "ErrorPolicy abort-job" must appear in the printer section.
+
+   I also tried with lpadmin to update the ErrorPolicy. Nothing changes the ErrorPolicy or it
+   does not make it to the printers.conf file.
+
+   What am I missing? How do I make sure that cupsd actually aborts a job on error?
+
+***   
+   lpadmin -p p-go-avtom2 -v p-go-avtom2 -E
+
+
+
+---
+http://blog.zwiegnet.com/linux-server/resume-cups-printer-command-line-centos-6/
+
+Resume CUPS Printer command line CentOS 6
+
+   In this scenario we have a printer that is “paused” in CUPS for one reason or another, and
+   we need to be able to print to it again. Login to your CUPS server
+
+   from here do a lpstat -p (shows all printers even if disabled)
+
+   in this case, the printer is “paused, or disabled”
+
+   to resume the printer issue the following command:
+
+   as you can see once we run lpstat -p again, our printer is enabled
+
+   you should also do your due diligence and restart cups
+
+   That’s it!
+
+
+
+---
+https://discussions.apple.com/thread/3864095?tstart=0
+
+How can my users unpause a printer without admin login?
+
+   Everytime a printer goes into a paused state it requires me to login as the admin for the
+   que to unpause the printer.  Any ideas?
+
+***
+   Hi Toddfromri,
+
+   Open Terminal and run the following as the root user:
+
+   dseditgroup -o edit -a everyone -t group _lpadmin
+
+   (To run as root user prepend the above with "sudo ".  You must be an administrator user in
+   order to use sudo.)
+
+***   
+   Hi!
+
+   Disable printer queue password requirements for 10.5 (works also in 10.6.8):
+
+   Mac OS X 10.5 requires you to enter an administrator's password to pause/resume a print
+   queue, where no previous version of OS X has done so. This is extremely annoying in a lab
+   setting -- if there's a paper jam or something, the queues on all the computers need to be
+   restarted by an administrator, instead of the user just clicking Resume. I haven't seen a
+   solution to this elsewhere, so here's what I came up with:
+
+   1. As root, or in a Terminal session with su privileges, edit /etc/cups/cupsd.conf.
+
+   2. Find this section:
+Limit Pause-Printer Resume-Printer Enable-Printer Disable-Printer Pause-Printer-After-Current-Job Ho
+ld-New-Jobs Release-Held-New-Jobs Deactivate-Printer Activate-Printer Restart-Printer Shutdown-Print
+er Startup-Printer Promote-Job Schedule-Job-After CUPS-Accept-Jobs CUPS-Reject-Jobs>
+     AuthType Default
+     Require user @AUTHKEY(system.print.admin) @admin @lpadmin
+     Order deny,allow
+</Limit>
+
+   3. Remove the items you don't want limited: Pause-Printer, Resume-Printer,
+   Pause-Printer-After-Current-Job, etc.
+
+   4. Save the file, quit the editor, and restart your computer.
+
+   Found here: [44]http://hints.macworld.com/article.php?story=20081107092520601
+
+   You can also do this in a webbrowser on localhost:631 (127.0.0.1:631)
+
+***   
+   I use CASPER at work to roll out software printers etc and I run a shell script via CASPER
+   and if ads the users to the lpadmin group and now they can unpause the printer without
+   intervention
+
+***   
+   Sorry for cross posting but these are old threads and Im not sure anyone is paying
+   attention to them anymore.
+
+   I have a wee mac lab and I'd really want to enable the user to pause and resume printing.
+   Looking in the .config file I see the following on lines 40, 77, 110.
+
+   <Limit Pause-Printer Resume-Printer Enable-Printer Disable-Printer
+   Pause-Printer-After-Current-Job Hold-New-Jobs Release-Held-New-Jobs Deactivate-Printer
+   Activate-Printer Restart-Printer Shutdown-Printer Startup-Printer Promote-Job
+   Schedule-Job-After Cancel-Jobs CUPS-Accept-Jobs CUPS-Reject-Jobs>
+
+       AuthType Default
+
+       Require user @AUTHKEY(system.print.operator) @admin @lpadmin
+
+       Order deny,allow
+
+   </Limit>
+
+   Im having trouble telling why its in there three times - anyone know? Can I just remove
+   Pause-Printer Resume-Printer Enable-Printer from all three instances?
+
+***   
+   You can add the user accounts to the print operators group via the Directory Utility.
+
+   go - computer - hdd - system - Library - CoreServices - Directory Utility.
+
+   Go to tab Directory Editor
+
+   Select "Groups" from drop down Viewing in node /Local/Default and authenticate as a local
+   admin.
+
+   find the Print Operator or Print Administrators groups
+
+   either find or add the attribute GroupMembers and add the users there
+
+   Have the user log in again and try.
+
+***
+   Thanks, this change via Directory Utility worked for me.   Added users to the Print
+   Administrators group can now deal with stalled or paused prints without admin password.
+   (Not for the faint of heart, that is a complex looking utility.)   Following your
+   instructions to the letter worked.
+
+   FYI: I tried deleting all the parameters in some "limit" command in the
+   /etc/cups/cupsd.conf (lines 41,73,106) as suggested elsewhere, that didn't seem to help.
+
+
+
+---
+https://groups.google.com/forum/#!topic/macenterprise/sP2CZP8c0aE
+
+Resuming CUPS printer (10.7.4) from command line/script
+
+Good afternoon, 
+
+So this morning all our lab printers ran out of toner at the same timeï¿½ "amazing" luck there.  Anyway that
+has cause some of our Cups print queues to pause themselves.  I've been looking around is there a command
+that will resume a cups printer (or ideally) all printers that I could build into my log-in script?  Thanks! 
+
+***
+cupsenable <printername> 
+
+Should do what you want. 
+
+***
+Two approaches we use, use at your own peril and do lots of testing: 
+
+1) my old one, dished manually by ARD whenever there was a paused printer, 
+ALL. THE. TIME: 
+--- 
+lpstat -p | grep disabled | awk '{print $2}' | while read printer 
+do 
+lpadmin -p $printer -E 
+done 
+--- 
+finds disabled printers and re-enables. no intelligence to see if they 
+should be enabled, etc. 
+
+2) give everyone 'print operator' rights, allows users to pause and resume, 
+edit printer settings, and delete jobs sitting in the print queue. works 
+fine for us as less people mess with print settings than they do somehow 
+get printers paused. also our printing goes to a print billing system, so 
+as soon as you print, it takes the job away, removing anyones right to 
+delete anyone elses job on the local workstation: 
+
+--- 
+#!/bin/bash 
+
+# This script modifies the /etc/authorization script to allow all users to 
+be print operators. 
+# I.E. the ability to pause, resume, adjust drivers and settings, and 
+delete paused print jobs. 
+# Consider if all users of your target mac need this privilige, as there's 
+potential cause for 
+# shenanigans. 
+
+# Also important to make sure you have an /etc/authorization backup before 
+proceeding. 
+# /bin/cp /etc/authorization{,.backup} 
+
+#+ Tools 
+plb=/usr/libexec/PlistBuddy 
+chmod=/bin/chmod 
+chown=/usr/sbin/chown 
+
+#+ Allow print operator rights 
+"$plb" -c "set rights:system.print.operator:class allow" 
+"/etc/authorization" 
+"$plb" -c "delete rights:system.print.operator:group" "/etc/authorization" 
+"$plb" -c "delete rights:system.print.operator:shared" "/etc/authorization" 
+
+#+ Permissions 
+"$chown" root:wheel "/etc/authorization" 
+"$chmod" 644 "/etc/authorization" 
+
+exit 0 
+#EOF 
+--- 
+
+^^ please note you need to do a backup yourself of /etc/authorization, and 
+i haven't bothered to write the commands to 'undo'. if i were to encounter 
+issues, i'd simply revert the backup. the hashed cp command will do a 
+backup, but i don't do it myself that way. Some of this pinched from Chris 
+Gerke's blog (google him, he writes good stuff) 
+
+Hope these help. 

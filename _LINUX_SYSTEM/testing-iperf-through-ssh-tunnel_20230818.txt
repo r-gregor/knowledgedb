@@ -1,0 +1,178 @@
+filename: testing-iperf-through-ssh-tunnel_20230818.txt
+https://www.jeffgeerling.com/blog/2023/testing-iperf-through-ssh-tunnel
+
+Testing iperf through an SSH tunnel
+August 16, 2023
+
+   I recently had a server with some bandwidth limitations (tested using scp and rsync -P), where I was
+   wondering if the problem was the data being transferred, or the server's link speed.
+
+   The simplest way to debug and verify TCP performance is to install iperf3 and run an iperf speed test
+   between the server and my computer.
+
+   On the server, you run iperf3 -s, and on my computer, iperf3 -c [server ip].
+
+   But iperf3 requires port 5201 (by default) to be open on the server, and in many cases-especially if
+   the server is inside a restricted environment and only accessible through SSH (e.g. through a bastion
+   or limited to SSH connectivity only)-you won't be able to get that port accessible.
+
+   So in my case, I wanted to run iperf through an SSH tunnel. This isn't ideal, because you're testing
+   the TCP performance through an encrypted connection. But in this case both the server and my computer
+   are extremely new/fast, so I'm not too worried about the overhead lost to the connection encryption,
+   and my main goal was to get a performance baseline.
+
+   Without further ado, here's how I set up the SSH-tunneled iperf3 run:
+
+   On my machine, I set up a tunnel for port 7001:
+$> ssh -p [ssh port on server] -L7001:localhost:7001 jeffgeerling@[server ip]
+
+   Then, SSH'ed into the server, I started an instance of iperf3 listening on port 7001:
+$> iperf3 -s -p 7001
+
+   Finally, on my machine, I ran some iperf3 tests:
+$> iperf3 -c localhost -p 7001
+Connecting to host localhost, port 7001
+[  7] local ::1 port [port here] connected to ::1 port 7001
+[ ID] Interval           Transfer     Bitrate
+[  7]   0.00-1.00   sec  23.9 MBytes   200 Mbits/sec
+[  7]   1.00-2.00   sec  20.9 MBytes   176 Mbits/sec
+
+   [**1]This answer on the Unix stack exchange was helpful in writing this post, and it also goes one
+   level deeper showing how to tunnel through a bastion server instead of just directly through SSH to
+   the server.
+
+
+
+---
+[**1]
+https://unix.stackexchange.com/questions/291360/running-iperf-over-ssh/303594#303594
+
+iperf allows the user to specify the ports in three places: one where the server listens, one where the
+client connects, and one where the client spawns a mini server for the -d/--dualtest option. We need all
+three for this.
+
+While it might be possible to do it with fewer, I found it was easier to specify all the ports so I could
+better keep track of them. In this setup, I will assume a setup that looks something like this:
+
+-----------            -------          -------
+| Control |  SSH #1,2  | Box |  SSH #3  | Box |
+|   Box   | ---------> | #1  | -------> | #2  |
+-----------            -------          -------
+
+The "control box" might also have direct access to SSH on box #2, but we don't need it. For this, Box #2
+will be the iperf server listening on 7001 and box 2 will be a client listening back on port 7002. These can
+be any accessible ports, I chose those two at random.
+
+First, connect to box #1. Next, you need to connect through to Box #2. In this nested session, you will need
+to create two port tunnels: one forward and one reverse. The ssh options that do this are -L7001:localhost:7001
+for the forward and -R7002:localhost:7002 for the reverse. Because iperf expects the ports to be located on
+a remote host, each tunnel has to be symmetrical (the same port number at both ends of the tunnel). Then,
+start the iperf server listening at port 7001 (iperf -s -p 7001).
+
+It might look something like this:
+
+me@control$> ssh box1.example.com
+box1$> ssh -L7001:localhost:7001 -R7002:localhost:7002 box2.example.com
+box2$> iperf -s -p 7001
+------------------------------------------------------------
+Server listening on TCP port 7001
+TCP window size: 85.3 KByte (default)
+------------------------------------------------------------
+
+After that's started, open a second session to Box #1. Here, start an iperf client to localhost at port 7001,
+with the listen-back port on 7002 (the default listen-back port is 5001 like the server). This means that
+the client will attempt to connect with an iperf server on localhost:7001, which SSH grabs and sends off to
+box #2. It then starts a "mini" iperf server listening on 7002. Once the connection from the client to the
+server is initiated, the iperf client tells the iperf server to connect back on port 7002. The server notes
+that the inbound connection is coming from 127.0.0.1 (or ::1 depending on the configuration), so it starts a
+"mini" client that will connect to 127.0.0.1:7002. Because we also have the reverse forward in place, ssh
+snaps up this connection too and sends it off to box 1.
+
+Your second session might look something like this:
+
+(side note for this example: I set the time to 30s for a different test; the default will suffice)
+
+me@control$> ssh box1.example.com
+box1$> iperf -c localhost -p 7001 -L 7002 -d -t 30
+------------------------------------------------------------
+Server listening on TCP port 7002
+TCP window size: 85.3 KByte (default)
+------------------------------------------------------------
+------------------------------------------------------------
+Client connecting to localhost, TCP port 7001
+TCP window size: 4.00 MByte (default)
+------------------------------------------------------------
+[  3] local 127.0.0.1 port 37014 connected with 127.0.0.1 port 7001
+[  5] local 127.0.0.1 port 7002 connected with 127.0.0.1 port 51806
+[ ID] Interval       Transfer     Bandwidth
+[  3]  0.0-30.0 sec  1.26 GBytes   361 Mbits/sec
+[  5]  0.0-30.2 sec  1.23 GBytes   349 Mbits/sec
+
+When the client is finished testing, your server window might look something like this:
+
+...
+box2$> iperf -s -p 7001
+------------------------------------------------------------
+Server listening on TCP port 7001
+TCP window size: 85.3 KByte (default)
+------------------------------------------------------------
+[  4] local 127.0.0.1 port 7001 connected with 127.0.0.1 port 41997
+------------------------------------------------------------
+Client connecting to 127.0.0.1, TCP port 7002
+TCP window size: 4.00 MByte (default)
+------------------------------------------------------------
+[  6] local 127.0.0.1 port 46864 connected with 127.0.0.1 port 7002
+[ ID] Interval       Transfer     Bandwidth
+[  6]  0.0-30.0 sec  1.23 GBytes   351 Mbits/sec
+[  4]  0.0-30.2 sec  1.26 GBytes   359 Mbits/sec
+
+WARNING: SSH WILL distort the perceived connection speeds. Running iperf without SSH between the same two
+boxes yielded this (the boxes are in the same roles):
+
+Client:
+
+box1$> iperf -c box2.example.com -d
+------------------------------------------------------------
+Server listening on TCP port 5001
+TCP window size: 85.3 KByte (default)
+------------------------------------------------------------
+------------------------------------------------------------
+Client connecting to box2.example.com, TCP port 5001
+TCP window size:  306 KByte (default)
+------------------------------------------------------------
+[  3] local 172.20.0.1 port 45722 connected with 172.20.0.2 port 5001
+[  5] local 172.20.0.1 port 5001 connected with 172.20.0.2 port 60909
+[ ID] Interval       Transfer     Bandwidth
+[  3]  0.0-10.0 sec  1.01 GBytes   866 Mbits/sec
+[  5]  0.0-10.0 sec   823 MBytes   689 Mbits/sec
+
+Server:
+
+box2$> iperf -s
+------------------------------------------------------------
+Server listening on TCP port 5001
+TCP window size: 85.3 KByte (default)
+------------------------------------------------------------
+[  4] local 172.20.0.2 port 5001 connected with 172.20.0.1 port 45722
+------------------------------------------------------------
+Client connecting to 172.20.0.1, TCP port 5001
+TCP window size:  306 KByte (default)
+------------------------------------------------------------
+[  6] local 172.20.0.2 port 60909 connected with 172.20.0.1 port 5001
+[ ID] Interval       Transfer     Bandwidth
+[  6]  0.0-10.0 sec   823 MBytes   690 Mbits/sec
+[  4]  0.0-10.0 sec  1.01 GBytes   864 Mbits/sec
+
+I tried messing with the TCP window settings, the length of the buffer, TCP_NODELAY, and using multiple SSH
+sessions, but the overhead was still present. I also tried HPN-SSH, but I actually got better performance
+over regular SSH, so I think there's a setting I missed when I was setting up HPN. Running the iperf
+connections in simplex rather than duplex (option -r/--tradeoff (Do a bidirectional test individually)) got
+results closer to the link speed, but still with significant SSH overhead.
+
+That all being said, if you need to create bridge between these two machines and measure the capacity of
+that bridge, this solution is perfect. If you are trying to measure the raw throughput between these machines,
+the numbers these tests provide will be less (and probably much less) than the link speed.
+
+
+---
+

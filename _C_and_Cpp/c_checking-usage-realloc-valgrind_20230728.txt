@@ -1,0 +1,260 @@
+filename: c_checking-usage-realloc-valgrind_20230728.txt
+https://developers.redhat.com/articles/2023/07/26/checking-usage-realloc-valgrind#size_zero
+
+Checking usage of realloc with Valgrind
+July 26, 2023
+
+   One of the C dynamic memory allocation functions is realloc. Given a pointer, realloc will resize
+   the memory block it points to. This sounds like a simple and useful mechanism to do memory
+   management. But realloc has various gotchas that Valgrind Memcheck can check for to ensure you
+   use the function correctly. Memory blocks should exist and have not yet been freed, blocks can be
+   moved when resized, on failure to resize the memory block might leak, and what happens when a block
+   is reduced to zero size might be undefined.
+
+Introducing realloc
+   The realloc function is defined as void *realloc(void *ptr, size_t size);. Given a pointer to an
+   existing memory block, it will try to resize that memory block to the given size, making the block
+   larger or smaller. The current memory content of the block will be kept, but if the block increases
+   in size, then the extra content will have undefined values (there is no calloc variant of realloc
+   that would zero the extra content). If the block can be increased in place, then the given pointer
+   will be returned. Otherwise, a new memory block will be allocated, the content moved, and the given
+   pointer will be freed. On error, NULL is returned, and the existing pointer will be kept valid (this
+   can result in subtle memory leaks; see below).
+
+The memory block to resize should be valid
+   To resize a memory block, it should exist. That means it must have been allocated before and not yet
+   freed. The exception is if the given pointer is NULL; in that case, realloc (NULL, size) will
+   allocate a new block as if calling malloc (size). Tracking memory blocks is precisely what Valgrind
+   Memcheck does, so it will catch such issues.
+#include <stdlib.h>
+
+int main () {
+	char *p, *q, *r;
+	p = malloc (127);
+	q = realloc (p + 64, 128); /* address inside a block. */
+	r = malloc (16);
+	free (r);
+	q = realloc (r, 32); /* pointer already freed. */
+}
+
+$> gcc -g -o badaddr badaddr.c
+$> valgrind -q ./badaddr
+==14094== Invalid free() / delete / delete[] / realloc()
+==14094==    at 0x4846A40: realloc (vg_replace_malloc.c:1649)
+==14094==    by 0x401170: main (badaddr.c:9)
+==14094==  Address 0x4a49080 is 64 bytes inside a block of size 127 alloc'd
+==14094==    at 0x484182F: malloc (vg_replace_malloc.c:431)
+==14094==    by 0x401157: main (badaddr.c:8)
+==14094==
+==14094== Invalid free() / delete / delete[] / realloc()
+==14094==    at 0x4846A40: realloc (vg_replace_malloc.c:1649)
+==14094==    by 0x40119F: main (badaddr.c:12)
+==14094==  Address 0x4a49100 is 0 bytes inside a block of size 16 free'd
+==14094==    at 0x48442AC: free (vg_replace_malloc.c:974)
+==14094==    by 0x40118E: main (badaddr.c:11)
+==14094==  Block was alloc'd at
+==14094==    at 0x484182F: malloc (vg_replace_malloc.c:431)
+==14094==    by 0x40117E: main (badaddr.c:10)
+
+   Note that GCC since version 11 can also catch some realloc issues at compile time with the
+   -Wfree-nonheap-object warning.
+
+The memory block can move
+   To resize the memory block, it might have to be moved. This might happen both when expanding or when
+   shrinking the memory block. The memory allocator might have different areas for different memory
+   block chunk sizes. But the resized memory block doesn't have to move, as in this case on Fedora 38
+   with glibc 2.37 on x86_64:
+#include <stdlib.h>
+#include <stdio.h>
+
+struct frob {
+	unsigned char key;
+	unsigned char value;
+};
+
+int main () {
+	struct frob *frobs;
+	frobs = malloc (5 * sizeof (struct frob));
+	for (int i = 0; i < 5; i++) {
+		frobs[i].key = i;
+		frobs[i].value = i + 40;
+	}
+	struct frob *search = &frobs[2]; /* Should be redone after realloc */
+	printf ("frobs @%p, search value: %d\n", frobs, search->value);
+
+	frobs = realloc (frobs, 6 * sizeof (struct frob));
+	printf ("frobs @%p, search value: %d\n", frobs, search->value);
+
+	frobs = realloc (frobs, 4 * sizeof (struct frob));
+	printf ("frobs @%p, search value: %d\n", frobs, search->value);
+
+	free (frobs);
+}
+
+$> gcc -g -o search search.c
+$> ./search
+frobs @0x1a092a0, search value: 42
+frobs @0x1a092a0, search value: 42
+frobs @0x1a092a0, search value: 42
+
+   In the above example, the memory block wasn't moved when extending or when truncating the memory
+   block. And even if the memory block moves, the old location might still be addressable and even have
+   the old values in it. This means that in some cases dereferencing pointers into the old (now freed
+   and invalid) memory block might still produce the original values. Making it look like your code
+   works correctly.
+
+   Valgrind Memcheck will move the memory block on every realloc call and mark the old block as freed
+   and unaddressable. So it is immediately clear when the code dereferences a pointer inside the
+   original memory block. It won't crash the program, but it will produce an invalid read or write
+   error.
+$> valgrind -q ./search
+frobs @0x4a47040, search value: 42
+==15139== Invalid read of size 1
+==15139==    at 0x4011F5: main (search.c:23)
+==15139==  Address 0x4a47045 is 5 bytes inside a block of size 10 free'd
+==15139==    at 0x4846A40: realloc (vg_replace_malloc.c:1649)
+==15139==    by 0x4011EC: main (search.c:22)
+==15139==  Block was alloc'd at
+==15139==    at 0x484182F: malloc (vg_replace_malloc.c:431)
+==15139==    by 0x401167: main (search.c:13)
+==15139==
+frobs @0x4a474d0, search value: 42
+==15139== Invalid read of size 1
+==15139==    at 0x40122B: main (search.c:26)
+==15139==  Address 0x4a47045 is 5 bytes inside a block of size 10 free'd
+==15139==    at 0x4846A40: realloc (vg_replace_malloc.c:1649)
+==15139==    by 0x4011EC: main (search.c:22)
+==15139==  Block was alloc'd at
+==15139==    at 0x484182F: malloc (vg_replace_malloc.c:431)
+==15139==    by 0x401167: main (search.c:13)
+==15139==
+frobs @0x4a47520, search value: 42
+
+   You can fix the above program by assigning the search pointer a new value after each realloc call, or
+   by making the search variable an index into the memory block that frobs points to.
+
+   It might be tempting to check whether the new pointer returned by realloc is different from the
+   pointer given to it, or use the difference between the pointers to adjust other values. But a call to
+   realloc makes the original pointer indeterminate and uses of indeterminate pointers are undefined.
+   Valgrind Memcheck works too low level to detect whether a value is a (indeterminate) pointer, so it
+   cannot warn about such uses.
+
+   But in some cases, GCC, since version 12, will be able to flag usage of pointers into blocks that
+   have been realloced when using the -Wuse-after-free=2 warning and might catch usage of an
+   indeterminate pointer after a realloc call with -Wuse-after-free=3.
+
+Returns NULL on failure, but doesn't free
+   In the previous example, we didn't check for failure. If the realloc call fails, it returns NULL. But
+   the original pointer is kept valid. So it is easy to get a memory leak if you assign the return value
+   of realloc to the original memory block pointer. Even when you check for failure.
+
+#include <stdlib.h>
+#include <stdint.h>
+
+int main () {
+	char *p = malloc (128);
+	if (p == NULL)
+		return -1;
+
+	p = realloc (p, PTRDIFF_MAX); /* So big it will certainly fail. */
+	if (p == NULL)
+		return -1;
+
+	free (p);
+}
+
+$> gcc -g -o fail fail.c
+$> valgrind -q --leak-check=full ./fail
+==15619== 128 bytes in 1 blocks are definitely lost in loss record 1 of 1
+==15619==    at 0x484182F: malloc (vg_replace_malloc.c:431)
+==15619==    by 0x401157: main (fail.c:6)
+
+   The correct way to ensure the memory block doesn't leak on realloc failure is to assign the result to
+   a temporary variable and check that. Then you can safely free the original memory block.
+
+char *q = realloc (p, PTRDIFF_MAX);
+if (q == NULL) {
+	free (p);
+	return -1;
+}
+p = q;
+
+   Note that this kind of leak is hard to detect at runtime since realloc doesn't fail often. In some
+   situations GCC since version 12 can detect such realloc leaks at compile time when using
+   -fanalyzer with -Wanalyzer-malloc-leak.
+
+size zero
+   What happens when realloc is called with a zero size? Earlier standards were not clear on the exact
+   semantics. Specifically, it wasn't clear whether an implementation should return a NULL pointer or a
+   pointer to a memory block of size zero (so the returned pointer value is valid and unique but cannot
+   be used to store anything in it). And if the implementation returns NULL, then it isn't clear whether
+   the given pointer should have been freed (since normally NULL signifies failure and the original
+   pointer should be kept valid on failure).
+
+   On systems using glibc, like Fedora and Red Hat Enterprise Linux (RHEL), calling realloc(ptr, 0)
+   will return NULL and free ptr, unless ptr itself is NULL, in which case it will return a unique
+   pointer to a zero-sized block of memory (or return NULL and set errno to ENOMEM if that fails).
+
+   But relying on that implementation is not portable to other implementations. And although earlier C
+   standards said calling realloc with size zero was implementation defined, the C23 standard says that
+   if the size argument to realloc is zero then that is undefined behavior (which effectively means it
+   is a bug that can cause anything to happen).
+
+   Since version 3.21.0, Valgrind has had two options to help you with this. For Memcheck, there is
+   --show-realloc-size-zero=no|yes, which defaults to yes because, in most cases, this is a mistake.
+#include <stdio.h>
+#include <stdlib.h>
+
+int main () {
+	char *p = malloc (16);
+	char *q = realloc (p, 0);
+	printf ("q: %p\n", q);
+}
+
+$> gcc -g -o zero zero.c
+$> valgrind -q ./zero
+==15911== realloc() with size 0
+==15911==    at 0x4846A40: realloc (vg_replace_malloc.c:1649)
+==15911==    by 0x40116C: main (zero.c:7)
+==15911==  Address 0x4a47040 is 0 bytes inside a block of size 16 alloc'd
+==15911==    at 0x484182F: malloc (vg_replace_malloc.c:431)
+==15911==    by 0x401157: main (zero.c:6)
+q: (nil)
+
+   But if you are convinced you are using realloc with size zero correctly, then you can use
+   --show-realloc-size-zero=no.
+
+   There is also --realloc-zero-bytes-frees=yes|no, which works with all Valgrind tools. It defaults to
+   yes on Fedora and RHEL, which uses glibc, but might default to no on other systems.
+
+   To test how your program works against an implementation where realloc with size zero doesn't return
+   NULL but returns a pointer to a zero-sized block, use --realloc-zero-bytes-frees=no.
+$> valgrind -q --show-realloc-size-zero=no --realloc-zero-bytes-frees=no \
+           --leak-check=full ./zero
+q: 0x4a47090
+==15919== 1 bytes in 1 blocks are definitely lost in loss record 1 of 1
+==15919==    at 0x4846A40: realloc (vg_replace_malloc.c:1649)
+==15919==    by 0x40116C: main (zero.c:7)
+==15919==
+
+   Note that the memory block returned by realloc leaks. It is counted as a one-byte leak because the
+   address itself is unique (even though the memory block is for zero bytes). Here you can see that the
+   best thing to do is always call free on the result of realloc to ensure not to leak memory (since
+   calling free on NULL is okay and doesn't do anything). Even better is to never call realloc with size
+   zero but to call free explicitly (and clear any pointers to the memory block) if it isn't needed
+   anymore.
+
+Conclusion
+   realloc, together with malloc and free, is a really powerful way to manage dynamically sized memory
+   blocks. But it has a couple of tricky corner cases to watch out for. Valgrind Memcheck will help you
+   find various issues like using it with bad arguments, pointers that might have become invalid, and
+   leaks of blocks that have been resized. Also, don't forget to use GCC with -fanalyzer,
+   -Wuse-after-free, and -Wfree-nonheap-object to catch some of these issues early.
+
+   Finally, there is the almost philosophical question of what it means to have a zero-sized memory
+   block. Since different implementations of (and standards describing) realloc answer that question
+   differently, it is best to avoid ever calling realloc with size zero.
+
+
+---
+

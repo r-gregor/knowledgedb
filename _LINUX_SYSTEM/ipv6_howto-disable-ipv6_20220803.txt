@@ -1,0 +1,466 @@
+filename: ipv6_howto-disable-ipv6_20220803.txt
+https://opensource.com/article/22/8/disable-ipv6
+
+August 1, 2022
+
+   IPv6 is a good thing for the Internet in general, but I find it unnecessarily complex for use in most
+   home and small- to medium-size businesses. Like many others, I continue to use private IPv4 address
+   ranges for my own internal networks and those for which I have some level of responsibility. My ISP
+   only provides IPv4 addresses anyway, so it makes no sense to use IPv6 internally when all external
+   packets are IPv4. Besides, IPv4 is much simpler, and one of my Linux Philosophy tenets is "Find the
+   Simplicity."
+
+   As a result, I disabled IPv6 on all my hosts. It seemed easy-at first. Here is how I did it.
+
+Testing for IPv6
+   My hosts run the Fedora 36 Xfce spin along with many packages and configuration changes I
+   perform after the initial default installation. All of my hosts have the most recent updates
+   installed. One of those hosts is my firewall/router, which is the first host on which I disabled
+   IPv6.
+
+   You can check to see whether IPv6 is currently active on your Linux host. The nmcli command results
+   below are from my router/firewall host. All the active NICs have both IPv4 and IPv6 addresses.
+
+$> nmcli
+   enp4s0: connected to enp4s0
+      (***)"Realtek RTL8111/8168/8411"(***)
+           ethernet (r8169), 84:16:F9:04:44:03, hw, mtu 1500
+           ip4 default
+           inet4 45.20.209.41/29
+           route4 45.20.209.40/29 metric 102
+           route4 default via 45.20.209.46 metric 102
+           inet6 2600:1700:7c0:860:8616:f9ff:fe04:4403/64
+           inet6 fe80::8616:f9ff:fe04:4403/64
+           route6 fe80::/64 metric 256
+           route6 default via fe80::a698:13ff:fee5:fa10 metric 1024
+           route6 2600:1700:7c0:860::/64 metric 256
+   enp1s0: connected to enp1s0
+      (***)"Realtek RTL8111/8168/8411"(***)
+           ethernet (r8169), 84:16:F9:03:E9:89, hw, mtu 1500
+           inet4 192.168.10.1/24
+           route4 192.168.10.0/24 metric 101
+           inet6 fe80::8616:f9ff:fe03:e989/64
+           route6 fe80::/64 metric 256
+   enp2s0: connected to enp2s0
+      (***)"Realtek RTL8111/8168/8411"(***)
+           ethernet (r8169), 84:16:F9:03:FD:85, hw, mtu 1500
+           inet4 192.168.0.254/24
+           route4 192.168.0.0/24 metric 100
+           inet6 fe80::8616:f9ff:fe03:fd85/64
+           route6 fe80::/64 metric 256
+   lo: unmanaged
+           "lo"
+           loopback (unknown), 00:00:00:00:00:00, sw, mtu 65536
+   DNS configuration:
+           servers: 192.168.0.52 8.8.8.8 8.8.4.4
+           interface: enp4s0
+           servers: 192.168.0.52 8.8.8.8
+           interface: enp2s0
+           servers: 192.168.0.52 8.8.8.8
+           interface: enp1s0
+
+Use GRUB to configure the kernel
+   GRUB-the Grand Unified Bootloader-loads the kernel into memory and sets many kernel parameters during
+   the Linux boot process. The current bootloader is actually GRUB2, the second major version of GRUB,
+   but it is easier just to call it GRUB.
+
+   The GRUB configuration file /boot/grub2/grub.cfg provides the startup configuration for the kernel,
+   but you should not modify it directly. The location of the UEFI GRUB configuration file may vary
+   depending on your distribution. However, its location is irrelevant for this purpose. Linux startup
+   kernel configuration can be easily modified using the /etc/default/grub configuration file, which
+   configures the kernel properly regardless of whether it boots using UEFI.
+
+   There are two command line arguments to add to the /etc/default/grub file to configure the Linux
+   kernel to disable IPv6. The first, GRUB_CMDLINE_LINUX="ipv6.disable=1" adds "ipv6.disable=1" to the
+   kernel command line.
+
+   The second, GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1 quiet splash" is a little more complicated.
+   When you set GRUB_DISABLE_RECOVERY to true, one menu entry will be generated for each Linux kernel.
+   When set to false, two menu entries are created for each kernel: One default entry and one entry for
+   recovery mode. This option lists command-line arguments to be added only to the default menu entry,
+   after those listed in GRUB_CMDLINE_LINUX.
+
+   The other two arguments define how the kernel startup looks on the display. The "quiet" argument
+   disables most of the informational messages emitted by the kernel during its startup and
+   self-configuration. The "splash" argument causes the splash screen to be displayed during kernel
+   startup. The splash screen can be a graphic such as a logo or an animation.
+
+   My /etc/default/grub file looks like this after making those additions:
+
+   GRUB_TIMEOUT=5
+   GRUB_DISTRIBUTOR="$(sed 's, release .*$,,g' /etc/system-release)"
+   GRUB_DEFAULT=saved
+   GRUB_DISABLE_SUBMENU=true
+   GRUB_TERMINAL_OUTPUT="console"
+   GRUB_CMDLINE_LINUX="rhgb quiet"
+   GRUB_DISABLE_RECOVERY="true"
+   GRUB_ENABLE_BLSCFG=true
+   GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1 quiet splash"
+   GRUB_CMDLINE_LINUX="ipv6.disable=1"
+
+   After making these (or any) additions to the /etc/default/grub file, run the grub2-mkconfig command,
+   which adds these arguments to the kernel command line in the grub.cfg configuration file for each
+   installed kernel. These changes do not take effect immediately. You must reboot the hosts for IPv6 to
+   be disabled.
+
+Automate this solution
+   Automating these tasks using Ansible is straightforward. Just create a playbook with the following
+   settings and run it against the list of hosts that need this change. The first two tasks in this
+   playbook append the desired configuration:
+
+   - name: Play 1 - Modify /etc/default/grub to configure kernel boot parameters.
+     hosts: f36vm
+     tasks:
+       - name: Append GRUB_CMDLINE_LINUX_DEFAULT variable to /etc/default/grub
+         lineinfile:
+           path: /etc/default/grub
+           insertafter: EOF
+     (***) line: 'GRUB_CMDLINE_LINUX_DEFAULT="ipv6.disable=1 quiet splash"' (***)
+       - name: Append GRUB_CMDLINE_LINUX variable to /etc/default/grub
+         lineinfile:
+           path: /etc/default/grub
+           insertafter: EOF
+     (***) line: 'GRUB_CMDLINE_LINUX="ipv6.disable=1"' (***)
+       - name: Run grub2-mkconfig to update /boot/grub/grub.cfg
+         command:
+           cmd: grub2-mkconfig
+
+   Once again, you must reboot the hosts for IPv6 to be disabled. You can add the reboot to the playbook
+   so that the changes take effect immediately, or wait until the next time the hosts need to be
+   rebooted for other reasons.
+
+The other solution
+   I created another solution; it is just not the best and most elegant option. However, I want to show
+   my thought process because there is some information here that might be useful.
+
+Add a local file to sysctl.d
+   You can use the /etc/sysctl file to add the configuration settings necessary, but it is much better
+   to add a local file to the /etc/sysctl.d directory so that it won't be overwritten during updates or
+   upgrades. Note that there is already a file named 99-sysctl.conf. You can use that file to set the
+   configuration, but I created a file named 99-local-network.conf with the following content for this
+   purpose. That way, if the 99-sysctl.conf changes with future updates or upgrades, my file will remain
+   untouched. This is not an executable file; it is a configuration file.
+
+   ################################################################################
+   # Local NetworkManager settings - Specifically to disable IPV6                 #
+   ################################################################################
+   #
+   net.ipv6.conf.all.disable_ipv6 = 1
+   net.ipv6.conf.default.disable_ipv6 = 1
+
+   Note: Like many configuration files in configuration directories like this one, the files contained
+   in the directory are read in natural sorted order. That means the value for a variable declared in a
+   file with a later sort order will override an earlier declaration for the same variable.
+
+   A reboot is usually used to cause these changes to take effect, but I later learned how to do so
+   without a reboot. I rebooted my system and reran the nmcli command with the following results:
+
+   [root@wally ~]# nmcli
+   enp4s0: connected to enp4s0
+      (***)"Realtek RTL8111/8168/8411"(***)
+           ethernet (r8169), 84:16:F9:04:44:03, hw, mtu 1500
+           ip4 default
+           inet4 45.20.209.41/29
+           route4 45.20.209.40/29 metric 101
+           route4 default via 45.20.209.46 metric 101
+   enp1s0: connected to enp1s0
+      (***)"Realtek RTL8111/8168/8411"(***)
+           ethernet (r8169), 84:16:F9:03:E9:89, hw, mtu 1500
+           inet4 192.168.10.1/24
+           route4 192.168.10.0/24 metric 102
+   enp2s0: connected to enp2s0
+      (***)"Realtek RTL8111/8168/8411"(***)
+           ethernet (r8169), 84:16:F9:03:FD:85, hw, mtu 1500
+           inet4 192.168.0.254/24
+           route4 192.168.0.0/24 metric 100
+   lo: unmanaged
+     (***) "lo" (***)
+           loopback (unknown), 00:00:00:00:00:00, sw, mtu 65536
+   DNS configuration:
+           servers: 192.168.0.52 8.8.8.8 8.8.4.4
+           interface: enp4s0
+           servers: 192.168.0.52 8.8.8.8
+           interface: enp2s0
+           servers: 192.168.0.52 8.8.8.8
+           interface: enp1s0
+
+   This shows that my simple fix worked.
+
+Except...
+   Except that solution only works on one of my twelve Linux computers. After writing the above part of
+   this article, I started installing this fix on all of my other hosts. I had only done one system when
+   I realized that this approach did not always work. I then tried it on one of my VMs and it also
+   failed there. As best I can tell, it only works on one host-the one I use as my firewall and router.
+
+   After some additional research on a VM, I discovered that these settings could also be issued as
+   commands using sysctl so that the system would not need a reboot. I could enter those commands from
+   the command line to deactivate IPv6. Here's an example:
+
+   [root@f36vm ~]# sysctl -w net.ipv6.conf.all.disable_ipv6=1
+   net.ipv6.conf.all.disable_ipv6 = 1
+   [root@f36vm ~]# sysctl -w net.ipv6.conf.default.disable_ipv6=1
+   net.ipv6.conf.default.disable_ipv6 = 1
+   [root@f36vm ~]# nmcli
+   enp0s3: connected to Wired connection 1
+     (***) "Intel 82540EM" (***)
+           ethernet (e1000), 08:00:27:07:CD:FE, hw, mtu 1500
+           ip4 default
+           inet4 192.168.0.136/24
+           route4 192.168.0.0/24 metric 100
+           route4 default via 192.168.0.254 metric 100
+   lo: unmanaged
+   <SNIP>
+
+   It took some time to research this and determine that the file I created was not being read-or at
+   least not processed-by sysctl during the Linux startup. Or, if it was, it was being ignored or the
+   settings were being overwritten later by the same variables with different values. After this, I knew
+   that there was no deeper problem preventing it.
+
+About sysctl
+   At this point, I looked into the sysctl command in more detail. The purpose of the sysctl command is
+   to set kernel parameters in the /proc directory. The root user can use it to set individual
+   parameters from the command line. In addition-and this is the key to my solution-you can use it to
+   view and set all of the kernel parameters stored in several locations, including /etc/sysctl.conf and
+   in files located in /etc/sysctl.d. The sysctl command is used during Linux startup to set the kernel
+   parameters.
+
+   I repeat: The system and the sysadmin can use the sysctl command to view and set kernel variables
+   while the system is up and running and without a reboot. This command and the power it offers the
+   Linux sysadmin is one of the most significant differences between Linux and other operating systems.
+   It gives us a tool to do things impossible on other OSs.
+
+   I tested this by rebooting the VM and running the following command to set the variables in all
+   locations listed on the sysctl man page:
+
+   [root@f36vm ~]# sysctl --system
+   * Applying /usr/lib/sysctl.d/10-default-yama-scope.conf ...
+   kernel.yama.ptrace_scope = 0
+   * Applying /usr/lib/sysctl.d/50-coredump.conf ...
+   kernel.core_pattern = |/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h
+   kernel.core_pipe_limit = 16
+   fs.suid_dumpable = 2
+   * Applying /usr/lib/sysctl.d/50-default.conf ...
+   kernel.sysrq = 16
+   kernel.core_uses_pid = 1
+   net.ipv4.conf.default.rp_filter = 2
+(***) sysctl: setting key "net.ipv4.conf.all.rp_filter": Invalid argument (***)
+   net.ipv4.conf.default.accept_source_route = 0
+(***) sysctl: setting key "net.ipv4.conf.all.accept_source_route": Invalid argument (***)
+   net.ipv4.conf.default.promote_secondaries = 1
+(***) sysctl: setting key "net.ipv4.conf.all.promote_secondaries": Invalid argument (***)
+   net.ipv4.ping_group_range = 0 2147483647
+   net.core.default_qdisc = fq_codel
+   fs.protected_hardlinks = 1
+   fs.protected_symlinks = 1
+   fs.protected_regular = 1
+   fs.protected_fifos = 1
+   * Applying /usr/lib/sysctl.d/50-libkcapi-optmem_max.conf ...
+   net.core.optmem_max = 81920
+   * Applying /usr/lib/sysctl.d/50-libreswan.conf ...
+   net.ipv6.conf.default.accept_redirects = 0
+   net.ipv6.conf.all.accept_redirects = 0
+   net.ipv4.conf.default.send_redirects = 0
+   net.ipv4.conf.default.accept_redirects = 0
+   net.ipv4.conf.all.send_redirects = 0
+   net.ipv4.conf.all.accept_redirects = 0
+   * Applying /usr/lib/sysctl.d/50-pid-max.conf ...
+   kernel.pid_max = 4194304
+   * Applying /etc/sysctl.d/99-local-network.conf ...
+   net.ipv6.conf.all.disable_ipv6 = 1
+   net.ipv6.conf.default.disable_ipv6 = 1
+   * Applying /etc/sysctl.d/99-sysctl.conf ...
+   * Applying /etc/sysctl.conf ...
+   [root@f36vm ~]#
+
+   Checking the status of the NIC with the nmcli command showed that IPv6 had been disabled and that
+   IPv4 was still up and running. Yes, I do see the other errors in that data stream, but I am ignoring
+   them for now. Be sure to read the man page for the sysctl command as it is quite interesting. It
+   provides a method for processing all sysctl configuration files with the --service option.
+
+The solution
+   Now that I understood the true nature of the problem, I could create a real solution-even if it might
+   be only a temporary circumvention. I was able to do so in a way that is in keeping with the original
+   intent of the Linux startup sequence and the sysctl.d method for configuring the kernel.
+
+   I left my new configuration file in place in /etc/sysctl.d. I created the simple Bash script shown
+   below to run the sysctl --system command and stored it in /usr/local/bin.
+
+   #!/bin/bash
+   <SNIP - discarded a bunch of comments to save space>
+   sysctl --system
+
+   I tested this script multiple times before proceeding to ensure that it worked. If you do this, be
+   sure to test it multiple times, both with and without rebooting, to return to the original kernel
+   configuration.
+
+Create the service
+
+   The real key to this solution was to create a new systemd service that would work similarly to the
+   old rc.local SystemV script. In this case, I called it the MyStartup.service, and I renamed the
+   script I created above and called it MyStartup.sh. To create the service itself, I created a new
+   systemd unit file in the /usr/local/lib/systemd/system directory, which I also had to make. This
+   service will run once at startup. I named this new file MyStartup.service and added the following
+   content:
+
+   <SNIP - discarded a bunch of comments to save space>
+   [Unit]
+   Description=Runs /usr/local/bin/MyStartup.sh
+   [Service]
+   ExecStart=/usr/local/bin/MyStartup.sh
+   [Install]
+   WantedBy=multi-user.target
+
+   Note that systemd unit files like this one don't need to be executable. It is owned by root.root with
+   664 permissions. It's pretty simple to create this service, and I can use it for so many local
+   startup tasks that I plan to keep it even when there is a permanent fix to the extant problem.
+
+   The command below enables the new service. Note that the systemctl command searches the new directory
+   by default without any options, arguments, or prodding from me to locate the new unit file.
+
+   [root@f36vm ~]# systemctl enable MyStartup.service
+   Created symlink /etc/systemd/system/multi-user.target.wants/MyStartup.service →
+   /usr/local/lib/systemd/system/MyStartup.service.
+
+   Enabling the service does not run the MyStartup.sh script. This service will run the script at every
+   reboot.
+
+Testing
+   As soon as the VM rebooted, I logged in as root and ran the following command to check the status of
+   IPv6, but it was still active. After more testing, I determined that the service was running the
+   commands too soon, so I added a command to the MyStartup.sh script to sleep for 25 seconds before
+   running the commands. Here is the edited script:
+
+   #!/bin/bash
+   <SNIP - discarded a bunch of comments to save space>
+   # Wait a bit for things to start up and settle. It doesn't work without this.
+   sleep 25
+   # Run the sysctl command.
+   sysctl --system
+
+   I rebooted again and verified the status as soon as I could log in, with the result that the service
+   was still sleeping.
+
+   [root@f36vm ~]# systemctl status MyStartup.service
+   ● MyStartup.service - Runs /usr/local/bin/MyStartup.sh
+        Loaded: loaded (/usr/local/lib/systemd/system/MyStartup.service; enabled; vendor preset:
+   disabled)
+        Active: active (running) since Fri 2022-07-01 13:24:22 EDT; 14s ago
+      Main PID: 667 (MyStartup.sh)
+         Tasks: 2 (limit: 14129)
+        Memory: 592.0K
+           CPU: 1ms
+        CGroup: /system.slice/MyStartup.service
+                +- 667 /bin/bash /usr/local/bin/MyStartup.sh
+                +- 669 sleep 25
+
+   After waiting some additional time, I checked again, and the service had completed successfully, with
+   the results clearly shown in the last few journal entries. Further testing showed that a delay of
+   three seconds works reliably, while a delay of only one second always fails.
+
+   Jul 01 13:24:22 f36vm.both.org systemd[1]: Started MyStartup.service - Runs
+   /usr/local/bin/MyStartup.sh.
+   [root@f36vm ~]# systemctl status MyStartup.service
+   ○ MyStartup.service - Runs /usr/local/bin/MyStartup.sh
+        Loaded: loaded (/usr/local/lib/systemd/system/MyStartup.service; enabled; vendor preset:
+   disabled)
+        Active: inactive (dead) since Fri 2022-07-01 13:24:47 EDT; 358ms ago
+       Process: 667 ExecStart=/usr/local/bin/MyStartup.sh (code=exited, status=0/SUCCESS)
+      Main PID: 667 (code=exited, status=0/SUCCESS)
+           CPU: 9ms
+   Jul 01 13:24:47 f36vm.both.org MyStartup.sh[1020]: net.ipv4.conf.all.send_redirects = 0
+   Jul 01 13:24:47 f36vm.both.org MyStartup.sh[1020]: net.ipv4.conf.all.accept_redirects = 0
+   Jul 01 13:24:47 f36vm.both.org MyStartup.sh[1020]: * Applying /usr/lib/sysctl.d/50-pid-max.conf ...
+   Jul 01 13:24:47 f36vm.both.org MyStartup.sh[1020]: kernel.pid_max = 4194304
+   Jul 01 13:24:47 f36vm.both.org MyStartup.sh[1020]: * Applying /etc/sysctl.d/99-local-network.conf ...
+   Jul 01 13:24:47 f36vm.both.org MyStartup.sh[1020]: net.ipv6.conf.all.disable_ipv6 = 1
+   Jul 01 13:24:47 f36vm.both.org MyStartup.sh[1020]: net.ipv6.conf.default.disable_ipv6 = 1
+   Jul 01 13:24:47 f36vm.both.org MyStartup.sh[1020]: * Applying /etc/sysctl.d/99-sysctl.conf ...
+   Jul 01 13:24:47 f36vm.both.org MyStartup.sh[1020]: * Applying /etc/sysctl.conf ...
+   Jul 01 13:24:47 f36vm.both.org systemd[1]: MyStartup.service: Deactivated successfully.
+   [root@f36vm ~]#
+
+   You can see in the data output above that the configuration statements in the 99-sysctl.conf file
+   were applied. I also used the nmcli command to verify that IPv6 has been disabled.
+
+  Automate it
+   After figuring out how to consistently accomplish this solution, I added a set of tasks to do this to
+   the Ansible playbook I use to distribute new and updated configuration files. That makes it easy for
+   me to manage my 12 current hosts. I also added it to the playbook I use immediately after performing
+   a basic installation on new hosts or ones that need a reinstallation for some reason. I added the
+   following tasks to those playbooks.
+
+   This first set of tasks is for my solution to add a new service:
+
+      - name: Install 99-local-network.conf file to disable IPV6
+         copy:
+           src: /root/ansible/system-scripts/files/99-local-network.conf
+           dest: /etc/sysctl.d
+           mode: 0644
+           owner: root
+           group: root
+       - name: Install MyStartup.sh
+         copy:
+           src: /root/ansible/system-scripts/files/MyStartup.sh
+           dest: /usr/local/bin
+           mode: 0754
+           owner: root
+           group: root
+       - name: create /root/ansible/system-scripts/files/ directory
+         file:
+           path: /root/ansible/system-scripts/files/
+           state: directory
+           mode: 0755
+           owner: root
+           group: root
+
+       - name: Install MyStartup.service
+         copy:
+           src: /root/ansible/system-scripts/files/MyStartup.service
+           dest: /usr/local/lib/systemd/system/
+           mode: 0664
+           owner: root
+           group: root
+       - name: Enable the MyStartup.service
+         systemd:
+           name: MyStartup.service
+           state: stopped
+           enabled: yes
+       - name: Run the raw command to disable IPV4 so a reboot is not required at this time
+         command:
+           cmd: sysctl --system
+
+   The advantage of this more complex solution of adding the configuration file to the sysctl.d
+   directory and then running a playbook with this series of tasks is it disables IPv6 without requiring
+   a reboot.
+
+Final thoughts
+   Although just installing the file with the correct kernel parameters and rebooting worked fine on one
+   of my hosts, it failed on all of the others I tried. I looked for differences that might explain why
+   it failed on the others while working on my router/firewall but found nothing that provided a clue as
+   to why this is so. I discovered this problem exists on hosts with newly installed Fedora 36 without
+   any of the changes and post-installation configuration that I always perform and on those with my
+   usual changes. I do plan to keep investigating. I intend to submit a bug report to Red Hat so that
+   there might be an actual fix to this instead of either of these circumventions.
+
+   Neither circumvention depends upon the existence of any NIC configuration files-either the old-style
+   interface configuration files that used to be located in /etc/sysconfig/network-scripts or the newer
+   NetworkManager interface connection files located in the /etc/NetworkManager/system-connections
+   directory. It works with or without those files. The result is global for all network interfaces on
+   the host.
+
+   My own solution is a somewhat general approach that you can use in lieu of the old rc.local script of
+   the old SystemV startup days.
+
+  Resources
+   The following resources are kept as current as possible but may not be completely accurate at any
+   given time.
+     * The GRUB manual is available in multiple formats from the GNU website.
+     * The Fedora documentation website has an excellent page, Bootloading with GRUB2.
+     * The Red Hat RHEL 7 online documentation also has a good chapter about working with the GRUB2 boot
+       loader.
+     * The kernel.org website has a long list of kernel parameters and a huge amount of other
+       information about the Linux kernel.
+
+
+---
+

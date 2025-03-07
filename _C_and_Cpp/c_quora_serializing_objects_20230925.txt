@@ -1,0 +1,250 @@
+filename: c_quora_serializing_objects_20230925.txt
+https://www.quora.com/Why-do-we-need-to-serialize-objects-before-storing-in-when-all-objects-are-essentially-\
+byte-arrays-in-memory-Cant-we-just-save-it-in-its-last-state-and-revive-it-through-memory-copy/answer/Joe-Zbiciak
+
+Why do we need to serialize objects before storing in when all objects are essentially byte arrays in
+memory? Can't we just save it in its last state and revive it through memory copy?
+Profile photo for Joe Zbiciak
+Joe Zbiciak
+Developed practical algorithms actually used in production.2y
+
+I can think of multiple reasons. This is a representative, but not exhaustive list:
+
+	The in-memory layout may vary between consumers of the data.
+	Not all data structures are stored as contiguous blocks of bytes.
+	Pointers, in particular, are usually not stable between runs of a program.
+	Variant types might want different representations depending on what value type is actually present.
+
+Examples
+In the examples below, I will use a pseudo-C syntax unless otherwise specified, but you could envision
+this structure in many different languages.
+
+Let's consider a very simple structure. Let's say we have a data structure that represents a key/value
+pair. You might use this to hold configuration variables, for example.
+
+struct variable {
+	string ident;   // Identifier of the variable.
+	int value;      // The value held in the variable.
+};
+
+Every programming language I've used will store the contents of ident separately of the physical bytes
+that comprise an instance of struct variable. The length of the identifier can vary.
+
+If you tried to save the in-memory image of struct variable, you'll likely capture the guts of an object
+that contains pointers or other address details that are specific to this execution of the program. It is
+possible to construct abstractions that can make this work in some languages, but if you use the stock,
+off-the-shelf string in your programming language of choice, that won't be the case.
+
+For example, suppose I used C++, and I create a simple string table for immutable strings. Variable
+identifiers are great candidates for a simple abstraction like this.
+
+// Immutable string held in the string table.
+// This design assumes we know the string table implicitly.
+class imm_string final {
+	public:
+		std::string operator std::string() const;
+		std::string_view operator std::string_view() const;
+	private:
+		int index;  // Index into string table.
+};
+
+The string table itself might be stored in a way that lends itself to binary serialization:
+
+class string_table {
+	public:
+		// ... details
+	private:
+		// Storage to serialize:
+		std::vector<int> offset;
+		std::vector<int> length;
+		std::vector<char> arena;
+
+		// Dynamic storage we'll regenerate:
+		std::unordered_map<std::string, int> string_to_index;
+};
+
+Now, some of you might be shouting: std::vector has pointers inside! And, you'd be right. You can't
+serialize those directly. At some point you have to stop pushing the lump around under the rug and deal
+with dynamic storage. But, if you circumscribe it to this small piece, the other data structures may benefit.
+
+The vector contents themselves are stored contiguously in memory. So, you could implement a generic
+vector serializer that outputs the number of elements, followed by the binary image of what follows.
+
+Or, suppose you were using C99 (or newer). You could implement something vector-like that you could
+directly serialize:
+
+typedef union dyn_array {
+	struct dyn_array_header {
+		int capacity;
+		int size;
+	} da_header;
+
+	struct dyn_array_char {
+		int capacity;
+		int size;
+		char data[];
+	} da_char;
+
+	struct dyn_array_int {
+		int capacity;
+		int size;
+		int data[];
+	} da_int;
+
+	struct dyn_array_var {
+		int capacity;
+		int size;
+		struct variable data[];
+	}
+
+	// etc.
+} dyn_array;
+
+If you write the binary image starting at da_header.size, you don't have to worry about any embedded
+pointers. The code that reads this back in can read size, compute a suitable capacity, allocate storage,
+and read the rest in pretty easily.
+
+// Reads in a dyn_array_int.
+// Error checking omitted for brevity.
+dyn_array *read_dyn_array_int(FILE *f) {
+	int size;
+	fread(&size, sizeof(int), 1, f);
+
+	int capacity = round_up_pow_2(size);
+	dyn_array *array =
+		malloc(sizeof(struct dyn_array_int) +
+				capacity * sizeof(int));
+
+	array->da_int.capacity = capacity;
+	array->da_int.size = size;
+	fread(&array->da_int.data, sizeof(int), size, f);
+
+	return array;
+}
+
+Not that complicated, right? *grimace-smile*
+
+If we modify struct variable accordingly:
+
+struct variable {
+	imm_string ident;  // This is now an integer.
+	int value;
+};
+
+Now you could potentially serialize struct variable directly as its binary image. If you have a contiguous
+array of these, then all you need to write out is the length, followed by the binary image of the variables.
+
+std::vector<variable> vars;
+
+Or, using the C99 approach, you'd have an appropriately allocated dyn_array.
+
+So... problem solved, right?
+
+Ehhh.... Are you sure ints are stored the same everywhere?
+
+Even if we limit ourselves to 32-bit 2's complement ints, the answer is still no. You have big endian
+and little endian systems out there, for example.
+
+Let's say we're lucky, and we can assume we're little endian everywhere too. That's easier to
+say for most folks in 2021 than it was in, say, 1991. If we say "little endian only," then this data
+structure could be serialized primarily as a binary image of what's in memory.
+
+But let's throw a new monkey wrench into the picture. Suppose we want to upgrade our variables to
+store a variety of data types: integer, float, and string.
+
+struct variable {
+	imm_string ident;
+	enum type type_tag;
+	union {
+		int int_value;
+		float float_value;
+		string string_value;
+	};
+};
+
+With our raw memory image binary serialization above, you can't directly de-serialize an older serialized
+object into this new structure. You'll need a translation step. That's not so bad.
+
+But how do we write this new structure out? We sprouted a new string field. And, unlike the identifier,
+it might not lend itself easily to the immutable string trick. It's still solvable with some extra work,
+of course.
+
+And how about that enum above? How much space does it occupy, and how much padding is around it? In
+real life C code, we don't actually know, since that's implementation defines. But, again, we can
+work around it. In C++, you can now actually specify what basic type the enum gets stored as. In C,
+you'd just change it to whichever integer type made sense. As for the padding, you're on the hook
+for figuring out how to make the structure lay out the same on all the platforms you want to compile for.
+
+Recurring Themes and Assumptions
+
+You might notice some recurring themes:
+	It's doable, if you put the effort in up front to design your data structures to allow it.
+	It's brittle. Small changes to the data structure negate the efficiencies of storing the binary
+	memory image.
+	You need to be aware of low-level implementation defined behaviors in order to succeed.
+	The serialized format imposes a particular in-memory organization for the data that may not be a
+	good fit for all programs that want to use that data.
+
+There's a fifth tacit assumption in all of the above example:
+	You're working in a language that lets you control the in-memory layout of a structure, and for
+	near zero cost (e.g. memcpy() or cheaper), you can:
+		expose that representation as a sequence of bytes, and
+		reinterpret an arbitrary sequence of bytes as an instance of the structure.
+
+Both C and C++ allow for that. Does Java? C#? Python? Insert-language-here? Or are you going to have to
+write a binary parser anyway for those other languages?
+
+Validation
+There's another issue I didn't cover: validation. Suppose you serialize your data to disk as a raw
+binary image, and then you restore that data from the raw binary image later.
+
+You still need to scan what you restored to validate that it's consistent and meaningful. For example,
+the imm_string wrapper above has an index into a string table. How do you handle out-of-range values?
+
+If you serialize your objects into a higher level format-XML, for example, or even protobuf-the
+process of constructing each object during deserialization gives you an opportunity to test invariants.
+
+Special Cases
+There are special-purpose approaches that may allow you to use pointers in your serialized data
+store. These approaches are inherently more brittle, but if the performance advantages are large enough,
+then it could be a win for a specialized application.
+
+For example, in POSIX environments, you can mmap() a file. This places the file directly into the memory map
+of the current process. The mmap() call also lets you specify a desired address to establish the mapping at.
+
+If you can fix that address so that it's the same every time your program runs, then your data can
+include pointers that point within the mmap()'d region. Those pointers will be valid whenever you mmap()
+the file at that same address.
+
+This works as long as you're always able to mmap() the file at the same address, and the size and
+representation of your pointers never changes. That makes this a poor choice for an interchange format,
+but it may make a reasonable choice for files that will never leave the machine they were created on. For
+example, it might be suitable for a local lightweight databases for preferences and usage history;
+editor temporary files; working storage for other large-data-set applications; etc.
+
+It's worth noting that filesystems almost look like this. However, instead of storing CPU pointers, they
+tend to store addresses in terms of disk-oriented structures, such as block numbers and byte offsets. But,
+you may still have struct definitions designed to exactly match on-disk structures, and efficient means
+at the OS kernel level for mapping disk blocks into the filesystem driver's memory map.
+
+Summary / Conclusion
+You don't always need to serialize objects you save to memory.
+
+You can sometimes store objects to disk by storing binary in-memory image, or something very close to
+it, if your programming environment provides you the right tools. The resulting code requires care to
+construct correctly, and tends to be brittle afterward.
+
+The key stumbling blocks tend to be things such as:
+	Pointers
+	Value representations (incl. endianness)
+	Variable-sized objects
+	Implementation-specific details such as alignment and padding
+
+There's ways to work around each of these, but it adds to the complexity and brittleness of the code.
+
+You probably want something more robust and general as your default approach. That's where general
+purpose serialization comes fits in.
+
+
+---
+

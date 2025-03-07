@@ -1,0 +1,48 @@
+filename: wget_beware-of-base64-encoded-strings_20240416.txt
+https://garrit.xyz/posts/2024-04-15-beware-of-base64-encoded-strings
+
+Beware of base64 encoded strings
+Apr 15 2024
+
+   I just encountered a fun little bug that I thought is worth sharing.
+
+   TL;DR: the base64 util breaks lines after a certain number of columns. Use a flag to specify
+   "don't break". Here's the commit that fixes the issue:
+
+   It started when we noticed that a cronjob that used wget to regularly call an endpoint failed on one
+   specific environment. The endpoint uses Basic Auth, which is essentially a header with a
+   Base64 encoded representation of a username and password. Curl has this functionality
+   built in, but to keep the attack surface as small as possible, we decided to stick to wget,
+   which is part of busybox, to keep the container image size under 1 MB (!). After all, all we want to
+   do is ping an endpoint.
+
+   This is the command we used up to this point:
+$> wget --post-data="" -O - --header="Authorization: Basic $(echo -n $BASIC_AUTH_USERNAME:$BASIC_AUTH_PASSWORD \
+ | base64)" http://endpoint:8080/v1/cache
+
+   We noticed that the request worked fine on non-prod environments, but it failed on production with
+   the following error:
+The HTTP header line [b2verlk1rwjsnutbcapkjh==] does not conform to RFC 7230. The request has been rejected.
+
+   After digging around for a while and separating out the individual pieces of the commands, I noticed
+   that the subcommand to build the header value (echo -n $BASIC_AUTH_USERNAME:$BASIC_AUTH_PASSWORD |
+   base64) behaved differently on prod vs. non-prod. The password on prod is way longer compared to the
+   other environments. Let's run this command with a short input:
+$> echo -n someuser:somepassword | base64
+c29tZXVzZXI6c29tZXBhc3N3b3Jk
+
+   And again with a long input:
+$> echo -n someuser:somepasswordthatswaylongerthanthefirstonebutalsoverysecureandsafe | base64
+c29tZXVzZXI6c29tZXBhc3N3b3JkdGhhdHN3YXlsb25nZXJ0aGFudGhlZmlyc3RvbmVidXRhbHNv
+dmVyeXNlY3VyZWFuZHNhZmU=
+
+   Bingo! There's a rogue newline character in the output of base64. The fix is very straight-forward.
+   Using the -w0 flag for base64, we can force the output to be on the same line:
+$> echo -n someuser:somepasswordthatswaylongerthanthefirstonebutalsoverysecureandsafe | base64 -w0
+c29tZXVzZXI6c29tZXBhc3N3b3JkdGhhdHN3YXlsb25nZXJ0aGFudGhlZmlyc3RvbmVidXRhbHNvdmVyeXNlY3VyZWFuZHNhZmU=
+
+   This eventually fixed the issue. Not something I would've ever thought of!
+
+
+---
+

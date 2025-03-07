@@ -1,0 +1,73 @@
+filename: c_howto-quickly-break-long-string-into-lines_20240422.txt
+https://lemire.me/blog/2024/04/19/how-quickly-can-you-break-a-long-string-into-lines/
+
+How quickly can you break a long string into lines?
+April 19, 2024
+
+   Suppose that you receive a long string and you need to break it down into lines. Consider the
+   simplified problems where you need to break the string into segments of (say) 72 characters. It is a
+   relevant problem if your string is a base64 string or a Fortran formatted statement.
+
+   The problem could be a bit complicated because you might need consider the syntax. So the speed of
+   breaking into a new line every 72 characters irrespective of the content provides an upper bound on
+   the performance of breaking content into lines.
+
+   The most obvious algorithm could be to copy the content, line by line:
+
+void break_lines(char *out, const char *in, size_t length, size_t line_length) {
+	size_t j = 0;
+	size_t i = 0;
+	for (; i + line_length <= length; i += line_length) {
+		memcpy(out + j, in + i, line_length);
+		out[j+line_length] = '\n';
+		j += line_length + 1;
+	}
+	if (i < length) {
+		memcpy(out + j, in + i, length - i);
+	}
+}
+
+   Copying data in blocks in usually quite fast unless you are unlucky and you trigger aliasing.
+   However, allocating a whole new buffer could be wasteful, especially if you only need to extend the
+   current buffer by a few bytes.
+
+   A better option could thus be to do the work in-place. The difficulty is that if you load the data
+   from the current array, and then write it a bit further away, you might be overwriting the data you
+   need to load next. A solution is to proceed in reverse: start from the end ... move what would be the
+   last line off by a few bytes, then move the second last line and so forth. Your code might look like
+   the following C function:
+
+void break_lines_inplace(char *in, size_t length, size_t line_length) {
+	size_t left = length % line_length;
+	size_t i = length - left;
+	size_t j = length + length / line_length - left;
+	memmove(in + j, in + i, left);
+	while (i >= line_length) {
+		i -= line_length;
+		j -= line_length + 1;
+		memmove(in + j, in + i, line_length);
+		in[j+line_length] = '\n';
+	}
+}
+
+   I wrote a benchmark. I report the results only for a 64KB input. Importantly, my numbers do not
+   include memory allocation which is separate. Your results will vary, but here are my own results:
+
+   -------------------------------------------------------
+   method      Intel Ice Lake, GCC 12    Apple M2, LLVM 14
+   -------------------------------------------------------
+   memcpy      43 GB/s                   70 GB/s
+   copy        24 GB/s                   40 GB/s
+   in-place    25 GB/s                   38 GB/s
+   -------------------------------------------------------
+
+   In my case, it does not matter whether we do the computation in-place or not. The in-place approach
+   generates more instructions but we are not limited by the number of instructions.
+
+   Roughly speaking, I achieve a bit more than half the speed as that of a memory copy. We might be
+   limited by the number of loads and stores. There might be a clever way to close the gap.
+
+
+
+---
+

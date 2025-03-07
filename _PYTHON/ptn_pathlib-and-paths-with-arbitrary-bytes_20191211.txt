@@ -1,0 +1,355 @@
+filename: pathlib-and-paths-with-arbitrary-bytes_20191211.txt
+https://jodal.no/2019/12/10/pathlib-and-paths-with-arbitrary-bytes/
+
+pathlib and paths with arbitrary bytes
+2019-12-10
+
+   The pathlib module was added to the standard library in Python 3.4 and is one of the many nice
+   improvements that Python 3 has gained over the past decade. In three weeks, Python 3.5 will be the
+   oldest version of Python that still receives security patches. This means that the presence of
+   pathlib can soon be taken for granted on all Python installations, and the quest towards replacing
+   os.path can begin for real.
+
+   In this post, I'll have a look at how pathlib can be used to handle file paths containing arbitrary
+   bytes, as this is valid on most file systems.
+
+Introduction to pathlib
+   pathlib provides an API for working with file system paths that works consistently across platforms
+   and handles most corner cases well. If you replace all of your os.path usages with pathlib, you'll
+   probably have more readable code with fewer bugs.
+
+   Here are a few examples to get a feel for the pathlib API.
+
+   The entry point to the pathlib API is usually the Path class:
+>>> from pathlib import Path
+>>>
+
+   pathlib can replace the os.path module in most cases:
+>>> p = Path("hello.txt")
+>>> p
+PosixPath('hello.txt')
+>>> p.name
+'hello.txt'
+>>> p.parent
+PosixPath('.')
+>>> p.exists()
+True
+>>> p.is_file()
+True
+>>>
+
+   It has convenient shortcuts for getting the contents of a file, or writing to it:
+>>> p.read_bytes()
+b'Hello, world!\n'
+>>> p.read_text()
+'Hello, world!\n'
+>>>
+
+   As well as the low level APIs:
+>>> with p.open() as fh:
+...     fh.seek(7)
+...     print(fh.read(5))
+...
+7
+world
+>>>
+
+   It has replacements for os.rename() and friends:
+>>> q = p.with_suffix(".md")
+>>> q
+PosixPath('hello.md')
+>>> p.rename(q)
+>>> p.exists()
+False
+>>> q.exists()
+True
+>>>
+
+   You can concatenate paths with a forward slash, which might be controversial, but reads a lot better
+   than os.path.join(a, b) once you get used to it:
+>>> d = p / ".."
+>>> d
+PosixPath('hello.txt/..')
+>>> d = d.resolve()
+>>> d
+PosixPath('/home/jodal')
+>>> d.is_dir()
+True
+>>>
+
+   When working with directories, you no longer need os.walk() or glob.glob():
+>>> len(list(d.iterdir()))
+112
+>>> d.glob("*.md")
+[PosixPath('/home/jodal/hello.md')]
+>>>
+
+   Most APIs in the standard library, and many third party libraries, now accept os.PathLike in
+   addition to bytes and strings as file paths, which means that you can use your Path instances where
+   you used to use strings. If you've started to type annotate your Python programs, using Path will
+   also be helpful because image: Path communicates much more about the indended usage than image: str
+   would.
+
+Path, text, and bytes
+   If you interface with an API that doesn't accept Path instances, the convention is to convert the
+   Path instance to a plain old string using str() or bytes():
+>>> str(p)
+'hello.txt'
+>>> bytes(p)
+b'hello.txt'
+>>>
+
+   pathlib uses Unicode strings aka text instead of bytes wherever possible. In fact, pathlib requires
+   you to instantiate Path using a Unicode string:
+>>> Path(b'/tmp/foo')
+Traceback (most recent call last):
+  ...
+TypeError: argument should be a str object or an os.PathLike object returning str, not <class 'bytes'>
+>>> Path(b'/tmp/foo'.decode())
+PosixPath('/tmp/foo')
+>>>
+
+   If you provide pathlib with a non-ASCII text string and ask it to encode it as a URI, it will
+   helpfully percent-encode it for you:
+>>> p = Path('/tmp/æ')
+>>> p
+PosixPath('/tmp/æ')
+>>> p.as_uri()
+'file:///tmp/%C3%A6'
+>>>
+
+   In the as_uri() output, we can see that æ became %C3%A6. It first encoded the character æ to bytes
+   using UTF-8 encoding, resulting in the two bytes 0xC3 and 0xA6. It then encoded the bytes that were
+   not safe for use in URIs with percent-encoding, resulting in %C3%A6.
+
+Arbitrary bytes
+   Since pathlib implicitly uses UTF-8 for encoding, how well does it handle file systems that contain
+   non-UTF-8 directory and file names?
+
+   The NTFS file system only allows file paths that can be represented as UTF-16, but most other file
+   systems accept almost any sequence of bytes as a file path.
+
+   Let's test with a couple of worst case bytes:
+     * the null byte, 0x00 or \x00 when escaped in Python, and
+     * the first half of a two-byte UTF-8 codepoint, 0xC3 or \xC3 in Python.
+
+>>> name = b'/tmp/ab\x00cd\xC3'
+>>> name
+b'/tmp/ab\x00cd\xc3'
+>>>
+
+   As this file path cannot be decoded as UTF-8, we can't even construct a Path instance:
+>>> p = Path(name)
+Traceback (most recent call last):
+  ...
+TypeError: argument should be a str object or an os.PathLike object returning str, not <class 'bytes'>
+>>> p = Path(name.decode())
+Traceback (most recent call last):
+  ...
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0xc3 in position 10: unexpected end of data
+>>>
+
+   What if we handle the decoding errors by replacing the offending bytes?
+>>> p = Path(name.decode(errors="replace"))
+>>>
+
+   With the replace error handler, we manage to create a Path instance, but we've lost some information
+   by replacing 0xC3 with the Unicode replacement character, U+FFFD, here encoded into UTF-8 as
+   0xEFBFBD:
+>>> p
+PosixPath('/tmp/ab\x00cd�')
+>>> p.as_uri()
+'file:///tmp/ab%00cd%EF%BF%BD'
+>>> str(p)
+'/tmp/ab\x00cd�'
+>>> str(p).encode()
+b'/tmp/ab\x00cd\xef\xbf\xbd'
+>>>
+
+   A Path that cannot reconstruct the bytes it originated from is not useful, as we cannot use it to
+   find and access the file represented by the Path instance.
+>>> str(p).encode() == name
+False
+>>>
+
+   We need a way to convert arbitrary bytes to a Path instance without losing any information, so that
+   given only a Path instance we can later reconstruct the bytes required to access that file.
+
+Surrogate escape
+   Luckily, PEP 383 introduced just that in Python 3.1, released more than a decade ago: the
+   surrogateescape error handler.
+
+   The surrogateescape error handler is not available in Python 2.7, so users of the pathlib2
+   backport are probably out of luck. With three weeks left until Python 2's end-of-life, you probably
+   have other things to worry about.
+
+   Using the surrogateescape error handler we get the following behavior from pathlib:
+>>> name
+b'/tmp/ab\x00cd\xc3'
+>>> name.decode(errors="surrogateescape")
+'/tmp/ab\x00cd\udcc3'
+>>>
+
+   \udcc3 in the decoded string is a surrogate escape code point for the 0xC3 byte.
+
+   Passing the text string to pathlib, we get a Path like usual, and with str(p) we get the same text
+   string back again, with the surrogate escape code point:
+>>> p = Path(name.decode(errors="surrogateescape"))
+>>> p
+PosixPath('/tmp/ab\x00cd\udcc3')
+>>> str(p)
+'/tmp/ab\x00cd\udcc3'
+>>>
+
+   Let's try encoding this back to bytes and compare it to the bytes we started with:
+>>> str(p).encode() == name
+Traceback (most recent call last):
+  ..
+UnicodeEncodeError: 'utf-8' codec can't encode character '\udcc3' in position 10: surrogates not allowed
+>>>
+
+   That failed because str.encode() does not allow encoding of surrogates by default. When we create a
+   Unicode string by decoding with the surrogateescape error handler, we must also use the
+   surrogateescape error handler to encode the text back to bytes:
+>>> str(p).encode(errors="surrogateescape") == name
+True
+>>>
+
+   Interestingly, when rendering the path as a URI, pathlib correctly converts the surrogate to the
+   original byte, 0xC3, percent-encoded as %C3.
+>>> p.as_uri()
+'file:///tmp/ab%00cd%C3'
+>>>
+
+   In fact, pathlib is able to correctly encode paths with surrogates to bytes itself:
+>>> bytes(p)
+b'/tmp/ab\x00cd\xc3'
+>>> bytes(p) == name
+True
+>>>
+
+os.fsencode()
+   The reason pathlib correctly converts the path to bytes is because its __bytes__() implementation
+   uses os.fseencode().
+
+   os.fsencode() explicitly encodes using the surrogateescape handler, except on Windows, where it uses
+   the strict handler to not allow any file paths that cannot be used on NTFS. It lets bytes pass
+   through unchanged.
+>>> import os
+>>> os.fsencode("/tmp/æ")
+b'/tmp/\xc3\xa6'
+>>> os.fsencode(b"/tmp/ab\x00cd\xc3")
+b'/tmp/ab\x00cd\xc3'
+>>>
+
+   os.fsencode() has a sibling in os.fsdecode(), which does the opposite. It decodes using the
+   surrogateescape handler, except on Windows, where it uses the strict handler. It lets text, not
+   bytes, pass through unchanged.
+>>> os.fsdecode(b"/tmp/ab\x00cd\xc3")
+'/tmp/ab\x00cd\udcc3'
+>>> os.fsdecode("/tmp/æ")
+'/tmp/æ'
+>>>
+
+   With this, we can put together some recommendations.
+
+To Path and back again
+   To create a Path instance that can hold a path with arbitrary byte encoding, use
+   Path(os.fsdecode(...)):
+>>> p1 = Path(os.fsdecode(b'/tmp/ab\x00cd\xc3'))
+>>> p2 = Path(os.fsdecode('/tmp/æ'))
+>>> p1
+PosixPath('/tmp/ab\x00cd\udcc3')
+>>> p2
+PosixPath('/tmp/æ')
+>>>
+
+   To get the exact bytes from a Path instance, use bytes(path):
+>>> bytes(p1)
+b'/tmp/ab\x00cd\xc3'
+>>> bytes(p2)
+b'/tmp/\xc3\xa6'
+
+Presentation
+   When it comes to presenting the path to an end user, in a user interface or a log file, there is no
+   perfect solution.
+
+   Using URIs yields a consistent representation of the file path, irrespective of its validity as
+   UTF-8. The URIs are true to the actual bytes on the file system and do not contain any surrogates.
+>>> p1.as_uri()
+'file:///tmp/ab%00cd%C3'
+>>> p2.as_uri()
+'file:///tmp/%C3%A6'
+
+Why you should not use str(path)
+   However, for anything that is valid UTF-8 but not valid ASCII, which includes most languages spoken
+   by humans, the result of str(path) is a lot more readable than a URI.
+
+   For paths which are valid UTF-8 str(path) yields the cleanest result:
+>>> str(p2)
+'/tmp/æ'
+
+   But for names consisting of bytes that are invalid UTF-8, the use of surrogates leaks through. It's
+   undesirable to expose users to this implementation-specific detail:
+>>> str(p1)
+'/tmp/ab\x00cd\udcc3'
+
+   You might think that since invalid UTF-8 isn't that common, maybe we can live with the surrogates
+   leaking through in those rare cases?
+
+   Printing a text string involves encoding it to bytes before it is streamed to your output, e.g. a
+   terminal or a file. And since encoding text containing surrogates isn't allowed by default,
+   print(str(path)) can crash your application:
+>>> print(str(p2))
+/tmp/æ
+>>> print(str(p1))
+Traceback (most recent call last):
+  ...
+UnicodeEncodeError: 'utf-8' codec can't encode character '\udcc3' in position 10: surrogates not allowed
+>>>
+
+   It is possible to go down this path, but you'll need to always use the Python repr() of the string,
+   instead of simply printing the string:
+>>> print(repr(str(p1)))
+'/tmp/ab\x00de\udcc3'
+>>>
+
+Lesser of the evils
+   So, with my current knowledge of possible solutions, my recommendation for consistent representation
+   of paths with arbitrary bytes in user interfaces, including logging and console output, is to use
+   either repr(path) or path.as_uri(), with a preference for path.as_uri():
+>>> print(repr(p1))
+PosixPath('/tmp/ab\x00de\udcc3')
+>>> print(p1.as_uri())
+file:///tmp/ab%00de%C3
+>>>
+
+Summary
+   Let's recap what we've learned here:
+     * pathlib provides a nice, portable API to work with file system paths in Python.
+     * With the help of the surrogateescape error handler, pathlib can handle paths with arbitrary
+       bytes.
+     * os.fsencode() and os.fsdecode() are convenient ways to use the surrogateescape error handler,
+       with the bonus of correct behavior on Windows too.
+     * Using str(path) to present Path objects in user interfaces might crash your application. The
+       alternatives, repr(path) and path.as_uri(), are not perfect either, but at least they are safe.
+
+Cheat sheet
+>>> import os
+>>> from pathlib import Path
+
+>>> # To create paths:
+>>> p = Path(os.fsdecode(b'/tmp/ab\x00cd\xc3'))
+>>> p
+PosixPath('/tmp/ab\x00cd\udcc3')
+
+>>> # To use with APIs not supporting `os.PathLike`:
+>>> bytes(p)
+b'/tmp/ab\x00cd\xc3'
+
+>>> # To show to users:
+>>> print(p.as_uri())
+file:///tmp/ab%00cd%C3
+
+
+---

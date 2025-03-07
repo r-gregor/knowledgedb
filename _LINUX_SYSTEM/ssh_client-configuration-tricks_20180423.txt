@@ -1,0 +1,161 @@
+filename: ssh_client-configuration-tricks_20180423.txt
+https://zinovyev.net/blog/ssh-client-configuration-tricks
+   
+SSH client configuration tricks
+2018.04.22
+
+   Here I'll describe some specific configuration options, I use to optimize my SSH client workflow.
+
+   The instructions are split into 4 topics with different level of complexity:
+    1. How to keep your credentials all in one place (beginner level);
+    2. Chdir to specific path after connection is established;
+    3. Keep your remote sessions alive. Even if the connection was lost;
+    4. Speed up your ssh connection, reduce a number of sessions;
+
+1. How to keep your credentials all in one place
+   Keeping all the usernames, hostnames, ip addresses and passwords in mind is not a fun at all. It's
+   also not a fun to have a file with a bunch of such credentials and copy and paste them every time you
+   need to establish a new connection;
+
+   Suppose you have a remote server with domain zinovyev.net with a user called ubuntu.
+
+   Every time you want to establish a connection to your server, you have to perform these steps:
+    1. Open a file called ~/Desktop/MySecretCredentials.txt to find out your username (e.g. ubuntu);
+    2. Type in a command ssh ubuntu@zinovyev.net to initiate a connection;
+    3. Go back to a file with credentials to retrieve your password;
+    4. Copy and paste your password when the prompt is shown;
+
+   Suppose now, that the company you're working for, owns a dozens of servers.
+
+   Let's optimize the described above workflow.
+
+   To don't type your username and hostname every time you want to initialize a connection, you can make
+   up an intuitive name for each server and use it with the ssh command.
+
+   The configuration file of the ssh client is called ~/.ssh/config.
+
+   Let's open it and put this configuration in it:
+Host zinovyev-prod
+  Hostname zinovyev.net
+  User ubuntu
+
+   Now you can use the ssh command in this way: ssh zinovyev-prod.
+
+   But you still have to put in your password. Let's use an RSA key instead!
+
+   Use ssh-keygen command to generate a new rsa key:
+ssh-keygen -trsa
+Generating public/private rsa key pair.
+Enter file in which to save the key (/home/ubuntu/.ssh/id_rsa):
+Created directory '/home/ubuntu/.ssh'.
+Enter passphrase (empty for no passphrase):
+
+   Don't enter any passphrase, just press an ENTER key. You don't want to provide it everytime you are
+   trying to establish a connection, don't you?
+
+   The command ssh-keygen will generate you two files:
+     * The first one (~/.ssh/id_rsa) is a private key. You should NOT SHARE it with anybody;
+     * The second one (~/.ssh/id_rsa.pub, remember the pub part wich stands for public) can be used by
+       the remote host to verify your identity;
+
+   Copy the content of the public key (run cat ~/.ssh/id_rsa.pub and copy the output).
+
+   Now log in to the your server ssh zinovyev-prod and create a specific file for you keys ON THE REMOTE
+   HOST:
+mkdir ~/.ssh
+touch ~/.ssh/authorized_keys
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+
+   Now put the content of your original idrsa.pub file (wich is stored in your buffer, remember?) to the
+   `~/.ssh/authorizedkeys` file. Log out and log in again.
+
+   No password should be asked next time you log in to the server with the ssh zinovyev-prod command.
+
+   P.S. You might be interested in the utility called ssh-agent. Launch it on both: local machine and on
+   the remote server too by typing in ssh-agent command. Your private key will now be shared accross the
+   ssh session without a need to copy it directly to the remote host so nobody will be able to read it.
+   It gives you the ability to deploy from remote host and to work with your github repositories from
+   the remote host without need to type in the password.
+
+2. Chdir to specific path after connection
+   There's usually a specific path there on the remote you want to chdir to after you have successfully
+   connected to the server. It's often a directory where the source code of your application is stored
+   to. The directory of your application can vary from host to host: it can be /var/www/app1 or
+   /opt/apps/app2 or just anything.
+
+   To switch to the proper directory authomatically open your configuration file ~/.ssh/config again and
+   enhance it with a RemoteCommand instruction:
+Host zinovyev-prod
+  Hostname zinovyev.net
+  User ubuntu
+  RequestTTY yes
+  RemoteCommand cd /var/www/app1
+
+   Now every time you type in ssh zinovyev-prod you will be connected to the remote server and the
+   directory will be changed to the /var/www/app1 automatically.
+
+3. Keep your remote sessions alive. Even if the connection was lost
+   Sometimes the connection gets lost for a second. Sometimes you accidently halt your laptop,
+   forgetting about a script that was running through an ssh session without nohup. In any case there's
+   not reasonable cause to rely on the unstable connection channel.
+
+   There's a software tool called screen wich makes it terribly simple to create a daemonized session on
+   server. All you need is to install it (it does exists in mostly all repositories of all Linux based
+   distros).
+
+   The basic screen commands are:
+     * screen -help To list all existing commands;
+     * screen -help To list all running sessions;
+     * screen To start a new session;
+     * screen -x [session-name] Attach to a not deatached session (somebody is already using it, you'll
+       share the screen);
+     * screen -r [session-name] Attach to a detached session (somebody has used it, but now it is
+       daemonized);
+     * Ctrl^a+d Detach from session without killing it;
+
+   Now let's change an ssh configuration file one more time to start (or attach to existing) a screen
+   session just after signing in to remote server:
+Host zinovyev-prod
+  Hostname zinovyev.net
+  User ubuntu
+  RequestTTY yes
+  RemoteCommand cd /var/www/app1 ; screen -SRR example-name
+
+
+   Here's an explanation of used options (from the screen\'s help page):
+     -D -RR Do whatever is needed to get a screen session.
+     -S sockname Name this session .sockname instead of ...
+
+   So you can use any name you like instead of example-name to name your session.
+
+   Now when you ssh to the remote host the new session will be started imidiatly just after login. And
+   when you want to close the connection just use Ctrl^a+d to keep the connection alive until the next
+   login.
+
+4. Speed up your ssh connection, reduce the number of sessions
+   All the settings that we've declared so far are restricted to a specific host. The client can also be
+   configured to store some global options.
+
+   There are several client configuration options which can speed up connections by reducing the number
+   of sessions by enabling the sharing of multiple sessions over a single network connection.
+
+   The other option that can speed up the connection (on slower networks) is enabling the compression of
+   the ssh traffic.
+
+   So let's modify our ~/.ssh/config file one more time:
+   
+# Global options
+
+Compression yes
+ControlMaster auto
+ControlPersist yes
+ControlPath ~/.ssh/sockets/socket-%r@%h:%p
+
+# Per-host settings
+
+Host zinovyev-prod
+  Hostname zinovyev.net
+  User ubuntu
+  RequestTTY yes
+  RemoteCommand cd /var/www/app1 ; screen -SRR example-name
