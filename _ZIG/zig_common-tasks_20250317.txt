@@ -1,0 +1,502 @@
+filename: zig_common-tasks_20250317.txt
+https://renatoathaydes.github.io/zig-common-tasks/
+
+Zig Common Tasks
+
+   This website is dedicated to helping programmers perform common tasks in Zig.
+
+   It is not a tutorial and should be used mostly as a reference.
+
+Reading the samples
+   Notice that it's implicit in many code samples:
+     * const std = @import("std"); at the top.
+     * the alloc variable is of type std.mem.Allocator. See the allocators sample for how to get one.
+     * Zig's multi-line strings are rendered incorrectly: \\ Foo is shown as \ Foo, with a red slash.
+       This is hard to fix due to the bug being in an unmaintained Go library used to convert
+       markdown to HTML. Once Zig has such library, maybe we'll switch to that and the problem will be
+       gone :)!
+
+     All samples are tested on MacOS, Windows and Linux/Ubuntu using the Zig version declared in
+     .github/workflows/test.yml.
+
+Code samples
+   The Zig Standard Library is currently in flux. Effort is taken to keep all samples up-to-date, but
+   changes are to be expected until it stabilizes after Zig 1.0.
+
+### C interop - Strings ###
+// WARNING: @cImport will eventually go away.
+// https://github.com/ziglang/zig/issues/20630
+const c = @cImport({
+	// normally you would include headers or even c files, like this:
+	//@cInclude("test.c");
+	// but for this sample, C code is directly defined here
+	@cDefine("MY_C_CODE", "()\nconst char* give_str() { return \"Hello C\"; }");
+});
+
+// use mem.span to convert strings to slices
+const span = std.mem.span;
+
+test "Handling C strings" {
+	// cstr has type '[*c]const u8' here, but can be coerced to a Zig pointer
+	const cstr = c.give_str();
+	// notice how Zig String literals are also 0-terminated
+	const hz: [*:0]const u8 = "Hello Zig";
+	const hc: [*:0]const u8 = "Hello C";
+
+	// calling "span" turns sentinel-terminated values into slices
+	const hzSlice: []const u8 = span(hz);
+
+	try expect(!std.mem.eql(u8, span(cstr), hzSlice));
+	try expect(std.mem.eql(u8, span(cstr), span(hc)));
+}
+
+
+### C interop - void pointers ###
+const c_code =
+   \\
+   \\ static const void* _value;
+   \\ void store_void(const void* v) { _value = v; }
+   \\ const void* get_void() { return _value; }
+;
+
+// WARNING: @cImport will eventually go away.
+// https://github.com/ziglang/zig/issues/20630
+const c = @cImport({
+	// normally you would include headers or even c files, like this:
+	//@cInclude("test.c");
+	// but for this sample, C code is directly defined here
+	@cDefine("MY_C_CODE", c_code);
+});
+
+test "deal with void pointer from C" {
+	// send some value to be stored in C as a void* pointer
+	c.store_void(@as(?*const anyopaque, &@as(u32, 10)));
+
+	// retrieve the value which now is "untyped", or opaque
+	const untyped_value: ?*const anyopaque = c.get_void();
+
+	// to restore the type, we must cast it to the known type explicitly
+	const value: *const u32 = @ptrCast(@alignCast( untyped_value));
+
+	try std.testing.expectEqual(@as(u32, 10), value.*);
+}
+
+
+### Check for null (using nullable value) ###
+test "Use value orelse a default" {
+	const byte: ?u8 = null;
+	const n: u8 = byte orelse @as(u8, 0);
+	try std.testing.expectEqual(n, @as(u8, 0));
+}
+
+test "Check for null using if statement" {
+	const byte: ?u8 = 10;
+	var n: u8 = 2;
+	if (byte) |b| {
+		// b is non-null here
+		n += b;
+	}
+	try std.testing.expectEqual(n, @as(u8, 12));
+}
+
+test "Check for null using if expression" {
+	const byte: ?u8 = null;
+	const n: u8 = if (byte) |b| b + 1 else 2;
+	try std.testing.expectEqual(n, @as(u8, 2));
+} //
+
+   Notes:
+     * The get-command-line-args sample shows a while loop used with an iterator which returns null
+       when no more elements are left.
+
+
+### Create allocators ###
+test "Get the test allocator" {
+	const alloc = std.testing.allocator;
+	_ = alloc; // use allocator
+}
+
+test "Create a general-purpose allocator" {
+	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+	// call deinit to free it if necessary
+	defer _ = gpa.deinit();
+	_ = gpa.allocator(); // use allocator
+}
+
+test "Get system-native page allocator" {
+	const alloc: std.mem.Allocator = std.heap.page_allocator;
+	_ = alloc; // use allocator
+}
+
+test "Create a fixed buffer allocator" {
+	const alloc: std.mem.Allocator = init: {
+		// use an array as the "heap"
+		var buffer: [1024]u8 = undefined;
+		var fba = std.heap.FixedBufferAllocator.init(&buffer);
+		break :init fba.allocator();
+	};
+	_ = alloc; // use allocator
+}
+
+test "Get an Arena allocator" {
+	const alloc = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+	// the arena allocator will free everything allocated through it
+	// when it is de-initialized.
+	defer alloc.deinit();
+} //
+
+
+### Get command line arguments ###
+test "argsWithAllocator - get an iterator, use an allocator" {
+	var args = try std.process.argsWithAllocator(alloc);
+	defer args.deinit();
+	while (args.next()) |arg| {
+		_ = arg; // use arg
+	}
+}
+
+test "argsAlloc - get a slice, use an allocator" {
+	const args = try std.process.argsAlloc(alloc);
+	defer std.process.argsFree(alloc, args);
+	for (args) |arg| {
+		_ = arg; // use arg
+	}
+}
+
+test "args - get an iterator, no allocation but not fully portable" {
+	const builtin = @import("builtin");
+	var args =
+		if (builtin.os.tag == .windows or builtin.os.tag == .wasi)
+		// this sample does not work on Windows and WASI
+		return
+	else
+		// Linux, MacOS etc. can use the simpler args() method:
+		std.process.args();
+
+	while (args.next()) |arg| {
+		_ = arg; // use arg
+	}
+} //
+
+   Notes:
+     * the first item in args is the program path itself.
+     * not using the allocator version makes the code less cross-platform.
+
+
+### Get environment variables ###
+test "Get a single environment variable" {
+	const path = try std.process.getEnvVarOwned(alloc, "PATH");
+	defer alloc.free(path);
+	try std.testing.expect(path.len > 0);
+}
+
+test "Get all environment variables" {
+	var env = try std.process.getEnvMap(alloc);
+	defer env.deinit();
+	try std.testing.expect(env.count() > 0);
+} //
+
+
+### JSON - Parse object ###
+test "Parse JSON object" {
+	const example_json: []const u8 =
+		\\{"a_number": 10, "a_str": "hello"}
+	;
+	const JsonStruct = struct {
+		a_number: u32,
+		a_str: []const u8
+	};
+
+	const parsed = try std.json.parseFromSlice(JsonStruct, alloc, example_json, .{});
+	defer parsed.deinit();
+
+	const result = parsed.value;
+	try std.testing.expectEqual(@as(u32, 10), result.a_number);
+	try std.testing.expectEqualSlices(u8, "hello", result.a_str);
+}
+
+
+### JSON - Write object ###
+test "Write JSON object" {
+	const example_json: []const u8 =
+		\\{"a_number":10,"a_str":"hello"}
+	;
+
+	var stream = std.ArrayList(u8).init(alloc);
+	defer stream.deinit();
+
+	try std.json.stringify(.{
+		.a_number = @as(u32, 10),
+		.a_str = "hello",
+	}, .{}, stream.writer());
+
+	try std.testing.expectEqualSlices(u8, example_json, stream.items);
+}
+
+
+### List directory contents ###
+test "List contents of directory" {
+	var children = std.fs.cwd().openDir("source", .{ .iterate = true }) catch {
+		// couldn't open dir
+		return;
+	};
+	defer children.close();
+	// use the returned iterator to iterate over dir contents
+	_ = children.iterate();
+} //
+
+
+### Print something to stdout/stderr ###
+pub fn main() !void {
+	// print to stdout (stderr would be getStdErr() - which has the same type)
+	const stdout = std.io.getStdOut();
+	try stdout.writeAll("Hello, world!\n");
+
+	// similar construct to printf
+	try stdout.writer().print("number: {d}, string: {s}\n", .{ 42, "fourty-two" });
+} //
+
+
+### Process - execute ###
+test "Execute a process (inherit stdout and stderr)" {
+	// the command to run
+	const argv = [_][]const u8{ "ls", "./" };
+
+	// init a ChildProcess... cleanup is done by calling wait().
+	var proc = std.process.Child.init(&argv, alloc);
+
+	// ignore the streams to avoid the zig build blocking...
+	// REMOVE THESE IF YOU ACTUALLY WANT TO INHERIT THE STREAMS.
+	proc.stdin_behavior = .Ignore;
+	proc.stdout_behavior = .Ignore;
+	proc.stderr_behavior = .Ignore;
+
+	try proc.spawn();
+
+	//std.debug.print("Spawned process PID={}\n", .{proc.id});
+
+	// the process only ends after this call returns.
+	const term = try proc.wait();
+
+	// term can be .Exited, .Signal, .Stopped, .Unknown
+	try std.testing.expectEqual(term, std.process.Child.Term{ .Exited = 0 });
+}
+
+test "Execute a process (consume stdout and stderr into allocated memory)" {
+	// the command to run
+	const argv = [_][]const u8{ "ls", "./" };
+
+	const proc = try std.process.Child.run(.{
+		.argv = &argv,
+		.allocator = alloc,
+	});
+
+	// on success, we own the output streams
+	defer alloc.free(proc.stdout);
+	defer alloc.free(proc.stderr);
+
+	const term = proc.term;
+
+	try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, term);
+	try std.testing.expect(proc.stdout.len != 0);
+	try std.testing.expectEqual(proc.stderr.len, 0);
+
+}
+
+
+### Read file bytes ###
+test "Read bytes from a file" {
+	// current working directory
+	const cwd = std.fs.cwd();
+
+	const handle = cwd.openFile("hello.txt",
+	// this is the default, so could be just '.{}'
+	.{ .mode = .read_only }) catch {
+		// file not found
+		return;
+	};
+	defer handle.close();
+
+	// read into this buffer
+	var buffer: [64]u8 = undefined;
+	const bytes_read = handle.readAll(&buffer) catch unreachable;
+
+	// if bytes_read is smaller than buffer.len, then EOF was reached
+	try std.testing.expectEqual(@as(usize, 6), bytes_read);
+
+	const expected_bytes = [_]u8{ 'h', 'e', 'l', 'l', 'o', '\n' };
+	try std.testing.expectEqualSlices(u8, &expected_bytes, buffer[0..bytes_read]);
+}
+
+
+### Read file line by line ###
+test "Read file one line at a time" {
+	const max_bytes_per_line = 4096;
+	var file = std.fs.cwd().openFile("my-file.txt", .{}) catch {
+		// couldn't open file
+		return;
+	};
+	defer file.close();
+	// wrapping the reader into a std.io.bufferedReader is usually advised
+	var buffered_reader = std.io.bufferedReader(file.reader());
+	const reader = buffered_reader.reader();
+	while (try reader.readUntilDelimiterOrEofAlloc(alloc, '\n', max_bytes_per_line)) |line| {
+		defer alloc.free(line);
+		// use line
+	}
+} //
+
+
+### Read user input from command line ###
+pub fn main() !void {
+	const stdin = std.io.getStdIn().reader();
+	const maybe_input = try stdin.readUntilDelimiterOrEofAlloc(alloc, '\n', max_line_size);
+	if (maybe_input) |input| {
+		defer alloc.free(input);
+		// use input
+	}
+} //
+
+
+### Socket - accept TCP connections ###
+fn localhostListener(port: u16) !std.net.Server {
+	const localhost = try std.net.Address.resolveIp("0.0.0.0", port);
+	return localhost.listen(.{});
+}
+
+pub fn main() !void {
+	var listener = try localhostListener(8081);
+	defer listener.deinit();
+
+	const connection = try listener.accept();
+	defer connection.stream.close();
+
+	std.log.info("Accepted connection from {}", .{connection.address});
+	try printMessage(&connection.stream.reader());
+} //
+
+   Notes:
+     * See also MasterQ32/zig-network.
+     * This sample does not work on Windows. Help to fix it welcome.
+
+
+### Socket - send data ###
+pub fn main() !void {
+	const remote = try std.net.Address.resolveIp("0.0.0.0", 8081);
+	var remote_stream = try std.net.tcpConnectToAddress(remote);
+	defer remote_stream.close();
+	try remote_stream.writer().writeAll("hello from Zig\n");
+} //
+
+   Notes:
+     * See also MasterQ32/zig-network.
+     * This sample does not work on Windows. Help to fix it welcome.
+
+
+### String - check if it contains another ###
+test "Check if a string contains another" {
+	const to_find = "string";
+	const contains = std.mem.containsAtLeast(u8, "big string", 1, to_find);
+	try std.testing.expect(contains);
+} //
+
+
+### String - compare two strings ###
+test "Check if two strings are equal ignoring case (ASCII only)" {
+	const are_equal = std.ascii.eqlIgnoreCase("hEllO", "Hello");
+	try std.testing.expect(are_equal);
+}
+
+test "Check if two strings are exactly equal" {
+	const are_equal = std.mem.eql(u8, "hello", "hello");
+	try std.testing.expect(are_equal);
+} //
+
+
+### String - convert to number ###
+test "Convert string to number" {
+	// base-10 signed integer
+	const decimal = try std.fmt.parseInt(i32, "42", 10);
+	try std.testing.expectEqual(@as(i32, 42), decimal);
+
+	// floating-point number
+	const float = try std.fmt.parseFloat(f64, "3.1415");
+	try std.testing.expectEqual(@as(f64, 3.1415), float);
+
+	// base-2 unsigned integer
+	const byte = try std.fmt.parseUnsigned(u8, "1_0101", 2);
+	try std.testing.expectEqual(@as(u8, 21), byte);
+} //
+
+
+### String - iterate over UTF-8 code points ###
+test "Iterate over utf-8 string code points" {
+	// reference: https://emojipedia.org/woman-astronaut/
+	var utf8_str = (try std.unicode.Utf8View.init("👩‍🚀")).iterator();
+	try std.testing.expectEqual(@as(?u21, 0x1F469), utf8_str.nextCodepoint());
+	try std.testing.expectEqual(@as(?u21, 0x200D), utf8_str.nextCodepoint());
+	try std.testing.expectEqual(@as(?u21, 0x1F680), utf8_str.nextCodepoint());
+	try std.testing.expectEqual(@as(?u21, null), utf8_str.nextCodepoint());
+} //
+
+
+### Threads and channels ###
+const Val = std.atomic.Value(u32);
+const Order = std.builtin.AtomicOrder;
+
+fn toRunInThread(v: *Val) void {
+	const value = v.load(Order.acquire);
+	v.store(value + 1, Order.release);
+}
+
+test "Pass an atomic value to a Thread and wait for it to be modified" {
+	const allocator = std.heap.page_allocator;
+
+	// an atomic value to be updated by another Thread
+	var value = Val.init(42);
+
+	const thread = try std.Thread.spawn(.{
+		// optional config
+		.allocator = allocator,
+		.stack_size = 1024,
+	}, toRunInThread, .{&value});
+
+	// must either join() or detach()
+	thread.join();
+
+	try expectEqual(@as(u32, 43), value.load(Order.unordered));
+} //
+
+
+### Write to file ###
+test "Write bytes to a file (create if necessary, append or replace contents)" {
+	// current working directory
+	const cwd = std.fs.cwd();
+
+	const file_path = "hello.txt";
+
+	const handle = try cwd.createFile(file_path, .{
+		// set to true to fully replace the contents of the file
+		.truncate = false,
+	});
+	defer handle.close();
+	defer cwd.deleteFile(file_path) catch unreachable;
+
+	// go to the end of the file if you want to append to the file
+	// and `truncate` was set to `false` (otherwise this is not needed)
+	try handle.seekFromEnd(0);
+
+	// write bytes to the file
+	const bytes_written = try handle.write("hello Zig\n");
+
+	try std.testing.expectEqual(@as(usize, 10), bytes_written);
+}
+
+
+   Zig Common Tasks is an independent project by Renato Athaydes and voluntary contributors. The source code
+   is hosted on GitHub and OpenCode.net. Contributions are welcome. Everything in this website is on
+   public domain: UNLICENSE.
+
+
+---
+
