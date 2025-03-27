@@ -1,0 +1,230 @@
+filename: bash_trim-terminal-command-prompt-working-dir_20250327.txt
+https://askubuntu.com/questions/17723/trim-the-terminal-command-prompt-working-directory
+
+Trim the terminal command prompt working directory
+Feb 2, 2016
+
+   When using the terminal in a deep folder structure sometimes the prompt can take up most of the line.
+   Is there any way in which I can trim the working directory? I know I can do
+PS1="\W >"
+
+   to only print the current directory and not the full path, but is there a way to have something like:
+/home/smauel/de...ther/folder >
+
+
+***
+   If you are using bash4 (Ubuntu 9.10 and newer has bash4), the easiest option is to just set the
+   PROMPT_DIRTRIM variable. e.g.:
+PROMPT_DIRTRIM=2
+
+   In order for that to work properly the current path escape sequence '\w' must be with lower case 'w'!
+
+   For one similar to João Pinto's example, (that'll work in older bash versions and ensures that the
+   path component is never longer than 30 characters), you could do something like this:
+PS1='[\u@\h:$(p=${PWD/#"$HOME"/~};((${#p}>30))&&echo "${p::10}…${p:(-19)}"||echo "\w")]\$ '
+
+***
+   Create a small python script which implements the desired trimming logic.
+
+   Example: ~/.short.pwd.py
+import os
+from socket import gethostname
+hostname = gethostname()
+username = os.environ['USER']
+pwd = os.getcwd()
+homedir = os.path.expanduser('~')
+pwd = pwd.replace(homedir, '~', 1)
+if len(pwd) > 33:
+   pwd = pwd[:10]+'...'+pwd[-20:] # first 10 chars+last 20 chars
+print('[%s@%s:%s] ' % (username, hostname, pwd))
+
+   Now test it, from a terminal:
+export PROMPT_COMMAND='PS1="$(python3 ~/.short.pwd.py)"'
+
+   If you are ok with the result just append the command to your ~/.bashrc.
+echo "export PROMPT_COMMAND='PS1=\"\$(python3 ~/.short.pwd.py)\"'" >> ~/.bashrc
+
+***
+   Another way around that problem is to include a line break into PS1, so that the working directory
+   and the actual prompt appear on separate lines, for example:
+PS1="\w\n>"
+
+***
+   Add this to the bottom of your ~/.bashrc
+split_pwd() {
+	# Only show ellipses for directory trees -gt 3
+	# Otherwise use the default pwd as the current \w replacement
+	if [ $(pwd | grep -o '/' | wc -l) -gt 3 ]; then
+		pwd | cut -d'/' -f1-3 | xargs -I{} echo {}"/../${PWD##*/}"
+	else
+		pwd
+	fi
+}
+
+export PS1="\$(split_pwd) > "
+
+   Admittedly this could probably be cleaner, but I wanted to get a crack at it.
+
+   Expected output for directories more than three layers deep.
+/home/chris/../Node Projects >
+
+   Expected output for directories from Desktop and back.
+/home/chris/Desktop >
+/home/chris >
+/home
+
+***
+     * Beautiful! I just need to add some smarts about transforming $HOME to "~/" and not counting that
+       as part of the 'length' if $PWD is under the home directory.
+
+***
+   Based on Cris Sullivan's answer, but keeping the ~ for the home folder
+
+get_bash_w() {
+	# Returns the same working directory that the \W bash prompt command
+	echo $(pwd | sed 's@'"$HOME"'@~@')
+}
+
+split_pwd() {
+	# Split pwd into the first element, elipsis (...) and the last subfolder
+	# /usr/local/share/doc --> /usr/.../doc
+	# ~/project/folder/subfolder --> ~/project/../subfolder
+	split=2
+	W=$(get_bash_w)
+	if [ $(echo $W | grep -o '/' | wc -l) -gt $split ]; then
+		echo $W | cut -d'/' -f1-$split | xargs -I{} echo {}"/../${W##*/}"
+	else
+		echo $W
+	fi
+}
+
+export PS1="\$(split_pwd) > "
+
+***
+   Just to update slightly (for Python3) and enhance the selected answer to add colours to the prompt as
+   per a BASH prompt (in Linux Mint 18.3 anyway):
+#! /usr/bin/python3
+
+import os, getpass
+from socket import gethostname
+
+username = getpass.getuser()
+hostname = gethostname()
+pwd = os.getcwd()
+homedir = os.path.expanduser('~')
+pwd = pwd.replace(homedir, '~', 1)
+
+if len(pwd) > 40:
+	# first 10 chars+last 30 chars
+	pwd = pwd[:10] + '...' + pwd[-30:]
+
+# Virtual environment being used? Essential not to omit!
+ve = os.getenv('VIRTUAL_ENV')
+venv = '(`basename \"$VIRTUAL_ENV\"`)' if ve else ''
+
+# colours as per my current BASH Terminal:
+# username + hostname: bold green
+# path and $: bold blue
+print( '\[\e[;1;32m\]%s%s@%s \[\e[;1;34m\]%s $\[\e[0m\]  ' % (venv, username, hostname, pwd) )
+
+   More on colour codes in a BASH Terminal here. There's probably some way of finding out what
+   colours your Terminal uses automatically, but I haven't got a clue what that might be.
+
+   With the shebang line the export line for inclusion in .bashrc then becomes:
+export PROMPT_COMMAND='PS1="$(~/.local/bin/manage_prompt.py)"' # adjust path to .py file
+
+   NB1 these "\e" escape codes must always be enclosed in "\[ ... \]", otherwise line-returns get
+   completely messed up.
+
+   NB2 to get your full path at any time just go
+... $ pwd
+
+   of course...
+
+***
+   This small addition to @joão-pinto's excellent answer adds in the virtual environment name when
+   you run the workon command.
+import os
+from platform import node
+hostname = node().split('.')[0]
+username = os.environ['USER']
+pwd = os.getcwd()
+homedir = os.path.expanduser('~')
+pwd = pwd.replace(homedir, '~', 1)
+
+# check for the virtualenv
+ve = os.getenv('VIRTUAL_ENV')
+
+if ve:
+	venv = '(`basename \"$VIRTUAL_ENV\"`)'
+else:
+	venv = ''
+
+if len(pwd) > 33:
+	pwd = pwd[:10]+'...'+pwd[-20:] # first 10 chars+last 20 chars
+print '%s[%s@%s:%s] ' % (venv, username, hostname, pwd)
+
+***
+   this prompt shortens all names except the current line this:
+user:/h/t/D/C/current$
+
+sps() {
+	echo `dirname $PWD` | sed -r 's|/(.)[^/]*|/\1|g'
+}
+
+PS1='\u:$$(eval "sps")/\W\$ '
+
+***
+   A Further customization based on mike rodent's update. This allows to change the len of the
+   shown path dynamically via
+export MAXPROMPTLEN=<desired length>
+
+   It always shows the last folder (even if its name is longer than the maximum length), and tries to
+   show the first folder.
+#! /usr/bin/python3
+
+import os, getpass
+from socket import gethostname
+
+username = getpass.getuser()
+hostname = gethostname()
+pwd = os.getcwd()
+homedir = os.path.expanduser('~')
+pwd = pwd.replace(homedir, '~', 1)
+
+# Default value for maxlen of pwd
+# Use environment varibale MAXPROMPTLEN to change dynamically
+MAXLEN=30
+if "MAXPROMPTLEN" in os.environ:
+	MAXLEN = int(os.environ["MAXPROMPTLEN"])
+
+if len(pwd) > MAXLEN:
+	# keep first and last folder
+	parts = pwd.split(os.path.sep)
+	leaf = "..." + parts[-1]
+	stem = os.path.sep.join(parts[:2])[:(MAXLEN-len(leaf)+1)]
+	pwd = stem + leaf
+
+# Virtual environment being used? Essential not to omit!
+ve = os.getenv('VIRTUAL_ENV')
+venv = '(`basename \"$VIRTUAL_ENV\"`)' if ve else ''
+
+# colours as per my current BASH Terminal:
+# username + hostname: bold green
+# path and $: bold blue
+print(f"\[\e[;1;32m\]{venv}{username}@{hostname} \[\e[;1;34m\]{pwd}$\[\e[0m\]")
+
+   I suggest you include it in your .bashrc like this:
+# Limit the lenght of the prompt dynamically
+# comment to turn off
+max_prompt_len=yes
+if [ "$max_prompt_len" ]; then
+	MAXPROMPTLEN=30  # maxium length of prompt
+	PS1="$(python3 ~/.short_pwd.py)"
+fi
+
+   Assuming you put the code in ~/.short_pwd.py
+
+
+---
+
