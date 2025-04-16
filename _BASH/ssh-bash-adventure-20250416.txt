@@ -1,0 +1,287 @@
+filename: ssh-bash-adventure-20250416.txt
+https://gitlab.com/-/snippets/2149340
+
+An ssh adventure; or, why l10n support is important(*)
+
+There's a few things I do in the bashrc on my laptop that isn't done in the default bashrc of random throwaway
+hosts I shell into. Sometimes this is irritating or disorienting, but it's not worth manually installing my
+bashrc on every host I visit. But there has to be a better way, right? Let's waste entirely too much time to
+find out:
+
+Maybe we can just set the options we want directly in the ssh invocation. That's a bit awkward, but we can
+hide that in an alias or something on the local machine and it won't get in the way a lot. Let's try that, and
+start by saving some keystrokes when invoking puppet in the usual manner:
+alias puppet_="sudo puppet agent --test"
+
+Nothing to write home about, but a simple enough motivating example, hopefully:
+lirnril@rivendellxps:~$> ssh secret-abc123.1d6.org 'alias puppet_="sudo puppet agent --test"'
+lirnril@rivendellxps:~$> 
+
+Oh, right, that just makes the remote shell set the option and then immediately exit, instead of opening an
+interactive shell session. Okay, well, can we just start that session by hand afterwards?
+
+lirnril@rivendellxps:~$> ssh secret-abc123.1d6.org 'alias puppet_="sudo puppet agent --test" ; bash'
+
+And then nothing happens. Huh.
+
+fjaflkasjflsf^[[D^[[D^[[D
+bash: line : $'fjaflkasjflsf\E[D\E[D\E[D': command not found
+ls -l /dev/stdin
+lrwxrwxrwx 1 root root 15 Jun  8  2020 /dev/stdin -> /proc/self/fd/0
+ls -l /proc/self/fd/0
+lr-x------ 1 lirnril users 64 Jul 15 21:09 /proc/self/fd/0 -> pipe:[1016279995]
+
+
+We are, in fact, interactively talking to bash, but bash isn't feeling very interactive, so we don't get a
+prompt. Our standard input appears to be a pipe, as if we were some random process and not an interactive
+user. Fortunately this is not insurmountable, we just lost some ssh default behavior by specifying a command,
+as the manual page elucidates:
+
+    When the user's identity has been accepted by the server, the server
+    either executes the given command in a non-interactive session or, if no
+    command has been specified, logs into the machine and gives the user a
+    normal shell as an interactive session.  All communication with the
+    remote command or shell will be automatically encrypted.
+
+    If an interactive session is requested ssh by default will only request a
+    pseudo-terminal (pty) for interactive sessions when the client has one.
+    The flags -T and -t can be used to override this behaviour.
+
+And indeed, with -t it immediately looks better:
+
+lirnril@rivendellxps:~$> ssh -t secret-abc123.1d6.org 'alias puppet_="sudo puppet agent --test" ; bash'
+lirnril@secret-abc123:~$> ls -l /proc/self/fd/0
+lrwx------ 1 lirnril employees 64 Jul 15 21:16 /proc/self/fd/0 -> /dev/pts/2
+
+However, we didn't actually achieve anything.
+
+lirnril@secret-abc123:~$> puppet_ --noop
+bash: puppet_: command not found
+
+Alas, aliases aren't inherited by child processes. We want to make bash define our alias but then continue
+interactively. Here are some bad ways to do it, taking the requirement literally as "send the alias
+definition, then send interactive input":
+
+lirnril@rivendellxps:~$> ssh -t secret-abc123.1d6.org "( echo 'alias puppet_=\"sudo puppet agent --test\"' ; cat ) | bash -i"
+lirnril@secret-abc123:~$> alias puppet_="sudo puppet agent --test"
+lirnril@secret-abc123:~$> type puppet_
+cat: -type p: Input/output error
+uppet_
+puppet_ is aliased to `sudo puppet agent --test'
+lirnril@secret-abc123:~$> exit
+Connection to secret-abc123.1d6.org closed.
+
+lirnril@rivendellxps:~$> ( echo 'alias puppet_="sudo puppet agent --test"'; cat ) | ssh -t secret-abc123.1d6.org bash -i
+bash: cannot set terminal process group (-1): Inappropriate ioctl for device
+bash: no job control in this shell
+<g-d5bacc:~$> alias puppet_="sudo puppet agent --test"
+lirnril@secret-abc123:~$> type puppet_
+type puppet_
+puppet_ is aliased to `sudo puppet agent --test'
+lirnril@secret-abc123:~$> ^[[D^[[A^[[C^[[C^[[B^[[D^[[A^C
+
+So the first one immediately exited for some reason, the second one sort of worked but doesn't seem to get us
+a particularly normal looking shell, lacking job control and, apparently, readline support.
+
+But we really don't need to do this, because bash already comes with a feature for running some commands
+before an interactive session, it's sourcing a bashrc file. We don't really need the default bashrc that comes
+with our homedir on those hosts, right?
+
+lirnril@rivendellxps:~$> ssh -t secret-abc123.1d6.org "echo 'alias puppet_=\"sudo puppet agent --test\"' > .bashrc ; bash"
+lirnril@secret-abc123:~$> type puppet_
+puppet_ is aliased to `sudo puppet agent --test'
+
+Now we're getting somewhere, a perfectly legit shell with our handy alias pre-defined, that's all we wanted.
+We can hide this whole invokation in a bash function and it won't even be particularly painful to use. But it
+still feels a bit gross, so let's spend some more of our apparently not very precious time to make it a bit
+nicer.
+
+One ugly aspect is this:
+
+lirnril@secret-abc123:~$> ps x
+  PID TTY      STAT   TIME COMMAND
+28758 ?        S      0:00 sshd: lirnril@pts/0
+28761 pts/0    Ss+    0:00 -bash
+29348 ?        S      0:00 sshd: lirnril@pts/1
+29349 pts/1    Ss     0:00 bash -c echo 'alias puppet_="sudo puppet agent --test"' > .bashrc ; bash -i
+29350 pts/1    S      0:00 bash -i
+31274 pts/1    R+     0:00 ps x
+
+I'm not sure how I feel about having my bashrc visible in the parent process's arguments, for anyone to
+criticize my preferences or steal my secret techniques.
+
+We can paper over this by exec'ing into the final bash process, since that makes the parent process go away,
+but that's basically a race, the arguments are still briefly visible.
+
+Another embarassing flaw is overwriting whatever .bashrc already exists on the remote side. It's just clumsy
+and probably annoying during future visits. Let's start by addressing that with with bash's --rcfile option:
+
+lirnril@rivendellxps:~$> ssh -t secret-abc123.1d6.org "echo 'alias puppet_=\"sudo puppet agent --test\"' > \
+	custom-bashrc ; bash --rcfile custom-bashrc"
+lirnril@secret-abc123:~$> type puppet_
+puppet_ is aliased to `sudo puppet agent --test'
+
+We want to do better, though: The filesystem is basically global state, global state is morally wrong, and we
+should really avoid relying on having a writable location on the filesystem, and we shouldn't risk races in
+case we run this command concurrently or something. Also, leaving that file sitting around is just not very
+elegant.
+
+Indeed, bash is amenable to our demands, we don't need a real file just to have a filename we can pass as the
+argument for --rcfile. With process substitution, we can run whatever command, bash will have it write its
+output into a pipe, and we can usually get away with pretending the other end of the pipe is a normal file:
+
+lirnril@rivendellxps:~$> echo <( echo amazing technology )
+/dev/fd/63
+lirnril@rivendellxps:~$> cat <( echo amazing technology )
+amazing technology
+
+So, how does that look?
+
+lirnril@rivendellxps:~$> ssh -t secret-abc123.1d6.org "bash --rcfile <( echo 'alias puppet_=\"sudo puppet agent --test\"' )"
+lirnril@secret-abc123:~$> type puppet_
+puppet_ is aliased to `sudo puppet agent --test'
+
+Much better! So how about the string escaping situation? It's already getting out of hand, it'd only get worse
+for any less trivial definitions. Can we just read the alias definition from a local file?
+
+lirnril@rivendellxps:~$> echo 'alias puppet_="sudo puppet agent --test"' > custom-bashrc
+lirnril@rivendellxps:~$> ssh -t secret-abc123.1d6.org "bash --rcfile <( echo '"$(cat custom-bashrc)"' )"
+bash: alias: puppet: not found
+bash: alias: agent: not found
+bash: alias: --test: not found
+
+Uhhh, nope. Living in a commandline is invariably vexing. But how can we smuggle our ephemeral bashrc past any
+commandline arguments and argument expansion and so on? Preferably without resorting to scp or anything weird?
+
+Once again a facility for our desires already exists, awaiting us in the ssh_config manual page:
+
+     SendEnv
+             Specifies what variables from the local environ(7) should be sent
+             to the server.  [...]
+
+Now it's easy, right? Load the config into an environment variable, tell ssh to pass it along, and safely use
+it in a remote command, without having to escape the thing at any point.
+
+lirnril@rivendellxps:~$> CUSTOM_BASHRC=$(cat custom-bashrc) ssh -o SendEnv=CUSTOM_BASHRC -t \
+	secret-abc123.1d6.org 'bash --rcfile <( echo "$CUSTOM_BASHRC")'
+lirnril@secret-abc123:~$> type puppet_
+bash: type: puppet_: not found
+
+Wait, what? Okay, let's keep reading:
+
+                      [...]  The server must also support it, and the server
+             must be configured to accept these environment variables.  Note
+             that the TERM environment variable is always sent whenever a
+             pseudo-terminal is requested as it is required by the protocol.
+
+Mhmmmm. Okay, sure.
+
+lirnril@rivendellxps:~$> TERM=$(cat custom-bashrc) ssh -t secret-abc123.1d6.org 'bash --rcfile <( echo "$TERM" )'
+lirnril@secret-abc123:~$> echo $TERM
+alias puppet_="sudo puppet agent --test"
+
+And surely having a bogus TERM will never cause any problems, right? I suspect it's going to default something
+very basic that just works but maybe doesn't, uhh, support mouse input or something. I guess we can just
+restore the original value.
+
+lirnril@rivendellxps:~$> TERM=$(declare -p TERM; cat custom-bashrc) ssh -t secret-abc123.1d6.org 'bash --rcfile <( echo "$TERM" )'
+lirnril@secret-abc123:~$> type puppet_
+puppet_ is aliased to `sudo puppet agent --test'
+lirnril@secret-abc123:~$> echo $TERM
+rxvt-unicode-256color
+
+(declare -p ... is the one lifehack for robustly escaping strings in bash that I'm aware of. It expands to a
+declaration of whatever you're asking it about, in perfectly valid bash syntax. You know, just in case they
+start shipping terminals with names like $(sudo rm -Rf /)term.)
+
+(Also, I think our secret bashrc is now safe from ps, in the end we still expand it in the arguments to echo,
+but echo is a shell builtin and won't show as a process in the ps output. We could also switch to cat <<<$TERM,
+which is probably even safer.)
+
+Pretty much perfect, and very intuitive too, right? Let's add a stretch goal: I also want my vimrc. Not any
+vim plugins, just the basic settings (such as turning off mouse input). So, we want to transport two separate
+files, so our one magic environment is not going to cut it, barring some more shenanigans maybe involving jq
+or more declare -p juggling.
+
+Let's read one more sentence in that helpful manual page:
+
+             Refer to AcceptEnv in sshd_config(5) for how to configure the
+             server.
+
+Oh.
+
+lirnril@secret-abc123:~$> grep AcceptEnv /etc/ssh/sshd_config
+grep: /etc/ssh/sshd_config: Permission denied
+lirnril@secret-abc123:~$> exit
+Connection to secret-abc123.1d6.org closed.
+lirnril@rivendellxps:~$> echo >> custom-bashrc 'alias please=sudo'
+lirnril@rivendellxps:~$> TERM=$(declare -p TERM; cat custom-bashrc) ssh -t secret-abc123.1d6.org 'bash --rcfile <( echo "$TERM" )'
+lirnril@secret-abc123:~$> please grep AcceptEnv /etc/ssh/sshd_config
+AcceptEnv LANG LC_*
+
+The default (on debian?) appears to be considerate of individual users' language and locale/encoding
+preferences, without being all that picky about what kind of things your locale actually covers or what
+locales look like. Typically, you'd expect to see something like LANG=en_US.UTF-8, or LC_TIME=en_DK.UTF-8 to
+get a reasonable date/time format out of American computers. But for ssh's purposes, there is no one stopping
+us from declaring our bashrc and vimrc to be valid locale names for the completely normal LC_BASHRC and
+LC_VIMRC categories:
+
+lirnril@rivendellxps:~$> LC_VIMRC=$(cat custom-vimrc) \
+	LC_BASHRC=$(cat custom-bashrc ; echo "alias vim='vim -u <(echo \"\$LC_VIMRC\")'" ) \
+	ssh -t secret-abc123.1d6.org 'bash --rcfile <( echo "$LC_BASHRC" )'
+lirnril@secret-abc123:~$> type puppet_
+puppet_ is aliased to `sudo puppet agent --test'
+lirnril@secret-abc123:~$> type vim
+vim is aliased to `vim -u <(echo "$LC_VIMRC")'
+lirnril@secret-abc123:~$> vim /etc/haproxy/haproxy.cfg
+
+... where vim's -u is like bash's --rcfile. Pretend you just observed me performing some advanced editing
+maneuvers on that file. After all this toil, I'm now happy, and confident this amazing function is going to
+pay off within a few years at most:
+
+ssx() {
+	LC_VIMRC=$(cat ~/custom-vimrc) \
+	LC_BASHRC=$(cat ~/custom-bashrc) \
+	ssh -t "$@" exec bash --init-file '<(echo "$LC_BASHRC")'
+}
+
+***
+    this is IMPECCABLE work i was on the edge of my seat the whole time
+
+	i do want to mention that you can get further with the <( $(cat custom-bashrc) ) approach if you just add
+	more quotes x3
+
+    ; ssh -t linode "bash --rcfile <( echo '""$(cat custom-bashrc)""' )"
+    linode-static:~$
+
+but it breaks again as soon as you do anything complicated (e.g. my real bashrc):
+
+; ssh -t linode "bash --rcfile <( echo '""$(cat .bashrc)""' )"
+zsh:98: unmatched '
+zsh:98: parse error near `<( echo 'if [ -n "$B...'
+Connection to 50.116.47.176 closed.
+
+***
+ok here is a version that doesn't require smuggling environment variables and works for arbitrary numbers of
+files and arbitrarily weird syntax
+
+$> (x=$(cat .bashrc); ssh -t linode "$(declare -p x)"'; exec bash --rcfile <(echo "$x")')
+
+this also does not set any variables in your parent shell, because that's stateful and we don't want to be
+stateful
+
+**
+extended to vim alias: ssh -t -o RemoteCommand="$(ssescape x); $(ssescape y);"'exec bash \
+	--rcfile <(echo "$x"; echo "alias vim='\''vim -u <(echo "$y")'\''"; )' "$@"
+
+***
+This reminds me of
+
+https://github.com/sineemore/backpack
+
+There are many forks with very minor changes if you poke around github.
+
+
+---
+
+
