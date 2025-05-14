@@ -1,0 +1,495 @@
+filename: grobi-x11-monitor-autoconfig-20250513.txt
+https://michael.stapelberg.ch/posts/2025-05-10-grobi-x11-monitor-autoconfig/
+
+In praise of grobi for auto-configuring X11 monitors
+2025-05-10
+
+   I have recently started using the grobi program by Alexander Neumann again and was delighted to
+   discover that it makes using my fiddly (but wonderful)
+   [**1][https://michael.stapelberg.ch/posts/2017-12-11-dell-up3218k/]Dell 32-inch 8K monitor (UP3218K)
+   monitor much more convenient - I get a signal more quickly than with my previous, sleep-based approach.
+
+   Previously, when my PC woke up from suspend-to-RAM, there were two scenarios:
+    1. The monitor was connected. My sleep program would power on the monitor (if needed), sleep a
+       little while and then run xrandr(1) to (hopefully) configure the monitor correctly.
+    2. The monitor was not connected, for example because it was still connected to my work PC.
+
+   In scenario #2, or if the one-shot configuration attempt in scenario #1 fails, I would need to SSH in
+   from a different computer and run xrandr manually so that the monitor would show a signal:
+$> DISPLAY=:0 xrandr \
+  --output DP-4 --mode 3840x4320 --panning 0x0+0+0 \
+  --output DP-2 --right-of DP-4 --mode 3840x4320 --panning 0x0+3840+0
+
+Automatic monitor configuration with grobi
+   I have now completely solved this problem by creating the following ~/.config/grobi.conf file:
+rules:
+	- name: UP3218K
+
+		outputs_connected: [DP-2, DP-4]
+
+		# DP-4 is left, DP-2 is right
+		configure_row:
+			- DP-4@3840x4320
+			- DP-2@3840x4320
+
+		# atomic instructs grobi to only call xrandr once and configure all the
+		# outputs. This does not always work with all graphic cards, but is
+		# needed to successfully configure the UP3218K monitor.
+		atomic: true
+
+   ...and installing / enabling grobi (on Arch Linux) using:
+$> sudo pacman -S grobi
+$> systemctl --user enable --now grobi
+
+   Whenever grobi detects that my monitor is connected (it listens for X11 RandR output change
+   events), it will run xrandr(1) to configure the monitor resolution and positioning.
+
+   To check what grobi is seeing/doing, you can use:
+$> systemctl --user status grobi
+$> journalctl --user -u grob
+
+   For example, on my system, I see:
+grobi: 18:31:48.823765 outputs: [HDMI-0 (primary) DP-0 DP-1 DP-2 (connected) 3840x2160+ \
+	[DEL-16711-808727372-DELL UP3218K-D2HP805I043L] DP-3 DP-4 (connected) 3840x21>
+grobi: 18:31:48.823783 new rule found: UP3218K
+grobi: 18:31:48.823785 enable outputs: [DP-4@3840x4320 DP-2@3840x4320]
+grobi: 18:31:48.823789 using one atomic call to xrandr
+grobi: 18:31:48.823806 running command /usr/bin/xrandr xrandr --output DP-4 --mode 3840x4320 --output DP-2 \
+	--mode 3840x4320 --right-of DP-4
+grobi: 18:31:49.285944 new RANDR change event received
+
+   Notably, the instructions for getting out of a bad state (no signal) are now to power off the monitor
+   and power it back on again. This will result in RandR output change events, which will trigger grobi,
+   which will run xrandr, which configures the monitor. Nice!
+
+Why not autorandr?
+   No particular reason. I knew grobi. If nothing else, grobi is written in Go, so it's likely to keep working
+   smoothly over the years.
+
+Does grobi work on Wayland?
+   Probably not. There is no mention of Wayland over on the grobi repository.
+
+Bonus: my Suspend-to-RAM setup
+   As a bonus, this section describes the other half of my monitor-related automation.
+
+   When I suspend my PC to RAM, I either want to wake it up manually later, for example by pressing a
+   key on the keyboard or by sending a Wake-on-LAN packet, or I want it to wake up automatically each
+   morning at 6:50 - that way, daily cron jobs have some time to run before I start using the computer.
+
+   To accomplish this, I use zleep, a wrapper program around rtcwake(8) and systemctl suspend that
+   integrates with the myStrom switch smart plug to turn off power to the monitor entirely. This is
+   worthwhile because the monitor draws 30W even in standby!
+
+<code>
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"time"
+	)
+
+var (
+	resume = flag.Bool("resume",
+	false,
+	"run resume behavior only (turn on monitor via smart plug)")
+
+	noMonitor = flag.Bool("no_monitor",
+	false,
+	"disable turning off/on monitor")
+)
+
+func monitorPower(ctx context.Context, method, cmnd string) error {
+
+	if *noMonitor {
+		log.Printf("[monitor power] skipping because -no_monitor flag is set")
+		return nil
+	}
+
+	log.Printf("[monitor power] command: %v", cmnd)
+	u, err := url.Parse("http://myStrom-Switch-A46FD0/" + cmnd)
+
+	if err != nil {
+		return err
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		req, err := http.NewRequest(method, u.String(), nil)
+			if err != nil {
+				return err
+			}
+		ctx, canc := context.WithTimeout(ctx, 5*time.Second)
+		defer canc()
+		req = req.WithContext(ctx)
+		resp, err := http.DefaultClient.Do(req)
+
+		if err != nil {
+			log.Print(err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("unexpected HTTP status code: got %v, want %v", resp.Status, http.StatusOK)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		log.Printf("[monitor power] request succeeded")
+		return nil
+	}
+}
+
+func nextWakeup(now time.Time) time.Time {
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	if now.Hour() < 6 {
+		// wake up today
+		return midnight.Add(6*time.Hour + 50*time.Minute)
+	}
+
+	// wake up tomorrow
+	return midnight.Add(24 * time.Hour).Add(6*time.Hour + 50*time.Minute)
+}
+
+func runResume() error {
+	// Retry for up to one minute to give the network some time to come up
+	ctx, canc := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer canc()
+	if err := monitorPower(ctx, "GET", "relay?state=1"); err != nil {
+		log.Print(err)
+	}
+	return nil
+}
+
+func zleep() error {
+	ctx := context.Background()
+	now := time.Now().Truncate(1 * time.Second)
+	wakeup := nextWakeup(now)
+	log.Printf("now   : %v", now)
+	log.Printf("wakeup: %v", wakeup)
+	log.Printf("wakeup: %v (timestamp)", wakeup.Unix())
+
+	// assumes hwclock is running in UTC (see timedatectl | grep local)
+
+	// Power the monitor off in 15 seconds.
+	// mode=on is intentional: https://api.mystrom.ch/#e532f952-36ea-40fb-a180-a57b835f550e
+	// - the switch will be turned on (already on, so this is a no-op)
+	// - the switch will wait for 15 seconds
+	// - the switch will be turned off
+	if err := monitorPower(ctx, "POST", "timer?mode=on&time=15"); err != nil {
+		log.Print(err)
+	}
+
+	sleep := exec.Command("sh", "-c", fmt.Sprintf("sudo rtcwake -m no --verbose --utc -t %v && sudo system ctl suspend", wakeup.Unix()))
+	sleep.Stdout = os.Stdout
+	sleep.Stderr = os.Stderr
+	fmt.Printf("running %v\n", sleep.Args)
+
+	if err := sleep.Run(); err != nil {
+		return fmt.Errorf("%v: %v", sleep.Args, err)
+	}
+
+	return nil
+}
+
+func main() {
+	flag.Parse()
+
+	if *resume {
+		if err := runResume(); err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		if err := zsleep(); err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+</code>
+
+   To turn power to the monitor on after resuming, I placed the following shell script in
+   /lib/systemd/system-sleep/zleep.sh:
+
+<code>
+#!/bin/sh
+
+case "$1" in
+	pre)
+		exit 0
+	;;
+
+	post)
+		/usr/local/bin/zleep -resume
+		exit 0
+	;;
+
+	*)
+		exit 1
+		;;
+esac
+</code>
+
+   Once power is on, grobi will detect and configure the monitor.
+
+   Here is the program in action:
+2025/05/06 21:58:32 now   : 2025-05-06 21:58:32 +0200 CEST
+2025/05/06 21:58:32 wakeup: 2025-05-07 06:50:00 +0200 CEST
+2025/05/06 21:58:32 wakeup: 1746593400 (timestamp)
+2025/05/06 21:58:32 [monitor power] command: timer?mode=on&time=15
+2025/05/06 21:58:32 [monitor power] request succeeded
+running [sh -c sudo rtcwake -m no --verbose --utc -t 1746593400 && sudo systemctl suspend]
+Using UTC time.
+        delta   = 0
+        tzone   = 0
+        tzname  = UTC
+        systime = 1746561512, (UTC) Tue May  6 19:58:32 2025
+        rtctime = 1746561512, (UTC) Tue May  6 19:58:32 2025
+alarm 1746593400, sys_time 1746561512, rtc_time 1746561512, seconds 0
+rtcwake: wakeup using /dev/rtc0 at Wed May  7 04:50:00 2025
+suspend mode: no; leaving
+
+
+---
+[**1]
+https://michael.stapelberg.ch/posts/2017-12-11-dell-up3218k/
+
+Dell 8K4K monitor (Dell UP3218K) (2017)
+2023-10-25
+
+Background
+   Ever since I first used a MacBook Pro with Retina display back in 2013, I've been madly in love with
+   hi-DPI displays. I had seen the device before, and marvelled at brilliant font quality with which
+   scientific papers would be rendered. But it wasn't until I had a chance to use the device for a few
+   hours to make i3 compatible with hi-DPI displays that I realized what a difference it makes in the
+   day-to-day life.
+
+   Note that when I say "hi-DPI display", I mean displays with an integer multiple of 96 dpi, for
+   example displays with 192 dpi or 288 dpi. I explain this because some people use the same term to
+   mean "anything more than 96 dpi".
+
+   In other words, some people are looking for many pixels (e.g. running a 32 inch display with
+   3840x2160 pixels, i.e. 137 dpi, with 100% scaling), whereas I desire crisp/sharp text (i.e. 200%
+   scaling).
+
+   Hence, in 2014, I bought the Dell UP2414Q with 3840x2160 on 24" (185 dpi), which was one of the first
+   non-Apple devices to offer a dpi that Apple would market as "Retina".
+
+   After getting the Dell UP2414Q, I replaced all displays in my life with hi-DPI displays one by one. I
+   upgraded my phone, my personal laptop, my work laptop and my monitor at work.
+
+Dell UP3218K
+   In January 2017, Dell introduced the Dell Ultrasharp UP3218K monitor at the Consumer Electronics Show
+   (CES). It is the world's first available 8K monitor, meaning it has a resolution of 7680x4320 pixels
+   at a refresh rate of 60 Hz. The display's dimensions are 698.1mm by 392.7mm (80cm diagonal, or 31.5
+   inches), meaning the display shows 280 dpi.
+
+   While the display was available in the US for quite some time, it took until October 2017 until it
+   became available in Switzerland.
+
+Compatibility
+   The UP3218K requires connecting two separate DisplayPort 1.4 cables in order to reach the native
+   resolution and refresh rate. When connecting only one cable, you will be limited to a refresh rate of
+   30 Hz, which is a very noticeable annoyance on any display: you can literally see your mouse cursor
+   lag behind. Ugh.
+
+   Note that this mode of connection does not use Multi-Stream Transport (MST), which was a trick that
+   first-generation 4K displays used. Instead, it uses the regular Single-Stream Transport (SST), but
+   two cables.
+
+   As of November 2017, only latest-generation graphics cards support DisplayPort 1.4 at all, with e.g.
+   the nVidia GTX 1060 being marketed as "DisplayPort 1.2 Certified, DisplayPort 1.3/1.4 Ready".
+
+AMD Radeon Pro WX7100
+   Hence, I thought I would play it safe and buy a graphics card which is explicitly described as
+   compatible with the UP3218K: I ordered an AMD Radeon Pro WX7100.
+
+   Unfortunately, I have to report that the WX7100 is only able to drive the monitor at native
+   resolution when using Windows. On Linux, I was limited to 1920x1080 at 60Hz (!) when using the Open
+   Source amdgpu driver. With the Closed Source amdgpu-pro driver, I reached 3840x2160 at 60Hz, which is
+   still not the native resolution. Also, the amdgpu-pro driver is a hassle to install: it requires an
+   older kernel and isn't packaged well in Debian.
+
+nVidia GeForce GTX 1060
+   I returned the WX7100 in exchange for the cheapest and most quiet GeForce 10 series card with 2
+   DisplayPort outputs I could find. My choice was the MSI GeForce GTX 1060 GAMING X 6G (MSI
+   V328-001R). The card seems like overkill, given that I don't intend to play games on this machine,
+   but lower-end cards all come with at most one DisplayPort output.
+
+   Regardless, I am happy with the card. It indeed is silent, and with the Closed Source driver, it
+   powers the UP3218K without any trouble. Notably, it supports RandR 1.5, which I'll talk about a bit
+   more later.
+
+   Compatibility Matrix
+   ----------------------------------------------------------------
+   Operating System    Graphics Card    Driver    Resolution
+   ----------------------------------------------------------------
+   Windows             Radeon WX7100    yes       7680x4320 @ 60 Hz
+   Windows             GeForce 1060     yes       7680x4320 @ 60 Hz
+   Linux               Radeon WX7100    amdgpu    1920x1080 @ 60 Hz
+   Linux               Radeon WX7100    pro       3840x2160 @ 60 Hz
+   Linux               GeForce 1060     nVidia    7680x4320 @ 60 Hz
+   ----------------------------------------------------------------
+
+Recommendation
+   If you want to play it safe, buy an nVidia card of the GeForce 10 series. Verify that it says
+   "DisplayPort 1.4 Ready", and that it comes with two DisplayPort outputs.
+
+   I read about improvements of the amdgpu driver for the upcoming Linux 4.15, but I don't know
+   whether that will help with the problems at hand.
+
+Impressions
+   The unboxing experience is well-designed, and all components make a good impression. All cables which
+   you will need (two DisplayPort cables, a power cable, a USB cable) are included and seem to be of
+   high quality.
+
+   The display has a thin bezel, much thinner than my other monitors ViewSonic VX2475Smhl-4K or Dell
+   UP2414Q.
+
+   The power LED is white and not too bright. The on-screen menu reacts quickly and is reasonably
+   intuitive.
+
+   The built-in USB hub works flawlessy, even with devices which don't work on my standalone USB3 hub
+   (for reasons which I have yet to find out).
+
+Display Quality
+   The display quality of the screen is stunningly good.
+
+   It was only when I configured 300% scaling that I realized why some Chromebooks had a distinctly
+   different look and feel from other computers I had used: I always assumed they differed in font
+   rendering somehow, but the actual difference is just the screen DPI: fonts look distinctly better
+   with 288 dpi than with 192 dpi, which of course looks better than 96 dpi.
+
+   Some people might wonder whether an 8K display is any better than a 4K display, and I now can answer
+   that question with a decisive "yes, one can easily see the difference". I'm not sure if the
+   difference between a 288 dpi and a 384 dpi display would be visible, but we'll see when we get there
+   :-).
+
+Glossy
+   What I didn't expect is that the UP3218K is a glossy display, as opposed to a matte display.
+   Depending on the brightness and colors, you might see reflections. With my preferred brightness of
+   50%, I can clearly see reflections when displaying darker colors, e.g. on a black terminal emulator
+   background, or even in my grey Emacs theme.
+
+   While one can mentally ignore the reflections after a little while, I still consider the glossyness a
+   mild annoyance. I hope as 8K displays become more prevalent, display vendors will offer matte 8K
+   displays as well.
+
+Scaling
+   I found it interesting that the display works well in both 200% scaling and 300% scaling.
+
+   When running the display at 200% scaling, you get 3840x2160 (4K resolution) "logical pixels", but
+   sharper.
+
+   When running the display at 300% scaling, you get 2560x1440 "logical pixels", but extremely sharp.
+
+   I would say it is a subjective preference which of the two settings to use. Most likely, people who
+   prefer many pixels would run the display at 200%, whereas I prefer the 300% scaling mode for the time
+   being.
+
+Linux compatibility / configuration
+   To use this display without gross hacks, ensure all relevant components in your software stack
+   support RandR 1.5. My known working configuration is:
+     * Xorg 1.19.5
+     * nVidia driver 375.82
+     * libxcb 1.12
+     * i3 4.14
+     * i3lock 2.10
+
+   With the following command, you can create a RandR MONITOR object spanning the DisplayPort outputs
+   DP-4 and DP-2:
+$> xrandr --setmonitor up3218k auto DP-4,DP-2
+
+   I place this command in my ~/.xsession before starting i3.
+
+   Theoretically, Xorg could create a MONITOR object automatically. I filed a feature request for
+   this.
+
+Scaling compatibility
+   With regards to scaling issues, the situation is very similar to any other monitor which requires
+   scaling. Applications which were updated to support 200% scaling seem to work with 300% scaling just
+   as well.
+
+   Of course, applications which were not yet updated to work with scaling look even smaller than on
+   200% displays, so it becomes more of a nuisance to use them. As far as I can tell, the most likely
+   offender are Java applications such as JDownloader.
+
+Buzzing noise
+   Unfortunately, the monitor emits a high-pitched buzzing noise, very similar to Coil Whine. The noise
+   is loud enough to prevent focused work without listening to music.
+
+   I verified that this symptom was happening with Windows and Linux, on two different computers, with
+   default monitor settings, and even when no input source was connected at all.
+
+   Finally, I contacted Dell support about it. In the call I received on the next business day, they
+   were very forthcoming and offered to replace the monitor.
+
+   The replacement monitor still emits some noise, but much less pronounced. I think I can easily ignore
+   the noise.
+
+   Update after 2+ years: I had honestly forgotten that the replacement monitor also made noise. Maybe
+   it went away, or my ears have gotten worse, or I just didn't notice for long enough.
+
+Wakeup issues
+   Rarely (less than once a week), when waking up the monitor from DPMS standby mode, only the left half
+   of the screen would appear on my monitor.
+
+   This can be fixed by turning the monitor off and on again.
+
+   My theory is that one of the scalers does not manage to synchronize with the video card, but I don't
+   know for sure.
+
+   Interestingly enough, I also encountered this issue with the Dell UP2414Q I bought in 2014. My
+   workaround is to power down that display using its power button in the evenings, and power it up in
+   the mornings.
+
+   Update after 2+ years: I have now figured out that the monitor wakes up reliably after:
+    1. Swapping the cables around at my Graphics Card, i.e. using output DP-4 for the left monitor half
+       and output DP-0 for the right monitor half, not the other way around:
+$> xrandr \
+--output DP-4 --mode 3840x4320 --panning 0x0+0+0 \
+--output DP-0 --mode 3840x4320 --panning 0x0+3840+0 --right-of DP-4
+
+    2. When powering on the monitor, waiting until it shows the dialog box "No signal on DP1", and only
+       then waking up my machine to generate a signal.
+
+   When disconnecting and re-connecting the monitor to another machine, I found these steps the most
+   reliable:
+    1. Power off the monitor, then unplug the two DisplayPort cables.
+    2. Plug in both cables, then power the monitor on again.
+       An easy mistake to make is to not push the DisplayPort connector in all the way. This issue
+       usually manifests itself as the monitor still showing a picture (because the second cable likely
+       is plugged in correctly), but the full resolution not being available.
+
+   I have used these two steps twice a workday for weeks on end, and the monitor came up reliably every
+   single time.
+
+Power Usage
+   When the display is turned on, it consumes about 70W of power.
+
+   But, when the display enters "power saving mode", for example because you ran xset dpms force off, it
+   still consumes 30W of power! Therefore, better turn it off with the button every night, so that it
+   consumes less than 1W.
+
+Conclusion
+   For me, this monitor is worth it: I am okay with paying the hefty Research & Development tax that
+   first-to-market products such as this monitor have. I like to think that I'm voting with my wallet to
+   make sure vendors notice my interest in "Retina" displays.
+
+   For most people, I would recommend to wait until the second or third generation of 8K monitors. By
+   then, I expect most issues to be resolved, compatibility to not be a concern, and vendors focusing on
+   extra features. Hopefully, we'll eventually see matte 8K monitors with higher refresh rates than 60
+   Hz.
+
+
+---
+
