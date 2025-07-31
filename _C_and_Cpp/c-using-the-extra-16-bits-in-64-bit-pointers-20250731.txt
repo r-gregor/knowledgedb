@@ -1,0 +1,301 @@
+filename: c-using-the-extra-16-bits-in-64-bit-pointers-20250731.txt
+https://stackoverflow.com/questions/16198700/using-the-extra-16-bits-in-64-bit-pointers
+
+Using the extra 16 bits in 64-bit pointers
+
+   I read that [https://stackoverflow.com/q/6716946/995714]a 64-bit machine actually uses only 48 bits of
+   address (specifically, I'm using Intel core i7).
+
+   I would expect that the extra 16 bits (bits 48-63) are irrelevant for the address, and would be
+   ignored. But when I try to access such an address I got a signal EXC_BAD_ACCESS.
+
+   My code is:
+int *p1 = &val;
+int *p2 = (int *)((long)p1 | 1ll<<48);//set bit 48, which should be irrelevant
+int v = *p2; //Here I receive a signal EXC_BAD_ACCESS.
+
+   Why this is so? Is there a way to use these 16 bits?
+
+   This could be used to build more cache-friendly linked list. Instead of using 8 bytes for next ptr,
+   and 8 bytes for key (due to alignment restriction), the key could be embedded into the pointer.
+
+***
+   The high order bits are reserved in case the address bus would be increased in the future, so you
+   can't use it simply like that
+
+     The AMD64 architecture defines a 64-bit virtual address format, of which the low-order 48 bits are
+     used in current implementations (...) The architecture definition allows this limit to be raised
+     in future implementations to the full 64 bits, extending the virtual address space to 16 EB (2^64
+     bytes). This is compared to just 4 GB (2^32 bytes) for the x86.
+
+     ^http://en.wikipedia.org/wiki/X86-64#Architectural_features
+
+   More importantly, according to the same article [Emphasis mine]:
+
+     ... in the first implementations of the architecture, only the least significant 48 bits of a
+     virtual address would actually be used in address translation (page table lookup). Further, bits
+     48 through 63 of any virtual address must be copies of bit 47 (in a manner akin to sign
+     extension), or the processor will raise an exception. Addresses complying with this rule are
+     referred to as "canonical form."
+
+   As the CPU will check the high bits even if they're unused, they're not really "irrelevant". You need
+   to make sure that the address is canonical before using the pointer.
+
+   Some recent CPUs can optionally ignore high bits, checking only that the topmost matches bit #47
+   (PML4) or #56 (PML5). Intel Linear Address Masking (LAM) can be enabled by the kernel on a
+   per-process basis, for either user-space, the kernel, or both. AMD UAI (Upper Address Ignore) is
+   similar. ARM64 has a similar feature, Top Byte Ignore (TBI). This makes it more efficient to
+   store data in pointers, and easier (you don't have to manually strip it out before deref or passing
+   to a function that isn't aware of the tagging.)
+
+   That said, in x86_64 you're still free to use the high 16 bits if needed (if the virtual address is
+   not wider than 48 bits, see below), but you have to check and fix the pointer value by
+   sign-extending it before dereferencing.
+
+   ^Note that casting the pointer value to long is not the correct way to do because long is not
+   guaranteed to be wide enough to store pointers. You need to use uintptr_t or intptr_t.
+
+int *p1 = &val; // original pointer
+uint8_t data = ...;
+const uintptr_t MASK = ~(1ULL << 48);
+
+// === Store data into the pointer ===
+// Note: To be on the safe side and future-proof (because future implementations
+//     can increase the number of significant bits in the pointer), we should
+//     store values from the most significant bits down to the lower ones
+int *p2 = (int *)(((uintptr_t)p1 & MASK) | (data << 56));
+
+// === Get the data stored in the pointer ===
+data = (uintptr_t)p2 >> 56;
+
+// === Deference the pointer ===
+// Sign extend first to make the pointer canonical
+// Note: Technically this is implementation defined. You may want a more
+//     standard-compliant way to sign-extend the value
+intptr_t p3 = ((intptr_t)p2 << 16) >> 16;
+val = *(int*)p3;
+
+   WebKit's JavaScriptCore and Mozilla's SpiderMonkey engine as well as LuaJIT use this in the
+   nan-boxing technique. If the value is NaN, the low 48-bits will store the pointer to the object
+   with the high 16 bits serve as tag bits, otherwise it's a double value.
+
+   Previously Linux also uses the 63^rd bit of the GS base address to indicate whether the value was
+   written by the kernel
+
+   In reality you can usually use the 48^th bit, too. Because most modern 64-bit OSes split kernel and
+   user space in half, so bit 47 is always zero and you have 17 top bits free for use
+
+   You can also use the lower bits to store data. It's called a tagged pointer. If int is 4-byte
+   aligned then the 2 low bits are always 0 and you can use them like in 32-bit architectures. For
+   64-bit values you can use the 3 low bits because they're already 8-byte aligned. Again you also need
+   to clear those bits before dereferencing.
+
+int *p1 = &val; // the pointer we want to store the value into
+int tag = 1;
+const uintptr_t MASK = ~0x03ULL;
+
+// === Store the tag ===
+int *p2 = (int *)(((uintptr_t)p1 & MASK) | tag);
+
+// === Get the tag ===
+tag = (uintptr_t)p2 & 0x03;
+
+// === Get the referenced data ===
+// Clear the 2 tag bits before using the pointer
+intptr_t p3 = (uintptr_t)p2 & MASK;
+val = *(int*)p3;
+
+   One famous user of this is the V8 engine with SMI (small integer) optimization. The lowest bit in
+   the address will serve as a tag for type:
+     * if it's 1, the value is a pointer to the real data (objects, floats or bigger integers). The next
+       higher bit (w) indicates that the pointer is weak or strong. Just clear the tag bits and
+       dereference it
+     * if it's 0, it's a small integer. In 32-bit V8 or 64-bit V8 with pointer compression it's a 31-bit
+       int, do a signed right shift by 1 to restore the value; in 64-bit V8 without pointer compression
+       it's a 32-bit int in the upper half
+
+   32-bit V8
+                           |----- 32 bits -----|
+   Pointer:                |_____address_____w1|
+   Smi:                    |___int31_value____0|
+
+   64-bit V8
+               |----- 32 bits -----|----- 32 bits -----|
+   Pointer:    |________________address______________w1|
+   Smi:        |____int32_value____|0000000000000000000|
+
+     https://v8.dev/blog/pointer-compression
+
+   So as commented below, Intel has published PML5 which provides a 57-bit virtual address
+   space, if you're on such a system you can only use 7 high bits
+
+   You can still use some work around to get more free bits though. First you can try to use a 32-bit
+   pointer in 64-bit OSes. In Linux if x32abi is allowed then pointers are only 32-bit long. In Windows
+   just clear the /LARGEADDRESSAWARE flag and pointers now have only 32 significant bits and you can use
+   the upper 32 bits for your purpose. See How to detect X32 on Windows?. Another way is to use some
+   pointer compression tricks: How does the compressed pointer implementation in V8 differ from
+   JVM's compressed Oops?
+
+   You can further get more bits by requesting the OS to allocate memory only in the low region. For
+   example if you can ensure that your application never uses more than 64MB of memory then you need
+   only a 26-bit address. And if all the allocations are 32-byte aligned then you have 5 more bits to
+   use, which means you can store 64 - 21 = 43 bits of information in the pointer!
+
+   I guess ZGC is one example of this. It uses only 42 bits for addressing which allows for 2^42
+   bytes = 4 × 2^40 bytes = 4 TB
+
+     ZGC therefore just reserves 16TB of address space (but not actually uses all of this memory)
+     starting at address 4TB.
+
+     A first look into ZGC
+
+   It uses the bits in the pointer like this:
+ 6                 4 4 4  4 4                                             0
+ 3                 7 6 5  2 1                                             0
++-------------------+-+----+-----------------------------------------------+
+|00000000 00000000 0|0|1111|11 11111111 11111111 11111111 11111111 11111111|
++-------------------+-+----+-----------------------------------------------+
+|                   | |    |
+|                   | |    * 41-0 Object Offset (42-bits, 4TB address space)
+|                   | |
+|                   | * 45-42 Metadata Bits (4-bits)  0001 = Marked0
+|                   |                                 0010 = Marked1
+|                   |                                 0100 = Remapped
+|                   |                                 1000 = Finalizable
+|                   |
+|                   * 46-46 Unused (1-bit, always zero)
+|
+* 63-47 Fixed (17-bits, always zero)
+
+   For more information on how to do that see
+     * Allocating Memory Within A 2GB Range [https://stackoverflow.com/q/54729401/995714]
+     * How can I ensure that the virtual memory address allocated by VirtualAlloc is between 2-4GB
+       [https://stackoverflow.com/q/63275557/995714]
+     * Allocate at low memory address [https://stackoverflow.com/q/48631207/995714]
+     * How to malloc in address range > 4 GiB [https://stackoverflow.com/q/5343722/995714]
+     * Custom heap/memory allocation ranges [https://stackoverflow.com/q/45475282/995714]
+     ________________________________________________________________________________________________
+
+   Side note: Using linked list for cases with tiny key values compared to the pointers is a huge memory
+   waste, and it's also slower due to bad cache locality. In fact you shouldn't use linked list in most
+   real life problems
+     * Bjarne Stroustrup says we must avoid linked lists
+     * Why you should never, ever, EVER use linked-list in your code again
+     * Number crunching: Why you should never, ever, EVER use linked-list in your code again
+     * Bjarne Stroustrup: Why you should avoid Linked Lists
+     * Are lists evil?-Bjarne Stroustrup
+
+***
+   I guess no-one mentioned possible use of bit fields [https://en.cppreference.com/w/cpp/language/bit_field]
+   in this context, e.g.
+
+template<typename T>
+struct My64Ptr {
+	signed long long ptr : 48; // as per phuclv's comment, we need the type to be signed to be sign extended
+	unsigned long long ch : 8; // ...and, what's more, as Peter Cordes pointed out, it's better to mark signedness of bit field explicitly (before C++14)
+	unsigned long long b1 : 1; // Additionally, as Peter found out, types can differ by sign and it doesn't mean the beginning of another bit field (MSVC is particularly strict about it: other type == new bit field)
+	unsigned long long b2 : 1;
+	unsigned long long b3 : 1;
+	unsigned long long still5bitsLeft : 5;
+
+	inline My64Ptr(T* ptr) : ptr((long long) ptr) {
+	}
+
+	inline operator T*() {
+		return (T*) ptr;
+	}
+	inline operator const T*() const {
+		return (T*) ptr;
+	}
+	inline T* operator->() {
+		return (T*)ptr;
+	}
+	inline const T* operator->() const {
+		return (T*)ptr;
+	}
+};
+
+My64Ptr<const char> ptr ("abcdefg");
+ptr.ch = 'Z';
+ptr.b1 = true;
+ptr.still5bitsLeft = 23;
+std::cout << ptr << ", char=" << char(ptr.ch) << ", byte1=" << ptr.b1 << ", 5bitsLeft=" << ptr.still5bitsLeft << " ...BTW: sizeof(ptr)=" << sizeof(ptr);
+
+// The output is: abcdefg, char=Z, byte1=1, 5bitsLeft=23 ...BTW: sizeof(ptr)=8
+// With all signed long long fields, the output would be: abcdefg, char=Z, byte1=-1, 5bitsLeft=-9 ...BTW: sizeof(ptr)=8
+
+   I think it may be quite a convenient way to try to make use of these 16 bits, if we really want to
+   save some memory. All the bitwise (& and |) operations and cast to full 64-bit pointer are done by
+   compiler (though, of course, executed in run time).
+
+***
+   A standards-compliant way to canonicalize AMD/Intel x64 pointers (based on the current documentation
+   of canonical pointers and 48-bit addressing) is
+
+int *p2 = (int *)(((uintptr_t)p1 & ((1ull << 48) - 1)) | ~(((uintptr_t)p1 & (1ull << 47)) - 1));
+
+   This first clears the upper 16 bits of the pointer. Then, if bit 47 is 1, this sets bits 47 through
+   63, but if bit 47 is 0, this does a logical OR with the value 0 (no change).
+
+     * Note that in user-space in most OSes, you can count on your pointer being in the low half of
+       virtual address space, where sign extension is equivalent to zero-extension. So you actually just
+       need the AND-mask part.
+     * If you were going to do the full general case, it would be more efficient to just redo
+       sign-extension with ((intptr_t)p1 << 16) >> 16. (Or use uintptr_t for the left shift if you care
+       about compilers that don't define the behaviour of shifting bits out the top of a signed
+       integer). That also avoids needing any 64-bit constants, although it has worse critical-path
+       latency than (uintptr_t)p1 & ((1ULL<<48) - 1)
+     * @PeterCordes The problem with that is not just the undefined behavior of the left shift on signed
+       types that you point out, but also (in C, and any C++ prior to C++20) the implementation-defined
+       behavior of right shift of negative numbers (it is NOT guaranteed to be arithmetic shift, so it
+       isn't guaranteed to sign-extend the number at all!).
+     * If you were worried about that level of portability, you couldn't make assumptions about pointer
+       bit-patterns and what conversion from T* to uintptr_t does to the bits. So you couldn't really be
+       doing this in the first place. All the x86-64 compilers anyone cares about use arithmetic
+       right-shift on signed types. GNU C documents this, and MSVC of course does it that way, too, and
+       I'd be shocked if any work differently unless intentionally Deathstation 9000. Avoiding UB is
+       potentially useful because of overly aggressive optimizers, unlike with relying on
+       implementation-defined behaviour.
+     * Apparently it's possible to write a fully portable arithmetic right shift which GCC/clang can
+       even compile to a single instruction:
+       github.com/Rupt/c-arithmetic-right-shift/blob/master/sar.c (MIT license) /
+       godbolt.org/z/YasMG5WYe includes a fully safe version using it which does compile to two
+       shifts. (Or AArch64 sbfx). Unfortunately your code compiles with 2 64-bit constants, two ANDs, a
+       NEG, and an OR.
+
+***
+   According to the Intel Manuals (volume 1, section 3.3.7.1) linear addresses has to be in the
+   canonical form. This means that indeed only 48 bits are used and the extra 16 bits are sign extended.
+   Moreover, the implementation is required to check whether an address is in that form and if it is not
+   generate an exception. That's why there is no way to use those additional 16 bits.
+
+   The reason why it is done in such way is quite simple. Currently 48-bit virtual address space is more
+   than enough (and because of the CPU production cost there is no point in making it larger) but
+   undoubtedly in the future the additional bits will be needed. If applications/kernels were to use
+   them for their own purposes compatibility problems will arise and that's what CPU vendors want to
+   avoid.
+
+***
+   Physical memory is 48 bit addressed. That's enough to address a lot of RAM. However between your
+   program running on the CPU core and the RAM is the memory management unit, part of the CPU. Your
+   program is addressing virtual memory, and the MMU is responsible for translating between virtual
+   addresses and physical addresses. The virtual addresses are 64 bit.
+
+   The value of a virtual address tells you nothing about the corresponding physical address. Indeed,
+   because of how virtual memory systems work there's no guarantee that the corresponding physical
+   address will be the same moment to moment. And if you get creative with mmap() you can make two or
+   more virtual addresses point at the same physical address (wherever that happens to be). If you then
+   write to any of those virtual addresses you're actually writing to just one physical address
+   (wherever that happens to be). This sort of trick is quite useful in signal processing.
+
+   Thus when you tamper with the 48th bit of your pointer (which is pointing at a virtual address) the
+   MMU can't find that new address in the table of memory allocated to your program by the OS (or by
+   yourself using malloc()). It raises an interrupt in protest, the OS catches that and terminates your
+   program with the signal you mention.
+
+   If you want to know more I suggest you Google "modern computer architecture" and do some reading
+   about the hardware that underpins your program.
+
+
+---
+
