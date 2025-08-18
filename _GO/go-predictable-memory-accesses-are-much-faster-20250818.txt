@@ -1,0 +1,343 @@
+filename: go-predictable-memory-accesses-are-much-faster-20250818.txt
+https://lemire.me/blog/2025/08/15/predictable-memory-accesses-are-much-faster/
+
+Predictable memory accesses are much faster
+
+   Loading data from memory often takes several nanoseconds. While the processor waits for the data, it
+   may be forced to wait without performing useful work. Hardware prefetchers in modern processors
+   anticipate memory accesses by loading data into the cache before it is requested, thereby optimizing
+   performance. Their effectiveness varies depending on the access pattern: sequential reads benefit
+   from efficient prefetching, unlike random accesses.
+
+   To test the impact of prefetchers, I wrote a Go program that uses a single array access function. The
+   execution time is measured to compare performance. I start with a large array of 32-bit integers (64
+   MiB).
+    1. Sequential access: I read every 8 integers.
+    2. Random access: I read every 8 integers in random order.
+    3. Backward access: I read every 8 integers from the end.
+    4. Interleaved access: I read every 8 integers, starting from the first, the middle one, the second
+       one, the one after the middle one, and so forth.
+    5. Bouncing access: I read every 8 integers, starting from the first, then the last, then the
+       second, then the second last and so forth.
+
+   I skip integers that are not at an index divisible by eight: I do so to minimize 'cache line'
+   effects. The code looks as follow:
+
+type DataStruct struct {
+	a, b, c, d, e, f, g, h uint32
+}
+
+var arr []DataStruct
+
+for j := 0; j < arraySize; j++ {
+	sum += arr[indices[j]].a // Accessing only the first field
+}
+
+   Running the program on my Apple laptop, I get that everything is much faster than the pure random
+   access. It serves to illustrate how good our processors are at predicting data access.
+
+   [**1][https://github.com/lemire/Code-used-on-Daniel-Lemire-s-blog/tree/master/2025/08/15]My Go program is
+   available.
+
+
+---
+[**1]
+https://github.com/lemire/Code-used-on-Daniel-Lemire-s-blog/tree/master/2025/08/15
+
+[prefetch.go]
+<code>
+package main
+
+import (
+	"fmt"
+	"math/rand" // Use modern rand package (Go 1.22+)
+	"testing"
+)
+
+// DataStruct represents a 64-byte structure with 8 uint32 values
+type DataStruct struct {
+	a, b, c, d, e, f, g, h uint32
+}
+
+const arraySize = 1000000
+
+// initArray initializes an array of DataStruct with sequential values
+func initArray(size int) []DataStruct {
+	arr := make([]DataStruct, size)
+	for i := 0; i < size; i++ {
+		arr[i] = DataStruct{
+			a: uint32(i),
+			b: uint32(i + 1),
+			c: uint32(i + 2),
+			d: uint32(i + 3),
+			e: uint32(i + 4),
+			f: uint32(i + 5),
+			g: uint32(i + 6),
+			h: uint32(i + 7),
+		}
+	}
+	return arr
+}
+
+func initArrayConsecutive(size int) []int {
+	arr := make([]int, size)
+	for i := 0; i < size; i++ {
+		arr[i] = i
+	}
+	return arr
+}
+func BenchmarkSequentialAccess(b *testing.B) {
+	arr := initArray(arraySize)
+
+	b.ResetTimer()
+	var sum uint32 // Ensure sum is used to prevent optimization
+	for i := 0; i < b.N; i++ {
+		sum = 0
+		for j := 0; j < arraySize; j++ {
+			sum += arr[j].a // Accessing only the first field
+		}
+	}
+	// Use sum to prevent compiler optimization
+	b.StopTimer()
+	if sum == 0 {
+		b.Fatal("sum is zero, which is unexpected")
+	}
+}
+
+func BenchmarkSequentialAccessWithBuffer(b *testing.B) {
+	arr := initArray(arraySize)
+	indices := initArrayConsecutive(arraySize)
+
+	b.ResetTimer()
+	var sum uint32 // Ensure sum is used to prevent optimization
+	for i := 0; i < b.N; i++ {
+		sum = 0
+		for j := 0; j < arraySize; j++ {
+			sum += arr[indices[j]].a // Accessing only the first field
+		}
+	}
+	// Use sum to prevent compiler optimization
+	b.StopTimer()
+	if sum == 0 {
+		b.Fatal("sum is zero, which is unexpected")
+	}
+}
+
+func BenchmarkBackwardAccess(b *testing.B) {
+	arr := initArray(arraySize)
+
+	b.ResetTimer()
+	var sum uint32 // Ensure sum is used to prevent optimization
+	for i := 0; i < b.N; i++ {
+		sum = 0
+		for j := arraySize; j > 0; j-- {
+			sum += arr[j-1].a // Accessing only the first field
+		}
+	}
+	// Use sum to prevent compiler optimization
+	b.StopTimer()
+	if sum == 0 {
+		b.Fatal("sum is zero, which is unexpected")
+	}
+}
+
+func BenchmarkRandomAccess(b *testing.B) {
+	arr := initArray(arraySize)
+
+	// Initialize random number generator with a fixed seed for reproducibility
+	indices := make([]int, arraySize)
+	for i := range indices {
+		indices[i] = i
+	}
+	// Use rand.Shuffle from math/rand/v2 with the custom RNG source
+	rand.Shuffle(len(indices), func(i, j int) {
+		indices[i], indices[j] = indices[j], indices[i]
+	})
+
+	b.ResetTimer()
+	var sum uint32 // Ensure sum is used to prevent optimization
+	for i := 0; i < b.N; i++ {
+		sum = 0
+		for _, idx := range indices {
+			sum += arr[idx].a // Accessing only the first field
+		}
+	}
+	// Use sum to prevent compiler optimization
+	b.StopTimer()
+	if sum == 0 {
+		b.Fatal("sum is zero, which is unexpected")
+	}
+}
+
+func BenchmarkBouncingAccess(b *testing.B) {
+	arr := initArray(arraySize)
+
+	b.ResetTimer()
+	var sum uint32 // Ensure sum is used to prevent optimization
+	for i := 0; i < b.N; i++ {
+		sum = 0
+		for j := 0; j < arraySize/2; j++ {
+			sum += arr[j].a
+			sum += arr[arraySize-j-1].a
+		}
+	}
+	// Use sum to prevent compiler optimization
+	b.StopTimer()
+	if sum == 0 {
+		b.Fatal("sum is zero, which is unexpected")
+	}
+}
+
+func BenchmarkInterleavedAccess(b *testing.B) {
+	arr := initArray(arraySize)
+
+	b.ResetTimer()
+	var sum uint32 // Ensure sum is used to prevent optimization
+	for i := 0; i < b.N; i++ {
+		sum = 0
+		for j := 0; j < arraySize/2; j++ {
+			sum += arr[j].a
+			sum += arr[arraySize/2+j].a
+		}
+	}
+	// Use sum to prevent compiler optimization
+	b.StopTimer()
+	if sum == 0 {
+		b.Fatal("sum is zero, which is unexpected")
+	}
+}
+
+func BenchmarkBackwardAccessWithBuffer(b *testing.B) {
+	arr := initArray(arraySize)
+	indices := initArrayConsecutive(arraySize)
+
+	b.ResetTimer()
+	var sum uint32
+	for i := 0; i < b.N; i++ {
+		sum = 0
+		for j := arraySize; j > 0; j-- {
+			sum += arr[indices[j-1]].a
+		}
+	}
+	b.StopTimer()
+	if sum == 0 {
+		b.Fatal("sum is zero, which is unexpected")
+	}
+}
+
+// Version bufferisée des accès bouncing
+func BenchmarkBouncingAccessWithBuffer(b *testing.B) {
+	arr := initArray(arraySize)
+	indices := initArrayConsecutive(arraySize)
+
+	b.ResetTimer()
+	var sum uint32
+	for i := 0; i < b.N; i++ {
+		sum = 0
+		for j := 0; j < arraySize/2; j++ {
+			sum += arr[indices[j]].a
+			sum += arr[indices[arraySize-j-1]].a
+		}
+	}
+	b.StopTimer()
+	if sum == 0 {
+		b.Fatal("sum is zero, which is unexpected")
+	}
+}
+
+// Version bufferisée des accès interleaved
+func BenchmarkInterleavedAccessWithBuffer(b *testing.B) {
+	arr := initArray(arraySize)
+	indices := initArrayConsecutive(arraySize)
+
+	b.ResetTimer()
+	var sum uint32
+	for i := 0; i < b.N; i++ {
+		sum = 0
+		for j := 0; j < arraySize/2; j++ {
+			sum += arr[indices[j]].a
+			sum += arr[indices[arraySize/2+j]].a
+		}
+	}
+	b.StopTimer()
+	if sum == 0 {
+		b.Fatal("sum is zero, which is unexpected")
+	}
+}
+
+func main() {
+	resconsecutive := testing.Benchmark(BenchmarkSequentialAccessWithBuffer)
+	fmt.Println("BenchmarkSequentialAccessWithBuffer", resconsecutive)
+	resrandom := testing.Benchmark(BenchmarkRandomAccess)
+	fmt.Println("BenchmarkRandomAccess", resrandom)
+	resbackwardbuf := testing.Benchmark(BenchmarkBackwardAccessWithBuffer)
+	fmt.Println("BenchmarkBackwardAccessWithBuffer", resbackwardbuf)
+
+	resbouncingbuf := testing.Benchmark(BenchmarkBouncingAccessWithBuffer)
+	fmt.Println("BenchmarkBouncingAccessWithBuffer", resbouncingbuf)
+	resinterleavedbuf := testing.Benchmark(BenchmarkInterleavedAccessWithBuffer)
+	fmt.Println("BenchmarkInterleavedAccessWithBuffer", resinterleavedbuf)
+
+	ratiobuf := float64(resrandom.NsPerOp()) / float64(resconsecutive.NsPerOp())
+	fmt.Printf("Ratio (Random/SequentialBuffer): %.2f\n", ratiobuf)
+	fmt.Printf("\n\n")
+
+	res := testing.Benchmark(BenchmarkSequentialAccess)
+	fmt.Println("BenchmarkSequentialAccess", res)
+	resbackward := testing.Benchmark(BenchmarkBackwardAccess)
+	fmt.Println("BenchmarkBackwardAccess", resbackward)
+	resbouncing := testing.Benchmark(BenchmarkBouncingAccess)
+	fmt.Println("BenchmarkBouncingAccess", resbouncing)
+	resinterleaved := testing.Benchmark(BenchmarkInterleavedAccess)
+	fmt.Println("BenchmarkInterleavedAccess", resinterleaved)
+}
+</code>
+
+
+[plot.py]
+<code>
+import matplotlib.pyplot as plt
+import re
+
+def parse_output(output):
+	# Regex pour extraire le type d'accès et ns/op
+	pattern = r"Benchmark(\w+)Access(?:WithBuffer)?\s+\d+\s+(\d+) ns/op"
+	matches = re.findall(pattern, output)
+
+	labels = []
+	means = []
+	for match in matches:
+		label = match[0]
+		ns_per_op = int(match[1])
+		labels.append(label)
+		means.append(ns_per_op / 1e6)  # Conversion ns -> ms
+	return labels, means
+
+def plot_bar_chart(labels, means, mins, maxs):
+	plt.rcParams.update({'font.size': 16})
+	fig, ax = plt.subplots(figsize=(10, 6))
+	barlist = ax.bar(labels, means, color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'])
+	for i, mean_val in enumerate(means):
+		ax.text(i, mean_val + max(means)*0.02, f"{mean_val:.1f}", ha='center', va='bottom', fontsize=16, fontweight='bold', color=barlist[i].get_facecolor())
+	ax.spines['top'].set_visible(False)
+	ax.spines['right'].set_visible(False)
+	ax.set_ylabel("Time per op (ms)")
+	ax.grid(axis='y', linestyle='--', alpha=0.7)
+	plt.tight_layout()
+	plt.savefig("plot.png", dpi=300)
+	plt.close(fig)
+
+def main():
+	output = """BenchmarkSequentialAccessWithBuffer    2937        369939 ns/op
+BenchmarkRandomAccess                   934       1314153 ns/op
+BenchmarkBackwardAccessWithBuffer      3229        354276 ns/op
+BenchmarkBouncingAccessWithBuffer      3598        338103 ns/op
+BenchmarkInterleavedAccessWithBuffer   3289        331715 ns/op"""
+
+	labels, means = parse_output(output)
+	plot_bar_chart(labels, means, None, None)
+
+if __name__ == "__main__":
+	main()
+</code>
+
