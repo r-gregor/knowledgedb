@@ -1,0 +1,1496 @@
+filename: c-memory-magic-part-1-20250901.txt
+https://andreleite.com/posts/2025/nstl/virtual-memory-explained/
+[pdf version: c-memory-magic-part-1-to-4.pdf]
+
+Memory Magic Part 1: The Pointer is a Lie (A Dive into Virtual Memory)
+21 Jun, 2025
+
+The Grand Illusion: What a Pointer Really Is
+   As programmers, we live and breathe pointers. We look in our debugger and see an address like
+   0x7FFAC44B1A20 and we think, "Okay, that's the location of my object in the computer's RAM."
+
+   This is one of a developer's most useful lies.
+
+   That address does not point to a specific location on your physical RAM chips. It's a fabrication, a
+   number that only has meaning within the simulated world created for your specific program: its
+   virtual address space. Your program is like a brain in a vat, and every single memory access it
+   attempts is mediated by the Operating System (OS) and a special piece of hardware called the Memory
+   Management Unit (MMU).
+
+   Understanding this grand illusion is the first step toward mastering low-level performance. Today,
+   we're not just peeking behind the curtain, we're going to dismantle the entire stage to see how the
+   magic works.
+
+The Wild West: Life Without Virtual Memory
+   To appreciate the genius of the solution, we must first feel the full weight of the problems it
+   solves. Let's step into a time machine and visit the chaotic world of early operating systems, where
+   programs spoke directly to physical RAM. It was a lawless frontier fraught with peril.
+
+  Problem 1: The Shared Battlefield of Physical RAM
+   In this world, all programs and the operating system itself shared one single, global address space:
+   the physical RAM. There were no walls, no fences, and no rules. This created a twofold crisis of
+   address collisions and a complete lack of protection.
+
+   Memory Conflicts
+    The Address Collision Nightmare
+
+   Imagine if street addresses weren't local to a city but were globally unique across the planet. If I
+   build a house at '123 Main Street' in Lisbon, no one in London, Tokyo, or New York could ever use
+   that address. This was the reality for early programmers.
+
+   When you compile a program, the compiler and linker hard-code memory addresses into the final
+   executable file. The main function might be placed at address 0x401000, and a global variable score
+   might be at 0x403070. Now, imagine another company releases a popular utility that is also compiled
+   to use those exact same addresses for its own functions and variables. You could only run one of them
+   at a time. The moment you tried to load the second program, the OS would have to overwrite the first
+   one in memory, leading to an immediate crash. This lack of "relocatability" made running multiple
+   applications from different vendors a game of chance.
+
+    The Chaos of No Protection
+
+   Even if you managed to load two programs that didn't have overlapping addresses, the danger was far
+   from over. With every program having direct access to the entire physical memory map, a simple bug in
+   one application could wreak havoc on others, or even the entire system.
+     * Silent Corruption: Imagine you've been writing your novel for hours in Word.exe. It occupies a
+       block of physical RAM. In the background, MusicPlayer.exe is playing your favorite song,
+       occupying a different block. A minor bug in the music player's code for updating its progress bar
+       causes it to calculate a wrong memory address. Instead of writing to its own memory, it writes a
+       single byte to physical address 0x1A3B4C... which just so happens to be in the middle of the
+       paragraph you just wrote. The letter 'A' in your document is silently replaced by an unprintable
+       character. There's no crash, no warning, just silent, insidious data corruption.
+     * The System-Wide Crash: Now, what if that buggy pointer wrote to memory owned by the operating
+       system itself? The OS keeps critical data structures in RAM: information about open files,
+       network connections, and device drivers. If the music player accidentally overwrites the memory
+       location holding the address of the mouse driver, your mouse might freeze. If it overwrites the
+       core process scheduler, the entire system grinds to a halt.
+
+   A single buggy program could corrupt other applications or bring down the entire machine because
+   there was no mechanism to enforce memory boundaries.
+
+  Problem 2: The Puzzle of External Fragmentation
+   This is one of the most wasteful and frustrating problems of direct physical memory management. Let's
+   walk through a scenario.
+
+   Step 1: A Fresh Start. Your computer with 8MB of RAM has just booted up. Memory is a clean slate.
+[------------------------- Free (8MB) --------------------------]
+
+   Step 2: Load Some Programs. You launch Program A (1MB), Program B (2MB), and Program C (1MB). They
+   are placed contiguously in RAM.
+[ A (1MB) | B (2MB) | C (1MB) |--------- Free (4MB) ----------]
+
+   Step 3: A Program Exits. You finish your work in Program B, and you close it. Its 2MB of memory is
+   now free, but it has left a "hole".
+[ A (1MB) |--- Free (2MB) ---| C (1MB) |--------- Free (4MB) ----------]
+
+   At this point, you have a total of 6MB of free RAM. Plenty of space, right?
+
+   Step 4: The Fragmentation Trap. Now, you try to launch Program D, which needs 3MB. The OS scans and
+   finds the 4MB block is large enough, placing it there.
+[ A (1MB) |--- Free (2MB) ---| C (1MB) | D (3MB) | --Free(1MB)-- ]
+
+   Finally, you try to launch Program E, which also needs 3MB. The OS scans memory. It finds a 2MB free
+   block and a 1MB free block. You have a total of 3MB of free RAM, exactly what you need. But neither
+   individual block is large enough. The launch fails. This is External Fragmentation. Your memory has
+   become a slice of Swiss cheese, and although you have enough total resources, they are so broken up
+   that they are unusable.
+
+The Solution: A New Reality Called Virtual Memory
+   Faced with this chaos, computer scientists devised an elegant and powerful solution: they inserted a
+   layer of abstraction between the program and the physical hardware. Instead of letting programs
+   operate in the real world of physical RAM, they gave each program its very own simulated world. This
+   concept is called Virtual Memory.
+
+   The core principles of this new reality are:
+     * Isolation: Each program runs in a private virtual address space. This space is a clean, linear,
+       massive range of addresses. The program believes it is the only thing in memory. Usually from 0
+       to 2^48 - 1 on a 64-bit system, which is 256 Terabytes of usable address space.
+     * Abstraction: A program's view of its memory (one giant, contiguous block) is completely decoupled
+       from the physical reality of RAM chips.
+     * Mediation: A trusted authority, the partnership of the Operating System and the MMU hardware,
+       sits between the program and physical RAM. This authority manages the simulation, translates the
+       program's virtual addresses into real physical addresses, and enforces the rules.
+
+   Virtual Memory is the what: the conceptual framework of providing an isolated, abstract memory
+   environment. Now, let's look at the how.
+
+The Building Blocks: Paging and Page Tables
+   So how do you actually build this simulation? How can the OS efficiently map a massive virtual
+   address space onto a smaller, potentially messy physical RAM?
+
+   The answer is a technique called paging.
+
+   Instead of managing memory byte-by-byte (which would be incredibly inefficient), the OS and MMU
+   manage it in fixed-size chunks. This chunk is called a page. Both the virtual address space and
+   physical RAM are divided into these same-sized pages (often called frames in physical RAM). A typical
+   page size is 4 kilobytes (4096 bytes).
+
+   Because all pages are the same size, they are interchangeable. Any virtual page can be mapped to any
+   available physical frame. This fungibility is the key.
+
+   To manage this mapping, each process has a data structure called a Page Table. The page table is the
+   dictionary that the MMU uses to translate a Virtual Page Number into a Physical Frame Number.
+
+   When your CPU tries to access a virtual address, the MMU performs the translation:
+    1. Split the Address: It splits the address into a Virtual Page Number (the upper bits) and an
+       Offset (the lower bits, which represent the location within the page).
+    2. Consult the Page Table: The MMU uses the Virtual Page Number as an index to find the
+       corresponding entry in the process's page table.
+    3. Check Permissions: The page table entry contains permission flags (Is it present? Read/write?
+       User-accessible?). If the access is illegal, the MMU triggers a fault.
+    4. Calculate Final Address: The MMU takes the Physical Frame Number from the table entry, multiplies
+       it by the page size to get the physical base address, and adds the offset. This final, real
+       address is then sent to RAM.
+
+  A Note for the Performance-Minded: The TLB Cache
+   Constantly reading from the Page Table in main memory for every single instruction would be
+   prohibitively slow. To solve this, the MMU contains a small, extremely fast hardware cache called the
+   Translation Lookaside Buffer (TLB). The TLB stores recently used virtual-to-physical page mappings.
+
+   When translating an address, the MMU checks the TLB first.
+     * TLB Hit: If the mapping is in the TLB (a "hit"), the translation is nearly instantaneous.
+     * TLB Miss: If it's not found (a "miss"), only then does the MMU perform the slower lookup from the
+       Page Table in RAM, and the result is then cached in the TLB for future use.
+
+   A high rate of TLB misses, often caused by scattered memory access patterns, can be a significant and
+   hidden performance bottleneck. This is why data locality is crucial not just for the CPU cache, but
+   for the memory translation hardware itself.
+
+     Modern CPUs actually contain several layers of TLBs (typically a tiny, per-core L1 backed by a
+     larger shared L2) and tag entries with a process identifier (ASID/PCID) so the cache need not be
+     flushed on every context switch.
+
+The Payoff: How Virtual Memory Solves the Classic Problems
+   Let's revisit our original problems and see precisely how the Virtual Memory system, implemented with
+   paging, solves them.
+
+  Solving Address Collisions and Protection
+   Virtual Memory solves this by providing total isolation. Since every process gets its own separate
+   Page Table, their virtual address spaces are completely independent.
+
+   MMU
+   Both programs use the same virtual address, but their unique page tables translate that address to
+   different, non-conflicting physical frames. Process A's page table has no entries that point to
+   physical frames owned by Process B, so it is physically impossible for A to corrupt B's memory.
+
+  Solving Fragmentation
+   Virtual memory solves external fragmentation by using paging to decouple the virtual layout from the
+   physical layout. A program requests a contiguous block of virtual memory, but the OS can satisfy that
+   request using any available free physical frames, no matter how scattered they are.
+
+   Paging
+     VX means Virtual Page X. PY means Physical Page Y.
+     Note that the diagram is not correct, but serves to explain what conceptually happens.
+
+   The program perceives its memory as one large, unbroken block. But the OS has fulfilled this virtual
+   request using the small, fragmented free spaces in physical RAM.
+
+The Benevolent Error: Understanding the Page Fault
+   A page fault isn't just for catching bugs. It's an essential mechanism that the OS uses to manage the
+   virtual memory illusion efficiently. When the MMU triggers a page fault because it cannot find a
+   valid, present translation for an address, it passes control to the OS. The OS then inspects the
+   situation to determine the cause. One powerful use case is Paging from Disk, where the OS can load
+   needed data from the hard drive, creating the illusion of near-infinite memory. Another is what we'll
+   see next.
+
+The Programmer's Playground: From Fault to Feature
+   If a page fault is just a trigger for the OS to resolve a memory state, what if we, as programmers,
+   could intentionally set up memory regions to cause a resolvable fault the first time we touch them?
+   This is precisely what modern operating systems allow us to do, and it's the foundation of the
+   reserve/commit memory model, a process often called demand paging.
+
+   This two-step process gives us fine-grained control over our virtual address space without
+   immediately paying the cost of physical RAM.
+
+  Step 1: Reserving Virtual Address Space
+   When you reserve a large block of memory (say, 1GB), you are not allocating any physical RAM or even
+   space in the page file. You are simply telling the OS kernel:
+
+     See this huge, contiguous range of virtual addresses? I'm claiming that for my process. Allocate a
+     descriptor for it (a VAD on Windows, or VMA on Linux), but don't create any page table mappings
+     yet. If my program tries to access it, there will be no valid translation, so treat it as an
+     access violation.
+
+   At this point, you have a guaranteed contiguous block of addresses, but you have used almost no
+   system resources. If you were to dereference a pointer into this range, the MMU would fault, the OS
+   would check its records, see the memory is reserved but not committed, and raise a segmentation
+   fault.
+
+  Step 2: Committing Memory
+   does not typically allocate physical RAM. Instead, committing tells the OS:
+
+     Okay, for that specific 4KB virtual page I reserved, I intend to use it. Modify your internal
+     structures so that it's now backed by the system's page file. Set up my process's page table so
+     that the entry for this virtual page is marked as valid, but points to its location in the page
+     file, not to a physical frame. The 'Present' bit in the page table entry remains 0 (false).
+
+   Now, the memory is committed. The OS has guaranteed it can provide the memory when asked. The magic
+   happens on the very first access.
+    1. Your code tries to write to the committed page.
+    2. The MMU sees the Present bit is 0 and triggers a page fault.
+    3. The OS page fault handler takes over. It checks its records and sees this is a resolvable
+       fault-the page is committed but not yet in RAM.
+    4. The OS finds a free physical frame, loads it with a page of zeros (since it's a new allocation),
+       updates the page table entry to point to this new physical frame, sets the Present bit to 1, and
+       sets the correct read/write permissions.
+    5. The OS returns control to your program, re-executing the instruction that failed. This time, the
+       MMU finds a valid, present translation and the write succeeds transparently.
+
+   Every subsequent access to that page is now direct and fast, with no faults. You only pay the
+   physical RAM and performance cost for the pages you actually touch, when you touch them.
+
+   With this correct understanding, the API calls now accurately reflect reality.
+
+    On Windows:
+
+const size_t ONE_GIGABYTE = 1024 * 1024 * 1024;
+const size_t PAGE_SIZE = 4096;
+
+// 1. RESERVE: Carve out a 1GB contiguous chunk of the virtual address space.
+// This only allocates a Virtual Address Descriptor (VAD) in the kernel.
+// No physical RAM or page file space is used.
+void *block = VirtualAlloc (
+	NULL,
+	ONE_GIGABYTE,
+	MEM_RESERVE,
+	PAGE_NOACCESS
+);
+
+// ...
+
+// 2. COMMIT: Back the first page of the reservation with the page file.
+// This doesn't allocate physical RAM yet. It just updates the page table
+// entry to be valid, but marked "not present".
+VirtualAlloc (
+	block,
+	PAGE_SIZE,
+	MEM_COMMIT,
+	PAGE_READWRITE
+);
+
+// ...
+
+// 3. FIRST ACCESS: This write operation is where the magic happens.
+// It triggers a resolvable page fault. The OS allocates a physical frame,
+// maps it, and the instruction completes.
+int *data = (int *)block;
+*data = 123; // <-- Page Fault occurs here!
+
+// All subsequent accesses to this page are fast and will not fault.
+*data = 456; // <-- No fault.
+
+    On Linux/macOS:
+   The POSIX model is slightly different but achieves the same goal. mmap with PROT_NONE reserves the
+   virtual address space (by creating a VMA - Virtual Memory Area). mprotect makes it accessible. On
+   Linux, anonymous private mappings are typically handled via copy-on-write with a shared page of
+   zeros. The first write triggers the page fault that allocates a private, writable physical page for
+   the process.
+const size_t ONE_GIGABYTE = 1024 * 1024 * 1024;
+const size_t PAGE_SIZE = 4096;
+
+// 1. RESERVE: Map a 1GB chunk of virtual address space with no permissions.
+// The kernel creates a Virtual Memory Area (VMA) for this range.
+void *block = mmap(
+	NULL,
+	ONE_GIGABYTE,
+	PROT_NONE,
+	MAP_PRIVATE | MAP_ANONYMOUS,
+	-1, 0
+);
+
+// ...
+
+// 2. COMMIT (effectively): Change permissions to make the first page accessible.
+// This updates the VMA. The kernel now knows that access is permitted.
+// No physical page is allocated yet.
+mprotect(
+	block,
+	PAGE_SIZE,
+	PROT_READ | PROT_WRITE
+);
+
+// ...
+
+// 3. FIRST ACCESS: This first write triggers a page fault. The kernel sees
+// the page is a new, private, anonymous page. It allocates a physical frame
+// of zeros, maps it with read/write permissions, and resumes the process.
+int *data = (int *)block;
+*data = 123; // <-- Page Fault occurs here!
+
+// Subsequent accesses to this page are fast.
+*data = 456; // <-- No fault.
+
+Conclusion: The World is Your Oyster
+   With this deep knowledge, you are no longer just a consumer of memory; you are a conscious
+   participant in its management. The reserve/commit pattern is your entry point to this new level of
+   control.
+
+   In the next article, we will take our first practical step: use this knowledge to build a Virtual
+   Memory Arena, a blazingly fast custom allocator that will change the way you manage memory in your
+   most demanding applications.
+
+
+---
+filename: c-virtual-memory-arena-allocator-20250901.txt
+https://andreleite.com/posts/2025/nstl/virtual-memory-arena-allocator/
+
+Memory Magic Part 2: The Arena of Power
+4 Jul, 2025
+[pdf version: c-memory-magic-part-1-to-4.pdf]
+
+The Generalist's Burden
+   In Part 1, we tore down the grand illusion of memory and stared into the machinery of the OS. We now
+   understand that our pointers are virtual and that a page fault is not a bug, but a conversation with the
+   kernel.
+
+   With this knowledge, let's look at the tools we use every day, new in C++ and malloc in C, with new,
+   critical eyes. These functions are the workhorses of memory allocation. They are robust, they are
+   thread-safe, and they are general-purpose. And that is their greatest weakness.
+
+   A general-purpose allocator is a jack-of-all-trades and a master of none. It must be prepared for any
+   situation: a 1-byte allocation followed by a 1-gigabyte allocation, followed by freeing the 1-byte
+   allocation. To handle this chaos, it pays a heavy price in performance and complexity.
+
+   When you call new, you are not just getting a piece of memory. You are triggering a cascade of hidden
+   operations:
+    1. Locking: The allocator must first acquire a lock (like a mutex) to prevent other threads from
+       corrupting its internal state. This is a major point of contention in multithreaded applications.
+    2. Searching: It then searches through its complex data structures (like free lists or trees) to
+       find a block of memory that fits your request. This search is not free.
+    3. Metadata: When it finds a block, it has to write metadata next to your allocation, a small
+       "header" that stores the size of the block and other info. This metadata wastes memory and, more
+       importantly, pollutes your CPU caches.
+    4. Unlocking: Finally, it releases the lock.
+
+   Every single allocation pays this tax. Deallocation is just as complex, involving more locking and
+   manipulation of the free lists. This is the generalist's burden. For high-performance applications
+   like game engines, physics simulators, or servers, this overhead is unacceptable. We need a
+   specialist. We need an Arena.
+
+The Arena: A New Philosophy of Allocation
+   A Memory Arena (also known as a linear allocator, region, or bump allocator) is a radical departure
+   from the new/delete model. The philosophy is simple and brutal:
+
+     Allocate a huge, contiguous block of memory upfront. To allocate memory within the arena, just
+     increment a pointer. To free memory, destroy the entire arena in one shot.
+
+   That's it. Let's break down the earth-shattering implications of this model.
+     * Blazing-Fast Allocation: An allocation is reduced to its bare essence: an addition and a pointer
+       assignment. There are no locks, no searches, no complex data structures. It is, quite literally,
+       one of the fastest possible ways to allocate memory.
+     * Zero Per-Allocation Overhead: There is no metadata header for each allocation. The objects are
+       packed tightly together in memory, one after the other. This not only saves memory but creates a
+       paradise for the CPU's prefetcher, dramatically improving cache performance.
+     * Simplified Lifetime Management: The most powerful feature of an arena is that all objects
+       allocated within it share a single lifetime. You don't free them individually. You use them for a
+       specific task (rendering a frame, loading a level, processing a request) and then you obliterate
+       the entire arena at once. This completely eliminates an entire class of memory leaks and
+       double-free bugs.
+
+   Typical Heap (new/malloc) Arena Allocator
+
+Forging Our Arena with Virtual Memory
+   Now, let's build one. A naive arena might just malloc a big chunk of memory. But we are no longer
+   naive. We are armed with the power of virtual memory. We will build an arena that is not just fast,
+   but also incredibly memory-efficient, using the reserve/commit pattern we learned in Part 1.
+
+   Our Arena will have four key properties:
+struct Arena {
+	char *base_ptr;          // The start of our massive virtual reservation
+	size_t reserved_size;    // The total size of the reservation (e.g., 1GB)
+	size_t committed_size;   // How much memory is currently committed
+	size_t current_offset;   // The "bump pointer" offset from the base
+};
+
+  Step 1: Creation - Claiming Our Land
+   First, we need a function to create the arena. This function will reserve a huge swath of virtual
+   address space but will commit nothing. We only pay the physical RAM cost for the pages we actually
+   touch, when we touch them, thanks to demand paging. The first allocation will trigger the first
+   commit.
+// A simplified, cross-platform implementation
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h> // For sysconf
+#endif
+
+// Dynamically get the OS page size once.
+const size_t PAGE_SIZE = []() {
+#ifdef _WIN32
+	SYSTEM_INFO sysInfo;
+	GetSystemInfo(&sysInfo);
+	return sysInfo.dwPageSize;
+#else
+	return (size_t)sysconf(_SC_PAGESIZE);
+#endif
+}();
+
+Arena *CreateArena(size_t reserve_size) {
+	Arena *arena = (Arena *)malloc(sizeof(Arena));
+	if (!arena) return NULL;
+
+	// Align reservation up to the nearest page size
+	reserve_size = (reserve_size + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+
+#ifdef _WIN32
+	void *block = VirtualAlloc(NULL, reserve_size, MEM_RESERVE, PAGE_NOACCESS);
+	if (!block) {
+		free(arena);
+		return NULL;
+	}
+#else
+	void *block = mmap(NULL, reserve_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (block == MAP_FAILED) {
+		free(arena);
+		return NULL;
+	}
+#endif
+
+	arena->base_ptr = (char *)block;
+	arena->reserved_size = reserve_size;
+	// IMPORTANT: Start with zero committed memory.
+	arena->committed_size = 0;
+	arena->current_offset = 0;
+
+	return arena;
+}
+
+  Step 2: Allocation - The Bump Pointer
+   This is the heart of the arena. The ArenaAlloc function. Its logic is beautiful: check if there's
+   enough committed space. If not, commit more. Then, just bump the pointer.
+
+   The Allocation Process
+void *ArenaAlloc(Arena *arena, size_t size) {
+	if (!arena || size == 0) return nullptr;
+
+	size_t new_offset = arena->current_offset + size;
+
+	if (new_offset > arena->reserved_size) {
+		// Out of reserved space
+		return NULL;
+	}
+
+	if (new_offset > arena->committed_size) {
+		// Align the required commit size up to the nearest page
+		size_t new_commit_target = (new_offset + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+		// Clamp to the reservation limit
+		if (new_commit_target > arena->reserved_size) {
+			new_commit_target = arena->reserved_size;
+		}
+
+		size_t size_to_commit = new_commit_target - arena->committed_size;
+		void *commit_start_addr = arena->base_ptr + arena->committed_size;
+
+#ifdef _WIN32
+		if (!VirtualAlloc(commit_start_addr, size_to_commit, MEM_COMMIT, PAGE_READWRITE)) {
+			return NULL;
+		}
+#else
+		if (mprotect(commit_start_addr, size_to_commit, PROT_READ | PROT_WRITE) != 0) {
+			return NULL;
+		}
+#endif
+		arena->committed_size = new_commit_target;
+	}
+
+	// The actual "allocation" is just this.
+	void *memory = arena->base_ptr + arena->current_offset;
+	arena->current_offset = new_offset;
+
+	return memory;
+}
+
+  Step 3: Deallocation - The Great Reset
+   How do you free an object from the arena? You don't. That's the point. When you are done with
+   everything in the arena, you have two choices.
+
+   If you want to reuse the arena for the next task (e.g., the next frame), you simply reset it. This is
+   the fastest deallocation in the world:
+void ArenaReset(Arena *arena) {
+	arena->current_offset = 0;
+}
+
+   If you are done with the arena forever, you release all of its memory back to the OS in a single
+   call.
+void ArenaRelease(Arena *arena) {
+#ifdef _WIN32
+	VirtualFree(arena->base_ptr, 0, MEM_RELEASE);
+#else
+	munmap(arena->base_ptr, arena->reserved_size);
+#endif
+	free(arena);
+}
+
+The Arena in Action: A Game Loop
+   Imagine a game frame. You need to allocate memory for particle effects, UI elements, temporary
+   physics data, and AI command lists. All of this memory is needed for just 16 milliseconds, then it's
+   all garbage. This is the perfect use case for an arena.
+
+// At the start of the game
+Arena *frame_arena = CreateArena(1024 * 1024 * 64); // 64MB frame arena
+
+// --- Main Game Loop ---
+while (game_is_running) {
+	// --- Start of Frame ---
+	ArenaReset(frame_arena);
+
+	// Allocate memory for various systems using our lightning-fast allocator
+	Particle *particles = (Particle *)ArenaAlloc(frame_arena, sizeof(Particle) * 1000);
+	UICommand *ui_cmds = (UICommand *)ArenaAlloc(frame_arena, sizeof(UICommand) * 50);
+	TempCollisionData *coll_data = (TempCollisionData *)ArenaAlloc(frame_arena, sizeof(TempCollisionData) * 200
+);
+
+	// ... do all game logic, physics, and rendering ...
+	// All the pointers above are used here.
+
+	// --- End of Frame ---
+	// No need to call free() or delete on anything.
+	// The ArenaReset at the top of the loop already handled it.
+}
+
+// At the end of the game
+ArenaRelease(frame_arena);
+
+   We just serviced thousands of potential allocations and deallocations with two trivial function calls
+   per frame. We have achieved memory management nirvana.
+
+Level Up: Scoped Arenas for Nested Lifetimes
+   The frame arena is a powerful pattern, but what happens when a function needs its own temporary
+   memory within a frame?
+
+   Imagine a function ProcessPhysicsCollisions() that needs to generate a temporary list of potential
+   collision pairs. It could allocate from the main frame_arena, but then it permanently consumes that
+   space for the rest of the frame, even though the data is only needed for a few milliseconds.
+
+   This is where the concept of a Scoped Arena (or scratch arena) comes in. Instead of creating a whole
+   new virtual memory arena, we create a temporary, lightweight allocator that "borrows" memory from a
+   parent arena. The mechanism is beautifully simple: we just save the state of the parent arena's
+   pointer and restore it when we're done.
+
+   We can wrap this logic in a clean C++ RAII object:
+// A temporary "save point" for a parent arena
+struct ScopedArena {
+	Arena *parent_arena;
+	size_t original_offset;
+
+	// Constructor saves the parent's current state
+	ScopedArena(Arena *parent) {
+		parent_arena = parent;
+		original_offset = parent->current_offset;
+	}
+
+	// Destructor restores the parent's state, effectively "freeing"
+	// all memory allocated during this scope's lifetime.
+	~ScopedArena() {
+		parent_arena->current_offset = original_offset;
+	}
+
+	// We can even add an Alloc method for convenience
+	void *Alloc(size_t size) {
+		return ArenaAlloc(parent_arena, size);
+	}
+};
+
+   Now, our ProcessPhysicsCollisions function can have its own clean, isolated memory space without any
+   long-term impact on the frame arena.
+void ProcessPhysicsCollisions(Arena *frame_arena) {
+	// All memory allocated inside this block will be automatically
+	// reclaimed when 'scope' goes out of scope.
+	ScopedArena scope(frame_arena);
+
+	// This allocation is temporary
+	PotentialPair *pairs = (PotentialPair *)scope.Alloc(sizeof(PotentialPair) * 1000);
+
+	// ... do complex work with the 'pairs' list ...
+
+} // <-- ~ScopedArena() is called here, 'frame_arena->current_offset' is reset!
+
+   Scoped Arena
+The Performance Showdown: By the Numbers
+
+   Talk is cheap. Let's write a benchmark. We'll perform a stress test: allocate 1 million small,
+   randomly-sized objects, then free them all. This is a nightmare scenario for malloc due to its
+   overhead and search complexity.
+
+   The Results:
+   -------------------------------------------------------
+   Test               Allocation Time    Deallocation Time
+   -------------------------------------------------------
+   malloc/free        ~8.77 ms           ~15.07 ms
+   Arena Allocator    ~0.84 ms           ~0.042 µs (42 ns)
+   -------------------------------------------------------
+     Ran on a M4 Pro 12-Core Macbook
+
+   The arena isn't just a little faster. It's in a completely different league. In this run, the
+   allocations were over 10.44x faster because they are just pointer bumps. The deallocation is
+   astronomically faster, over 358,000x faster, because it's a single integer assignment, so fast we
+   have to measure it in nanoseconds. This isn't an optimization; it's a paradigm shift.
+
+Embracing the Arena's "Limitations"
+   At first glance, the arena's "all or nothing" deallocation seems like a major limitation. It's
+   natural to think they're only useful for niche cases or trivial, throwaway data. But this perspective
+   misses the bigger picture. In high-performance software like game engines, the vast majority of
+   allocations are not random, they are grouped by a well-defined lifetime.
+
+   Think about it:
+     * All the data needed to render a single frame.
+     * All the assets and state loaded for a specific game level.
+     * All the temporary data generated to process a physics tick.
+
+   These are not individual, unrelated allocations. They are groups of objects that are born together
+   and die together. This is the exact pattern the arena is designed to master. The "limitation" of no
+   individual free becomes a feature, forcing you to think about memory in terms of lifetimes, which
+   leads to simpler, more robust code. It structurally eliminates entire classes of bugs like
+   use-after-free and memory leaks from forgotten delete calls.
+
+     But what about truly temporary, scratch memory?
+
+   This is where the ScopedArena pattern shines. It's the standard solution for handling nested
+   lifetimes. If your main frame_arena lives for 16ms, but a function within that frame needs memory for
+   only 50 microseconds, you create a ScopedArena. This gives you a "scratch pad" that borrows from the
+   main arena and automatically cleans itself up when the function ends, without permanently consuming
+   space from the frame's budget. It's the perfect way to handle temporary data without compromising the
+   efficiency of the parent arena.
+
+Conclusion
+   The arena allocator is not a drop-in replacement for every call to new. It's a foundational tool that
+   requires a shift in thinking-from managing individual objects to managing object lifetimes. Once you
+   make that shift, you'll find that arenas can handle almost all of the allocations in a typical game
+   loop, making your code faster, safer, and easier to reason about.
+
+   And for that remaining, long-lived objects, that truly do need individual deallocation? As we'll see
+   in Part 3, the arena still serves as the perfect, high-performance foundation upon which we can build
+   even more powerful, specialized allocators.
+
+
+---
+filename: c-memory-magic-part-3-20250901.txt-20250902.txt
+https://andreleite.com/posts/2025/nstl/virtual-memory-pool-allocator/
+
+Memory Magic Part 3: The Specialist's Toolkit
+12 Jul, 2025
+[pdf version: c-memory-magic-part-1-to-4.pdf]
+
+The Arena's Edge Case
+   In Part 2, we forged the Arena: a tool of immense power based on a simple philosophy: allocate with
+   lightning speed by bumping a pointer, and free everything all at once. This is perfect for
+   short-lived data or for data that shares a collective lifetime. But the Arena, like any specialist,
+   has its edge cases. What if your system's lifetime is long, yet its contents churn constantly, like
+   particles spawning and dying by the thousands every second?
+
+   This calls for a new philosophy: specialization. We will engineer a Pool Allocator, designed to
+   manage the rapid allocation and deallocation of objects that are all the same size. Our journey will
+   take us through distinct designs, from simple to sophisticated. But remember, "better" is relative,
+   each step solves specific problems, but the right choice depends on your exact circumstances, like
+   how often you iterate vs. how much you need stable references.
+
+Act 1: The Naive Pool and the Fragmentation Problem
+
+   Let's start with the most basic possible implementation. A "pool" is just a collection of fixed-size
+   slots. We can create this by taking a large chunk of memory from our arena and simply deciding to
+   treat it as an array of Particle objects.
+
+struct Particle {
+	bool is_active;
+	float position[2];
+	float velocity[2];
+	float lifetime_remaining;
+};
+
+// For now, the pool just tracks how many slots we've ever used.
+struct ParticlePool {
+	Arena* backing_arena;
+	size_t capacity; // How many slots we can iterate over
+};
+
+void InitPool(ParticlePool* pool, Arena* backing_arena) {
+	pool->backing_arena = backing_arena;
+	pool->capacity = 0;
+}
+
+// Allocation is just a bump in the arena.
+Particle* PoolAlloc(ParticlePool* pool) {
+	pool->capacity++;
+	return (Particle*)ArenaAlloc(pool->backing_arena, sizeof(Particle));
+}
+
+   This works for spawning our initial burst of particles. But the moment a particle's
+   lifetime_remaining hits zero, we have a problem. What do we do? We can set its is_active flag to
+   false, but its memory slot is still occupied. If we just call PoolAlloc again, it will give us a
+   brand new slot from the arena, leaving the old one empty and unusable.
+
+   This creates "holes" in our memory block. This problem is a form of internal fragmentation: the
+   memory is allocated to our pool, but it's not being used for any active objects.
+
+   We've got a basic pool, but fragmentation is wasting memory. Time to recycle...
+
+Act 2: Solving Fragmentation with a Free List
+   The solution to our fragmentation problem is obvious: we need to recycle the memory. When a particle
+   is freed, we should add it to a list of available slots. The next time PoolAlloc is called, it should
+   check this free list first.
+
+    Step 1: The External List Idea
+   Our first thought might be to create a separate, external list to track the free slots.
+// A thought experiment - don't do this!
+std::vector<Particle*> free_particle_pointers;
+
+   When we free a particle, we push_back its pointer onto this vector. When we allocate, we check if the
+   vector is empty. If not, we pop a pointer off the back and use it. This works, but it feels wrong.
+   We're trying to build a lean, screaming-fast allocator, and we've just introduced the overhead of a
+   complex data structure that does its own heap allocations to manage it. We are defeating the purpose.
+
+   We can do better. We can do it with zero extra memory. But how? Where could we possibly store the
+   pointers for our linked list without mallocing a single extra byte?
+
+    Step 2: The Zero-Overhead Trick
+
+   Let's look closely at a "dead" particle. We've set its is_active flag to false. What about the rest
+   of its data? Its position, velocity, and lifetime_remaining are now completely useless. They are just
+   bytes occupying space, waiting to be overwritten. This is wasted space.
+
+   What if we could repurpose it?
+
+   What if, the moment a particle becomes inactive, we could treat the memory that used to hold its
+   float data as a place to store a single pointer, a pointer to the next free slot in our list?
+
+   This is not just a hypothetical idea. The perfect tool for this job is the union. A union is a
+   special kind of struct where all members occupy the same memory location. By placing our active data
+   and our next_free pointer inside a union, we are explicitly telling the compiler that these two
+   things are mutually exclusive: a particle's memory is either used for game data or it's used as a
+   link in the free list, but never both at the same time.
+
+   This is the magic trick. We will build our free list inside the memory of the dead objects
+   themselves.
+
+// The new, improved Particle struct
+struct Particle {
+	bool is_active; // Always accessible
+
+	union {
+		// State when is_active = true
+		struct {
+			float position[2];
+			float velocity[2];
+			float lifetime_remaining;
+		} data;
+		// State when is_active = false
+		Particle* next_free;
+	};
+};
+
+   Now, the memory of a dead particle can be repurposed to become a node in a singly-linked list. Our
+   pool only needs to store a single pointer: the head of this list. This is a true zero-overhead free
+   list.
+
+    Step 3: Implementation
+   With this clever structure in place, the implementation becomes beautifully simple.
+
+struct ParticlePool {
+	Arena* backing_arena;
+	Particle* free_list_head;
+	size_t capacity;
+};
+
+// InitPool remains mostly the same, just initialize the head pointer.
+void InitPool(ParticlePool* pool, Arena* backing_arena) {
+	pool->backing_arena = backing_arena;
+	pool->free_list_head = nullptr;
+	pool->capacity = 0;
+}
+
+void PoolFree(ParticlePool* pool, Particle* p) {
+	if (!p) return;
+
+	p->is_active = false;
+	// Prepend the freed particle to the free list.
+	p->next_free = pool->free_list_head;
+	pool->free_list_head = p;
+}
+
+Particle* PoolAlloc(ParticlePool* pool) {
+	// First, try to recycle from the free list.
+	if (pool->free_list_head) {
+		Particle* recycled = pool->free_list_head;
+		pool->free_list_head = recycled->next_free; // Pop from list
+		recycled->is_active = true;
+		return recycled;
+	}
+
+	// If the free list is empty, get fresh memory from the arena.
+	pool->capacity++;
+	Particle* new_particle = (Particle*)ArenaAlloc(pool->backing_arena,
+	                                               sizeof(Particle));
+	if (new_particle) {
+		new_particle->is_active = true;
+	}
+	return new_particle;
+}
+
+   This design is a huge improvement. Allocation and deallocation are incredibly fast. It provides
+   pointers that are stable as long as the object isn't freed when PoolAlloc returns a Particle*, that
+   pointer's value is fixed and will remain valid until PoolFree is called on it. Other systems can
+   safely store this pointer, but beware: if you hold onto the pointer after freeing and the memory is
+   reused for a new particle, it will point to a different object. This is a potential source of bugs if
+   not managed carefully.
+
+   We've solved fragmentation, but is this always "better"? Not necessarily, if your system doesn't have
+   high churn or if iteration isn't a bottleneck, the naive pool might be simpler and sufficient. But
+   for many cases, this free list is a solid step up... until we hit the next hurdle.
+
+Act 3: The Hidden Flaw - The Iteration Problem
+   We have solved the recycling problem, but we have created a new, subtle performance issue, one that
+   may or may not matter depending on your workload. For a particle system, the single most common
+   operation is iterating over all active particles every frame to update their position and check their
+   lifetime.
+
+   With our current design, how do we find all the active particles? They are scattered throughout the
+   memory block allocated by the arena. We have no choice but to walk the entire block from start to
+   finish and check each one.
+
+Particle* all_particles = (Particle*)pool->backing_arena->base_ptr;
+for (size_t i = 0; i < pool->capacity; ++i) {
+	Particle* p = &all_particles[i];
+	if (p->is_active) { // <-- This check is the performance killer
+		// ... update and render ...
+	}
+}
+
+   If our pool has a capacity of 10,000 but only 500 particles are active, we are wasting 95% of our
+   loop's time just checking a flag. This is death by a thousand cuts. The unpredictable if statement
+   can also cause CPU branch mispredictions, stalling the processor's pipeline and making the problem
+   even worse.
+
+   We have traded good iteration performance for easy allocation. This is a bad trade if iteration is
+   your hot path, but if your system prioritizes fast alloc/free over frequent loops (e.g., sparse
+   access patterns), the free list might still be ideal. In data-oriented design, we must optimize for
+   the most common access pattern, and if that pattern is iteration, we need a different approach.
+
+Act 4: The Packed Array - A Quest for Perfect Iteration
+   Our new goal is to design a data structure where all active objects are packed tightly together in
+   one contiguous block. This would allow for a simple, cache-perfect loop with no wasted checks, if
+   iteration is indeed your bottleneck.
+
+   This technique is called a Packed Array, and it's maintained with a clever removal strategy often
+   called "swap-and-pop".
+
+   The rule is simple and absolute: All active particles live in a contiguous block at the beginning of
+   the array, from index 0 to active_count - 1.
+     * Allocation: Is trivial. We just hand out the particle at active_count and then increment the
+       counter.
+     * Deallocation: This is the clever part. To free a particle at index i, we don't create a hole. We
+       take the particle from the very end of the active block (active_count - 1) and move its data into
+       the slot at index i. Then we simply decrement active_count.
+
+   The hole is instantly filled, and the contiguous block is preserved. The update loop becomes a thing
+   of beauty:
+
+// Perfect iteration. No branches, perfect cache locality.
+for (size_t i = 0; i < pool.active_count; ++i) {
+	Particle* p = &pool.particles[i];
+	// ... update and render ...
+}
+
+   However, this deallocation step involves copying the entire particle data from the end to the hole.
+   If your particles are small, this is fine, but if they're large or if you have extremely high churn
+   (e.g., particles with very short lifetimes, dying and spawning thousands per frame), the repeated
+   copying can add up to significant overhead. In such cases, the performance gain in iteration might be
+   offset by slower deallocations, making this less ideal for ultra-short-lived objects compared to the
+   free list's near-zero-cost frees.
+
+   This is a performance win for iteration-heavy systems, but it's not universally "better", it
+   complicates deallocation and introduces a new issue we'll see next. If your use case involves
+   infrequent iteration or needs stable pointers more than speed, stick with the free list.
+
+Act 5: The Unstable Pointer Crisis
+   We have achieved the perfect loop. We have eliminated wasted work and maximized cache performance.
+   But in doing so, we have introduced a new, far more dangerous problem, one that could make this
+   design unsuitable for systems requiring reliable external references.
+
+   Consider this scenario:
+    1. The UI system wants to draw a special icon over a specific particle, so it asks for and stores a
+       pointer: Particle* p_special = &pool.particles[5];
+    2. A moment later, the physics system determines that particle 5 has hit a wall and calls
+       PoolFree(pool, 5).
+    3. The pool, following the swap-and-pop rule, copies the data from the last particle (say, at index
+       99) into slot 5.
+    4. Now, when the UI system dereferences its p_special pointer, it is no longer pointing to the
+       particle it was given. It's pointing to a completely different particle that just happens to
+       occupy the same memory address.
+
+   This is a dangling pointer. We have solved the performance problem but created a correctness
+   nightmare that can lead to silent data corruption, impossible-to-debug visual glitches, or outright
+   crashes. We cannot safely pass raw pointers to objects in a packed array.
+
+   This is the ultimate architect's dilemma: we have a conflict between iteration performance and
+   reference stability. If your system doesn't need external pointers (e.g., all logic is internal), the
+   packed array is fantastic. But if stability is key, we need one more layer.
+
+Act 6: The Final Architecture - Generational Handles
+   The answer is to introduce a layer of indirection. Instead of giving other systems a direct pointer
+   (an object's home address), we will give them a Handle (an object's unique ID card). This handle can
+   then be used to safely look up the object's current address, if your problem demands both fast
+   iteration and stable references.
+
+   Let's build this step by step, starting with a simple example to illustrate the concepts.
+
+    Step 1: The Indirection Table
+   First, let's understand why we need indirection. In the packed array, particles move around during
+   deallocations, their positions (indices) in the array change due to swap-and-pop. A direct pointer
+   like &pool.particles[5] becomes invalid if something else gets swapped into index 5.
+
+   To fix this, we decouple the "identity" of a particle from its physical location. When we allocate a
+   particle, we assign it a stable ID, a unique number that never changes, even if the particle's data
+   moves in the array. Think of the ID as a permanent name tag.
+
+   Now, to find a particle's current location, we need a way to look up "Where is ID 42 right now?"
+   That's where the indirection table comes in. We'll use an array called sparse_to_dense: the index of
+   this array is the ID, and the value stored there is the current index in the packed array.
+
+   For example, suppose we have a small pool with capacity 4:
+     * We allocate Particle A, assign it ID 0, place it at packed index 0: sparse_to_dense[0] = 0.
+
+   Handle Example 1
+     * Allocate Particle B, ID 1, at index 1: sparse_to_dense[1] = 1.
+
+   Handle Example 2
+     * Allocate Particle C, ID 2, at index 2: sparse_to_dense[2] = 2.
+
+   Handle Example 3
+   If we free Particle B (ID 1, at index 1), swap-and-pop moves Particle C into index 1 and reduces
+   active_count to 2. We update the table: sparse_to_dense[2] = 1 (C is now at 1).
+
+   But wait, during the swap, how do we know which ID was at the end to update its entry? We need a
+   reverse mapping: another array called dense_to_sparse, where the index is the packed position, and
+   the value is the ID.
+
+   Before the free: dense_to_sparse[0] = 0 (A), [1] = 1 (B), [2] = 2 (C).
+
+   After swap: Move C's data to index 1, then set dense_to_sparse[1] = 2, and update sparse_to_dense[2] = 1.
+
+   Handle Example 4
+   This two-way mapping ensures we can quickly find and update locations without slow searches. It's
+   like a phone book (sparse_to_dense for ID to address) and a reverse directory (dense_to_sparse for
+   address to ID).
+
+   This indirection adds a small cost (array lookups) but allows handles to remain valid even as indices
+   change.
+
+    Step 2: The Stale Handle Problem - Using Generations
+   With just IDs and tables, there's still a risk. Suppose we free particle A (ID 0), making ID 0
+   available. Then we allocate a new particle C, which reuses ID 0. An old handle with ID 0 now
+   incorrectly points to C instead of the original A!
+
+   This is the "stale handle" issue, reused IDs can fool old handles.
+
+   To solve this, we add a generation count to each ID, stored directly in the sparse array alongside
+   the dense index. Think of it as a version number for each slot.
+     * When we free a slot (sparse index 0, current generation 0), we increment its generation to 1 in
+       the sparse array.
+     * A handle stores both the sparse index and the generation at creation: {index: 0, generation: 0}.
+     * When reusing the slot for a new particle C, it keeps the updated generation 1, so handles for C
+       are {index: 0, generation: 1}.
+     * To use a handle, check if its generation matches the current generation in the sparse array for
+       that index. If not (e.g., old handle has gen 0, but sparse has gen 1), it's stale and invalid.
+
+   This prevents reuse bugs. For example, the old handle for A fails the check, while new ones for C
+   succeed.
+
+    Step 3: The Final Implementation
+   Putting it all together, this is the complete solution, often called a Slot Map. It gives us the best
+   of all worlds: cache-perfect iteration and completely safe, stable external references... for problems
+   that need both. If your system is simpler, earlier designs might be lighter and sufficient.
+
+   Here's a simplified overview:
+
+// Handle stores sparse index and generation
+struct ParticleHandle {
+	uint32_t sparse_index;
+	uint32_t generation;
+};
+
+// Sparse entry holds current dense index and generation
+struct SparseEntry {
+	uint32_t dense_index;  // Current position in packed array
+	uint32_t generation;   // Version number
+};
+
+struct ParticlePool {
+	// ... packed particle_data array, active_count, etc.
+	uint32_t* dense_to_sparse;	// Packed index -> sparse index
+	SparseEntry* sparse;		// Sparse index -> {dense_index, generation}
+
+	ParticleHandle Alloc() {
+		// Find a free sparse index (e.g., next available or from free list)
+		uint32_t sparse_id = get_free_sparse_id();
+
+		// Place in packed array
+		uint32_t dense_id = active_count++;
+		sparse[sparse_id].dense_index = dense_id;
+		dense_to_sparse[dense_id] = sparse_id;
+
+		// Use current generation (increment if needed for reuse)
+		uint32_t gen = sparse[sparse_id].generation;
+
+		// Initialize particle data at dense_id
+		// ...
+
+		return {sparse_id, gen};
+	}
+
+	void Free(ParticleHandle handle) {
+		if (!IsValid(handle)) return;
+
+		uint32_t dense_id = sparse[handle.sparse_index].dense_index;
+		uint32_t last_dense = --active_count;
+
+		// Swap-and-pop: Copy last particle's data to freed spot
+		particle_data[dense_id] = particle_data[last_dense];
+
+		// Update mappings for the moved particle
+		uint32_t moved_sparse = dense_to_sparse[last_dense];
+		sparse[moved_sparse].dense_index = dense_id;
+		dense_to_sparse[dense_id] = moved_sparse;
+
+		// Invalidate: Increment generation and mark as free
+		sparse[handle.sparse_index].generation++;
+		sparse[handle.sparse_index].dense_index = INVALID;	// e.g., UINT32_MAX
+	}
+
+	bool IsValid(ParticleHandle handle) {
+		if (handle.sparse_index >= capacity) return false;
+		return sparse[handle.sparse_index].generation == handle.generation &&
+			   sparse[handle.sparse_index].dense_index != INVALID;
+	}
+
+	Particle* Get(ParticleHandle handle) {
+		if (!IsValid(handle)) return nullptr;
+		uint32_t dense_id = sparse[handle.sparse_index].dense_index;
+		return &particle_data[dense_id];
+	}
+};
+
+The Performance Showdown: By the Numbers
+   Now that we've built our arsenal of pool designs, let's put them to the test. We'll simulate a
+   particle system under stress, measuring three key phases:
+     * Alloc/Free Time: The cost of initial allocations and deallocations.
+     * Churn Time: Simulating dynamic gameplay by replacing 500 particles over 1,000 "frames" (frees
+       followed by allocs), this tests real-world object turnover. (Note: Times here are purely the
+       accumulative cost of alloc/free calls, excluding setup like shuffling.)
+     * Iteration Time: Updating all active particles a set number of times, mimicking per-frame logic.
+
+   These benchmarks were run with varying total allocations, free rates, and iteration counts to expose
+   each design's strengths and weaknesses. We'll walk through each test set, highlighting what the
+   numbers reveal about trade-offs like cache efficiency, allocation speed, and iteration bottlenecks.
+
+     Ran on a M4 Pro 12-Core Macbook
+
+  Set 1: High Churn (95% Free) - 10,000 Allocs, 9,500 Frees, 1,000 Iterations, 500 Churn/1,000 Frames
+
+   This set models a sparse system with lots of frees (e.g., short-lived particles exploding on impact).
+
+   --------------------------------------------------------------------------------
+   Design            Alloc/Free Time (ms)    Churn Time (ms)    Iteration Time (ms)
+   --------------------------------------------------------------------------------
+   Naive Pool        12.99                   35.91              2.79
+   Free List Pool    0.17                    0.44               5.48
+   Packed Array      0.27                    0.39               0.31
+   Slot Map          0.15                    1.19               0.31
+   --------------------------------------------------------------------------------
+
+   Insights:
+     * The Naive Pool struggles with alloc/free (12.99 ms) due to its O(N) scan for free slots. It's
+       repeatedly combing through nearly 10,000 elements.
+     * Yet, its iteration shines (2.79 ms, faster than Free List) thanks to front-filling, which
+       clusters actives at the array's start for better cache hits despite the if branches.
+     * Free List dominates churn (0.44 ms total for 500,000 operations) with pure O(1) efficiency, but
+       iteration lags (5.48 ms) from scattered actives causing cache misses.
+     * Packed Array's churn is equally impressive (0.39 ms), showing swap-and-pop copies are negligible
+       for small structs.
+     * Slot Map adds a small churn overhead (1.19 ms) from indirection, but matches Packed's blazing
+       iteration (0.31 ms) while providing safe handles.
+
+  Set 2: Low Churn (5% Free) - 10,000 Allocs, 500 Frees, 1,000 Iterations, 500 Churn/1,000 Frames
+   Here, we have a dense system with few frees (e.g., long-lived entities like NPCs).
+
+   --------------------------------------------------------------------------------
+   Design            Alloc/Free Time (ms)    Churn Time (ms)    Iteration Time (ms)
+   --------------------------------------------------------------------------------
+   Naive Pool        12.94                   613.37             6.51
+   Free List Pool    0.13                    0.51               7.63
+   Packed Array      0.15                    0.80               6.92
+   Slot Map          0.15                    1.69               7.00
+   --------------------------------------------------------------------------------
+
+   Insights:
+     * Naive's churn balloons to 613 ms in this dense setup: each alloc must scan almost the full array
+       to find rare free slots, making it painfully inefficient.
+     * Its iteration holds up well (6.51 ms) due to clustering, but with 9,500 actives, the if checks
+       become less of a bottleneck.
+     * Free List and Packed Array breeze through churn (under 1 ms total), as frees quickly create
+       reusable slots without heavy costs.
+     * Slot Map's churn is a tad higher (1.69 ms) from handle and generation management.
+     * Iteration sees packed designs pull ahead slightly, benefiting from high active density, while
+       Free List trails due to minor scattering from churn.
+
+  Set 3: High Alloc/Free Cost - 100,000 Allocs, 99,500 Frees, 1,000 Iterations, 500 Churn/1,000 Frames
+   Scaling up to test raw alloc/free scalability (e.g., massive simulations).
+
+   -----------------------------------------------------------------------------------
+   Design             Alloc/Free Time (ms)     Churn Time (ms)     Iteration Time (ms)
+   -----------------------------------------------------------------------------------
+   Naive Pool         1244.46                  34.84               25.13
+   Free List Pool     1.41                     0.46                32.69
+   Packed Array       2.73                     0.39                0.31
+   Slot Map           1.62                     1.19                0.31
+   -----------------------------------------------------------------------------------
+
+   Insights:
+     * Naive buckles under the scale (1,244 ms alloc/free) with its O(N²)-esque scanning, completely
+       unusable for massive pools.
+     * Free List and Slot Map scale effortlessly with O(1) operations, keeping times low.
+     * Packed's initial frees take a hit (2.73 ms) from numerous swaps, but its churn stays minimal
+       (0.39 ms).
+     * Iteration amplifies the packed advantage (0.31 ms vs. 25-33 ms), as they process only 500 actives
+       while others slog through 100,000 slots.
+     * With abundant free slots post-initial frees, churn remains tiny for all, but Free List and Packed
+       edge out with sub-0.5 ms totals.
+
+  Set 4: High Iteration Cost - 10,000 Allocs, 9,500 Frees, 100,000 Iterations, 500 Churn/1,000 Frames
+
+   Cranking iterations to extremes (e.g., stress-testing update loops).
+
+   ---------------------------------------------------------------------------------
+   Design             Alloc/Free Time (ms)    Churn Time (ms)    Iteration Time (ms)
+   ---------------------------------------------------------------------------------
+   Naive Pool         12.78                   35.44              273.18
+   Free List Pool     0.15                    0.43               542.18
+   Packed Array       0.26                    0.38               30.79
+   Slot Map           0.15                    1.17               30.62
+   ---------------------------------------------------------------------------------
+
+   Insights:
+     * Iteration dominates, magnifying gaps: Packed and Slot Map wrap up in ~30 ms (handling 500 actives
+       100,000 times), while Naive (273 ms) and Free List (542 ms) burn time on empty slots.
+     * Naive's clustering pays off again, outpacing Free List in iteration, its naive strategy
+       accidentally optimizes for density.
+     * Churn aligns with other sets (all under 2 ms except Naive's 35 ms), underscoring that for
+       iteration-heavy workloads, packed designs deliver 9-18x speedups.
+     * Free List's churn is stellar (0.43 ms), but if looping is your hot path, the cache costs make it
+       lag.
+
+    What We've Learned from the Numbers
+   The big lesson? There's no universal "best", it hinges on your priorities. High churn? Lean toward
+   Free List for raw efficiency. Iteration-heavy? Packed or Slot Map will transform your frame times.
+   Need safety too? Slot Map reigns supreme as the balanced powerhouse. Always benchmark in your real
+   app; these tests are a starting point, but your data patterns might flip the script!
+
+Conclusion: Mastering Memory
+   We have journeyed from the raw, untamed power of the arena to the precision of the specialist's
+   toolkit. In doing so, we have treated memory not as a commodity to be consumed, but as a medium to be
+   sculpted. The free list, the packed array, and the slot map are not merely clever algorithms; they
+   are expressions of a fundamental principle: the structure of your data and the structure of your
+   problem must be in harmony.
+
+   This is the core of data-oriented design. It demands that we look past the convenient abstractions of
+   general-purpose allocators and engage directly with the realities of the hardware: with cache lines,
+   pointer indirection, and the relentless cost of a branch misprediction. The resulting systems are not
+   just faster; their performance is more predictable, more scalable, and more robust, because their
+   efficiency is an intrinsic property of their architecture, not an optimization applied as an
+   afterthought. The true magic lies not in any single trick, but in the mastery of these underlying
+   mechanics, allowing us to build solutions that are perfectly tailored to the task at hand.
+
+
+---
+filename: c-memory-magic-part-4-20250902.txt
+https://andreleite.com/posts/2025/nstl/virtual-memory-ring-buffer/
+
+Memory Magic Part 4: The Infinite Buffer
+9 Aug, 2025
+[pdf version: c-memory-magic-part-1-to-4.pdf]
+
+The End of the Line
+   A common performance problem lives in the heart of systems that stream data: audio engines, network
+   stacks, logging systems, and inter-thread message queues. It's the problem of the circular buffer,
+   also known as a ring buffer. And its problem is the "end of the line."
+
+The Classic Ring Buffer and its Two-Copy Problem
+   A ring buffer is a brilliant data structure for producer-consumer scenarios. One thread, the
+   producer, writes data into the buffer, and another thread, the consumer, reads it. It's a fixed-size
+   block of memory that cleverly pretends to be infinite by wrapping around on itself.
+
+   This works beautifully, until the head pointer reaches the end of the allocated memory block. At that
+   point, it must wrap back around to the beginning.
+
+   This wrap-around requirement complicates what should be a simple write operation. If a write
+   operation crosses the buffer's boundary, it must be split. The programmer must calculate the size of
+   the chunk to the end of the buffer, perform one memcpy, then calculate the size of the remaining data
+   and perform a second memcpy to the start of the buffer.
+
+void WriteToBuffer(RingBuffer* rb, const void* data, size_t size) {
+	// ... space check omitted ...
+	size_t current_head = rb->head;
+
+	if (current_head + size <= rb->capacity) {
+		// Case 1: The write fits in one contiguous block.
+		memcpy(rb->buffer + current_head, data, size);
+	} else {
+		// Case 2: The write wraps around. It must be split.
+		size_t first_chunk_size = rb->capacity - current_head;
+		memcpy(rb->buffer + current_head, data, first_chunk_size);
+
+		size_t second_chunk_size = size - first_chunk_size;
+		memcpy(rb->buffer, (char*)data + first_chunk_size, second_chunk_size);
+	}
+
+	// Finally, update the head pointer, wrapping it around with modulo.
+	rb->head = (current_head + size) % rb->capacity;
+}
+
+   Two Copies Problem
+   This conditional logic is a performance killer. The if statement is a prime candidate for branch
+   misprediction, which stalls the CPU. Furthermore, the API is messy. You can no longer simply ask for
+   a pointer to a contiguous block of memory to write into, the logic must handle the possibility of two
+   disjoint blocks for a single logical write.
+
+   What if we could eliminate the cliff? What if we could create a buffer that was, for all intents and
+   purposes, truly linear?
+
+The Virtual Memory Trick: A Mirrored Reality
+   The solution lies in using our deep knowledge of virtual memory to create a new reality. The trick is
+   elegant:
+
+     We will ask the OS to map the same block of physical RAM to two contiguous regions of virtual
+     address space.
+
+   The result is a virtual buffer where the second half is a perfect, byte-for-byte mirror of the first
+   half. Writing to buffer[0] also writes to buffer[capacity]. They are the same memory.
+
+   Virtual Memory Mapping
+   This technique is most practical in 64-bit applications where virtual address space is plentiful. The
+   alignment requirements for the buffer size are specific to each operating system, as we'll see below.
+
+Seeing the Magic in Action
+   With this buffer, the two-copy problem vanishes. We can perform a single memcpy that seamlessly wraps
+   around the buffer boundary, with no special logic.
+
+   The following code demonstrates this. We write a string that is intentionally placed to cross the
+   boundary of the physical memory.
+
+const size_t requested_size = 65536;
+char* buffer = CreateMirroredRingBuffer(requested_size);
+
+const char message[] = "HELLO!";
+size_t message_len = sizeof(message) - 1;
+size_t start_index = requested_size - 3; // Position write to force a wrap-around.
+
+// This single memcpy will cross the boundary.
+memcpy(&buffer[start_index], message, message_len);
+
+// We can now read the entire, contiguous message by pointing
+// to the start of the write in our "virtual" buffer.
+printf("Contiguous message after wrap-around: %.*s\n", (int)message_len, &buffer[start_index]);
+
+   The output proves that the single memcpy worked as if the buffer were truly linear. The memory region
+   starting at start_index now contains the full, unbroken message, with the wrap-around handled
+   transparently by the hardware.
+Contiguous message after wrap-around: HELLO!
+
+   Now that we've seen what this buffer can do, let's look at how to build it on different platforms.
+
+  Building the Mirrored Buffer on Windows
+   The modern Windows implementation revolves around VirtualAlloc2 and MapViewOfFile3, which allow us to
+   create and map into memory "placeholders" in a race-free way. The process is more nuanced than it
+   first appears.
+
+    Step 1: Align Size to Granularity
+   On Windows, the size of our buffer must be a multiple of the system's allocation granularity
+   (typically 64KB). We get this value from GetSystemInfo and round our requested size up to the next
+   valid multiple.
+
+SYSTEM_INFO sysInfo;
+GetSystemInfo(&sysInfo);
+const size_t granularity = sysInfo.dwAllocationGranularity;
+
+// Round the requested size up to the nearest multiple of granularity.
+size_t aligned_size = (size + granularity - 1) & ~(granularity - 1);
+
+    Step 2: Create a Page-File-Backed Memory Section
+   We use CreateFileMapping to ask the OS for a chunk of committable memory. Because this is an older
+   Win32 API, we must manually split our 64-bit aligned_size into high and low 32-bit parts for the
+   function arguments.
+
+// Split the 64-bit size for the CreateFileMapping function.
+DWORD size_high = (DWORD)(aligned_size >> 32);
+DWORD size_low = (DWORD)(aligned_size & 0xFFFFFFFF);
+
+HANDLE mapping = CreateFileMapping(INVALID_HANDLE_VALUE, NULL,
+                                   PAGE_READWRITE, size_high, size_low, NULL);
+
+    Step 3: Reserve a Combined Virtual Address Placeholder
+   We reserve a single, contiguous virtual address range that is twice the size of our aligned buffer.
+   This is the canvas we will work on.
+
+void* placeholder = VirtualAlloc2(GetCurrentProcess(), NULL, 2 * aligned_size,
+                                  MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                                  PAGE_NOACCESS, NULL, 0);
+
+    Step 4: Split the Placeholder
+   This is a crucial and non-obvious step. MapViewOfFile3 requires the placeholder it replaces to be of
+   the exact same size as the view being mapped. We cannot map a size-byte view into a 2*size-byte
+   placeholder.
+
+   To solve this, we perform a split. By calling VirtualFree on the second half of the reservation with
+   the special MEM_PRESERVE_PLACEHOLDER flag, we instruct the OS to redefine the single large
+   placeholder as two smaller, independent placeholders. This single call is all that's needed to
+   prepare our address space.
+
+// Split the 2*size placeholder into two separate 'size' placeholders.
+VirtualFree((char*)placeholder + aligned_size, aligned_size,
+            MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+
+    Step 5: Map the Memory Section into Each Placeholder
+   Now that we have two correctly-sized placeholders, we can map our memory section into each one using
+   MapViewOfFile3 with the MEM_REPLACE_PLACEHOLDER flag. This atomically consumes the placeholder and
+   replaces it with our mapping.
+
+// Map the first half into the first placeholder.
+void* view1 = MapViewOfFile3(mapping, GetCurrentProcess(), placeholder,
+                              0, aligned_size, MEM_REPLACE_PLACEHOLDER,
+                              PAGE_READWRITE, NULL, 0);
+
+// Map the second half into the second placeholder.
+void* view2 = MapViewOfFile3(mapping, GetCurrentProcess(),
+                              (char*)placeholder + aligned_size, 0, aligned_size,
+                              MEM_REPLACE_PLACEHOLDER,
+                              PAGE_READWRITE, NULL, 0);
+
+   If both calls succeed, we have our mirrored buffer. The mapping handle can now be closed, as the
+   views will keep the memory alive.
+
+     A Note on Older Windows Versions: The VirtualAlloc2 and MapViewOfFile3 functions are not available
+     on older systems. On those platforms, you must use a fallback method that involves reserving a
+     2*size block with VirtualAlloc, immediately freeing it with VirtualFree, and then attempting to
+     map both halves into the now-vacant address range with MapViewOfFileEx. This older method has an
+     inherent race condition: another thread could allocate memory in that address range between the
+     VirtualFree and MapViewOfFileEx calls. Robust code for older systems must put this logic in a
+     retry loop.
+
+  Building the Mirrored Buffer on POSIX (Linux/macOS)
+   The POSIX implementation uses mmap for everything, but first requires a sharable file descriptor.
+
+    Step 1: Round Up to Page Size
+   On POSIX systems, the mmap function requires that the size of a mapping be a multiple of the system's
+   page size (typically 4KB). We get this value from sysconf and round our requested size up to the next
+   valid multiple.
+
+long page_size = sysconf(_SC_PAGESIZE);
+
+// Round the requested size up to the nearest multiple of the page size.
+size_t aligned_size = (size + page_size - 1) & ~((size_t)page_size - 1);
+
+    Step 2: Get a Sharable File Descriptor
+   We need a file descriptor (fd) that represents the physical memory we want to map. The best way to
+   get one is with memfd_create on Linux, as it creates a truly anonymous in-memory file that won't
+   conflict with anything on the filesystem. For portability with systems like macOS, we must fall back
+   to shm_open.
+
+   shm_open requires a unique name. We will generate one using the process ID and a counter, and retry
+   if a name collision occurs.
+
+int fd = -1;
+#if __linux__
+// memfd_create is preferred: no name collisions and no filesystem presence.
+fd = syscall(SYS_memfd_create, "ring-buffer", MFD_CLOEXEC);
+#endif
+
+if (fd == -1) {
+	// shm_open is the POSIX fallback for macOS and older Linux.
+	char path[256];
+	int retries = 100;
+	do {
+		// Generate a unique name.
+		snprintf(path, sizeof(path), "/ring-buffer-%d-%d", getpid(), retries);
+
+		fd = shm_open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+
+		retries--;
+	} while (fd < 0 && errno == EEXIST && retries > 0);
+
+	if (fd < 0) return nullptr;
+
+	// Immediately unlink the path. The memory object will persist
+	// until the last fd is closed, ensuring automatic cleanup.
+	shm_unlink(path);
+}
+
+// Set the size of the memory object.
+ftruncate(fd, (off_t)aligned_size);
+
+    Step 3: Reserve a Contiguous Virtual Address Range
+   The core of the trick is getting two contiguous virtual memory blocks. The safest way to do this is
+   to ask the OS to reserve a single, larger block that is twice the size of our desired buffer. We use
+   mmap with PROT_NONE to reserve the address range without allocating any physical memory for it yet.
+   This prevents other threads from stealing our address space before we can map into it.
+
+void* placeholder = mmap(nullptr, 2 * aligned_size, PROT_NONE,
+                         MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+
+    Step 4: Map the File Descriptor Twice
+   Finally, we use mmap again to map our file descriptor from Step 2 into the two halves of the
+   placeholder we reserved in Step 3. The MAP_FIXED flag tells mmap to use the exact address we provide.
+   It is crucial to also use MAP_SHARED, which ensures that writes to one mapping are visible in the
+   other.
+
+// Map the first half.
+void* view1 = mmap(placeholder, aligned_size, PROT_READ | PROT_WRITE,
+                   MAP_FIXED | MAP_SHARED, fd, 0);
+
+// Map the second half.
+void* view2 = mmap((char*)placeholder + aligned_size, aligned_size,
+                    PROT_READ | PROT_WRITE,
+                    MAP_FIXED | MAP_SHARED, fd, 0);
+
+   If both calls succeed, the file descriptor fd can be safely closed. The kernel maintains a reference
+   to the underlying memory object for as long as the mappings exist.
+
+     A Note on POSIX Gotchas:
+     * shm_open Naming: The shm_open fallback uses filesystem-like names that can collide between
+       processes. Our retry loop with a unique name helps prevent this, but production code might use an
+       even more robust random name generation strategy.
+     * MAP_SHARED is Mandatory: The final two mmap calls must use MAP_SHARED to ensure writes to one
+       view are visible in the other, creating the mirror. Using MAP_PRIVATE would break the illusion
+       due to copy-on-write semantics.
+
+Taking it Further
+   This virtual memory trick is a powerful building block for a variety of high-performance systems.
+   With the core problem of wrap-around logic eliminated, you can focus on other challenges. Here are a
+   few things you could build:
+     * Lock-Free SPSC/MPSC Queues: This is the perfect foundation for single-producer or multi-producer
+       queues, where the producer(s) can write data of any size without complex logic or locking.
+     * Real-Time Audio Buffers: In audio processing, you often need to apply a DSP filter to a sliding
+       window of sample data. A mirrored buffer allows you to get a single pointer to this window, even
+       if it spans the "end" of the buffer, avoiding branches in your tight audio callback loop.
+     * Network Packet Assembly: When receiving network data, you can write incoming fragments directly
+       into the buffer. A single send or processing call can then operate on a complete, contiguous
+       packet once all its bytes have arrived, without any intermediate copying.
+     * Game Engine Command Buffers: A renderer's command buffer can be implemented as a ring buffer.
+       With this trick, the CPU can generate rendering commands in a tight, branch-free loop, writing
+       them into the buffer for the GPU to consume.
+
+Conclusion: From Trick to Tool
+   With this technique, we have transformed our ring buffer. The code that uses it becomes dramatically
+   simpler. A Write operation is no longer a conditional dance of two memcpy calls, it's a single,
+   clean, branch-free operation.
+
+   Of course, there is a trade-off. We are trading virtual address space and a few extra TLB entries for
+   a branch-free hot path. For many streaming applications, where the buffer write/read is the most
+   frequent operation, this is a fantastic bargain.
+
+   This is the essence of memory mastery. We looked at a common problem, the wrap-around check, and
+   refused to accept it as a necessary evil. By understanding the abstraction layer between our program
+   and the physical hardware, we were able to manipulate the mapping to create a data structure that is
+   perfectly suited to our problem.
+
+
+---
+
