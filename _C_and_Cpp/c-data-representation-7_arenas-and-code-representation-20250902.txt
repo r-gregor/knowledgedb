@@ -1,0 +1,407 @@
+filename: c-data-representation-7_arenas-and-code-representation-20250902.txt
+https://cs61.seas.harvard.edu/site/2022/Datarep7/#gsc.tab=0
+
+Data representation 7: Arenas and code representation
+
+   This lecture, we discuss arena allocators and the representation of code. Code representation serves
+   as a bridge to our next unit, which is assembly programming.
+
+Performance consequences of memory allocation
+
+[datarep7/mb0.cc]
+// allocate and free nodes `noperations` times
+long counter = 0;
+for (unsigned i = 0; i != noperations; ++i) {
+	int pos = random_node_index(randomness);
+	if (n[pos] == nullptr) {
+		n[pos] = new node;
+		n[pos]->contents = counter;
+		++counter;
+	} else {
+		delete n[pos];
+		n[pos] = nullptr;
+	}
+}
+
+          + Up to 8,192 nodes allocated at a time
+          + Models tasks like tree building & freeing, etc.
+     * mb0.cc uses a general-purpose memory allocator
+          + Can we speed it up?
+
+Memory arenas
+     * An arena allocator is an object whose purpose is to handle the allocation and deallocation of
+       other objects
+     * It can be faster than a general-purpose allocator because it can make assumptions about the
+       objects it allocates
+          + Such as that they are all the same size
+          + Or that they will all be freed at the same time
+
+Example
+
+[datarep7/mb1.cc]
+struct node_arena {
+	std::vector<node*> scratch_;
+
+	node* allocate() {
+		node* n;
+		if (this->scratch_.empty()) {
+			n = new node;
+		} else {
+			n = this->scratch_.back();
+			this->scratch_.pop_back();
+		}
+		return n;
+	}
+
+	void deallocate(node* n) {
+		this->scratch_.push_back(n);
+	}
+};
+
+   1.96x faster on Mac OS X desktop (0.90s → 0.46s)
+
+Libraries and abstraction boundaries
+     * A library implements a contract called a specification
+     * A specification imposes requirements on both the users of the library and the implementers of the
+       library
+     * If the user obeys their requirements, then the library must obey its requirements
+     * It can be written in a formal language or in precise human language
+     * Good software engineering practice
+     * An allocator is a simple library; how would you write its specification?
+
+struct node_arena {
+	node* allocate();
+	void deallocate(node* n);
+	~node_arena();
+};
+
+Allocator specification
+
+struct node_arena {
+	// Return a pointer to a freshly allocated `node`.
+	node* allocate();
+
+	// Deallocate `n`, which must refer to a live `node` that was
+	// returned by a previous call to `allocate()`.
+	void deallocate(node* n);
+
+	// Free any storage used for allocated `node`s. All `node`s allocated
+	// by this arena must be passed to `deallocate` before the arena
+	// is destroyed.
+	~node_arena();
+};
+
+A specification can have many implementations
+
+struct node_arena {
+	node* allocate() {
+		return new node;
+	}
+	void deallocate(node* n) {
+		delete n;
+	}
+}
+
+struct node_arena {
+	std::vector<node*> scratch_;
+	node* allocate() {
+		node* n;
+		if (scratch_.empty()) {
+			n = new node;
+		} else {
+			n = scratch_.back();
+			scratch_.pop_back();
+		}
+		return n;
+	}
+	void deallocate(node* n) {
+		scratch_.push_back(n);
+	}
+	~node_arena() { ... }
+}
+
+struct node_arena {
+	node* allocate() {
+		return new node[10];
+	}
+	void deallocate(node* n) {
+		delete[] n;
+	}
+}
+
+Per-allocation statistics?
+     * Goal: Count how often each node is reused
+          + Maybe some nodes are used more often than others
+
+void print_uses() {
+	for (auto n : ???) {
+		printf("@%p used %zu times\n", n, ???);
+	}
+}
+
+How to store per-allocation information
+     * Store information in an external data structure
+          + Example: std::map<node*, size_t> uses_
+          + Advantage: Simple to think about
+          + Disadvantage: More expensive
+     * Store information internal to each allocation
+          + Allocate more space than user requested
+          + Use the extra space for internal purposes
+          + Advantage: Speed
+          + Disadvantage: Complexity
+
+Let's add some numbers!
+
+Number adder driver
+
+[datarep7/add.cc]
+#include <cstdio>
+#include <cstdlib>
+#include "hexdump.hh"
+
+extern "C" {
+	int add(int a, int b);
+}
+
+int main(int argc, char* argv[]) {
+	if (argc <= 2) {
+		fprintf(stderr, "Usage: add A B\n\
+		                 Prints A + B.\n");
+		exit(1);
+	}
+
+	int a = strtol(argv[1], nullptr, 0);
+	int b = strtol(argv[2], nullptr, 0);
+	printf("%d + %d = %d\n", a, b, add(a, b));
+}
+
+     * This driver program reads two numbers from command line arguments and then prints their sum
+          + It parses the command line arguments (strings argv[1] and argv[2]) into integers using
+            strtol
+          + Want to know what a library function does? Try man strtol
+     * The add function is defined in another file, addf.cc
+
+C++ add
+
+[datarep7/addf.cc]
+extern "C" {
+	int add(int a, int b) {
+		return a + b;
+	}
+}
+
+   (extern "C" tells the compiler and linker to relax about matching argument types.)
+
+Examining the representation of code
+     * Machine instructions are stored in machine memory
+     * According to the C++ abstract machine, code is not stored in C++ objects
+          + sizeof(FUNCTIONNAME) is an error
+          + hexdump_object doesn't work!
+     * But on this architecture, we can still examine the instruction bytes that make up a function!
+     * Add hexdump((void*) add, 10) to the end of add.cc:
+
+00401220  8d 04 37 c3 66 2e 0f 1f  84 00                    |..7.f.....|
+
+Machine code
+     * Those bytes contain the code for the add function
+     * To confirm, examine the code that the compiler generated for the add function
+     * The objdump program prints information in object code and executables
+          + objdump -d disassembles machine code into sort-of-human-readable assembly language
+
+cs61-user@5ae5a48533a8:~/cs61-lectures/datarep7$ objdump -d addf.o
+
+addf.o:        file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <add>:
+   0:    8d 04 37                lea    (%rdi,%rsi,1),%eax
+   3:    c3                      retq
+
+     * The compiler generated an add function comprising two instructions and four bytes
+         1. lea (%rdi,%rsi,1),%eax (bytes 8d 04 37)
+         2. ret (byte c3)
+     * The first four bytes of the hexdump report those bytes, 8d 04 37 c3
+
+The many-to-many mapping between source code and machine code
+     * Many instruction sequences can correspond to the same source code
+          + An optimizing compiler might generate shorter machine code
+          + A security-conscious compiler might add security checks
+          + A sanitizer might add code to check for undefined behavior
+     * Many source codes can correspond to the same instructions
+          + Bytes of memory can have multiple meanings
+          + The memory representations of C and C++ data do not carry type information
+          + Semantically different functions might correspond to the same computations on memory
+     * This is surprising, interesting, and important, and we spend some time on it
+          + Try to understand why the same instructions sometimes work on semantically different data
+
+Turning off optimization
+     * add-noopt.o contains the add function compiled without optimization
+     * ./add-noopt prints instruction bytes f3 0f 1e fa 55 48 89 e5 89 7d...
+     * objdump -d add-noopt.o: The unoptimized add function is 18 bytes long!
+          + But it performs exactly the same computation
+          + Same code, different instructions
+
+Operation order
+     * int add(int a, int b) { return b + a; } (rather than a + b)
+          + Exact same meaning (C++ integer addition is commutative)
+          + Different instructions: 8d 04 3e c3 (not 37)
+          + The compiler's output happens to respect the operand order (though this is not required, and
+            in a more complicated function, the compiler might swap operand order if it found that
+            convenient)
+          + Different (though semantically equivalent) code, different instructions
+
+Parameter names
+     * int add(int flange, int procedurally) { return flange + procedurally; }
+          + Same instructions: 8d 04 37 c3
+          + Variable names are compiled away
+          + Different (though semantically equivalent) code, same instructions
+
+Type changes
+     * unsigned add(unsigned a, unsigned b) { return a + b; }
+          + Same instructions: 8d 04 37 c3
+          + Unsigned and signed integer addition can use the same instructions
+          + Different code, same instructions
+
+Type changes (2)
+     * int add(long a, long b) { return (int) (a + b); }
+          + Same instructions: 8d 04 37 c3
+          + Truncating a sum of longs produces the same result as summing them as ints
+
+Type changes (3)
+     * long add(long a, long b) { return a + b; }
+          + Different instructions: 48 8d 04 37 c3
+          + (The initial 48 byte says to perform the computation using 8-byte values)
+     * Semantically different function
+          + With longs, add(0xffff'ffff, 1) == 0x1'0000'0000L
+     * However, the code still appears to work as if with ints!
+          + ./add 0xffffffff 1 prints -1 + 1 = 0
+          + The printf function is truncating the result to int
+
+Type changes (4)
+     * char* add(char* a, long b) { return &a[b]; }
+          + Same instructions as long, long parameters: 48 8d 04 37 c3
+          + Pointer arithmetic is address arithmetic!
+
+Code changes
+     * unsigned add(unsigned a, unsigned b) { return a - (~b + 1); }
+          + 8d 04 37 c3
+          + The optimizer knows that ~b + 1 == -b, so a - -b == a + b
+
+Code changes (2)
+
+[datarep7/addf06.cc]
+unsigned add(unsigned a, unsigned b) {
+	while (b > 0) {
+		++a;
+		--b;
+	}
+	return a;
+}
+
+     * 8d 04 37 c3 !!!!
+     * Thank you, optimizer
+
+Code changes (3)
+
+[datarep7/addf07.cc]
+int add(int a, int b) {
+	while (a > 0) {
+		a -= 4;
+		b += 4;
+	}
+	while (a < 0) {
+		a += 2;
+		b -= 2;
+	}
+	if (a > 0) {
+		++b;
+	}
+	return b;
+}
+
+     * Honest, this add function is semantically equivalent to return a + b;
+     * But the optimizer [DEL: can't :DEL] doesn't yet figure that out
+
+Data changes
+
+[datarep7/addf08.cc]
+__attribute__((section (".text.addfunction"))) extern const unsigned char add[] = { 0x8d, 0x04, 0x37, 0xc3 };
+
+     * An add function, defined as an array of bytes?
+     * It works!!!! ./add08 1 2 prints 3; ./add08 10 -21 prints -11
+     * Code and data both have memory representations
+          + Once the program starts running, the meaning assigned at the source code level is
+            irrelevant-what matters is the byte values
+     * (The __attribute__((section (".text"))) tells the compiler that these bytes might be executable.
+       For security reasons, the bytes would not be executable otherwise-trying to call the "function"
+       would crash. This is an area where compilers and operating systems are getting stricter over
+       time. In previous years, simply saying const unsigned char add[] = {...} was enough.)
+
+Spelunking for add
+
+[datarep7/addf09.cc]
+int add(int a, int b) {
+	// Open a file
+	const char* file = "cs61hello.jpg";
+	int fd = open(file, O_RDONLY);
+	assert(fd >= 0);
+
+	// Look up its size
+	struct stat s;
+	int r = fstat(fd, &s);
+	assert(r >= 0 && S_ISREG(s.st_mode) && s.st_size > 0);
+
+	// Load it into memory starting at address `data`
+	void* data = mmap(nullptr, s.st_size, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+	assert(data != MAP_FAILED);
+
+	// Obtain address of add function in loaded file
+	uintptr_t function_address = (uintptr_t) data + 0x9efc;
+	int (*function_pointer)(int, int) = (int (*)(int, int)) function_address;
+
+	// Call add function
+	return function_pointer(a, b);
+}
+
+     * This function opens a file (our Hello Kitty)
+     * Loads that file into memory (man mmap, or wait for Unit 4)
+     * Chooses an offset into the file data (0x9efc bytes into the file data)
+     * And pretends the data at that offset contains an add function and calls it!??!
+
+It works!
+
+   Hello
+cs61-user@5ae5a48533a8:~/cs61-lectures/datarep7$ ./add09 1 2
+1 + 2 = 3
+cs61-user@5ae5a48533a8:~/cs61-lectures/datarep7$ ./add09 -1 -201
+-1 + -201 = -202
+
+Why does it work?
+     * Look at the contents of cs61hello.jpg, starting 0x9efc bytes in
+
+cs61-user@5ae5a48533a8:~/cs61-lectures/datarep7$ hexdump -C cs61hello.jpg
+00000000  ff d8 ff e0 00 10 4a 46  49 46 00 01 02 01 00 48    |......JFIF.....H|
+00000010  00 48 00 00 ff ed 00 2c  50 68 6f 74 6f 73 68 6f    |.H.....,Photosho|
+00000020  70 20 33 2e 30 00 38 42  49 4d 03 ed 00 00 00 00    |p 3.0.8BIM......|
+00000030  00 10 00 48 00 00 00 01  00 01 00 48 00 00 00 01    |...H.......H....|
+00000040  00 01 ff e1 79 f2 68 74  41 55 41 54 45 31 c0 55    |....y.htAUATE1.U|
+00000050  53 41 ba 01 00 00 00 bb  30 00 00 00 bd 23 00 00    |SA......0....#..|
+00000060  00 45 31 ed 64 48 8b 04  25 28 00 00 00 48 89 44    |.E1.dH..%(...H.D|
+    ... blah blah blah ...
+cs61-user@5ae5a48533a8:~/cs61-lectures/datarep7$ hexdump -C cs61hello.jpg | grep 9ef
+00009ef0  ad 7f c2 6f 87 1d 69 88  a7 a8 ae ac 8d 04 37 c3    |...o..i.......7.|
+
+     * 8d 04 37 c3!!!!
+
+Dynamic linking and loading
+     * Loading data into memory and treating that data as instructions is useful and common
+          + Dynamic linking, dynamic loading
+          + Used to implement plugins, etc.
+     * But be careful what you execute
+          + Try executing Hello Kitty starting at byte 72
+
+
+---
+
