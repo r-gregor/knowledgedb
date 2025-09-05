@@ -1,0 +1,121 @@
+filename: jv-bazel-knowledge-testing-for-clean-jvm-shutdown-20250905.txt
+https://fzakaria.com/2025/09/02/bazel-knowledge-testing-for-clean-jvm-shutdown
+
+Bazel Knowledge: Testing for clean JVM shutdown
+2025-09-02
+
+   Ever run into the issue where you exit your main method in Java but the application is still running?
+
+   That can happen if you have non-daemon threads still running.
+
+   The JVM specification specifically states the condition under which the JVM may exit:
+
+     A program terminates all its activity and exits when one of two things happens:
+     * All the threads that are not daemon threads terminate.
+     * Some thread invokes the exit() method of class Runtime or class System, and the exit operation is
+       not forbidden by the security manager.
+
+   What are daemon-threads?
+   They are effectively background threads that you might spin up for tasks such as garbage collection,
+   where you explicitly don't want them to inhibit the JVM from shutting down.
+
+   A common problem however is that if you have code-paths on exit that fail to stop all non-daemon
+   threads, the JVM process will fail to exit which can cause problems if you are relying on this
+   functionality for graceful restarts or shutdown.
+
+   Let's observe a simple example.
+
+public class Main {
+	public static void main(String[] args) {
+		Thread thread = new Thread(() -> {
+			try {
+				while (true) {
+					// Simulate some work with sleep
+					System.out.println("Thread is running...");
+					Thread.sleep(1000);
+				}
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+		// This is redundant, as threads inherit the daemon
+		// status from their parent.
+		thread.setDaemon(false);
+		thread.start();
+		System.out.println("Leaving main thread");
+	}
+}
+
+   If we run this, although we exit the main thread, we observe that the JVM does not exit and the
+   thread continues to do its "work".
+
+$> java Main
+Leaving main thread
+Thread is running...
+Thread is running...
+Thread is running...
+
+   Often you will see classes implement Closeable or AutoCloseable so that an orderly shutdown of these
+   sort of resources can occur. It would be great however to test that such graceful cleanup is done
+   appropriately for our codebases.
+
+   Is this possible in Bazel?
+
+@Test
+public void testNonDaemonThread() {
+	Thread thread = new Thread(() -> {
+		try {
+			while (true) {
+				// Simulate some work with sleep
+				System.out.println("Thread is running...");
+				Thread.sleep(1000);
+			}
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+	});
+	thread.setDaemon(false);
+	thread.start();
+}
+
+   If we run this test however we notice the test PASSES
+
+$> bazel test //:NonDaemonThreadTest -t-
+INFO: Invocation ID: f0b0c42f-2113-4050-ab7e-53c67dfa7904
+INFO: Analyzed target //:NonDaemonThreadTest (0 packages loaded, 4 targets configured).
+INFO: Found 1 test target...
+Target //:NonDaemonThreadTest up-to-date:
+  bazel-bin/NonDaemonThreadTest
+  bazel-bin/NonDaemonThreadTest.jar
+INFO: Elapsed time: 0.915s, Critical Path: 0.40s
+INFO: 2 processes: 6 action cache hit, 1 internal, 1 darwin-sandbox.
+INFO: Build completed successfully, 2 total actions
+//:NonDaemonThreadTest PASSED in 0.4s
+
+   Why?
+   Turns out that Bazel's JUnit test runner uses System.exit after running the tests, which according to
+   the JVM specification allows the runtime to shutdown irrespective of active non-daemon threads.
+
+     * Some thread invokes the exit() method of class Runtime or class System, and the exit operation is
+       not forbidden by the security manager.
+
+   From discussion with others in the community, this explicit shutdown was added specifically because
+   many tests would hang due to improper non-daemon thread cleanup.
+
+   How can we validate graceful shutdown then?
+   Well, we can leverage sh_test and startup our java_binary and validate that the application exits
+   within a specific timeout.
+
+   Additionally, I've put forward a pull-request PR#26879 which adds a new system property
+   bazel.test_runner.await_non_daemon_threads that can be added to a java_test such that the test runner
+   validates that there are no non-daemon threads running before exiting.
+
+     It would have been great to remove the System.exit call completely when the presence of the
+     property is true; however I could not find a way to then set the exit value of the test.
+
+   Turns out that even simple things can be a little complicated and it was a bit of a headscratcher to
+   see why our tests were passing despite our failure to properly tear down resources.
+
+
+---
+
