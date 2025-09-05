@@ -1,0 +1,290 @@
+filename: beware-of-sorting-locales-20250905.txt
+https://www.adrianstoll.com/post/beware-of-sorting-locales/
+
+Sorting Source Code
+
+   Config files and source code contain lists of items. For example config file can contain lists of
+   regions where a service is deployed. It is easier to read sorted lists. People tend to disregard the
+   order and tack new elements to the end as the lists grow over time. There are linters to remind
+   editors to keep the lists sorted. The way it works is there are comments with a special syntax before
+   and after the range of lines that should stay sorted. Whenever a commit changes the file, the linter
+   checks the lines are still sorted. An example might look like this:
+
+regions = [
+# LINT keep sorted start
+'eu-east-1;
+'eu-south-1;
+'eu-west-1',
+...
+'us-east-1',
+'us-west-1',
+# LINT keep sorted end
+]
+
+   I wrote some code with a list of items and passed it through sort(1) to sort it. Then I uploaded
+   change to the code review tool and was surprised to see a linter warning complaining the lines were
+   unsorted. The problem was sort(1) and the linter use different sorting criteria. The linter was
+   comparing the numerical values of each ASCII character (e.g. B -> 43 is before a -> 61) while sort(1)
+   was performing an English language alphabetical sort.
+
+$> python -c "print('a\nb\nc\nA\nB\nC')" | sort
+a
+A
+b
+B
+c
+C
+
+$> python -c "print(sorted(['a', 'b', 'c', 'A', 'B', 'C']))"
+['A', 'B', 'C', 'a', 'b', 'c']
+
+   sort(1) says
+
+  *** WARNING *** The locale specified by the environment affects
+  sort order.  Set LC_ALL=C to get the traditional sort order that
+  uses native byte values.
+
+$> python -c "print('a\nb\nc\nA\nB\nC')" | env LANG="C" sort
+A
+B
+C
+a
+b
+c
+
+$> python -c "print(sorted(['a', 'b', 'c', 'A', 'B', 'C']))"
+['A', 'B', 'C', 'a', 'b', 'c']
+
+   After seeing this behavior I decided to dig into the details of how sort(1) decides the output order
+   and present the results here.
+
+sort(1)
+   sort(1) is part of GNU coreutils and the source code is available here. The order of the output is
+   determined by the compare function whose code is presented below in entirety.
+
+static int compare (struct line const *a, struct line const *b) {
+	int diff;
+	size_t alen, blen;
+
+	/* First try to compare on the specified keys (if any).
+	 The only two cases with no key at all are unadorned sort,
+	 and unadorned sort -r. */
+	if (keylist) {
+		diff = keycompare (a, b);
+		if (diff || unique || stable)
+			return diff;
+	}
+
+	/* If the keys all compare equal (or no keys were specified)
+	 fall through to the default comparison.	*/
+	alen = a->length - 1, blen = b->length - 1;
+
+	if (alen == 0)
+		diff = - NONZERO (blen);
+	else if (blen == 0)
+		diff = 1;
+	else if (hard_LC_COLLATE) {
+		/* xmemcoll0 is a performance enhancement as
+		 it will not unconditionally write '\0' after the
+		 passed in buffers, which was seen to give around
+		 a 3% increase in performance for short lines.	*/
+		diff = xmemcoll0 (a->text, alen + 1, b->text, blen + 1);
+	} else {
+		diff = memcmp (a->text, b->text, MIN (alen, blen));
+		if (!diff)
+			diff = (alen > blen) - (alen < blen);
+	}
+
+	return diff_reversed (diff, reverse);
+}
+
+   The function takes two lines of text to compare and returns a positive or negative value depending on
+   whether a or b should go first and 0 in the case of a tie. The first if statement is for an option
+   where the text is sorted by the value of a column rather than by the entire string. It is not
+   relevant to the rest of the discussions. The second if and the first else-if check for the special
+   case of empty strings before the common case of non-empty strings.
+
+   A common programming pattern is writing a "fast" and "slow" path in a function. The idea is some
+   inputs are common and easy to process. These is special case code to cheaply process these inputs.
+   Not all inputs are easy to process. There is a slow path with more complicated logic to process all
+   the inputs the fast path cannot. We see this pattern in the above code. If hard_LC_COLLATE is false
+   the function does a fast byte-by-byte comparison of the strings using memcmp(3). This path will
+   produce the same comparison results as Python's default string comparison. What about the slow path?
+   What is hard_LC_COLLATE?
+
+Locales
+   A locale is a set of rules for determining how software should adapt to a specific culture. In Linux
+   the local is represented as a set of locale categories and configured by environment variables.
+   Text processing libraries read the environment variables and adapt their behavior to the user's
+   preferred language and culture. For example in Arabic text is written right to left while in English
+   it is written left to right. In Italy the comma separates digits representing the whole vs fractional
+   components of a number while in the United States "." is the separator.
+
+   The LC_COLLATE locale category controls sorting and regular expressions. The name comes from the word
+   collate meaning to collect and arrange in proper order. This locale category controls the behavior of
+   the strcoll(3) function for comparing two strings using the current locale. On a Linux machine
+   run locale(1) to see the configured locale. Note the output is determined by the LANG environment
+   variable.
+
+$> echo $LANG
+en_US.UTF-8
+
+$> locale | grep LC_COLLATE
+LC_COLLATE="en_US.UTF-8"
+
+$> env LANG=zh_CN.utf8 locale | grep LC_COLLATE
+LC_COLLATE="zh_CN.utf8"
+
+$> env LANG=C locale | grep LC_COLLATE
+LC_COLLATE="C"
+
+Hard Locales
+   Now we can go back to the source code of sort and see how the locale determines the sort order. The
+   value of hard_LC_COLLATE is set as follows:
+
+hard_LC_COLLATE = hard_locale (LC_COLLATE);
+
+   hard_locale is a function from Gnulib for determining whether the current locale has more complex
+   ordering constraints than byte-by-byte ordering. Below is the complete source code. The function
+   queries the currently configured locale by calling setlocale_null_r which calls the system's
+   setlocale(3). If the locale category is not set, or is set to "C" or "POSIX" then the library
+   defaults to easy comparison operations.
+
+bool hard_locale (int category) {
+	char locale[SETLOCALE_NULL_MAX];
+
+	if (setlocale_null_r (category, locale, sizeof (locale)))
+		return false;
+
+	if (!(strcmp (locale, "C") == 0 || strcmp (locale, "POSIX") == 0))
+		return true;
+
+#if defined __ANDROID__
+	/* On Android 5.0 or newer, it is possible to set a locale that has the same
+	 name as the "C" locale but in fact uses UTF-8 encoding.	Cf. test case 2 in
+	 <https://lists.gnu.org/archive/html/bug-gnulib/2023-01/msg00141.html>.	*/
+	if (MB_CUR_MAX > 1)
+		return true;
+#endif
+
+	return false;
+}
+
+   The branch of compare for hard locales calls xmemcoll0 which calls memcoll0 which runs a
+   loop calling strcoll(3). The memcoll0 function also uses the "fast" and "slow" path pattern.
+   It performs a byte-by-byte equality check before running the more expensive comparison if the inputs
+   are unequal.
+
+int memcoll0 (char const *s1, size_t s1size, char const *s2, size_t s2size) {
+	if (s1size == s2size && memcmp (s1, s2, s1size) == 0) {
+		errno = 0;
+		return 0;
+	} else {
+		return strcoll_loop (s1, s1size, s2, s2size);
+	}
+}
+
+Locales in glibc
+   What is left is to determine how setlocale(3) and strcoll(3) work. Below are the key glibc
+   datastructures and functions they depend on.
+
+Data
+   __locale_data is the in-memory datastructure representing the rules for a locale.
+
+/* Structure describing locale data in core for a category.  */
+struct __locale_data {
+	const char *name;
+	const char *filedata;    /* Region mapping the file data. */
+	off_t filesize;          /* Size of the file (and the region). */
+	enum {                   /* Flavor of storage used for those. */
+		ld_malloced,         /* Both are malloc'd. */
+		ld_mapped,           /* name is malloc'd, filedata mmap'd */
+		ld_archive           /* Both point into mmap'd archive regions. */
+	} alloc;
+	...
+
+	_nl_global_locale is the global locale that all new threads use by default.
+	/* This is the internal locale_t object that holds the global locale
+	   controlled by calls to setlocale.  A thread's TSD locale pointer
+	   points to this when `uselocale (LC_GLOBAL_LOCALE)' is in effect.  */
+	extern struct __locale_struct _nl_global_locale attribute_hidden;
+
+Functions
+   newlocale creates and initializes the datastructures for a new locale. Locale data is stored in
+   directories specified by the LOCPATH environment variable.
+
+extern locale_t newlocale (int __category_mask, const char *__locale,
+               locale_t __base) __THROW;
+
+   setlocale returns the name of the current global locale.
+
+char *setlocale (int category, const char *locale) {
+	char *locale_path;
+	size_t locale_path_len;
+	const char *locpath_var;
+	char *composite;
+
+/* Sanity check for CATEGORY argument. */
+if (__builtin_expect (category, 0) < 0 || __builtin_expect (category, 0) >= __LC_LAST)
+	ERROR_RETURN;
+
+/* Does user want name of current locale?  */
+if (locale == NULL)
+	return (char *) _nl_global_locale.__names[category];
+
+   uselocale sets the current thread's locale dataset by setting a thread local variable.
+	/* Switch the current thread's locale to DATASET.
+	   If DATASET is null, instead just return the current setting.
+	   The special value LC_GLOBAL_LOCALE is the initial setting
+	   for all threads, and means the thread uses the global
+	   setting controlled by `setlocale'.  */
+	locale_t __uselocale (locale_t newloc) {
+		locale_t oldloc = _NL_CURRENT_LOCALE;
+
+		if (newloc != NULL) {
+			const locale_t locobj
+				= newloc == LC_GLOBAL_LOCALE ? &_nl_global_locale : newloc;
+			__libc_tsd_set (locale_t, LOCALE, locobj);
+
+   Whenever glibc creates a new thread, it initializes thread to use the global locale by calling
+   uselocale.
+
+/* The entry-point for new threads.  */
+static void entry_point (struct __pthread *self, void *(*start_routine) (void *), void *arg) {
+	int err;
+
+	___pthread_self = self;
+	__resp = &self->res_state;
+
+#if IS_IN (libpthread)
+	/* Initialize pointers to locale data.  */
+	__ctype_init ();
+#endif
+#ifdef HAVE_USELOCALE
+	/* A fresh thread needs to be bound to the global locale.  */
+	uselocale (LC_GLOBAL_LOCALE);
+#endif
+
+strcoll(3)
+   strcoll looks up the dataset decribing the current locale and applies a the locale's rules to
+   compare the two strings. The unicode collation algorithm decribes the algorithm for applying the
+   collation rules.
+
+int STRCOLL (const STRING_TYPE *s1, const STRING_TYPE *s2) {
+	return STRCOLL_L (s1, s2, _NL_CURRENT_LOCALE);
+}
+
+   __libc_tsd_get reads the current value of the locale from thread local storage and is the complement
+   of __libc_tsd_set called by uselocale.
+
+/* This fetches the thread-local locale_t pointer, either one set with
+   uselocale or &_nl_global_locale.  */
+#define _NL_CURRENT_LOCALE  (__libc_tsd_get (locale_t, LOCALE))
+
+Conclusion
+   The conclusion of this article is "simple" tasks like sorting a config file have a subtlety and
+   taking a peek leads down a rabbit-hole of complexity.
+
+
+---
+
