@@ -1,0 +1,189 @@
+filename: bash-db-queries-project-pi-stats-20250916.txt
+https://connortumbleson.com/2025/09/15/project-pi-stats/
+
+Project: Pi Stats
+2025-09-15
+
+   Way back in 2018 I installed a Pi-hole to take control of my network in terms of the increasing
+   amount of ads, trackers and more on every single service. This works by leveraging known lists of
+   domains used for analytics, advertisements or malware and redirects them to nowhere (or basically
+   blocks them).
+
+   I wanted long-term stats from the beginning, but I noticed pretty quickly in the early stages of this
+   software that my database of historical records growing affected the system more than the benefit of
+   keeping those analytics so I had to get creative with a solution - thus this project was built.
+
+   For those unaware Pi-hole leverages SQLite3 for both query and domain storage which means if I wanted
+   to pull out historical records of DNS requests I'd need to query the database. Pi-hole did an
+   excellent job of documenting all enums and structure of this database so even without AI being
+   mainstream I could quickly write a query to get what I wanted.
+
+   So way back in 2018/2019 I had a simple query to obtain a subset (top 15) of domains.
+SELECT DOMAIN, count(DOMAIN)
+FROM queries
+WHERE (STATUS == 2 OR STATUS == 3)
+GROUP BY DOMAIN
+ORDER BY count(DOMAIN) DESC
+LIMIT 15
+
+   However, I just wanted to port all this data to a different database and store all queries instead of
+   live querying the real database. This was because I learned I was losing data over a year old so I
+   got to work on a little script to solve my problem. This bash script would:
+     * Find how many logged queries are in the database.
+     * Find the highest and lowest ID in the queries table.
+     * Obtain all the clients (devices).
+     * Find the last ID that was uploaded (or start fresh) at lowest.
+     * Grab 1,000 queries starting from the known ID and combine them with clients into JSON payload.
+     * Upload to server - record last ID if it was successful.
+
+   This led to some pretty ugly, but working code.
+function getClientsJson {
+	echo $(sqlite3 "/etc/pihole/pihole-FTL.db" "SELECT json_object('mac', hwaddr, 'first_seen', firstSeen, \
+	'last_seen', lastQuery, 'name', macVendor) from network" | jq -s .)
+}
+
+function getQueries {
+	echo $(sqlite3 "/etc/pihole/pihole-FTL.db" "SELECT json_object('id', queries.id, 'timestamp', \
+	queries.timestamp, 'type', queries.type, 'status', queries.status, 'domain', queries.domain, 'mac', \
+	network.hwaddr) FROM queries JOIN network_addresses ON queries.client = network_addresses.ip JOIN \
+	network ON network_addresses.network_id = network.id WHERE queries.id > $1 AND queries.domain != '' \
+	ORDER BY queries.id asc LIMIT 50" | jq -s .)
+}
+
+   Now I had a valid JSON blob to collect and parse on a far more powerful server. I could take a
+   snippet of the produced JSON and it would look like this.
+{
+	"version": 1,
+	"min": 105005214,
+	"max": 106527114,
+	"last_id": 105005754,
+	"queries": [
+		{
+			"id": 105005215,
+			"timestamp": 1755254401.45808,
+			"type": 1,
+			"status": 2,
+			"domain": "www.duckdns.org",
+			"mac": "b8:27:eb:19:30:c4"
+		}
+	],
+	"clients": [
+		{
+			"mac": "94:65:2d:c5:eb:aa",
+			"first_seen": 1558578874,
+			"last_seen": 1673223134,
+			"name": "OnePlus Technology (Shenzhen) Co., Ltd"
+		}
+	]
+}
+
+   This has been running for about 7 years now and working great, but has had some issues along the way.
+   In no specific order this has broken for:
+     * Timestamps gaining the microseconds portion, thus breaking parser.
+     * Clients having no name.
+     * Client count increasing to over 1,000.
+     * New enums (type or status) being added.
+     * Clients having no date seen.
+
+   Generally what then happens is my monthly report that runs reports has the most recent query as a
+   month ago. I have to determine if that is just a backlog of queries being processed or an actual
+   ingestion bug. Those normally take some time with my schedule to dig into so while this may have been
+   running for 7 years I probably have some gaps in the data.
+
+   Major Pi-hole upgrades have also damaged this process with either changing permissions on the
+   database or changing the default length of storing queries. All to basically summarize with saying -
+   this is not every single query my network has executed for 7 years, but instead I have 73~ million
+   out of a known 100~ million requests.
+
+   So now I've gotten into a pattern of blogging yearly about the state of blocked/allowed domains on my
+   network. I basically fire up an SSH connection and run "php artisan stats:dump" and go about my day.
+   I haven't spent much time considering a faster implementation because I only run this command once a
+   year. Once done it spits out everything I need for a blog.
+
+$> php artisan stats:dump
+
+Top 15 Allowed Domains
++--------------------------------------------+-----------+
+| Domain                                     | Count     |
++--------------------------------------------+-----------+
+| e7bf16b0-65ae-2f4e-0a6a-bcbe7b543c73.local | 5,631,937 |
+| 68c40e5d-4310-def5-a1c3-20640e1cd583.local | 5,305,150 |
+| 1d95ffae-4388-9fbc-1646-b2b637cecb64.local | 4,898,205 |
+| localhost                                  | 4,461,024 |
+| 1.1.1.1.in-addr.arpa                       | 2,019,619 |
+| www.gstatic.com                            | 1,443,418 |
+| ping2.ui.com                               | 1,422,805 |
+| ping.ui.com                                | 1,389,558 |
+| 806c4c48-1715-4220-054f-909f83563938.local | 1,342,386 |
+| 8.8.8.8.in-addr.arpa                       | 1,186,953 |
+| api-0.core.keybaseapi.com                  | 1,184,543 |
+| b.canaryis.com                             | 1,125,173 |
+| 168.192.in-addr.arpa                       | 1,057,459 |
+| pistats.ibotpeaches.com                    | 1,050,674 |
+| pool.ntp.org                               | 762,668   |
++--------------------------------------------+-----------+
+
+Top 15 Blocked Domains
++--------------------------------------------+---------+
+| Domain                                     | Count   |
++--------------------------------------------+---------+
+| 806c4c48-1715-4220-054f-909f83563938.local | 803,900 |
+| e7bf16b0-65ae-2f4e-0a6a-bcbe7b543c73.local | 638,460 |
+| ssl.google-analytics.com                   | 508,524 |
+| 1d95ffae-4388-9fbc-1646-b2b637cecb64.local | 432,008 |
+| app-measurement.com                        | 391,038 |
+| 68c40e5d-4310-def5-a1c3-20640e1cd583.local | 247,892 |
+| watson.telemetry.microsoft.com             | 217,743 |
+| logs.netflix.com                           | 187,798 |
+| googleads.g.doubleclick.net                | 158,314 |
+| androidtvchannels-pa.googleapis.com        | 153,954 |
+| mobile.pipe.aria.microsoft.com             | 124,971 |
+| flask.us.nextdoor.com                      | 113,808 |
+| beacons.gcp.gvt2.com                       | 101,266 |
+| sb.scorecardresearch.com                   | 99,971  |
+| beacons.gvt2.com                           | 97,701  |
++--------------------------------------------+---------+
+
+Total Queries: 72,899,802
+First Query: 2019-06-17 01:55:35
+Last Query: 2025-08-15 11:04:08
+Time in days: 2251
+Time taken: 55 minute(s).
+
+   From that output I can dive into analytics about blocked/accept domains and build out my yearly post.
+   I started thinking that combining everything doesn't really lend itself to discovering new threats
+   unless they are so heavy they outpace 7~ years of analytics. So I started building in a feature to
+   take the results at a yearly basis since the introduction of the feature.
+
+   This led to a yearly snippet being posted in addition to the summary.
+
+Year: 2020
+Top 5 Allowed Domains
++--------------------------------------------+-----------+
+| Domain                                     | Count     |
++--------------------------------------------+-----------+
+| e7bf16b0-65ae-2f4e-0a6a-bcbe7b543c73.local | 1,955,478 |
+| localhost                                  | 1,097,654 |
+| 1d95ffae-4388-9fbc-1646-b2b637cecb64.local | 425,029   |
+| b.canaryis.com                             | 336,553   |
+| ssl.gstatic.com                            | 107,738   |
++--------------------------------------------+-----------+
+
+Top 5 Blocked Domains
++--------------------------------------------+---------+
+| Domain                                     | Count   |
++--------------------------------------------+---------+
+| 806c4c48-1715-4220-054f-909f83563938.local | 395,395 |
+| e7bf16b0-65ae-2f4e-0a6a-bcbe7b543c73.local | 365,206 |
+| 1d95ffae-4388-9fbc-1646-b2b637cecb64.local | 197,003 |
+| ssl.google-analytics.com                   | 167,389 |
+| watson.telemetry.microsoft.com             | 82,205  |
++--------------------------------------------+---------+
+
+   The year 8 blog about running this setup will be up in February in which I'll go into the details of
+   what this new type of logging has added to my toolkit. Until then I'll figure out if I can clean up
+   this repository to open source it.
+
+
+---
+
