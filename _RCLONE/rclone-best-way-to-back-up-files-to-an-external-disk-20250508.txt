@@ -1,0 +1,585 @@
+filename: rclone-best-way-to-back-up-files-to-an-external-disk-20250508.txt
+https://forums.unraid.net/topic/59807-solved-best-way-to-back-up-files-to-an-external-disk/
+
+(SOLVED) Best way to back up files to an external disk?
+eptember 1, 2017
+
+I have several directories that I would like to automatically back up when I plug in my external hard
+drive. I would prefer for these files to be encrypted since I plan on keeping this external hard drive
+outside of my house. I know that I can use unassigned devices to create a script that is run whenever
+my hard drive is connected, but I would really like these files to be encrypted so if it's stolen/lost,
+I don't have to worry about who finds it. Does anyone have a script that does something like this? If so,
+would you mind sharing it? Thank you in advance.
+
+***
+As SpaceInvader One shows in his video, install rclone from the community applications store. SSH into
+your unRAID box and run "rclone config" and fill out the questions as follows:
+
+e/n/d/r/c/s/q> n (n for New remote)
+name> local (or whatever you want the local remote to be called)
+Storage> 10 (10 for Local Disk)
+nounc> 1 (1 for disable long file names, I want it to be accessible from Windows)
+y/e/d> y (y for yes this is OK)
+
+e/n/d/r/c/s/q> n (n for New remote)
+name> enc-extHDD (encypted external HDD or whatever you want the encrypted folder to be referenced as)
+Storage> 5 (5 for Encrypt/Decrypt a remote)
+remote> local:mnt/disks/unRAID_Backup/enc-extHDD (ensure you set the name before the : (local here) to
+the name of the previous remote, set everything after the : to the full path, excluding the first slash,
+of your external hdd mountpoint and the folder inside of it that you want to be your encrypted directory)
+filename_encryption> 2 (2 for Encrypt the filenames)
+y/g> y (y to create password for encryption)
+Password: ******** (Type your password)
+Password: ******** (Confirm your password)
+y/g/n> y (highly recommended to set a password for salt)
+Password: ******** (Type different password)
+Password: ******** (Confirm different password)
+y/e/d> y (y for Test this is OK)
+
+If you watched SpaceInvader One's video, all of this seems pretty familiar up until now. This is where
+things start getting pretty different. In his videos, he has you go to Settings -> rclone -> Mount/Unmount
+Script and set up scripts to automatically mount and unmount our drives. This works well for network drives
+because they should be able to be reached all the time that things are functioning normally, however,
+what happens when we don't have our external connected and we start our server? Rclone will not be able to
+mount the disconnected drive and it will move on with its life. We plug it in, it continues to be unmounted.
+
+To fix this, we need to use the Script function of Unassigned Devices. If you locate your drive in Main
+-> Unassigned Devices, you will notice that all the way to the right there is a Script column with a </>
+button under it. Click this. Here you can make your server perform actions when your external drive is
+mounted ($ACTION = 'ADD') or unmounted ($ACTION = 'REMOVE')
+
+It took a little bit of playing to get it to work exactly like I wanted, but this is basically the script
+I ended up with:
+
+	I had some issues with this script (it stopped working for some reason) and have since rewritten it with
+	rclone instead of rsync. Seems to be working pretty well this time around. The new script can be found in
+	the following post:
+
+<code>
+#!/bin/bash
+PATH=/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin
+
+#############
+# Variables #
+#############
+srcDir="/mnt/user"
+destDir="/mnt/disks/enc-extHDD"
+rcloneRemote="enc-extHDD:"
+backupDirs=("/documents/My Important Information/"
+			"/documents/IncomeTaxes/"
+			"/media/Pictures/dogs, cats, and birds/")
+
+# backupDirs elements should be surrounded in quotes. Special characters should be fine. Do not include the \ to escape them.
+
+##########
+# Script #
+##########
+
+case $ACTION in
+	'ADD' )
+		# Actions to perform upon mounting
+
+		# Insert break in Logfile
+		echo "" >> $LOGFILE
+		echo "-----------------------------------------------------------------------------------------------" >> $LOGFILE
+		echo "" >> $LOGFILE
+
+		# RClone Mount Directory
+		echo "Mounted at: " $(date '+%H:%M:%S (%Y%m%d)') >> $LOGFILE
+		mkdir -p $destDir
+		rclone mount --max-read-ahead 1024k --allow-other --allow-non-empty $rcloneRemote $destDir &
+
+		# Sleep to resolve issues in not mounting properly. Sync files by looping through $backupDirs Array.
+		echo "Started Sync at: " $(date '+%H:%M:%S (%Y%m%d)') >> $LOGFILE
+		sleep 5
+
+		for ((i=0; i < ${#backupDirs[@]};i++)); do
+			#echo "rsync -a $srcDir${backupDirs[$i]} $destDir${backupDirs[$i]}" >> $LOGFILE
+			rsync -a "$srcDir${backupDirs[$i]}" "$destDir${backupDirs[$i]}"
+		done
+
+		echo "Ended Sync at: " $(date '+%H:%M:%S (%Y%m%d)') >> $LOGFILE
+		/usr/local/emhttp/webGui/scripts/notify -e "Unassigned Devices" -s "External Backup Completed" -d "Your files have been sucessfully backed up to your external drive. You may now unmount it." -i "normal"
+	;;
+
+	'REMOVE' )
+		# Actions to perform upon umounting
+
+		# RClone Unmount Directory
+		fusermount -u $destDir
+		echo "Unmounted at: " $(date '+%H:%M:%S (%Y%m%d)') >> $LOGFILE
+	;;
+esac
+
+## Available variables:
+# AVAIL      : available space
+# USED       : used space
+# SIZE       : partition size
+# SERIAL     : disk serial number
+# ACTION     : if mounting, ADD; if unmounting, REMOVE
+# MOUNTPOINT : where the partition is mounted
+# FSTYPE     : partition filesystem
+# LABEL      : partition label
+# DEVICE     : partition device, e.g /dev/sda1
+# OWNER      : "udev" if executed by UDEV, otherwise "user"
+# PROG_NAME  : program name of this script
+# LOGFILE    : log file for this script
+</code>
+
+One of the trickier things to note is how to use rsync. I ran into issues a few times where it would create
+enc-extHDD/documents/documents/ instead of enc-extHDD/documents. To fix this, ensure that the source
+ends in a slash and the destination matches the source. It doesn't appear to matter if the destination
+ends in a slash or not. I also had a couple issues when the rsync ran immediately, so to remedy that,
+I just added the sleep 5 line.
+
+Hope this helps some other people out there! :)
+
+EDIT: Updated my script. Just did some general cleaning up and put all the directories I wish to back
+up into an array to loop through instead of specifying them one by one their own rsync commands.
+SpaceInvaderOne
+
+***
+Just to ask, why did you use the rsync command, instead of the rclone sync command?
+
+It seemed like rclone was more for the Cloud storage and I have been using rsync for a while. I can't
+think of any serious reason why I chose rsync over rclone.
+
+***
+[5p]
+@sjohnson, for some reason my old script stopped backing things up when I would plug in my hard drive,
+so I've been working on the script. This time I'm using rclone and it seems a lot better. The new script
+is as follows:
+
+
+<code>
+#!/bin/bash
+PATH=/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin
+
+#############
+# Variables #
+#############
+srcDir="/mnt/user"
+destDir="/mnt/disks/enc-extHDD"
+rcloneRemote="enc-extHDD:"
+maxSize="5G"
+deleteLogFiles="true"
+backupDirs=("/documents/My Important Information/"
+						"/documents/IncomeTaxes/"
+						"/media/Pictures/dogs, cats, and birds/")
+exclude=("VirtualBox VMs/"
+		 "Random Cats from Town/Terry/"
+		 "*.cache")
+
+##########
+# Script #
+##########
+
+case $ACTION in
+	'ADD' )
+		# Actions to perform upon mounting
+
+		# Insert break in Logfile
+		/usr/bin/echo -e "\\n-----------------------------------------------------------------------------------------------\\n" >> "$LOGFILE"
+
+		excludeFile="/tmp/$(date '+%Y%m%d_%H%M%S')_rclone-excludes.log"
+
+		for ((i=0; i < ${#exclude[@]}; i++)); do
+			/usr/bin/echo "${exclude[i]}" >> "$excludeFile"
+		done
+
+		if [ -f /usr/sbin/rclone ] && [[ $(pgrep -cf "rclone.*sync.*$rcloneRemote") -eq 0 ]]; then
+			finalTotalCount=0
+			finalUpdatedCount=0
+
+			# Sync files by looping through $backupDirs Array.
+			/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Started Sync" >> "$LOGFILE"
+
+			for ((i=0; i < ${#backupDirs[@]};i++)); do
+				if [ -d "$srcDir${backupDirs[$i]}" ]; then
+					/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Backing up ${backupDirs[$i]}" >> "$LOGFILE"
+					currTrackerFile="/tmp/$(date '+%Y%m%d_%H%M%S')_rclone.log"
+					/usr/sbin/rclone sync -vc --log-file "$currTrackerFile" --exclude-from "$excludeFile" --max-size $maxSize "$srcDir${backupDirs[$i]}" "$rcloneRemote${backupDirs[$i]}"
+
+					newCount=$(more "$currTrackerFile" | grep -ci "copied (new)")
+					replaceCount=$(tail -7 "$currTrackerFile" | grep -ci "replaced existing")
+					noChangeCount=$(( $(tail -7 "$currTrackerFile" | grep -i "Checks:" | tr -s " " | cut -d" " -f2) - replaceCount ))
+					updatedCount=$(( newCount + replaceCount ))
+					totalCount=$(( updatedCount + noChangeCount ))
+					finalTotalCount=$(( finalTotalCount + totalCount ))
+					finalUpdatedCount=$(( finalUpdatedCount + updatedCount ))
+
+					/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): $updatedCount/$totalCount files updated." >> "$LOGFILE"
+					/usr/bin/sleep 1
+				else
+					/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): $srcDir${backupDirs[$i]} does not exist!" >> "$LOGFILE"
+				fi
+			done
+
+			/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Sync Ended" >> "$LOGFILE"
+			/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Totals: $finalUpdatedCount/$finalTotalCount files updated." >> "$LOGFILE"
+			/usr/local/emhttp/webGui/scripts/notify -e "Unassigned Devices" -s "External Backup Completed" -d "Your files have been sucessfully backed up to your external drive.<br/>$finalUpdatedCount/$finalTotalCount files updated.<br/>You may now unmount it." -i "normal"
+
+			if [ "$(pgrep -cf "rclone.*mount.*$rcloneRemote")" -eq 0 ]; then				
+				# RClone Mount Directory
+				/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Drive Mounted " >> "$LOGFILE"
+				/usr/bin/mkdir -p $destDir
+				/usr/sbin/rclone mount --max-read-ahead 1024k --allow-other --allow-non-empty $rcloneRemote $destDir &
+			else
+				/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Drive Already Mounted" >> "$LOGFILE"
+			fi
+		else
+			if [ ! -f /usr/sbin/rclone ]; then
+					/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): /usr/sbin/rclone does not exist. Please install RClone via Community Applications." >> "$LOGFILE"
+			else
+					/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): It seems like RClone is already running. Not running a second time." >> "$LOGFILE"
+			fi
+		fi
+
+	;;
+	'REMOVE' )
+		# Actions to perform upon umounting
+
+		loopCount=0
+
+		# Kill mount script
+		while [ "$(pgrep -P 1 -cf "bash.*unassigned.devices/$PROG_NAME.sh")" -gt 0 ]; do
+			mapfile -t scriptPS < <(pgrep -P 1 -f "bash.*unassigned.devices/$PROG_NAME.*")
+			if [[ ${#scriptPS[@]} -gt 0 ]]; then
+				/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Unmounting prior to completion. Killing mount script (${scriptPS[*]})" >> "$LOGFILE"
+				/bin/kill -9 "${scriptPS[@]}"
+				/usr/bin/sleep 1
+				loopCount=$((loopCount + 1))
+				if [[ $loopCount -ge 30 ]]; then
+					break
+				fi
+			fi
+		done
+
+		loopCount=0
+
+		# Kill rclone sync processeses
+		while [ "$(pgrep -cf "rclone.*sync.*$rcloneRemote")" -gt 0 ]; do
+			mapfile -t rclonePS < <(pgrep -f "rclone.*sync.*$rcloneRemote")
+			if [[ ${#rclonePS[@]} -gt 0 ]]; then
+				/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Unmounting prior to completion. Killing rclone sync processes (${rclonePS[*]})" >> "$LOGFILE"
+				/bin/kill -9 "${rclonePS[@]}"
+			fi
+			/usr/bin/sleep 1
+			loopCount=$((loopCount + 1))
+			if [[ $loopCount -ge 30 ]]; then
+				break
+			fi
+		done
+
+		loopCount=0
+
+		# RClone Unmount Directory
+		while [ "$(pgrep -cf "rclone.*mount.*$destDir")" -gt 0 ]; do
+			/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Unmounting Drive" >> "$LOGFILE"
+			/bin/fusermount -u $destDir
+			/usr/bin/sleep 1
+			loopCount=$((loopCount + 1))
+			if [[ $loopCount -ge 30 ]]; then
+				break
+			fi
+		done
+		/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Drive Safe to Remove" >> "$LOGFILE"
+
+		if [ -d $destDir ]; then
+			/usr/bin/rm -r $destDir
+		fi
+	;;
+esac
+
+errorsVGrep="modify window is\\|waiting for checks\\|waiting for transfers\\|waiting for deletions\\|Transferred:\\|Checks:\\|Elapsed time:\\|Errors:\\s*0\\|INFO\\s*:\\s*$\\|^$\\|copied (new)\\|Copied (replaced existing)\\|Transferring\\|*.*% done\\|::::::::::\\|/tmp/.*rclone.log"
+nonErrorLogs=()
+
+mapfile -t logFiles < <(find /tmp -maxdepth 1 -type f -name "*_rclone*" | grep -v ".err\\|_rclone-excludes")
+for ((i=0; i<${#logFiles[@]}; i++)); do
+	mapfile -t errors < <(more "${logFiles[i]}" | grep -iv "$errorsVGrep")
+	#errors=""
+	#errors=$(more "${logFiles[i]}" | grep -iv "$errorsVGrep" | sed ':a;N;$!ba;s/\n/\t\n/g')
+	if [ "${#errors[@]}" -eq 0 ]; then
+		nonErrorLogs+=("${logFiles[i]}")
+	else
+		/usr/bin/echo -e "\\n##### POSSIBLE ERRORS DETECTED #####\\n${logFiles[i]}.err:\\n" >> "$LOGFILE"
+		for ((j=0; j<${#errors[@]}; j++)); do
+			/usr/bin/echo -e "\\t${errors[$j]}" >> "$LOGFILE"
+		done
+		/usr/bin/echo -e "\\n#####        END OF ERROR LIST         #####\\n" >> "$LOGFILE"
+		/usr/bin/mv "${logFiles[i]}" "${logFiles[i]}.err"
+	fi
+done
+
+#Delete non-error log files
+if [ "$deleteLogFiles" = "true" ] && [ "${#nonErrorLogs[@]}" -gt 0 ]; then
+	/usr/bin/rm "${nonErrorLogs[@]}"
+fi
+
+#Delete rclone-excludes
+mapfile -t excludesFiles < <(find /tmp -maxdepth 1 -type f -name "*_rclone-excludes.log")
+if [ "$deleteLogFiles" = "true" ] && [ "${#excludesFiles[@]}" -gt 0 ]; then
+	/usr/bin/find /tmp "$(pwd)" -type f -name "*rclone-excludes.log" -exec rm "{}" \;
+fi
+
+sleep 1
+if [ "$(find /tmp -maxdepth 1 -type f -name "*_rclone.log.err" | wc -l)" -gt 0 ]; then
+	/usr/local/emhttp/webGui/scripts/notify -e "Unassigned Devices" -s "External Backup - Errors Found" -d "Possible error(s) detected.<br/>Check /tmp for .log.err files." -i "warning"
+fi
+
+## Available variables: 
+# AVAIL       : available space
+# USED        : used space
+# SIZE        : partition size
+# SERIAL      : disk serial number
+# ACTION      : if mounting, ADD; if unmounting, REMOVE
+# MOUNTPOINT  : where the partition is mounted
+# FSTYPE      : partition filesystem
+# LABEL       : partition label (Name of mount, eg: /mnt/disks/myDrive, this returns "myDrive")
+# DEVICE      : partition device, e.g /dev/sda1
+# OWNER       : "udev" if executed by UDEV, otherwise "user"
+# PROG_NAME   : program name of this script (If script is "/boot/config/plugins/unassigned.devices/123.sh", returns "123")
+# LOGFILE     : log file for this script
+</code>
+
+EDIT: Cleaned it up and put in some error checking and other features that weren't in the script I posted last night.
+
+
+
+EDIT 2: Important note, if you're trying to delete a subdirectory of an included directory, (for
+example, '/media/Pictures/' is in the top list, but you don't want	the "Terry" folder included from
+'/media/Pictures/Random Cats from Town/Terry/', you have to specify 'Random Cats from Town/Terry' if
+you don't want any random cats, you have to specify 'Random Cats from Town' if you don't want pictures
+of Terry from February 13th and you have the files labeled like '20170213_001.png', you could specify
+something like 'Random Cats from Town/Terry/20140213_*.png" This kind of took me a second to figure out,
+so I figured it would be worth sharing. Most important thing to note is that you have to specify the
+folder hierarchy all the way back to the "root" of the current folder set.
+
+***
+I got two errors when running it:
+
+
+
+/boot/config/plugins/unassigned.devices/USB_Ext.sh: line 64: syntax error near unexpected token `<'
+/boot/config/plugins/unassigned.devices/USB_Ext.sh: line 64: ` /usr/local/emhttp/webGui/scripts/notify
+-e "Unassigned Devices" -s "External Backup Completed" -d "Your files have been sucessfully backed up
+to your external drive.
+$finalUpdatedCount/$finalTotalCount files updated.
+You may now unmount it." -i "normal"'
+/boot/config/plugins/unassigned.devices/USB_Ext.sh: line 74: syntax error near unexpected token `else'
+/boot/config/plugins/unassigned.devices/USB_Ext.sh: line 74: ` else'
+
+***
+For the first error, what happens when you take that line and you open Terminal from the WebGUI and run
+it in that terminal?
+
+/usr/local/emhttp/webGui/scripts/notify -e "Unassigned Devices" -s "External Backup Completed" -d "Your
+files have been sucessfully backed up to your external drive.<br/>$finalUpdatedCount/$finalTotalCount
+files updated.<br/>You may now unmount it." -i "normal"
+
+For the second one, it's kind of hard to see what's going on without having your copy of the code in front
+of me. I feel like there may be an erroneous line break or character or something somewhere. Can I bother
+you to copy your entire script, click the < > button at the top of a new message on this forum so I can see
+what exactly you have? You can feel free to leave off the top lines that pertain only to you if you'd like.
+muxel
+
+***
+Strangely I was not able to start the terminal in the WebGUI. I tried it via SSH and got the notification
+on the WebGUI.
+
+Here is the code: (I did not change anything except the variables)
+
+
+<code>
+#!/bin/bash
+PATH=/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin
+
+#############
+# Variables #
+#############
+srcDir="/mnt/user"
+destDir="/mnt/disks/USB_Ext"
+rcloneRemote="usb_local:"
+maxSize="5G"
+deleteLogFiles="true"
+backupDirs=("/downloads/lager/"
+			"/media/filme/"
+			"/archiv/)
+exclude=("*.cache")
+
+##########
+# Script #
+##########
+
+case $ACTION in
+	'ADD' )
+		# Actions to perform upon mounting
+
+		# Insert break in Logfile
+		/usr/bin/echo -e "\\n-----------------------------------------------------------------------------------------------\\n" >> "$LOGFILE"
+
+		excludeFile="/tmp/$(date '+%Y%m%d_%H%M%S')_rclone-excludes.log"
+
+		for ((i=0; i < ${#exclude[@]}; i++)); do
+			/usr/bin/echo "${exclude[i]}" >> "$excludeFile"
+		done
+
+		if [ -f /usr/sbin/rclone ] && [[ $(pgrep -cf "rclone.*sync.*$rcloneRemote") -eq 0 ]]; then
+			finalTotalCount=0
+			finalUpdatedCount=0
+
+			# Sync files by looping through $backupDirs Array.
+			/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Started Sync" >> "$LOGFILE"
+
+			for ((i=0; i < ${#backupDirs[@]};i++)); do
+				if [ -d "$srcDir${backupDirs[$i]}" ]; then
+					/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Backing up ${backupDirs[$i]}" >> "$LOGFILE"
+					currTrackerFile="/tmp/$(date '+%Y%m%d_%H%M%S')_rclone.log"
+					/usr/sbin/rclone sync -vc --log-file "$currTrackerFile" --exclude-from "$excludeFile" --max-size $maxSize "$srcDir${backupDirs[$i]}" "$rcloneRemote${backupDirs[$i]}"
+
+					newCount=$(more "$currTrackerFile" | grep -ci "copied (new)")
+					replaceCount=$(tail -7 "$currTrackerFile" | grep -ci "replaced existing")
+					noChangeCount=$(( $(tail -7 "$currTrackerFile" | grep -i "Checks:" | tr -s " " | cut -d" " -f2) - replaceCount ))
+					updatedCount=$(( newCount + replaceCount ))
+					totalCount=$(( updatedCount + noChangeCount ))
+					finalTotalCount=$(( finalTotalCount + totalCount ))
+					finalUpdatedCount=$(( finalUpdatedCount + updatedCount ))
+
+					/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): $updatedCount/$totalCount files updated." >> "$LOGFILE"
+					/usr/bin/sleep 1
+				else
+					/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): $srcDir${backupDirs[$i]} does not exist!" >> "$LOGFILE"
+				fi
+			done
+
+			/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Sync Ended" >> "$LOGFILE"
+			/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Totals: $finalUpdatedCount/$finalTotalCount files updated." >> "$LOGFILE"
+			/usr/local/emhttp/webGui/scripts/notify -e "Unassigned Devices" -s "External Backup Completed" -d "Your files have been sucessfully backed up to your external drive.<br/>$finalUpdatedCount/$finalTotalCount files updated.<br/>You may now unmount it." -i "normal"
+
+			if [ "$(pgrep -cf "rclone.*mount.*$rcloneRemote")" -eq 0 ]; then        
+				# RClone Mount Directory
+				/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Drive Mounted " >> "$LOGFILE"
+				/usr/bin/mkdir -p $destDir
+				/usr/sbin/rclone mount --max-read-ahead 1024k --allow-other --allow-non-empty $rcloneRemote $destDir &
+			else
+				/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Drive Already Mounted" >> "$LOGFILE"
+			fi
+		else
+			if [ ! -f /usr/sbin/rclone ]; then
+				/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): /usr/sbin/rclone does not exist. Please install RClone via Community Applications." >> "$LOGFILE"
+			else
+				/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): It seems like RClone is already running. Not running a second time." >> "$LOGFILE"
+			fi
+		fi
+	;;
+
+	'REMOVE' )
+		# Actions to perform upon umounting
+
+		loopCount=0
+
+		# Kill mount script
+		while [ "$(pgrep -P 1 -cf "bash.*unassigned.devices/$PROG_NAME.sh")" -gt 0 ]; do
+			mapfile -t scriptPS < <(pgrep -P 1 -f "bash.*unassigned.devices/$PROG_NAME.*")
+
+			if [[ ${#scriptPS[@]} -gt 0 ]]; then
+				/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Unmounting prior to completion. Killing mount script (${scriptPS[*]})" >> "$LOGFILE"
+				/bin/kill -9 "${scriptPS[@]}"
+				/usr/bin/sleep 1
+				loopCount=$((loopCount + 1))
+				if [[ $loopCount -ge 30 ]]; then
+					break
+				fi
+			fi
+		done
+
+		loopCount=0
+
+		# Kill rclone sync processeses
+		while [ "$(pgrep -cf "rclone.*sync.*$rcloneRemote")" -gt 0 ]; do
+			mapfile -t rclonePS < <(pgrep -f "rclone.*sync.*$rcloneRemote")
+			if [[ ${#rclonePS[@]} -gt 0 ]]; then
+				/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Unmounting prior to completion. Killing rclone sync processes (${rclonePS[*]})" >> "$LOGFILE"
+				/bin/kill -9 "${rclonePS[@]}"
+			fi
+			/usr/bin/sleep 1
+			loopCount=$((loopCount + 1))
+			if [[ $loopCount -ge 30 ]]; then
+				break
+			fi
+		done
+
+		loopCount=0
+
+		# RClone Unmount Directory
+		while [ "$(pgrep -cf "rclone.*mount.*$destDir")" -gt 0 ]; do
+			/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Unmounting Drive" >> "$LOGFILE"
+			/bin/fusermount -u $destDir
+			/usr/bin/sleep 1
+			loopCount=$((loopCount + 1))
+			if [[ $loopCount -ge 30 ]]; then
+				break
+			fi
+		done
+		/usr/bin/echo "$(date '+%H:%M:%S (%Y%m%d)'): Drive Safe to Remove" >> "$LOGFILE"
+
+		if [ -d $destDir ]; then
+			/usr/bin/rm -r $destDir
+		fi
+	;;
+esac
+
+errorsVGrep="modify window is\\|waiting for checks\\|waiting for transfers\\|waiting for deletions\\|Transferred:\\|Checks:\\|Elapsed time:\\|Errors:\\s*0\\|INFO\\s*:\\s*$\\|^$\\|copied (new)\\|Copied (replaced existing)\\|Transferring\\|*.*% done\\|::::::::::\\|/tmp/.*rclone.log"
+nonErrorLogs=()
+
+mapfile -t logFiles < <(find /tmp -maxdepth 1 -type f -name "*_rclone*" | grep -v ".err\\|_rclone-excludes")
+for ((i=0; i<${#logFiles[@]}; i++)); do
+	mapfile -t errors < <(more "${logFiles[i]}" | grep -iv "$errorsVGrep")
+	#errors=""
+	#errors=$(more "${logFiles[i]}" | grep -iv "$errorsVGrep" | sed ':a;N;$!ba;s/\n/\t\n/g')
+	if [ "${#errors[@]}" -eq 0 ]; then
+		nonErrorLogs+=("${logFiles[i]}")
+	else
+		/usr/bin/echo -e "\\n##### POSSIBLE ERRORS DETECTED #####\\n${logFiles[i]}.err:\\n" >> "$LOGFILE"
+		for ((j=0; j<${#errors[@]}; j++)); do
+			/usr/bin/echo -e "\\t${errors[$j]}" >> "$LOGFILE"
+		done
+		/usr/bin/echo -e "\\n#####    END OF ERROR LIST     #####\\n" >> "$LOGFILE"
+		/usr/bin/mv "${logFiles[i]}" "${logFiles[i]}.err"
+	fi
+done
+
+#Delete non-error log files
+if [ "$deleteLogFiles" = "true" ] && [ "${#nonErrorLogs[@]}" -gt 0 ]; then
+	/usr/bin/rm "${nonErrorLogs[@]}"
+fi
+
+#Delete rclone-excludes
+mapfile -t excludesFiles < <(find /tmp -maxdepth 1 -type f -name "*_rclone-excludes.log")
+if [ "$deleteLogFiles" = "true" ] && [ "${#excludesFiles[@]}" -gt 0 ]; then
+	/usr/bin/find /tmp "$(pwd)" -type f -name "*rclone-excludes.log" -exec rm "{}" \;
+fi
+
+sleep 1
+if [ "$(find /tmp -maxdepth 1 -type f -name "*_rclone.log.err" | wc -l)" -gt 0 ]; then
+	/usr/local/emhttp/webGui/scripts/notify -e "Unassigned Devices" -s "External Backup - Errors Found" -d "Possible error(s) detected.<br/>Check /tmp for .log.err files." -i "warning"
+fi
+
+## Available variables: 
+# AVAIL      : available space
+# USED       : used space
+# SIZE       : partition size
+# SERIAL     : disk serial number
+# ACTION     : if mounting, ADD; if unmounting, REMOVE
+# MOUNTPOINT : where the partition is mounted
+# FSTYPE     : partition filesystem
+# LABEL      : partition label (Name of mount, eg: /mnt/disks/myDrive, this returns "myDrive")
+# DEVICE     : partition device, e.g /dev/sda1
+# OWNER      : "udev" if executed by UDEV, otherwise "user"
+# PROG_NAME  : program name of this script (If script is "/boot/config/plugins/unassigned.devices/123.sh", returns "123")
+# LOGFILE    : log file for this script
+</code>
+
+
+---
+

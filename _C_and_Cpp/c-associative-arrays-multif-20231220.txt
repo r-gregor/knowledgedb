@@ -1,0 +1,672 @@
+filename: c_associative-arrays-multif_20231220.txt
+https://stackoverflow.com/questions/4864453/associative-arrays-in-c
+
+Associative arrays in C
+
+   I am implementing a way to transfer a set of data to a programmable dongle. The dongle is based on a
+   smart card technology and can execute an arbitrary code inside. The input and output data is passed
+   as a binary blocks that can be accessed via input and output pointers.
+
+   I would like to use an associative array to simplify the data processing code. Everything should work
+   this way:
+
+   First the host application:
+// Host application in C++
+in_data["method"] = "calc_r";
+in_data["id"] = 12;
+in_data["loc_a"] = 56.19;
+in_data["loc_l"] = 44.02;
+processor->send(in_data);
+
+   Next the code inside the dongle:
+// Some dongle function in C
+char* method_name = assoc_get_string(in_data, "method");
+int id = assoc_get_int(in_data, "id");
+float loc_a = assoc_get_float(in_data, "loc_a");
+float loc_l = assoc_get_float(in_data, "loc_l");
+
+   So my question is about the dongle part functionality. Is there C code or library to implement such
+   an associative array behavior like the above?
+
+***
+     * There's an implementation of associative arrays in David R Hanson's book
+	 [https://smile.amazon.com/dpf]C Interfaces and Implementations (1996). It is very workmanlike, but not
+	 completely trivial. They're called 'tables' in the book.
+
+***
+   [http://library.gnome.org/devel/glib/stable/glib-Hash-Tables.html]Glib's hash table. implements a map
+   interface or (associative array). And it's most likely the most used hash table implementation for C.
+GHashTable *table=g_hash_table_new(g_str_hash, g_str_equal);
+
+/* put */
+g_hash_table_insert(table,"SOME_KEY","SOME_VALUE");
+
+/* get */
+gchar *value = (gchar *) g_hash_table_lookup(table,"SOME_KEY");
+
+***
+   My suspicion is that you would have to write your own. If I understand the architecture you are
+   describing, then you will need to send the entire chunk of data in a single piece. If so, then most
+   libraries will not work for that because they will most likely be allocating multiple pieces of
+   memory, which would require multiple transfers (and an inside understanding of the structure). It
+   would be similar to trying to use a library hash function and then sending its contents over the
+   network on a socket just by passing the root pointer to the send function.
+
+   It would be possible to write some utilities of your own that manage a very simple associative array
+   (or hash) in a single block of memory. If the amount of data is small, it could use a simple linear
+   search for the entries and would be a fairly compact bit of code.
+
+
+   2
+     * Yes, you are right. The data processing function in dongle deals with a single piece of data. I
+       really feel like I need to implement a simple associative array with say 8 chars length indices
+       and a linear index searching algorithm! I just thought not to reinvent the wheel and ask if
+       someone has implemented it already.
+     * I definitely agree with not reinventing the wheel. And it certainly does seem likely that someone
+       has already done this ... but finding it could prove difficult since it is rather specialized.
+
+***
+   This is an old thread, but I thought this might still be useful for anyone out there looking for an
+   implementation. It doesn't take too much code; I did mine in ~100 lines of without any extra library.
+   I called it a dictionary since it parallels (sort of) the python datatype. Here is my code:
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdbool.h>
+
+typedef struct hollow_list hollow_list;
+
+struct hollow_lis {
+	unsigned int size;
+	void *value;
+	bool *written;
+	hollow_list *children;
+};
+
+//Creates a hollow list and allocates all of the needed memory
+hollow_list hollow_list_create(unsigned int size) {
+	hollow_list output;
+	output = (hollow_list) {.size = size, .value = (void *) 0, .written = calloc(size, sizeof(bool)), \
+			.children = calloc(size, sizeof(hollow_list))};
+	return output;
+}
+
+//Frees all memory of associated with a hollow list and its children
+void hollow_list_free(hollow_list *l, bool free_values) {
+	int i;
+	for (i = 0; i < l->size; i++) {
+		hollow_list_free(l->children + i, free_values);
+	}
+
+	if(free_values) {
+		free(l->value);
+	}
+	free(l);
+}
+
+//Reads from the hollow list and returns a pointer to the item's data
+void *hollow_list_read(hollow_list *l, unsigned int index) {
+	if(index == 0) {
+		return l->value;
+	}
+	unsigned int bit_checker;
+	bit_checker = 1<<(l->size - 1);
+	int i;
+	for (i = 0; i < l->size; i++) {
+		if(bit_checker & index) {
+			if(l->written[i] == true) {
+				return hollow_list_read(l->children + i, bit_checker ^ index);
+			} else {
+				return (void *) 0;
+			}
+		}
+		bit_checker >>= 1;
+	}
+}
+
+//Writes to the hollow list, allocating memory only as it needs
+void hollow_list_write(hollow_list *l, unsigned int index, void *value) {
+	if(index == 0) {
+		l->value = value;
+	} else {
+		unsigned int bit_checker;
+		bit_checker = 1<<(l->size - 1);
+		int i;
+		for (i = 0; i < l->size; i++) {
+			if(bit_checker & index) {
+				if(!l->written[i]) {
+					l->children[i] = hollow_list_create(l->size - i - 1);
+					l->written[i] = true;
+				}
+				hollow_list_write(l->children + i, bit_checker ^ index, value);
+				break;
+			}
+			bit_checker >>= 1;
+		}
+	}
+}
+
+typedef struct dictionary dictionary;
+
+struct dictionar {
+	void *value;
+	hollow_list *child;
+};
+
+dictionary dictionary_create() {
+	dictionary output;
+	output.child = malloc(sizeof(hollow_list));
+	*output.child = hollow_list_create(8);
+	output.value = (void *) 0;
+	return output;
+}
+
+void dictionary_write(dictionary *dict, char *index, unsigned int strlen, void *value) {
+	void *hollow_list_value;
+	dictionary *new_dict;
+	int i;
+	for (i = 0; i < strlen; i++) {
+		hollow_list_value = hollow_list_read(dict->child, (int) index[i]);
+		if(hollow_list_value == (void *) 0) {
+			new_dict = malloc(sizeof(dictionary));
+			*new_dict = dictionary_create();
+			hollow_list_write(dict->child, (int) index[i], new_dict);
+			dict = new_dict;
+		} else {
+			dict = (dictionary *) hollow_list_value;
+		}
+	}
+	dict->value = value;
+}
+
+void *dictionary_read(dictionary *dict, char *index, unsigned int strlen) {
+	void *hollow_list_value;
+	dictionary *new_dict;
+	int i;
+	for (i = 0; i < strlen; i++) {
+		hollow_list_value = hollow_list_read(dict->child, (int) index[i]);
+		if(hollow_list_value == (void *) 0) {
+			return hollow_list_value;
+		} else {
+			dict = (dictionary *) hollow_list_value;
+		}
+	}
+	return dict->value;
+}
+
+int main() {
+	char index0[] = "hello, this is a test";
+	char index1[] = "hello, this is also a test";
+	char index2[] = "hello world";
+	char index3[] = "hi there!";
+	char index4[] = "this is something";
+	char index5[] = "hi there";
+
+	int item0 = 0;
+	int item1 = 1;
+	int item2 = 2;
+	int item3 = 3;
+	int item4 = 4;
+
+	dictionary d;
+	d = dictionary_create();
+	dictionary_write(&d, index0, 21, &item0);
+	dictionary_write(&d, index1, 26, &item1);
+	dictionary_write(&d, index2, 11, &item2);
+	dictionary_write(&d, index3, 13, &item3);
+	dictionary_write(&d, index4, 17, &item4);
+
+	printf("%d\n", *((int *) dictionary_read(&d, index0, 21)));
+	printf("%d\n", *((int *) dictionary_read(&d, index1, 26)));
+	printf("%d\n", *((int *) dictionary_read(&d, index2, 11)));
+	printf("%d\n", *((int *) dictionary_read(&d, index3, 13)));
+	printf("%d\n", *((int *) dictionary_read(&d, index4, 17)));
+	printf("%d\n", ((int) dictionary_read(&d, index5, 8)));
+}
+
+   Unfortunately you can't replicate the list[x] syntax, but this is the best alternative I have come up
+   with.
+
+***
+     * Very nice!! The code above doesn't include a string value example, but it was straight forward to
+       implement it. I do have a minor correction and suggestion for the example code though. The length
+       of hi there! is 9 not 13, and instead of hard coding the string length, you could, of course, use
+       the strlen function, or, alternatively, let the read/write function determine the length of the
+       key string internally (thus saving on one parameter to the functions).
+
+***
+   Yes, but it will not work in the way you have specified. It will instead use a struct to store the
+   data and functions that operate on that struct, giving you the result you want. See
+   [http://www.mailsend-online.com/blog/a-simple-associative-array-library-in-c.html]A Simple Associative
+   Array Library In C. Example of use:
+
+struct map_t *test;
+
+test=map_create();
+map_set(test,"One","Won");
+map_set(test,"Two","Too");
+map_set(test,"Four","Fore");
+
+
+   GLib's [https://codereview.stackexchange.com/questions/13316/extracting-multiple-associative-arrays-in-php]
+   Hash Tables and [http://library.gnome.org/devel/glib/unstable/glib-Balanced-Binary-Trees.html]Balanced
+   Binary Trees might be what you're after.
+
+***
+   Mark Wilkins gave you the right answer. If you want to send the data as a single chunk, you need to
+   understand how C++ maps are represented in your architecture and write the access functions.
+
+   Anyway, if you decide to recreate the map on the dongle, I've written a small C library where you
+   could write thinks like:
+
+tbl_t in_data=NULL;
+
+tblSetSS(in_data,"method","calc_r");
+tblSetSN(in_data,"id",12);
+tblSetSF(in_data,"loc_a",56.19);
+tblSetSF(in_data,"loc_l",44.02);
+
+   and then:
+char  *method_name = tblGetP(in_data, "method");
+int    id          = tblGetN(in_data, "id");
+float  loc_a       = tblGetF(in_data, "loc_a");
+float  loc_l       = tblGetF(in_data, "loc_l");
+
+   The hashtable is a variation of the Hopscotch hash, which is rather good on average, and you can have
+   any mix of type for keys and data (i.e. you can use an entire table as a key).
+
+   The focus for that functions was on easing programming rather than pure speed and the code is not
+   thoroughly tested but if you like the idea and want to expand on it, you can have a look at the code
+   on [http://code.google.com/p/c-libutl/source/browse/#svn/trunk]googlecode.
+
+   (There are other things like variable length strings and a fast sttring pattern matching function but
+   those might not be of interest in this case).
+
+
+
+---
+https://c-for-dummies.com/blog/?p=5903
+
+Associative Arrays
+June 10, 2023
+
+   Being the ancient and venerable programming language it is, C lacks the associative array data type.
+   This type of array is found in other languages, and it can be awkwardly simulated in C.
+   From last week's Lesson, I sought to create two arrays, each with corresponding words in French
+   and English. This dual array approach seemed to be the best way to translate nouns between the
+   language, though I found my solution to be clumsy. What I really need is an associative array, which
+   is known as a dictionary in Python.
+
+   An associative array contains pairs of keys and values. You can use the keys to summon a value. For
+   example:
+
+   { { "One", "First" },
+     { "Two", "Second" },
+     { "Three", "Fourth" } }
+
+   In this pseudocode example, the associative array contains three elements or pairs. For the key One
+   the value is First. The second element has the key Two and the value Second. The last element key is
+   Three with the value Third.
+
+   The key/value pairs need not be strings. As with an array, they can any data type. For example:
+
+   { { "Zero", 0.0 },
+     { "e", 2.71828 },
+     { "pi", 3.14159 } }
+
+   The key/values need not be consistent, either. Above, the keys are strings with real numbers values.
+
+   Associative arrays are used like any array, though the keys summon the values. For example:
+
+   printf("You're score ranked %s\n",rank["One"]);
+
+   The above statement fetches element "One" from the associative array rank[]. From the example shown
+   earlier, the value output is the string "First".
+
+   In a way, the C language does use associative arrays, though the keys are locked in numeric order.
+   For example:
+
+   { { 1, "January" },
+     { 2, "February" },
+     { 3, "March" },
+   etc.
+
+   To create a simulated associative array requires a bit of overhead, more than necessary in other
+   programming languages. The following code shows my stab at an associative array to do my
+   English/French translation.
+
+[https://github.com/dangookin/C-For-Dummies-Blog/blob/master/2023_06_10-Lesson.c]2023_06_10-Lesson.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main() {
+	const char *months[12][2] =
+	{
+		{ "January", "janvier" },
+		{ "February", "fevrier" },
+		{ "March", "mars" },
+		{ "April", "avril" },
+		{ "May", "mai" },
+		{ "June", "juin" },
+		{ "July", "jullet" },
+		{ "August", "aout" },
+		{ "September", "septembre" },
+		{ "October", "octobre" },
+		{ "November", "novembre" },
+		{ "December", "decembre" }
+	};
+	int x;
+
+	for( x=0; x<12; x++ )
+		printf("%s = %s\n",
+				months[x][0],
+				months[x][1]
+			  );
+
+	return(0);
+}
+
+   The months[] array contains pairs of char pointers. It's a two dimensional array, with each element
+   representing a pair of strings. The program outputs each pair, though it doesn't use key/value
+   references.
+
+   January = janvier
+   February = fevrier
+   March = mars
+   April = avril
+   May = mai
+   June = juin
+   July = jullet
+   August = aout
+   September = septembre
+   October = octobre
+   November = novembre
+   December = decembre
+
+   In those programming languages that support associative arrays, functions (or methods) are available
+   that fetch the keys and values separately. Functions to dump an associative array are also available.
+   Even then, some languages may even let you perform tricks like this:
+
+   for( x="January"; x<="December"; x++ )
+
+   In C, however, more overhead and effort is required to deal with data pairs such as those found in
+   this Lesson's months[] array. In next week's Lesson I explore various ways to further foist an
+   associative array into the C language.
+
+
+
+---
+https://codereview.stackexchange.com/questions/115351/hashmap-or-associative-arrays-in-c
+
+HashMap or associative arrays in C
+
+   I am trying to implement an HashMap in C. I am trying to used a linked list style of interfacing to
+   make adding and removing keys easy and efficient. Searching is not something I am considering at this
+   point as it is early in progress. I am looking for any tweaks that could make this faster, more
+   memory efficient, more practical, more dynamic, etc. as well as any serious issues you notice as I am
+   merely an amateur at C programming and haven't much experience.
+
+   This is the header file with my declarations and implementation:
+#ifndef _M_LINKED_MAP_H_
+#define _M_LINKED_MAP_H_
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* LinkedMap keys can be 512 characters long inc'l null */
+#define M_MAX_KEY 512
+#define M_KEY_NOT_FOUND 0
+int _M_DEFAULT_VALUE_WARNED_ = 0; /* Issues one warning about zero default behavior */
+
+/* TYPES */
+
+typedef struct __LinkedMapNode {
+	char *k; /* key */
+	int v; /* value */
+	struct __LinkedMapNode *next;
+
+	/* determines whether key assign should happen to current node or node->next */
+	int first;
+} __LinkedMapNode;
+
+typedef __LinkedMapNode LinkedMapRoot;
+
+/* FUNCTION DECLARATIONS */
+
+int     LinkedMap_init (__LinkedMapNode *m);
+int     setLinkedMapKey(__LinkedMapNode *root, char const *key, int value);
+int     putLinkedMapKey(__LinkedMapNode *root, char const *key, int value);
+int     getLinkedMapKey(__LinkedMapNode *root, char const *key);
+void    delLinkedMapKey(__LinkedMapNode *root, char const *key);
+void    LinkedMap_free(__LinkedMapNode *root);
+__LinkedMapNode *LinkedMap_malloc();
+
+/* FUNCTION IMPLEMENTATIONS */
+
+int LinkedMap_init(__LinkedMapNode *m) {
+	if (!_M_DEFAULT_VALUE_WARNED_) {
+		puts("Please note: LinkedMaps return 0 on get if key is not found");
+		_M_DEFAULT_VALUE_WARNED_ = 1;
+	}
+	m->next = NULL;
+	m->first = 1; /* True if node is never assigned key */
+	return 0;
+}
+
+__LinkedMapNode *LinkedMap_malloc() {
+	__LinkedMapNode *m = malloc(sizeof(__LinkedMapNode));
+	LinkedMap_init(m);
+	return m;
+}
+
+int setLinkedMapKey(__LinkedMapNode *root, char const *key, int value) {
+	/* this function is used to change the value of an existing key in the
+	 * linked list */
+	if (root->next == NULL) {
+		puts("You must put a key before you can set it.");
+		return 1;
+	}
+	if (strcmp(root->k, key) != 0) {
+		setLinkedMapKey(root->next, key, value); /* search until the key is found */
+	} else {
+		root->v = value; /* change value */
+	}
+	return 0;
+}
+
+int putLinkedMapKey(__LinkedMapNode *root, char const *key, int value) {
+	/* this function is used only to assign new keys to nodes */
+	if (root->first) {
+		root->k = malloc(M_MAX_KEY);
+		strcpy(root->k, key);
+		root->v = value;
+		root->first = 0; /* node has key, should not be reassigned */
+	}
+	if (root->next != NULL) {
+		putLinkedMapKey(root->next, key, value); /* Recursive Call if possible */
+		/* Picks up on all nodes after first assignment before penultimate node */
+	}
+	else {
+		/* If the next node is null, recursion is impossible so
+		 * direct assignment is used */
+		/* takes on second assignment to root node and all subsequent assign calls */
+		root->next = LinkedMap_malloc();
+		root->next->k = malloc(M_MAX_KEY);
+		strcpy(root->next->k, key);
+		root->next->v = value;
+	}
+	return 0;
+}
+
+int getLinkedMapKey(__LinkedMapNode *root, char const *key) {
+	if (strcmp(root->k, key) != 0 && root->next != NULL) {
+		/* if the keys don't match and there are more check them */
+		return getLinkedMapKey(root->next, key);
+	}
+	if (strcmp(root->k, key) == 0) {
+		return root->v;
+	}
+	if (root->next == NULL) return M_KEY_NOT_FOUND; /* default value is zero if key is not found */
+	return M_KEY_NOT_FOUND;
+}
+
+void delLinkedMapKey(__LinkedMapNode *root, char const *key) {
+	/* Removing a key involves copying the entirety of the following node
+	 * to the node with the matching key */
+	if (root == NULL) return; /* Silent discard if key not found */
+	if (root->next == NULL) {
+		if (root->k != NULL) free(root->k);
+		root = NULL; /* last node is deleted */
+		return;
+	}
+	if (strcmp(root->k, key) == 0) {
+		if (root->k != NULL) free(root->k);
+		root->k = root->next->k;
+		root->v = root->next->v;
+		root->next = root->next->next;
+	} else {
+		/* current root is not the correct key and so the next one is examined */
+		delLinkedMapKey(root->next, key);
+	}
+}
+
+void LinkedMap_free(__LinkedMapNode *root) {
+	if (root == NULL) return;
+	if (root->next == NULL) {
+		if (root->k != NULL) free(root->k);
+		free(root);
+	}
+	else {
+		LinkedMap_free(root->next);
+	}
+}
+
+
+#endif
+/* _M_LINKED_MAP_H_ */
+
+***
+     * P.S. The __LinkedMapNode is used because the entire Map is interfaceable from the
+       root node so it should be used such that LinkedMapRoot root = LinkedMap_malloc(); is the only
+       node that the user will have to use as all actions can be performed on that
+
+     * Thedel function is buggy - there's a path that deletes a node without checking
+       the key. The free function looks buggy too. I think you need more tests and things like valgrind
+       to verify your implementation. Biggest issue is that it's not a hash map at all - hint: you don't
+       hash anything anywhere :-)
+
+     * I actually meant LinkedMap not Hash sorry
+
+***
+   Don't use reserved identiferiers.
+
+   From 7.1.3 Reserved identifiers of the C99 standard
+
+     All identifiers that begin with an underscore and either an uppercase letter or another underscore
+     are always reserved for any use.
+
+   This article is about C++; but it also contains a lot of information relavant to C. What are the
+   rules about using an underscore in a C++ identifier?.
+
+   All the following are reserved for the implementation.
+_M_LINKED_MAP_H_
+_M_DEFAULT_VALUE_WARNED
+__LinkedMapNode
+
+   Is there a use case were LinkedMap_init() would by used without a call to LinkedMap_malloc? If not
+   just roll them into a single function. If so then keep them separate.
+
+   Why does LinkedMap_init() return an int but always return 0. If it can return an error condition then
+   make it a void function. No point in wasting time returning a value if that value can never be used.
+int LinkedMap_init(__LinkedMapNode *m) {
+
+   Malloc can fail. In your LinkedMap_malloc() you must either check for that before calling
+   LinkedMap_init() or update LinkedMap_init() so that it can cope with a NULL pointer correctly.
+
+__LinkedMapNode *LinkedMap_malloc() {
+	__LinkedMapNode *m = malloc(sizeof(__LinkedMapNode));
+	LinkedMap_init(m);
+	return m;
+}
+
+   There seems to be a bug in setLinkedMapKey(). If the key is at the end of the chain you fail to find
+   it. Change if (root->next == NULL) { into if (root == NULL) {.
+
+   This is very dangerous.
+        root->k = malloc(M_MAX_KEY);
+        strcpy(root->k, key);
+
+   What happens if key is a very long string.
+
+***
+     * Question: suppose I check for NULL and it is NULL what would be the best course
+       of action? return, abort, or exit?
+
+     * Also, I originally had it if (root == NULL) but I would get a segfault if I tried
+       the last node and when I changed it the last node updated properly, I also thought that was odd
+
+     * @Tom, about your first question, for library code it is generally better to
+       return some error indicator and let the caller handle the failure as appropriate. Application
+       code can make more assumptions and it is sometimes fine to just abort on a failure case. But
+       regardless of the choice, it is important to detect and handle errors always.
+
+     * 1
+       @Tom: Return NULL and let the caller check that the result is not NULL. Just
+       because a container you are using does not work does not give that container authority to stop
+       the program. The program may be able to take actions to get more space before retrying.
+
+***
+   @Loki's answer already pointed out very important things, here are a few others:
+     * Use booleans to communicate success or failure of a function if there are only two possible
+       outcomes. All you have to do is #include <stdbool.h> and you'll have the bool type and true/false
+       constants at your disposal.
+     * Use enum for compile-time constants. #defines have several weaknesses if compared, such as
+       allowing silent redefinition and not producing a debug symbol (you'd see just a raw numeric
+       constant in your debugger), among others.
+     * If you're logging error messages, use the stderr standard stream. That's the expected place
+       to log runtime errors, so users of your code can filter normal stdout output from error messages.
+fprintf(stderr, "some error message here...");
+
+     * This seems like it should have been a comment documenting the behavior of the function instead:
+
+if (!_M_DEFAULT_VALUE_WARNED_) {
+	puts("Please note: LinkedMaps return 0 on get if key is not found");
+	_M_DEFAULT_VALUE_WARNED_ = 1;
+}
+
+     * I suggest using a consistent prefix for your function names. C doesn't have modules or
+       namespaces, so it is a good idea to define some prefix that indicates the module a function
+       belongs to. You could maybe prefix everything with LinkedMap_, example:
+
+LinkedMap_Init
+LinkedMap_GetKey
+LinkedMap_SetKey
+etc...
+
+     * You're blindly strcpying the keys without checking if then fit the M_MAX_KEY limit of 512 chars
+       including null. Never assume calling code will be well behaved. Always check your assumptions,
+       even if with just an assert to trap errors early and help you debugging.
+     * I also suggest validating input parameters against NULL if they are never meant to be null
+       pointers.
+     * Separate interface from implementation, right now, including your file in more than one .c source
+       file would result in duplicate symbols being defined. C requires you to define your functions
+       just once in a .c file, while the header (.h) contains only forward declarations and data
+       structures.
+
+***
+   3
+     * I don't understand how to separate the declarations because if I try to compile I
+       get undefined symbols
+
+     * Much obliged I particularly found useful the addition of name space like naming.
+
+     * @Tom, you just move the function implementations to a separate .c file, then
+       compile it with the rest of your program. That should be pretty much it. You are probably not
+       compiling the source file with the definitions, make sure it is included in your
+       workspace/makefile/whatever-build-system you are using.
+
+
+---

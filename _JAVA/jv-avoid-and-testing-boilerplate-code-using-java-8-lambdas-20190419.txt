@@ -1,0 +1,167 @@
+filename: jv_avoid-and-testing-boilerplate-code-using-java-8-lambdas_20190419.txt
+https://techbeatssite.wordpress.com/2016/05/25/avoid-and-testing-boilerplate-code-using-java-8-lambdas/
+
+Avoid and testing boilerplate code using Java 8 lambdas
+May 2016
+
+   Earlier this week I was doing some code review and found a piece of boilerplate code that kept
+   showing up all the time.
+
+   The repeating code looks something like this:
+   
+LockManager lockManager = lockManagerFactory.createManager();
+try {
+    lockManager.acquireLock(objectUuid);
+    // business logic in here
+} catch (LockAcquirementException e) {
+    throw new LockException(objectUuid, e);
+} finally {
+    lock.release();
+}
+
+   Having a Groovy background, the first thing that came to the top of my mind was moving all of this
+   into a separate class and pass in the business logic as closure, and have something like:
+   
+class SecureExecutor {
+    void lockAndExecute (def objectUuid, def businessLogicClosure) {
+        LockManager lockManager = lockManagerFactory.createManager();
+        try {
+            lockManager.acquireLock(objectUuid);
+            businessLogicClosure()
+        } catch (LockAcquirementException e) {
+            throw new LockException(objectUuid, e);
+        } finally {
+            lock.release();
+        }
+    }
+}
+
+   But then the question stroke me: how can I do the same with Java 8?
+
+   After spending a couple of minutes in googling, I came up with this approach:
+   
+public class SecureExecutor {
+    void lockAndExecute (String objectUuid, Runnable businessLogic) {
+        LockManager lockManager = lockManagerFactory.createManager();
+        try {
+            lockManager.acquireLock(objectUuid);
+            businessLogic.run();
+        } catch (LockAcquirementException e) {
+            throw new LockException(objectUuid, e);
+        } finally {
+            lock.release();
+        }
+    }
+}
+
+   This way, a consumer of SecureExecutor would work like this:
+   
+public class SecureExecutorConsumer {
+    private SecureExecutor executor = new SecureExecutor();
+    public void executeBusinessLogic() {
+        executor.lockAndExecute("uuid", () -> {
+            // business logic goes in here
+        });
+    }
+}
+
+     I'm not sure this is the best way to achieve the purpose I had in mind, but it's one that works.
+
+   But then the next question is: how do I unit test this? Assume SecureExecutorConsumer's business
+   logic delegates activities to dependent classes and posts to a JMS queue, for instance, how do I make
+   sure my business logic is actually doing what it's supposed to do? Ok, some might argue we should
+   consider SecureExecutorConsumer to be a [16]black box and not test its internals, but, in case I want
+   to test it as a [17]white box, how do I guarantee everything works as expected?
+
+   I've put together a couple of classes to illustrate how this could be solved
+   on [***]https://github.com/felipecao/java8-lamba-boilerplate.
+
+   Take a look at BusinessCodeThatWantsToAvoidBoilerplate class. As the name says, this is the class I
+   want to contain just business code and avoid having boilerplate. Notice it has two
+   dependencies: BoilerplateCode interface, which implementation will hold the code we want to prevent
+   from duplicating and that will execute the business logic from within it; and a Dependency class,
+   just like we'd have in any other business class.
+
+public class BusinessCodeThatWantsToAvoidBoilerplate {
+    BoilerplateCode boilerplate;
+    Dependency dependency;
+    public BusinessCodeThatWantsToAvoidBoilerplate(BoilerplateCode boilerplate, Dependency dependency)
+    {
+        this.boilerplate = boilerplate;
+        this.dependency = dependency;
+    }
+    public void executeBusinessLogic() {
+        boilerplate.executeBusinessLogic("Starting my business logic", () -> {
+            System.out.println("This is my business logic");
+            dependency.doSomething();
+        });
+    }
+    public static void main(String[] args)
+    {
+        BoilerplateContainer boilerplate = new BoilerplateContainer();
+        Dependency dependency = new Dependency();
+        BusinessCodeThatWantsToAvoidBoilerplate b = new BusinessCodeThatWantsToAvoidBoilerplate(boilerplate, dependency);
+        b.executeBusinessLogic();
+        System.exit(0);
+    }
+}
+
+   Now, when we write a unit test for BusinessCodeThatWantsToAvoidBoilerplate#executeBusinessLogic, we
+   want the test to make sure that the Dependency method is being invoked, and not just checking
+   if boilerplate#executeBusinessLogic was used.
+
+   The problem is: if we just mock the BoilerplateCode dependency, we'd never be able to know
+   whether dependency#doSomething got invoked, since it's internally called by boilerplate.
+
+   On the other hand, if we use a BoilerplateContainer [19]Spy, the actual production code would get
+   invoked, which would require the test to setup everything the production code needs to work
+   flawlessly (in the original code in the beginning of this post, for example, the test would need to
+   setup all the conditions for a LockException not to be raised).
+
+   And so I remembered the concept of [20]Test Doubles. And so what I basically did was adding creating
+   a new class under src/test/java called FakeBoilerplateCode, which implements the same BoilerplateCode
+   interface, but, instead of running lock calls, handling exceptions and so on, it simply executes the
+   business logic, allowing the test to worry specifically about the conditions that surround the
+   business logic.
+
+   From there on, instead of using a mock for BoilerplateCode, I can just make a spy out of a
+   FakeBoilerplateCode instance, enabling me to check both that:
+     * the execution of my business logic was handled by an implementation of BoilerplateCode, and;
+     * all dependencies were properly invoked.
+
+   The test class looks like below:
+
+import org.junit.Before;
+import org.junit.Test;
+import static org.mockito.Mockito.*;
+public class BusinessCodeThatWantsToAvoidBoilerplateTest {
+    BusinessCodeThatWantsToAvoidBoilerplate businessCode;
+    BoilerplateCode boilerplateContainerSpy;
+    Dependency dependencyMock;
+    @Before
+    public void setup() {
+        boilerplateContainerSpy = spy(new FakeBoilerplateCode());
+        dependencyMock = mock(Dependency.class);
+        businessCode = new BusinessCodeThatWantsToAvoidBoilerplate(boilerplateContainerSpy, dependencyMock);
+    }
+    @Test
+    public void testIt() {
+        businessCode.executeBusinessLogic();
+        verify(boilerplateContainerSpy, times(1)).executeBusinessLogic(eq("Starting my business logic"), \
+        any(Runnble.class));
+        verify(dependencyMock, times(1)).doSomething();
+    }
+}
+
+     I'm not sure this was the best possible approach, but at least I achieved the goal I had in mind 🙂
+
+   Any suggestions? Could this be improved somehow? Is Runnable the best interface to use to "emulate" a
+   Groovy closure? Leave a comment! I'd love to talk about it!
+
+UPDATE
+   Thanks to the point raised by Arun Menon, I've changed the code to use Supplier instead
+   of Runnable and avoid the issues he mentioned on his comment. The code's been updated on the
+   [***]GitHub project mentioned above. Thanks a lot for the input!
+
+
+---

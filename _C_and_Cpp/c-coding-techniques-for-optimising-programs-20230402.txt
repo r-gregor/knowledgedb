@@ -1,0 +1,378 @@
+filename: c_coding-techniques-for-optimising-programs_20230402.txt
+https://stackoverflow.com/questions/110684/what-coding-techniques-do-you-use-for-optimising-c-programs
+
+What coding techniques do you use for optimising C programs?
+
+   As it currently stands, this question is not a good fit for our Q&A format. We expect answers to be
+   supported by facts, references, or expertise, but this question will likely solicit debate,
+   arguments, polling, or extended discussion.
+
+   Some years ago I was on a panel that was interviewing candidates for a relatively senior embedded C
+   programmer position.
+
+   One of the standard questions that I asked was about optimisation techniques. I was quite surprised
+   that some of the candidates didn't have answers.
+
+   So, in the interests of putting together a list for posterity - what techniques and constructs do you
+   normally use when optimising C programs?
+
+   Answers to optimisation for speed and size both accepted.
+
+***
+   First things first - don't optimise too early. It's not uncommon to spend time carefully optimising a
+   chunk of code only to find that it wasn't the bottleneck that you thought it was going to be. Or, to
+   put it another way "Before you make it fast, make it work"
+
+   Investigate whether there's any option for optimising the algorithm before optimising the code. It'll
+   be easier to find an improvement in performance by optimising a poor algorithm than it is to optimise
+   the code, only then to throw it away when you change the algorithm anyway.
+
+   And work out why you need to optimise in the first place. What are you trying to achieve? If you're
+   trying, say, to improve the response time to some event work out if there is an opportunity to change
+   the order of execution to minimise the time critical areas. For example when trying to improve the
+   response to some external interrupt can you do any preparation in the dead time between events?
+
+   Once you've decided that you need to optimise the code, which bit do you optimise? Use a profiler.
+   Focus your attention (first) on the areas that are used most often.
+
+   So what can you do about those areas?
+     * minimise condition checking. Checking conditions (eg. terminating conditions for loops) is time
+       that isn't being spent on actual processing. Condition checking can be minimised with techniques
+       like loop-unrolling.
+     * In some circumstances condition checking can also be eliminated by using function pointers. For
+       example if you are implementing a state machine you may find that implementing the handlers for
+       individual states as small functions (with a uniform prototype) and storing the "next state" by
+       storing the function pointer of the next handler is more efficient than using a large switch
+       statement with the handler code implemented in the individual case statements. YMMV.
+     * minimise function calls. Function calls usually carry a burden of context saving (eg. writing
+       local variables contained in registers to the stack, saving the stack pointer), so if you don't
+       have to make a call this is time saved. One option (if you're optimising for speed and not space)
+       is to make use of inline functions.
+     * If function calls are unavoidable minimise the data that is being passed to the functions. For
+       example passing pointers is likely to be more efficient than passing structures.
+     * When optimising for speed choose datatypes that are the native size for your platform. For
+       example on a 32bit processor it is likely to be more efficient to manipulate 32bit values than 8
+       or 16 bit values. (side note - it is worth checking that the compiler is doing what you think it
+       is. I've had situations where I've discovered that my compiler insisted on doing 16 bit
+       arithmetic on 8 bit values with all of the to and from conversions to go with them)
+     * Find data that can be precalculated, and either calculate during initialisation or (better yet)
+       at compile time. For example when implementing a CRC you can either calculate your CRC values on
+       the fly (using the polynomial directly) which is great for size (but dreadful for performance),
+       or you can generate a table of all of the interim values - which is a much faster implementation,
+       to the detriment of the size.
+     * Localise your data. If you're manipulating a blob of data often your processor may be able to
+       speed things up by storing it all in cache. And your compiler may be able to use shorter
+       instructions that are suited to more localised data (eg. instructions that use 8 bit offsets
+       instead of 32 bit)
+     * In the same vein, localise your functions. For the same reasons.
+     * Work out the assumptions that you can make about the operations that you're performing and find
+       ways of exploiting them. For example, on an 8 bit platform if the only operation that at you're
+       doing on a 32 bit value is an increment you may find that you can do better than the compiler by
+       inlining (or creating a macro) specifically for this purpose, rather than using a normal
+       arithmetic operation.
+     * Avoid expensive instructions - division is a prime example.
+     * The "register" keyword can be your friend (although hopefully your compiler has a pretty good
+       idea about your register usage). If you're going to use "register" it's likely that you'll have
+       to declare the local variables that you want "register"ed first.
+     * Be consistent with your data types. If you are doing arithmetic on a mixture of data types (eg.
+       shorts and ints, doubles and floats) then the compiler is adding implicit type conversions for
+       each mismatch. This is wasted cpu cycles that may not be necessary.
+
+   Most of the options listed above can be used as part of normal practice without any ill effects.
+   However if you're really trying to eke out the best performance: - Investigate where you can (safely)
+   disable error checking. It's not recommended, but it will save you some space and cycles. - Hand
+   craft portions of your code in assembler. This of course means that your code is no longer portable
+   but where that's not an issue you may find savings here. Be aware though that there is potentially
+   time lost moving data into and out of the registers that you have at your disposal (ie. to satisfy
+   the register usage of your compiler). Also be aware that your compiler should be doing a pretty good
+   job on its own. (of course there are exceptions)
+
+***
+   As everybody else has said: profile, profile profile.
+
+   As for actual techniques, one that I don't think has been mentioned yet:
+
+   Hot & Cold Data Separation: Staying within the CPU's cache is incredibly important. One way of
+   helping to do this is by splitting your data structures into frequently accessed ("hot") and rarely
+   accessed ("cold") sections.
+
+   An example: Suppose you have a structure for a customer that looks something like this:
+
+struct Customer {
+	int ID;
+	int AccountNumber;
+	char Name[128];
+	char Address[256];
+};
+
+Customer customers[1000];
+
+   Now, lets assume that you want to access the ID and AccountNumber a lot, but not so much the name and
+   address. What you'd do is to split it into two:
+
+struct CustomerAccount {
+	int ID;
+	int AccountNumber;
+	CustomerData *pData;
+};
+
+struct CustomerData {
+	char Name[128];
+	char Address[256];
+};
+
+CustomerAccount customers[1000];
+
+   In this way, when you're looping through your "customers" array, each entry is only 12 bytes and so
+   you can fit many more entries in the cache. This can be a huge win if you can apply it to situations
+   like the inner loop of a rendering engine.
+
+***
+   My favorite technique is to use a good profiler. Without a good profile telling you where the
+   bottleneck lies, no tricks and techniques are going to help you.
+
+***
+   most common techniques I encountered are:
+     * loop unrolling
+     * loop optimization for better cache prefetch (i.e. do N operations in M cycles instead of NxM
+       singular operations)
+     * data aligning
+     * inline functions
+     * hand-crafted asm snippets
+
+   As for general recommendations, most of them are already sounded:
+     * choose better algos
+     * use profiler
+     * don't optimize if it doesn't give 20-30% performance boost
+
+***
+   For low-level optimization:
+    1. START_TIMER/STOP_TIMER macros from ffmpeg (clock-level accuracy for measurement of any code).
+    2. Oprofile, of course, for profiling.
+    3. Enormous amounts of hand-coded assembly (just do a wc -l on x264's /common/x86 directory, and
+       then remember most of the code is templated).
+    4. Careful coding in general; shorter code is usually better.
+    5. Smart low-level algorithms, like the 64-bit bitstream writer I wrote that uses only a single if
+       and no else.
+    6. Explicit write-combining.
+    7. Taking into account important weird aspects of processors, like Intel's cacheline split
+       issue.
+    8. Finding cases where one can losslessly or near-losslessly make an early termination, where the
+       early-termination check costs much less than the speed one gains from it.
+    9. Actually inlined assembly for tasks which are far more suited to the x86 SIMD unit, such as
+       median calculations (requires compile-time check for MMX support).
+
+***
+     * First and foremost, use a better/faster algorithm. There is no point optimizing code that is slow
+       by design.
+     * When optimizing for speed, trade memory for speed: lookup tables of precomputed values, binary
+       trees, write faster custom implementation of system calls...
+     * When trading speed for memory: use in-memory compression
+
+***
+   Avoid using the heap. Use obstacks or pool-allocator for identical sized objects. Put small things
+   with short lifetime onto the stack. alloca still exists.
+
+***
+   As my applications usually don't need much CPU time by design, I focus on the size my binaries on
+   disk and in memory. What I do mostly is looking out for statically sized arrays and replacing them
+   with dynamically allocated memory where it's worth the additional effort of free'ing the memory
+   later. To cut down the size of the binary, I look for big arrays that are initialized at compile time
+   and put the initializiation to runtime.
+
+char buf[1024] = { 0, };
+
+/* becomes: */
+
+char buf[1024];
+memset(buf, 0, sizeof(buf));
+
+   This will remove the 1024 zero-bytes from the binaries .DATA section and will instead create the
+   buffer on the stack at runtime and the fill it with zeros.
+
+   EDIT: Oh yeah, and I like to cache things. It's not C specific but depending on what you're caching,
+   it can give you a huge boost in performance.
+
+***
+   If possible, compare with 0, not with arbitrary numbers, especially in loops, because comparison with
+   0 is often implemented with separate, faster assembler commands.
+
+   For example, if possible, write
+for (i=n; i!=0; --i) { ... }
+
+   instead of
+for (i=0; i!=n; ++i) { ... }
+
+**
+     * 1
+       And comparison with constants is faster than comparison with variables! But a modern C compiler
+       is usually smart enough to reorder your loops on its own, or unroll them for you, as long as it
+       knows that this is safe.
+     * That down counting loop looks buggy to me unless you use ugly offsets in main loop body, assuming
+       we access array[n], to access elements 0..n-1, it's for (i=n; i--;) { ... } which is reverse of
+       for (i=0; i!=n; ++i) { ... }
+     * I am curious how much speed up this kind of technique can provide, I am writing some computation
+       programs, which takes long time to run because of the data (100GB), I am wondering whether I
+       should do this kind of optimizations. Assume there is no optimization can be done about
+       algorithm.
+
+***
+   Another thing that was not mentioned:
+     * Know your requirements: don't optimize for situations that will unlikely or never happen,
+       concentrate on the most bang for the buck
+
+***
+   basics/general:
+     * Do not optimize when you have no problem.
+     * Know your platform/CPU...
+     * ...know it thoroughly
+     * know your ABI
+     * Let the compiler do the optimization, just help it with the job.
+
+   some things that have actually helped:
+
+   Opt for size/memory:
+     * Use bitfields for storing bools
+     * re-use big global arrays by overlaying with a union (be careful)
+
+   Opt for speed (be careful):
+     * use precomputed tables where possible
+     * place critical functions/data in fast memory
+     * Use dedicated registers for often used globals
+     * count to-zero, zero flag is free
+
+***
+   Difficult to summarize ...
+     * Data structures:
+          + Splitting of a data structure depending on case of usage is extremely important. It is
+            common to see a structure that holds data that is accessed based on a flow control. This
+            situation can lower significantly the cache usage.
+          + To take into account cache line size and prefetch rules.
+          + To reorder the members of the structure to obtain a sequential access to them from your code
+
+     * Algorithms:
+          + Take time to think about your problem and to find the correct algorithm.
+          + Know the limitations of the algorithm you choose (a radix-sort/quick-sort for 10 elements to
+            be sorted might not be the best choice).
+
+     * Low level:
+          + As for the latest processors it is not recommended to unroll a loop that has a small body.
+            The processor provides its own detection mechanism for this and will short-circuit whole
+            section of its pipeline.
+          + Trust the HW prefetcher. Of course if your data structures are well designed ;)
+          + Care about your L2 cache line misses.
+          + Try to reduce as much as possible the local working set of your application as the
+            processors are leaning to smaller caches per cores (C2D enjoyed a 3MB per core max where
+            iCore7 will provide a max of 256KB per core + 8MB shared to all cores for a quad core die.).
+
+   The most important of all: Measure early, Measure often and never ever makes assumptions, base your
+   thinking and optimizations on data retrieved by a profiler (please use PTU).
+
+   Another hint, performance is key to the success of an application and should be considered at design
+   time and you should have clear performance targets.
+
+   This is far from being exhaustive but should provide an interesting base.
+
+***
+   These days, the most important things in optimzation are:
+     * respecting the cache - try to access memory in simple patterns, and don't unroll loops just for
+       fun. Use arrays instead of data structures with lots of pointer chasing and it'll probably be
+       faster for small amounts of data. And don't make anything too big.
+     * avoiding latency - try to avoid divisions and stuff that's slow if other calculations depend on
+       them immediately. Memory accesses that depend on other memory accesses (ie, a[b[c]]) are bad.
+     * avoiding unpredictabilty - a lot of if/elses with unpredictable conditions, or conditions that
+       introduce more latency, will really mess you up. There's a lot of branchless math tricks that are
+       useful here, but they increase latency and are only useful if you really need them. Otherwise,
+       just write simple code and don't have crazy loop conditions.
+
+   Don't bother with optimizations that involve copy-and-pasting your code (like loop unrolling), or
+   reordering loops by hand. The compiler usually does a better job than you at doing this, but most of
+   them aren't smart enough to undo it.
+
+***
+   Inline functions! Inspired by the profiling fans here I profiled an application of mine and found a
+   small function that does some bitshifting on MP3 frames. It makes about 90% of all function calls in
+   my applcation, so I made it inline and voila - the program now uses half of the CPU time it did
+   before.
+
+***
+   On most of embedded system i worked there was no profiling tools, so it's nice to say use profiler
+   but not very practical.
+
+   First rule in speed optimization is - find your critical path.
+   Usually you will find that this path is not so long and not so complex. It's hard to say in generic
+   way how to optimize this it's depend on what are you doing and what is in your power to do. For
+   example you want usually avoid memcpy on critical path, so ever you need to use DMA or optimize, but
+   what if you hw does not have DMA ? check if memcpy implementation is a best one if not rewrite it.
+   Do not use dynamic allocation at all in embedded but if you do for some reason don't do it in
+   critical path.
+
+   Organize your thread priorities correctly, what is correctly is real question and it's clearly system
+   specific.
+
+   We use very simple tools to analyze the bottle-necks, simple macro that store the time-stamp and
+   index. Few (2-3) runs in 90% of cases will find where you spend your time.
+   And the last one is code review a very important one. In most case we avoid performance problem
+   during code review very effective way :)
+
+***
+    1. Measure performance.
+    2. Use realistic and non-trivial benchmarks. Remember that "everything is fast for small N".
+    3. Use a profiler to find hotspots.
+    4. Reduce number of dynamic memory allocations, disk accesses, database accesses, network accesses,
+       and user/kernel transitions, because these often tend to be hotspots.
+    5. Measure performance.
+
+***
+   Sometimes you have to decide whether it is more space or more speed that you are after, which will
+   lead to almost opposite optimizations. For example, to get the most out of you space, you pack
+   structures e.g. #pragma pack(1) and use bit fields in structures. For more speed you pack to
+   align with the processors preference and avoid bitfields.
+
+   Another trick is picking the right re-sizing algorithms for growing arrays via realloc, or better
+   still writing your own heap manager based on your particular application. Don't assume the one that
+   comes with the compiler is the best possible solution for every application.
+
+***
+   Great lists. I will just add one tip I didn't saw in the above lists that in some case can yield huge
+   optimisation for minimal cost.
+     * bypass linker
+       if you have some application divided in two files, say main.c and lib.c, in many cases you can
+       just add a \#include "lib.c" in your main.c That will completely bypass linker and allow for much
+       more efficient optimisation for compiler.
+
+   The same effect can be achieved optimizing dependencies between files, but the cost of changes is
+   usually higher.
+
+***
+   Sometimes Google is the best algorithm optimization tool. When I have a complex problem, a bit of
+   searching reveals some guys with PhD's have found a mapping between this and a well-known problem and
+   have already done most of the work.
+
+***
+   I would recommend optimizing using more efficient algorithms and not do it as an afterthought but
+   code it that way from the start. Let the compiler work out the details on the small things as it
+   knows more about the target processor than you do.
+
+   For one, I rarely use loops to look things up, I add items to a hashtable and then use the hashtable
+   to lookup the results.
+
+   For example you have a string to lookup and then 50 possible values. So instead of doing 50 strcmps,
+   you add all 50 strings to a hashtable and give each a unique number ( you only have to do this once
+   ). Then you lookup the target string in the hashtable and have one large switch with all 50 cases (
+   or have functions pointers ).
+
+   When looking up things with common sets of input ( like css rules ), I use fast code to keep track of
+   the only possible solitions and then iterate thought those to find a match. Once I have a match I
+   save the results into a hashtable ( as a cache ) and then use the cache results if I get that same
+   input set later.
+
+   My main tools for faster code are:
+
+   hashtable - for quick lookups and for caching results
+   qsort     - it's the only sort I use
+   bsp       - for looking up things based on area ( map rendering etc )
+
+
+---
+

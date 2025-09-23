@@ -1,0 +1,381 @@
+filename: c_handwritting_memory_pool_and_code_analisys_20230809.txt
+https://devpress.csdn.net/cloud/62f652b97e6682346618b088.html
+
+Handwriting memory pool and code analysis [C language]
+2022-08-12
+
+   The memory pool manages the heap When a process executes, the operating system will allocate 0~4G of
+   virtual memory space to the process. The parts that programmers can manage (allocate and release)
+   [09231064ff3e495da0f69e95b2114d43.jpeg] (In: Handwriting memory pool and code analysis C language.pdf)
+
+The memory pool manages the heap
+   When a process executes, the operating system will allocate 0~4G of virtual memory space to the
+   process. The parts that programmers can manage (allocate and release) are mmap mapping area and heap
+   heap area, and the part managed by memory pool is the heap area of user process.
+
+Why use a memory pool?
+
+Memory pool is used to avoid heap fragmentation
+     * Avoid frequent allocation and release of memory (prevent fragmentation of heap area)
+
+   When the client connects to the server, the server will prepare part of the heap for message
+   retention. When a connection is successful, the server will allocate a section of memory belonging to
+   the connection in the heap. When the connection is closed, the allocated memory will be released.
+   However, when the number of connections is large and too frequent, it is inevitable to allocate and
+   release memory frequently. This will lead to small windows in the heap, that is, heap fragmentation.
+
+What happens if the heap is fragmented?
+     * An undetectable BUG will appear after working for a long time
+     * Unable to allocate a large and whole block of memory, malloc returns NULL
+
+Memory pool design
+Scenario: how to implement a memory pool that can avoid memory fragmentation on a clean heap?
+
+First: use linked list to manage memory
+   Use the linked list to connect the allocated pieces of memory in the heap area, set the flag (whether
+   to be used) and let each segment of memory on the linked list node expand slowly.
+
+What problems will occur when using the linked list alone?
+     * Memory blocks will be divided smaller and smaller, and the linked list will become longer and
+       longer. You know you can't divide more memory.
+
+So the idea of fixed memory is added to the design
+   When allocating a small segment of memory, the small segment of memory is divided fixedly, as shown
+   below
+    1. 16bytes
+    2. 32bytes
+    3. 64bytes
+    4. 128bytes
+    5. 256byts
+    6. 512bytes
+
+   However, different fixed small memory allocations will cause the following problems:
+    1. Find slow
+          + Find on assignment
+          + Find on release
+    2. Gaps also occur between blocks
+          + Cannot merge blocks
+          + Small piece recycling trouble
+
+Therefore, the memory pool model of custom fixed block and random block is finally obtained
+
+Memory pool
+Memory pool workflow
+Memory pool structure
+
+// Memory pool
+struct mp_pool_s{
+	size_t max;
+	struct mp_node_s *current;   // Small memory area currently pointed to, linked list structure
+	struct mp_large_s *large;    // Block memory
+	struct mp_node_s *head[0];   // Header of small memory
+};
+
+
+Small pieces of memory are linked by a one-way linked list
+
+// Small memory
+struct mp_node_s{
+	unsigned char *last;    // Current
+	unsigned char *end;     // last
+	struct mp_node_s *next; // Next 4k
+	size_t failed;
+};
+
+Large blocks of memory are also linked with one-way linked lists
+
+// Block memory
+struct mp_large_s{
+	struct mp_large_s *next;
+	void *alloc;
+};
+
+API
+
+Create memory pool
+    1. Determine the size as the fixed size of the small memory
+    2. First, last points to the first byte of the node
+    3. end points to the last
+
+// Create memory pool
+struct mp_pool_s *mp_create_pool(int size) {
+
+	struct mp_pool_s *pool;
+	int ret = posix_memalign((void**)&pool, ALIGNMENT, size + sizeof(struct mp_pool_s) + sizeof(struct mp_node_s));
+	if (ret) return NULL;
+
+	pool->max = (size<MP_MAX_ALLOC_FORM_POOL) ? size : MP_MAX_ALLOC_FORM_POOL;
+	pool->current = pool->head;
+	pool->head->last = (unsigned char*)pool + sizeof(struct mp_pool_s) + sizeof(struct mp_node_s);
+	pool->head->end = pool->head->last + size;
+	pool->head->failed = 0;
+	pool->large = NULL;
+
+	return pool;
+}
+
+Destroy memory pool
+    1. First release a large block of memory and traverse the linked list
+    2. Then release the small block and traverse the linked list
+
+// Destroy memory pool
+void mp_destroy_pool(struct mp_pool_s *pool) {
+
+	struct mp_large_s *large;
+
+	for(large = pool->large; large!=NULL; large = large->next) { //Release block
+		if (large->alloc)free(large->alloc);
+	}
+
+	struct mp_node_s *h = pool->head->next;
+
+	while(h) {       //Release small pieces
+		struct mp_pool_s *next = h->next;
+		free(h);
+		h = h->next;
+	}
+
+	free(pool);
+}
+
+Reset memory pool
+    1. Free a large block of memory first
+    2. Then point the last of the small memory to the first location of the memory
+
+// Reset memory pool
+void mp_reset_pool(struct mp_pool_s *pool) {
+
+	struct mp_node_s *head;
+	struct mp_large_s *large;
+
+	for(large = pool->large; large; large=large->next) { // Large blocks will be released
+		if (large->alloc)free(large->alloc);
+	}
+
+	pool->large = NULL;
+
+	for(head = pool->head; head; head = head->next) { // Point the head position of each node to the position
+                                                      // you just created
+		head->last = (unsigned char*)head + sizeof(struct mp_node_s);
+	}
+}
+
+
+Allocate a small block of memory to the memory pool
+    1. First, allocate a whole block (size psize) of small memory, and create a node to point to this
+       memory
+    2. Memory alignment, using the tail insertion method to insert the last position of the linked list
+    3. Readjust the current direction of the memory pool
+
+/* Allocate a small memory block of psize size, and start pointing to the position
+ * head - > last = memblk + size, linked list tail interpolation method
+ */
+static void *mp_alloc_block(struct mp_pool_s *pool, size_t size) {
+
+	unsigned char *memblk;
+	struct mp_node_s *head = pool->head;
+	size_t psize = (size_t)(head->end - (unsigned char*)head);  // psize = = parameter entered when creating memory pool
+
+	int ret = posix_memalign((void*)&memblk, ALIGNMENT, psize); // Allocate memory 24 byte alignment
+	if (ret)return NULL;
+
+	struct mp_node_s *p, *new_node, *current;
+	new_node = (struct mp_node_s*)memblk;
+
+	new_node->end = memblk + psize;
+	new_node->next = NULL;
+	new_node->failed = 0;
+
+	memblk += sizeof(struct mp_node_s);           // Skip node structure for memory alignment
+	memblk = mp_align_ptr(memblk, ALIGNMENT);     // memory alignment
+	new_node->last = memblk + size;
+	current = pool->current;
+
+	for(p = current; p->next; p = p->next) {      // Tail interpolation
+		if (p->failed++>4)current = p->next;
+	}
+
+	p->next = new_node;
+	pool->current = current ? current : new_node;
+
+	return memblk;
+}
+
+Take out a memory of size from a small memory (no byte alignment)
+    1. First, get the small block of memory pointed to by the current memory pool
+    2. Follow the nodes one by one to find out whether there is enough memory allocation in the small
+       memory
+    3. If any, byte align the memory and return
+    4. If there is no suitable block of memory, allocate an additional block of memory
+    5. If the small memory allocation fails, the size is allocated by creating a large memory
+
+// Take a block of size memory on a small memory area
+void *mp_nalloc(struct mp_pool_s *pool, size_t size) {
+
+	unsigned char *m;
+	struct mp_node_s  *p;
+
+	if (size<=pool->max) {
+		p = pool->current;  //Current block point
+
+		do {
+			m = p->last;
+			if ((size_t)(p->end - m)>=size) { // If the remaining memory of the current node is larger than size,
+                                              // it will be allocated in the node
+				p->last = m + size;
+				return m;
+			}
+
+			p = p->last;
+			//If the remaining size of no section is greater than size, reassign a block
+		} while(p);
+
+		return mp_alloc_block(pool, size);
+	}
+	//If the size exceeds the limit of small memory, it will be allocated in the way of large content allocation
+	return mp_alloc_large(pool, size);
+}
+
+Take out a block of size memory from a small block of memory (do byte alignment)
+
+// In a small memory area, take a memory byte of size to align
+void *mp_alloc(struct mp_pool_s *pool, size_t size) {
+
+	unsigned char *memblk;
+	struct mp_pool_s *p;
+
+	if (size<=pool->max) {
+		p = pool->current;                              // Current block point
+
+		do {
+			memblk = mp_align_ptr(p->last, ALIGNMENT);  // Do byte alignment
+			if ((size_t)(p->end-memblk) >= size) {      // If the remaining memory of the current node is larger
+                                                        // than size, it will be allocated in the node
+				p->last = memblk + size;
+				return memblk;
+			}
+			p = p->next;
+		} while(p);
+
+		//If the remaining size of no section is greater than size, reassign a block
+		return mp_alloc_block(pool, size);
+	}
+	//If the size exceeds the limit of small memory, it will be allocated in the way of large content allocation
+	return mp_alloc_large(pool, size);
+}
+
+
+Take out a memory of size from a small memory and initialize it to 0
+
+// Allocate memory and initialize to 0
+void *mp_calloc(struct mp_pool_s *pool, size_t size) {
+
+	void *p = mp_alloc(pool, size);
+
+	if (p) {
+		memset(p, 0 , size);
+	}
+	return p;
+}
+
+Allocate large memory of size (nodes of large memory are placed in small memory)
+    1. First, malloc gets the first address of the memory, and then hangs the large memory on the memory
+       pool. If the structure of the large memory is not created, it is created in the small memory
+    2. After creation, hook up and return the first address of large memory
+
+// Create large blocks of memory
+static void *mp_alloc_large(struct mp_pool_s *pool, size_t size) {
+
+	void *p = malloc(size);                         //distribution
+	if (p==NULL)return NULL;
+
+	size_t n = 0;
+	struct mp_large_s  *large;
+
+	for(large=pool->large; large; large = large->next) {
+		if (large->alloc == NULL) {
+			large->alloc = p;
+			return p;
+		}
+		if (n++>3)break;
+	}
+
+	//Large memory cannot be connected
+	large = mp_alloc(pool, sizeof(struct mp_large_s));
+	if (large==NULL) {
+		free(large);
+		return NULL;
+	}
+
+	large->alloc = p;
+	large->next = pool->large;
+	pool->large = large;
+
+	return p;
+}
+
+Frees a specified chunk of memory p
+
+     * Find before release
+
+// Free memory p
+ void mp_free(struct mp_pool_s *pool, void *p) {
+
+	 struct mp_large_s * large;
+	 for(large = pool->large; large; large = large->next) {
+
+		 if (p==large->alloc) {
+			 free(large->alloc);
+			 large->alloc = NULL;
+			 return;
+		 }
+	 }
+ }
+
+Overload posix_memalign
+
+// Reconfiguration mem_memalign
+void *mp_memalign(struct mp_pool_s *pool, size_t size, size_t alignment) {
+
+	void *p;
+
+	int ret = posix_memalign(&p, alignment, size);
+
+	if (ret) {
+		return NULL;
+	}
+
+	struct mp_large_s *large = mp_alloc(pool, sizeof(struct mp_large_s ));
+	if (ret)return NULL;
+
+	struct mp_large_s *large = mp_alloc(pool, sizeof(struct mp_large_s));
+
+	if (large==NULL) {
+		free(p);
+		return NULL;
+	}
+
+	large->alloc = p;
+	large->next = pool->large;
+	pool->large = large;
+
+	return p;
+}
+
+Memory alignment formula
+
+#define MP_ALIGNMENT                    32
+#define MP_PAGE_SIZE                    4096
+#define MP_MAX_ALLOC_FROM_POOL  (MP_PAGE_SIZE-1)
+
+#define mp_align(n, alignment) (((n)+(alignment-1)) & ~(alignment-1))
+#define mp_align_ptr(p, alignment) (void *)((((size_t)p)+(alignment-1)) & ~(alignment-1))
+
+So far, all the contents of the memory pool are here
+
+It is recommended to take a look at the memory pool of nginx. The demo of this memory pool is very similar
+to that of nginx
+
+
+---
+

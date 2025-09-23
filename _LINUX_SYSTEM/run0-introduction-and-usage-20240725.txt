@@ -1,0 +1,310 @@
+filename: run0_introduction-and-usage_20240725.txt
+https://linux-audit.com/systemd/run0-introduction-and-usage/
+
+Run0: introduction and usage
+
+Introduction
+Run0 was introduced in systemd version 256 and is intended as an alternative to sudo. Both commands
+elevate privileges, but are also somewhat different. Author Lennart Poettering describes run0 as somewhat
+more similar to the ssh command than it is to sudo.
+
+Basics
+When you use run0, it will create a transient service unit. Opposed to a permanent service unit that
+will run for a long time, transient units typically run very shortly. It can be compared with a towel
+versus a disposable paper towel. When the task is completed or you switched back to an unprivileged user,
+the service unit will be gone.
+
+Differences with sudo
+Run0 uses isolated services (transient units). Almost no execution or security context credentials are
+transferred into this new service.
+
+Run0 allocates a pseudo-tty, further isolating the unit.
+When possible, the authentication prompt is isolated from the terminal. This is done via polkit
+authentication.
+
+SetUID and SetGID file access bit are not used.
+No configuration file like /etc/sudoers.
+
+Usage and basic options
+Like most tools, run0 comes with a range of options. Here are some of the basic ones that you probably
+will use.
+
+-----------------------------------------------------------------------------------
+Option                    Action
+-----------------------------------------------------------------------------------
+--background=[COLOR]      Set background color, or disable when set empty value
+--chdir=PATH              Set current working directory to PATH
+--description="TEXT"      Give the transient unit a custom description
+--nice=VALUE              Define nice level (19 to -20)
+--property=NAME=VALUE     Set property (e.g. sandboxing/resource limitation)
+--setenv=ENV=VALUE        Declare an environment variable ENV with value VALUE
+--unit=NAME               Define a name of our transient unit instead of random one
+-----------------------------------------------------------------------------------
+
+Let's have a look at how to use run0 and apply these options.
+
+Become root user
+To elevate permissions without running a specific command, run run0 without any parameters.
+$> run0
+
+Background color
+You may notice that the background color changed, one of the features of run0. Don't like this
+color? Let's use a blue background instead of red.
+$> run0 --background=44 ps -ef
+
+Use a blue background with bold characters. Use quotes when using the semicolon character.
+$> run0 --background="44;1" ps -ef
+
+Not interested in a background color at all? Give it an empty value.
+$> run0 --background= ps -ef
+
+Unit and description
+When we run a command with run0, it will be assigned a new service unit. This is called an transient unit,
+one of a short duration. The name that is assigned is somewhat random, something like 'run-u302'. By
+using the option --unit= we can give it a custom name. Additionally, we can provide a description as well.
+
+By defining a clear name to the unit, it can easily be monitored. Let's fire up a new task and look
+at the status of our new service unit.
+
+$> run0 --nice=19 --unit=slowcopy --description="This is a copy task" systemctl status slowcopy.service
+==== AUTHENTICATING FOR org.freedesktop.systemd1.manage-units ====
+Authentication is required to manage system services or other units.
+Authenticating as: Michael (michael)
+Password:
+==== AUTHENTICATION COMPLETE ====
+● slowcopy.service - This is a copy task
+Loaded: loaded (/run/systemd/transient/slowcopy.service; transient)
+Transient: yes
+Active: active (running) since Wed 2024-06-19 10:33:39 CEST; 4ms ago
+Invocation: 1e903a4c842c453dba816188f65ca8d6
+Main PID: 4804 (systemctl)
+Tasks: 2 (limit: 4671)
+Memory: 1.5M (peak: 1.5M)
+CPU: 6ms
+CGroup: /user.slice/slowcopy.service
+        |-4804 /usr/bin/systemctl status slowcopy.service
+        `-4805 less
+
+Change work directory
+The work directory defaults to the home directory of the user. To adjust this, use --chdir= followed by
+the work directory.
+$> run0 --chdir=/var pwd
+
+Nice level
+Run0 allows to run a task with elevated privileges and directly an assignment of the nice level. This is very
+useful for longer running tasks like a file copy. This way it won't impact the production system too much.
+$> run0 --nice=19 my-task-with-low-priority
+
+Environment variables
+If you need to provide an environment variable, then this can be done using --setenv= followed by the
+variable and its value. To test that it is really available, let's display the environment variables
+from within the newly created service.
+$> run0 --setenv=SECRET=true bash -c 'export'
+
+Sandboxing capabilities with properties
+One of the most powerful features with run0 is to set a property. A property defines one or more aspects
+of the environment that processes are running in. To see available properties, use the show subcommand
+of systemctl.
+$> systemctl show dmesg.service
+
+Defining a property within run0 is an interesting combination. So even though you elevate privileges,
+you can still define restrictions and sandbox the command or application.
+
+Example
+Let's say you created a new shell script to automate an important system task. While it may need root
+privileges to run and interact with other commands, the script should not be able to wreck the system. One
+option is to use the ProtectSystem setting, which can mark the file system as read-only.
+
+Let's run a simple task to write a string of text into a file.
+$> run0 --property=ProtectSystem=strict bash -c 'echo test > /var/log/write-test'
+/usr/bin/bash: line 1: /var/log/write-test: Read-only file system
+
+So even though we run0 will give us root permissions, we are not allowed to write to a new file in
+our /var/log directory. But what if exactly that directory is what our script requires as part of its
+tasks? No problem, just set a second property that grants us write permission for that particular location.
+
+$> run0 --property=ProtectSystem=strict --property=ReadWritePaths=/var/log/write-test bash -c \
+	'echo test > /var/log/write-test'
+
+Now our file can be created, exactly as we intended. Testing a new script that requires root permissions
+has become a lot safer!
+
+Learn more about run0
+This article uses the run0 command to achieve its tasks. For this popular tool there is a cheat sheet
+available!
+
+[**1] Run0 man page.
+
+
+---
+[**1]
+https://manpages.debian.org/unstable/systemd/run0.1.en.html
+
+RUN0(1)     run0     RUN0(1)
+
+run0 - Elevate privileges
+SYNOPSIS
+
+run0 [OPTIONS...] [COMMAND...]
+
+DESCRIPTION
+run0 may be used to temporarily and interactively acquire elevated or different privileges. It serves a
+similar purpose as sudo(8), but operates differently in a couple of key areas:
+
+- No execution or security context credentials are inherited from the caller into the invoked commands, as
+  they are invoked from a fresh, isolated service forked off by the service manager.
+
+- Authentication takes place via polkit, thus isolating the authentication prompt from the terminal (if
+  possible).
+
+- An independent pseudo-tty is allocated for the invoked command, detaching its lifecycle and isolating it
+  for security.
+
+- No SetUID/SetGID file access bit functionality is used for the implementation.
+
+Altogether this should provide a safer and more robust alternative to the sudo mechanism, in particular in
+OS environments where SetUID/SetGID support is not available (for example by setting the NoNewPrivileges=
+variable in systemd-system.conf(5)).
+
+Any session invoked via run0 will run through the "systemd-run0" PAM stack.
+
+Note that run0 is implemented as an alternative multi-call invocation of systemd-run(1).
+
+OPTIONS
+The following options are understood:
+
+--no-ask-password
+Do not query the user for authentication for privileged operations.
+
+Added in version 256.
+
+--unit=
+Use this unit name instead of an automatically generated one.
+
+Added in version 256.
+
+--property=
+Sets a property on the service unit that is created. This option takes an assignment in the same format as
+systemctl(1)'s set-property command.
+
+Added in version 256.
+
+--description=
+Provide a description for the service unit that is invoked. If not specified, the command itself will be
+used as a description. See Description= in systemd.unit(5).
+
+Added in version 256.
+
+--slice=
+Make the new .service unit part of the specified slice, instead of user.slice.
+
+Added in version 256.
+
+--slice-inherit
+Make the new .service unit part of the slice the run0 itself has been invoked in. This option may be
+combined with --slice=, in which case the slice specified via --slice= is placed within the slice the run0
+command is invoked in.
+
+Example: consider run0 being invoked in the slice foo.slice, and the --slice= argument is bar. The unit will
+then be placed under foo-bar.slice.
+
+Added in version 256.
+
+--user=, -u, --group=, -g
+Switches to the specified user/group instead of root.
+
+Added in version 256.
+
+--nice=
+Runs the invoked session with the specified nice level.
+
+Added in version 256.
+
+--chdir=, -D
+Runs the invoked session with the specified working directory. If not specified defaults to the client's
+current working directory if switching to the root user, or the target user's home directory otherwise.
+
+Added in version 256.
+
+--setenv=NAME[=VALUE]
+Runs the invoked session with the specified environment variable set. This parameter may be used more than
+once to set multiple variables. When "=" and VALUE are omitted, the value of the variable with the same name
+in the invoking environment will be used.
+
+Added in version 256.
+
+--background=COLOR
+Change the terminal background color to the specified ANSI color as long as the session lasts. If not specified,
+the background will be tinted in a reddish tone when operating as root, and in a yellowish tone when
+operating under another UID, as reminder of the changed privileges. The color specified should be an ANSI X3.64
+SGR background color, i.e. strings such as "40", "41", ..., "47", "48;2;...", "48;5;...". See ANSI Escape
+Code (Wikipedia) for details. Set to an empty string to disable.
+
+Example: "--background=44" for a blue background.
+
+Added in version 256.
+
+--machine=
+Execute operation on a local container. Specify a container name to connect to.
+
+Added in version 256.
+
+-h, --help
+Print a short help text and exit.
+
+--version
+Print a short version string and exit.
+
+All command line arguments after the first non-option argument become part of the command line of the
+launched process. If no command line is specified an interactive shell is invoked. The shell to invoke may
+be controlled via --setenv=SHELL=... and currently defaults to the originating user's shell (i.e. not the
+target user's!) if operating locally, or /bin/sh when operating with --machine=.
+
+EXITA STATUS
+On success, 0 is returned. If run0 failed to start the session or the specified command fails, a non-zero
+return value will be returned.
+
+ENVIRONMENT VARIABLES
+As with systemd-run, the session will inherit the system environment from the service manager. In addition,
+the following environment variables will be set:
+
+$TERM
+Copied from the $TERM of the caller. Can be overridden with --setenv=
+
+Added in version 256.
+
+$SUDO_USER
+Set to the username of the originating user.
+
+Added in version 256.
+
+$SUDO_UID
+Set to the numeric UNIX user id of the originating user.
+
+Added in version 256.
+
+$SUDO_GID
+Set to the primary numeric UNIX group id of the originating session.
+
+Added in version 256.
+
+SEE ALSO
+systemd(1), systemd-run(1), sudo(8), machinectl(1)
+
+NOTES
+1. polkit
+https://www.freedesktop.org/wiki/Software/polkit
+
+2. ANSI Escape Code (Wikipedia)
+https://en.wikipedia.org/wiki/ANSI_escape_code#SGR_(Select_Graphic_Rendition)_parameters
+    systemd 256.4
+
+Source file:         run0.1.en.gz (from systemd 256.4-1)
+Source last updated: 2024-07-24T13:23:56Z
+Converted to HTML:   2024-07-24T21:23:46Z
+
+debiman c35ad7d, see github.com/Debian/debiman. Found a problem? See the FAQ.
+
+
+---
+

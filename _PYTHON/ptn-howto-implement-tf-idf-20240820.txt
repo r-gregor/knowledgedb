@@ -1,0 +1,280 @@
+filename: ptn_howto-implement-tf-idf_20240820.txt
+https://jamesg.blog/2024/08/17/tf-idf-python/
+
+How to implement TF-IDF in Python
+August 17, 2024
+
+   In the "[https://jamesg.blog/2024/07/16/build-a-search-index/]How to build a search index in Python" tutorial,
+   we walked through how to build a search index in Python. This index, when queried, gives equal weights to
+   all words that you use in your query. Thus, you can retrieve documents that contain words, but the
+   documents are not ordered in any way.
+
+   Once you have a search index, the next step is to implement a ranking algorithm. A ranking algorithm
+   takes documents that meet the criteria in the search (called "candidates") and ranks them according
+   to a specific formula. There are many formulas that are widely implemented for document ranking,
+   including TF-IDF and BM25.
+
+   In this guide, we are going to implement the Term Frequency / Inverse Document Frequency (TF-IDF)
+   algorithm.
+
+   Let's get started!
+
+Understanding TF-IDF
+   Although it has many variants, TF-IDF says that the relevance of a document to a query is equal to
+   the frequency of that term (TF) within a specific document multiplied by a score (IDF) that aims to
+   measure the importance of the word.
+
+   Term frequency is measured as:
+	 term frequency (WORD) = # of times WORD appears in a document / total # of words in the document
+
+   Suppose we have the search query "started with". Using term frequency alone, the document that
+   contains the words "started" and "with" the most will be boosted to the top of the search results.
+
+   But there is a problem with this approach: more common words will inflate the score, which will muddy
+   the results. That's where Inverse Document Frequency (IDF) comes in. IDF aims to estimate the
+   importance of a word. It is based on the assumption that words that are common across all documents
+   in a text are less important than those that are less common.
+
+   IDF is measured as:
+	 inverse document frequency (WORD) = log (# of documents / # of documents that contain WORD)
+
+   Suppose we have the search query "what is Aeropress". IDF would likely assign low scores to "what"
+   and "is", because those words are probably more common in the corpus of text being searched.
+   "Aeropress", on the other hand, would get more weight, which means documents returned would be more
+   related to Aeropress.
+
+   TF-IDF is not perfect, however. The algorithm does not care if two words are next to each other:
+   every word is treated individually. Suppose we are searching for "Aeropress brewing methods". All of
+   those words may be uncommon in a corpus of text, but documents that talk about all coffee brewing
+   methods and mention Aeropress as an example may be elevated above short articles that are dedicated
+   specifically to Aeropress brewing methods and use the words "brewing" and "methods" less.
+
+   Of note, TF-IDF can be slow for large datasets. You need to calculate TF-IDF scores for all documents
+   in a dataset for a given search, which means that search time will increase for longer queries and as
+   more documents are added to the document store.
+
+   With that said, TF-IDF is a good place to start in understanding search ranking.
+
+Calculating TF-IDF
+   We will continue with our example of building a search engine for song lyrics.
+
+   We will work with the following documents:
+documents = [
+	{
+		"title": "tolerate it",
+		"lyric": "I made you my temple, my mural, my sky"
+	},
+	{
+		"title": "my tears ricochet",
+		"lyric": "And I still talk to you when I'm screaming at the sky",
+	},
+	{
+		"title": "The Bolter",
+		"lyric": "Started with a kiss"
+	},
+]
+
+   First, we need to import a few dependencies:
+     * math: We will use this to implement the TF-IDF formula.
+     * string: We will use this to remove punctuation from documents.
+     * collections: We will use the defaultdict method to more efficiently create dictionaries.
+
+import math
+import string
+from collections import defaultdict
+
+   With our dependencies imported and documents set up, we can start implementing the algorithm.
+
+   First, we need to define:
+    1. The total number of documents.
+    2. A dictionary that can hold the word counts of words across all documents.
+    3. A dictionary to store the term frequency of words in individual documents.
+    4. A dictionary to store the inverse document frequencies of each word.
+
+document_count = len(documents)
+
+word_counts = defaultdict(int)
+document_term_frequencies = {}
+inverse_document_frequencies = {}
+
+   We can then start to compute the counts of each word, and how many times each word comes up in each
+   document:
+
+for doc in documents:
+	lyric = doc["lyric"].lower().translate(str.maketrans("", "", string.punctuation))
+	number_of_words = len(lyric.split())
+
+	document_term_frequencies[doc["title"]] = defaultdict(int)
+
+	for word in lyric.split():
+		word_counts[word] += 1
+		document_term_frequencies[doc["title"]][word] += 1
+
+	document_term_frequencies[doc["title"]] = {
+		word: count / number_of_words
+		for word, count in document_term_frequencies[doc["title"]].items()
+	}
+
+   The defaultdict allows us to define a dictionary that automatically adds a value if it does not
+   already exist.
+
+   Above, we:
+    1. Remove all punctuation in each document lyric and convert the lyric to lowercase.
+    2. Split the lyric into a list of words.
+    3. Compute word counts for each word.
+    4. Compute the term frequency (TF) for each word by dividing the number of times the word appears in
+       the document by the total number of words in the document.
+
+   We now have a dictionary with all of the TF scores for all documents.
+
+   With this information, we can calculate IDF:
+
+for word, count in word_counts.items():
+	inverse_document_frequencies[word] = (
+		math.log(document_count / count)
+	)
+
+   For each word, we take the logarithm of the total number of documents divided by the number of times
+   the word appears in all documents. We now have IDF scores for all words.
+
+Searching with TF-IDF
+   We have the two pieces of information we need to run a TF-IDF search: term frequency for all words in
+   each document and the inverse document frequencies across all documents. These pieces of information
+   need to be pre-computed across a whole corpus of text. They can then be used at query time to rank
+   searches.
+
+   With our TF-IDF index ready, we can write a function that computes a TF-IDF score for every document
+   given a search query:
+
+def tfidf(query, documents):
+	words = query.split()
+	results = {}
+
+	for doc in documents:
+		tfidfs = [
+			document_term_frequencies[doc["title"]].get(word, 0)
+			* inverse_document_frequencies.get(word, 0)
+			for word in words
+		]
+
+		results[doc["title"]] = sum(tfidfs)
+
+	results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+
+	return results
+
+   This function accepts a query and computes a TF-IDF score for every document in our corpus of text
+   using the TF and IDF values we computed earlier. To compute this score, we take each word in the
+   query, retrieve its TF and multiply it by IDF, and add up all the scores for all words. All words are
+   given equal weight.
+
+   We then sort the results in descending order by TF-IDF score. The higher the score, the more relevant
+   the document is to our input query.
+
+   If a word does not appear in our documents, we give it a 0 score in the TF-IDF calculation.
+
+Try the index
+   Let's run a few searches to see how our system performs on our documents. The search my sky returns:
+
+('tolerate it', 0.48949612312312935)
+('my tears ricochet', 0.11712209234234702)
+('The Bolter', 0.0)
+
+   "tolerate it" is the only document that contains both "my" and "sky", so it is boosted higher. "sky"
+   is in "my tears ricochet" so it is ranked second. Neither word is in The Bolter, so that document is
+   last.
+
+   Let's search for "my sky started with a kiss":
+
+('The Bolter', 2.09861228866811)
+('tolerate it', 0.48949612312312935)
+('my tears ricochet', 0.11712209234234702)
+
+   All the words in "started with a kiss" are in "The Bolter", so it is ranked at the top. "my" and
+   "sky" is in "tolerate it", so that song is ranked second. "sky" is in "my tears ricochet" so the song
+   still has a score, albeit a lower one.
+
+   Before this system, our search result returned all lyrics that contained a word. Now, we can order
+   candidates using the TF-IDF algorithm.
+
+Benchmarking
+   I tested the cabove ode on 20,000 copies of the documents list (60,000 lyrics). My test was run on an
+   M1 Macbook Air. It took 626.95ms to compute the TF-IDF index. It took 0.695918083190918 to run 10
+   queries (0.069s / query on average).
+
+   I also tested the above code on a list of 500,000 copies of the documents list. This created a list
+   of 1.5 million lyrics. It took 13.4 seconds to compute the TF-IDF index. It took 14.49 seconds to run
+   10 search queries (~1.4s / query on average).
+
+Bonus: Combining the index with our query language
+   This section is for readers of the "How to build a query language in Python" blog post. If you
+   are interested in writing a query language for a search engine, I encourage you to read that blog
+   post!
+
+   In "How to build a query language in Python", we walked through how to build a custom query
+   language for a search index. This query language doesn't order results: it finds all potential
+   results, then returns them unordered. Thus, we need a ranking algorithm to order them. Finding all
+   candidates that you can rank, then ranking those candidates is an essential search pattern.
+
+   With a few lines of code, we can use the TF-IDF algorithm above to rank results from our query
+   language.
+
+   Indeed, to get started, we can use all of the code from this guide to compute the TF and IDF scores
+   for our documents. Then, to use TF-IDF with our query language, we need to:
+	1. Define a mechanism to find all words (excluding operators) in a query, and;
+	2. Update the start function we defined to use TF-IDF to order results.
+
+   We can find all words in a query like so:
+
+class ExpressionInterpreter(Transformer):
+	def __init__(self):
+		self.query_words = []
+
+	def WORD(self, token):
+		self.query_words.append(token)
+		return token
+
+	...
+
+   Every time a WORD is evaluated in the syntax tree, it will be added to the list of query words.
+
+   We can then update the start function to call the search() function we declared earlier in this
+   guide:
+
+class ExpressionInterpreter(Transformer):
+	...
+
+	def start(self, items):
+		candidates = self.query(items)
+		words = " ".join(self.query_words)
+
+		ranked_candidates = tfidf(words, candidates)
+
+		return ranked_candidates
+
+   Here, we evaluate our tree using the self.query() method, create a string that contains all query
+   words, then rank all the candidates identified by our query language using TF-IDF.
+
+   Let's run the query (started with OR sky):
+
+('The Bolter', 1.049306144334055)
+('tolerate it', 0.15616278978979603)
+('my tears ricochet', 0.11712209234234702)
+
+   Our code successfully identifies that all three documents meet the search criteria (documents that
+   contain started with or sky).
+
+   Documents are then ranked according to relevance with TF-IDF. The Bolter is first, since started with
+   is rare in the corpus and both words appear in that document. tolerate it is ranked second since the
+   lyric mentions sky more than other documents. my tears ricochet contains sky too, but only once.
+
+   You can see the code that combines use of TF-IDF and the query language in the query_tfidf.py file in
+   the How to Build a Search Index repository.
+
+Acknowledgements
+   The formulas in this guide are based on the [https://en.wikipedia.org/wiki/Tf-idf]Wikipedia definition
+   of TF-IDF. I have condensed the formula definitions into text to make them more intuitive.
+
+
+---
+

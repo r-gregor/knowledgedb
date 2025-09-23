@@ -1,0 +1,217 @@
+filename: zig_intro-to-zigs-integer-casting-for-c-programmers_20250314.txt
+https://www.lagerdata.com/articles/an-intro-to-zigs-integer-casting-for-c-programmers
+
+An intro to Zig's integer casting for C programmers
+April 15, 2021
+
+AKA Zig casts, and when to use them
+   Today we'll just talk about integer casting, but Zig also provides explicit casting support for
+   floats, bools, enums, pointers, and more. For the full list of explicit casts, see
+   https://ziglang.org/documentation/master/#Explicit-Casts
+
+   There are two major problems with integer casting in C - you don't always know when it happens, and
+   you don't always know what it does. A bit of a bold claim, but what I mean here is that a purely
+   textual analysis of a C program (e.g, via grep or ctrl+f) cannot find all of the integer casts (due to implicit conversions) and of
+   the ones it does find, there is no textual way to distinguish truncation, reinterpretation, or
+   extension.
+
+   For an example of the former problem, try compiling and running this program:
+
+#include <stdlib.h>
+
+int main (void) {
+	if (sizeof(int) < -1) abort();
+	return 0;
+}
+
+   You won't even get a warning unless  or -Weverything is turned on. What's happening is that -1 is implicitly
+   converted to unsigned (since the result of sizeof is unsigned) and
+   results in a very large number.
+
+   There are [https://wiki.sei.cmu.edu/confluence/display/c/INT02-C.+Understand+integer+conversion+rules]many
+   other ways implicit conversions can cause trouble.
+
+   Zig solves these problems by 1) eliminating implicit conversions unless they are guaranteed to be safe (for
+   example, assigning a u8 value to a u16 variable cannot fail or lose data) and 2) giving each casting
+   operator its own built-in function, making it easy to audit their use with simple text-based tools.
+
+   So, let's review those built-ins and when to use them
+
+@as()
+   @as()is only allowed when the casting operation is unambiguous and safe, meaning no information will be
+   lost and the target type is guaranteed to be able to hold the source type.
+
+When to use: casting a compile-time integer for use in type inference:
+
+   var x = 5;           // not allowed - should x be signed? unsigned? what size?
+   var x = @as(u8, 5);  // type inference allows the compiler to determine that x is type u8
+
+When to use: casting an unsigned int to a larger signed int:
+
+   var x : u8 = 5;
+   var y = @as(i32, x);
+
+When to use: casting an int to a larger-size int of the same sign
+
+   var x : u8 = 5;
+   var y = @as(u32, x);
+
+@truncate()
+   @truncate() is used to explicitly cast to a smaller-size integer with the same signedness, by removing the
+   most-significant bits. It's the equivalent of an explicit C cast from a larger to a smaller integer of the
+   same sign.
+
+   var x = @as(u16, 513);     // x in binary: 0000001000000001
+   var y = @truncate(u8, x);  // y in binary:         00000001
+
+   Warning: You can call @truncate() on signed integers, but you need to make sure that's really what you want
+   to do - since @truncate always removes the most significant bits, the resulting value may or may not be
+   negative, regardless of whether the original value was negative.
+
+@bitCast()
+   @bitCast is used to to cast between types that are the same size, preserving the bitpattern. In other words
+   the data in memory does not change, but its interpretation may. In the context of integer casting, this is
+   relevant when casting between signed and unsigned types, if the source value is outside the bounds of the
+   target type. For example, given the u8 value 180, the bitpattern is 10110100. If we use @bitCast to convert
+   this to an i8 (assuming 2s complement notation), the value becomes -76. However if the original value were
+   e.g. 100, it would still be 100 after @bitCast since 100 has the same bitwise representation for i8 and u8.
+
+   
+   var x = @as(u8, 180);     // x in binary: 10110100 (value is 180)
+   var y = @bitCast(i8, x);  // y in binary: 10110100 (value is -76)
+   
+
+@intCast()
+   Finally, we have @intCast. In some ways @intCast is the dual of @bitCast - it casts between integer types
+   at runtime, preserving the value but not necessarily the bitpattern. For example, @intCast could be used to
+   convert an i32 value of 3 to a u8. Since it's not always possible to do this (for example - a u16 value of
+   0xFFFF cannot be stored in a u8) @intCast can invoke safety-checked undefined behavior. In other words, if
+   runtime safety is active (either due to the build mode or @setRuntimeSafety(true)), then calling @intCast
+   with invalid parameters will panic the program rather than leaving an unexpected value in the destination.
+   If runtime safety is turned off, you get undefined behavior.
+
+   
+   // zig build-exe test.zig && ./test
+   pub fn main() void 
+   
+
+   
+$> zig run test.zig
+thread 14280091 panic: integer cast truncated bits
+   /Users/ehaas/test.zig:4:13: 0x1018bf5bc in main (test)
+      var z = @intCast(i8, y);
+              ^
+   /Users/ehaas/source/zig/build/lib/zig/std/start.zig:410:22: 0x1018c177c in std.start.callMain (test)
+              root.main();
+                       ^
+   /Users/ehaas/source/zig/build/lib/zig/std/start.zig:362:12: 0x1018bf767 in std.start.callMainWithArgs
+   (test)
+      return @call(.{ .modifier = .always_inline }, callMain, .{});
+             ^
+   /Users/ehaas/source/zig/build/lib/zig/std/start.zig:332:12: 0x1018bf6a5 in std.start.main (test)
+      return @call(.{ .modifier = .always_inline }, callMainWithArgs, .{ @intCast(usize, c_argc),
+   c_argv, envp });
+             ^
+   ???:?:?: 0x7fff2032e620 in ??? (???)
+   ???:?:?: 0x0 in ??? (???)
+   [1]      79460 abort       zig run test.zig
+
+   Thus, when calling @intCast you should always check that the target type can hold the source value, unless
+   you're certain the value will fit.
+
+   What if you're not sure if the result will fit, and you don't want to check each time you add or multiply?
+   In that case you'll want to see our next article, [**1]Preventing integer overflow in Zig
+
+
+---
+[**1]
+https://www.lagerdata.com/articles/preventing-integer-overflow-in-zig
+
+Preventing integer overflow in Zig
+April 20, 2021
+
+   Consider the following Zig program:
+
+const std = @import("std");
+pub fn main() void {
+	var x: u16 = 500;
+	var y: u16 = 500;
+	var z: u32 = x * y;
+	std.debug.print("{d}\n", .{z});
+}
+
+   Run it with:
+$> zig run overflow.zig
+
+   thread 21769477 panic: integer overflow
+   /Users/ehaas/bugs/test.zig:5:20: 0x105008c97 in main (test)
+      var z: u32 = x * y;
+                     ^
+   /Users/ehaas/source/zig/build/lib/zig/std/start.zig:335:22: 0x105008f1d in std.start.main (test)
+              root.main();
+                       ^
+   ???:?:?: 0x7fff205aa620 in ??? (???)
+   ???:?:?: 0x0 in ??? (???)
+   [1]    98894 abort      zig run test.zig
+
+   500 * 500 is only 250,000 - so what happened?
+   In Zig, the multiplication operator invokes Peer Type Resolution on its operands. In this case, the
+   operands are both u16, so a 16-bit multiply will be performed, resulting in
+   a value of 250000, which is larger than the maximum u16 value of 65535 - thus integer overflow occurs, which
+   causes a panic in safety-checked build modes.
+
+   So how do we deal with this? There are least 3 ways, and it depends on what you're trying to do:
+
+1. Use wrapping arithmetic with the *% operator (one mnemonic for remembering
+it is that this combines multiply (*) with modulus (%):
+
+const std = @import("std");
+pub fn main() void {
+	@setRuntimeSafety(false);
+	var x: u16 = 500;
+	var y: u16 = 500;
+	var z: u32 = x *% y;
+	std.debug.print("{d}\n", .{z});
+}
+
+   This will perform wrapping 16-bit arithmetic, and then coerce the result to 32 bits. In this case, 500*500
+   produces a 16-bit result of 1101000010010000 which is then extended to the 32-bit result
+   00000000000000001101000010010000, or 53392. Note that there is no way to tell if overflow occurred, since
+   we explicitly asked for wrapping arithmetic.
+
+2. Use @mulWithOverflow
+
+const std = @import("std");
+pub fn main() void {
+	var x: u16 = 500;
+	var y: u16 = 500;
+	var z: u16 = undefined;
+	if (@mulWithOverflow(u16, x, y, &z)) {
+		std.debug.print("Oops! we had an overflow: {d}\n", .{z});
+	} else {
+		std.debug.print("{d}\n", .{z});
+	}
+}
+
+   This will perform a 16-bit multiply. If there is no overflow, it will return false and store the result in
+   z. If there is an overflow, it will return true and store the overflowed bits in z. Output: Oops! we had an
+   overflow: 53392.
+
+3. Cast an operand to u32:
+
+const std = @import("std");
+pub fn main() void {
+	var x: u16 = 500;
+	var y: u16 = 500;
+	var z: u32 = @as(u32, x) * y;
+	std.debug.print("{d}\n", .{z});
+}
+
+   Casting an operand to u32 will cause Peer Type Resolution to resolve both
+   arguments to u32, and produce a final result value of 250000
+
+Want to stay up to date on the future of firmware? Join our mailing list.
+
+
+---
+

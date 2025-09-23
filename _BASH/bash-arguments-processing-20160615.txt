@@ -1,0 +1,180 @@
+filename: bash_arguments-processing_20160615.txt
+https://tanguy.ortolo.eu/blog/article150/shell-process-arguments
+
+Process command line arguments in shell
+
+When writing a wrapper script, one often has to process the command line arguments to transform them
+according to his needs, to change some arguments, to remove or insert some, or perhaps to reorder them.
+Naive approach
+
+The naive approach to do that is:
+	# Process arguments, building a new argument list
+	new_args=""
+	for arg in "$@"
+	do
+	    case "$arg"
+	    in
+		--foobar)
+		    # Convert --foobar to the new syntax --foo=bar
+		    new_args="$args --foo=bar"
+		;;
+		*)
+		    # Take other options as they are
+		    new_args="$args $arg"
+		;;
+	    esac
+	done
+
+# Call the actual program
+	exec program $new_args
+	
+This naive approach is simple, but fragile, as it will break on arguments that contain a space. For
+instance, calling wrapper --foobar "some file" (where some file is a single argument) will result in
+the call program --foo=bar some file (where some and file are two distinct arguments).
+
+Correct approach
+To handle spaces in arguments, we need either:
+to quote them in the new argument list, but that requires escaping possible quotes they contain, which
+would be error-prone, and implies using external programs such as sed;
+to use an actual list or array, which is a feature of advanced shells such as Bash or Zsh, not standard
+shell…
+… except standard shell does support arrays, or rather, it does support one specific array: the positional
+parameter list "$@"2. This leads to one solution to process arguments in a reliable way, which consists
+in rebuilding the positional parameter list with the built-in command set --:
+	# Process arguments, building a new argument list in "$@"
+	# "$@" will need to be cleared, not right now but on first iteration only
+	first_iter=1
+	for arg in "$@"
+	do
+	    if [ "$first_iter" -eq 1 ]
+	    then
+		# Clear the argument list
+		set --
+		first_iter=0
+	    fi
+	    case "$arg"
+	    in
+		--foobar) set -- "$@" --foo=bar ;;
+		*) set -- "$@" "$arg" ;;
+	    esac
+	done
+
+# Call the actual program
+	exec program "$@"
+
+Notes
+I you prefer, for arg in "$@" can be simplified to just for arg.^
+As a reminder, and contrary to what it looks like, quoted "$@" does not expand to a single field, but
+to one field per positional parameter. ^
+Tags : shell, script, positional, argument, parameter, option, argument, space, iterate
+
+------------------
+4 comments
+
+wednesday 08 june 2016 a 14:37 Loic Minier said : #1
+Hey,
+
+Alternatively, you may also escape args and exec them as follows:
+	escape() {
+	echo "$*" | sed "s/'/'\"'\"'/g; s/.*/'&'/"
+	}
+
+	command=""
+	while :; do
+	command="$command $(escape "$1")"
+	shift
+	if [ $# -eq 0 ]; then
+	break
+	fi
+	done
+	break
+
+	eval $command
+
+This basically serializes the args into a space separated array in a string using shell escape sequences.
+
+However I like your solution much more as it doesn't involve spawning external commands; I hadn't thought
+of reusing the positional args in my earlier shell scripts, thanks for sharing :-)
+
+Cheers,
+- Loic
+wednesday 08 june 2016 a 15:21 Tanguy said : #2
+@Loic Minier : You are welcome. Regarding your solution, rather than a while true with a break inside it,
+why not use a while [ $# -gt 0 ]?
+
+Also, when one needs to do several such list processing, it can be useful to define functions, as each
+shell function has its own "$@". I think I already used that at least once, not sure what for though. But
+then it becomes rather tricky anyway, so this is a point where one should start asking himself whether
+or not he should be using a regular programming language instead of shell scripting.
+thursday 09 june 2016 a 09:55 martin said : #3
+How about using getopt? Here's something I wrote lately, which works rather well:
+
+	usage() {
+	echo "Usage: ${0##*/} [options] output-directory -- [git-annex filter]"
+	cat <<-_eof | column -ts:
+	--list, -l: output the list of files created
+	--wipe, -w: wipe the target directory first
+	--mode, -m: create copies, links, rellinks, or abslinks
+	--get, -g: Obtain missing files from git-annex
+	--visitor, -i: Include file for visitor pattern functions
+	--help, -h: this message
+	_eof
+	echo
+	echo " The git-annex filter defaults to '$DEFAULT_FILTER'"
+	}
+
+	WIPE=0
+	MODE=rellinks
+	LIST=0
+	GET=0
+	OUTDIR=
+	VISITOR=
+	eval set -- $(getopt -o 'lm:wgi:h' -l 'list,mode:,wipe,get,visitor:,help' -n "${0##*/}" -s sh -- "$@")
+	for opt; do
+	case "${NEXT:-}" in
+	('')
+	case "$opt" in
+	(--list|-l) LIST=1;;
+	(--wipe|-w) WIPE=1;;
+	(--mode|-m) NEXT=mode;;
+	(--get|-g) GET=1;;
+	(--visitor|-i) NEXT=visitor;;
+	(--help|-h) usage; exit 0;;
+	(--) NEXT=outdir;;
+	esac
+	;;
+	(mode) MODE="$opt"; unset NEXT;;
+	(outdir) OUTDIR="$opt"; NEXT=filter;;
+	(filter) FILTER="${FILTER:+$FILTER }$opt";;
+	(visitor) VISITOR="$opt"; unset NEXT;;
+	esac
+	done
+	
+thursday 09 june 2016 a 10:36 Tanguy said : #4
+@martin : Thank you for this example, you made me discover the column utility, and the possibility to
+use opening parentheses in case lists. I am not sure "${NEXT:-}" is any more useful than just "$NEXT"
+that should expand the same.
+
+Anyway, this mode of operation is good when you know exactly what options you will get, but not when
+you do not know but only want to operate (modify, remove, insert…) on some known options while keeping
+the other ones unmodified.
+
+Also, regarding the usage of getopt to process options with or without parameters, I personally use
+it this way, shifting the arguments instead of iterating over them, which removes the need for special
+handling of the next argument following an option that takes a parameter:
+
+	eval set -- "$(getopt -o hw: --long help,wait: -- "$@")"
+	while [ "$1" != "--" ]
+	do
+	case "$1"
+	in
+	-w|--wait) wait="$2"; shift 2 ;;
+	-h|--help) usage ; exit 0 ;;
+	esac
+	done
+	shift
+	if [ $# -ne 1 ] ; then usage ; exit 1 ; fi
+	file="$1"
+
+
+---

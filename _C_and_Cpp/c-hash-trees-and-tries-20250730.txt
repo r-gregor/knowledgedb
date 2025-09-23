@@ -1,0 +1,668 @@
+filename: c-hash-trees-and-tries-20250730.txt
+https://nrk.neocities.org/articles/hash-trees-and-tries
+
+Hash based trees and tries
+15 Sep 2023
+
+In my last[**1][https://nrk.neocities.org/articles/simple-treap] post I set out some peculiar requirements for
+a search data-structure and investigated how well a treap would fit those requirements. To re-cap, here were
+the requirements:
+
+  * Fast: O(log N) or better insertions and lookups.
+  * No dynamic resizes: plays well with linear allocators.
+  * Simple: should be implementable in 12~20 lines of non-finicky C.
+
+I alluded that there are data-structures that fulfill my needs while being even simpler and even faster. In
+this post I'll describe two of these:
+
+  * Hash-table of Binary Hash Trees
+  * Hash Tries
+
+Binary hash tree
+One of the key observations on the last post was the treap works due to a well distributed heap priority.
+Another observations was that instead of a PRNG we can use a hash function since "good hash functions" are
+supposed to have well distributed hashes.
+
+Now in our case, we don't really need the tree to be sorted by the key since we only care about insertions
+and lookups. Which leads to the following observation: there's no need to maintain a heap property. Instead
+we can just use the hash of the key to order the BST directly.
+
+Because the hashes are supposed to be fairly well distributed already, a BST built from sorting on the hash
+will thus end up fairly balanced too.
+
+typedef struct BHTNode {
+	Str key;
+	u64 hash;
+	struct BHTNode *child[2];
+} BHTNode;
+
+static BHTNode *bht_find(Arena *a, BHTNode **t, Str key) {
+	u64 hash = str_hash(key);
+	BHTNode **insert = t;
+	while (*insert != NULL) {
+		u64 phash = insert[0]->hash;
+		switch ((hash > phash) - (hash < phash)) {
+			case  0: if (str_eq(key, insert[0]->key)) return insert[0]; // fallthrough
+			case -1: insert = insert[0]->child + 0; break;
+			case +1: insert = insert[0]->child + 1; break;
+		}
+	}
+
+	if (a != NULL) {
+		*insert = arena_alloc(a, sizeof **insert);
+		**insert = (BHTNode){ .key = key, .hash = hash };
+	}
+	return insert[0];
+}
+
+And this is it, the entirety of the code required to implement a "binary hash tree".
+
+How does it perform compared to the treap from last post? Using the same benchmarking format as last time,
+here's some results:
+
+------------------------------------------------
+Items-Name      Insert SLookup RLookup Mem (KiB)
+------------------------------------------------
+512-Treap       53     63      39      16
+512-BHTree      34     51      58      20
+2048-Treap      250    288     226     64
+2048-BHTree     220    230     230     80
+16384-Treap     3008   3134    3168    512
+16384-BHTree    2267   2303    2543    640
+131072-Treap    40804  45579   66662   4096
+131072-BHTree   25849  30606   29721   5120
+1048576-Treap   650847 735479  1275253 32768
+1048576-BHTree  362686 418937  521011  40960
+------------------------------------------------
+
+In pretty much all cases, the binary hash tree outperforms the treap. The memory usage is a bit higher due to
+having to keep the hash member in each node since recomputing the hash can be expensive.
+
+Illustrations and intuitions
+To get a bit of intuition into how this works, here's a picture of a binary hash tree with 64 elements.
+
+img[BHT-64]
+
+You can see that the tree is far from being perfectly balanced. But it's not too far off either.
+
+Here's another image, this time with 256 elements.
+
+img[BHT-256]
+
+The tree isn't too off balance, although there's a bit of "cluster" forming at the middle. With hash-tables,
+I've noticed that a "decent" but fast hash function often makes the hash-table faster as a whole compared to
+a slower but higher quality hash function. But in case of a binary hash tree, getting good distribution out
+of your hash function seems to be much more important.
+
+But assuming you do have a "good hash function", are you really guaranteed not to degrade into a bad O(n)
+search? It's not a strong guarantee, but the probability of degrading into massively unbalanced O(n) tree is
+fairly low.
+
+One intuitive way I like to think about this is that if you have a largely unbalanced tree, that's another
+way of saying that there were lots of more ideal nodes in the "upper levels" of the tree which weren't taken.
+Which is another way of saying that those nodes are available for future insertions. And so if you are to
+insert a random number into the tree, there's a higher chance that it will take a more ideal branch on the
+upper level instead of descending down to the worst case.
+
+And conversely, if your tree is already fairly balanced, then there's less spots available on the upper
+levels increasing the chances of a random insert descending down to a bad branch.
+
+The above is an animation of inserting 128 elements into a binary hash tree. You can see how it goes through
+"cycles" where it becomes more unbalanced leaving lots of holes and then those holes slowly gets filled up by
+later insertions.
+
+Hash-table of hash trees
+Going along the theme of randomization and even distribution, how about we use multiple trees instead of just
+a single one. And we'll just pick a tree depending on the hash we've already computed. In other words, a
+"hash-table of hash-trees" (or HTHTree in short). Supporting it is trivial, simply change the insert
+initialization to the following:
+
+    BHTNode **insert = t + (keyhash & (NSLOTS - 1));
+
+And change t from a single tree pointer to an array of pointers. NSLOTS is the number of slots we have in our
+array, which must be a power of 2. 16 seems to be a good choice, anything above 32 starts providing
+diminishing returns.
+
+Also notice that I'm using the low bits of the hash to index into the hash-table. This is because the high
+bits will affect the binary tree comparison the most and the low bits are mostly going to be ignored. And so
+I'm making use of the low bits rather than the high.
+
+----------------------------------------------
+tems-Name     Insert SLookup RLookup Mem (KiB)
+----------------------------------------------
+64-BHTree     6      9       6       2
+64-HTHTree    3      5       4       2
+128-BHTree    10     18      12      5
+128-HTHTree   6      11      9       5
+256-BHTree    17     25      26      10
+256-HTHTree   14     23      21      10
+512-BHTree    36     52      47      20
+512-HTHTree   29     47      40      20
+1024-BHTree   76     111     100     40
+1024-HTHTree  64     100     82      40
+----------------------------------------------
+
+This provides some decent speed up at small Ns (common case). At large Ns, the "acceleration" provided by the
+hash-table becomes negligible because the O(log N) tree dominates.
+
+Given how easy it is to support a "root level hash-table" and the fact that it's strictly a win rather than
+being a trade-off, it probably doesn't make much sense not to do it.
+
+Hash array mapped trie
+The idea of making a BST out of hash seemed like a simple but effective idea. And so I started to search for
+any existing data-structure that does this but I couldn't quite find any. This does make sense because:
+
+  * If you're using a BST, that's likely because you require the keys to be sorted and sorting based on hash
+    obviously destroys that.
+  * If you don't care about the keys being sorted then you likely don't want the tree to be binary. Instead
+    you'd want to reduce pointers hops as much as possible.
+
+Hash array mapped trie (or HAMT) is a data-structure that takes the 2nd approach. Instead of a sorted tree,
+it's a trie of hashes. Describing HAMT in details is a bit out of scope for this article, but here's a short
+description (of what I gathered out of the wikipedia article and this talk by Phil Nash):
+
+  * Each node is an array of some power of 2. You take some bits out of the hash to index into that array.
+
+For example, if you picked 4 as the size of the array, then you'd take 2 bits out of your hash each time you
+traverse a node as your index. So if you're looking up or inserting "alpha" which has a 4-bit hash of 0b0111
+then you'll take the highest 2 bits (01) as your index.
+
+  * In your indexed position, the slot may be empty, in which case you'd insert your key there (or signal a
+    failure in case of lookup).
+  * Or the slot may be a key, in which case you'd compare against it.
+  * Or the slot may be a pointer to another array. In which case, you'd take the next two bits from your hash
+    (11 or 3 in our example) to index into that "next array".
+  * Or the slot can be a linked list. Which means you've ran out of hash bits (i.e there was a hash
+    collision) ^[i].
+
+Following the above idea, I went ahead and implemented a HAMT with some fairly finicky code.
+
+------------------------------------------------
+Items-Name      Insert SLookup RLookup Mem (KiB)
+------------------------------------------------
+2048-HTable     132    155     134     64
+2048-HTHTree    198    217     217     80
+2048-HAMT       142    177     138     185
+16384-HTable    1183   1433    1241    512
+16384-HTHTree   2180   2284    2497    640
+16384-HAMT      1330   1654    1318    1491
+131072-HTable   11864  19586   14878   4096
+131072-HTHTree  25756  31023   29675   5120
+131072-HAMT     14716  24269   18400   11730
+------------------------------------------------
+
+The above was using an array size of 8. The performance here is impressive, it's competing head to head with
+a pre-allocated hash-table. Lookup performance is really good too.
+
+But the problem is the insanely high memory usage. The original HAMT uses 32 sized array - but it uses a
+sparse array with a bitmap trick to save space. But that requires resizes, which I have explicitly forbidden.
+Reducing the array size to 4 makes the memory usage a bit less (at the cost of some performance) but even
+then the memory usage was crazy high compared to the other options.
+
+Skimming through the original paper it doesn't mention linked-lists. Instead it seems to recommend rehashing
+the key if a collision occurs.
+
+Simple hash trie
+The performance of HAMT was really good, but the large and finicky implementation combined with the huge
+memory overhead made me not investigate the ideas behind it any further.
+
+But in a weird turn of events Chris Wellons ended up misunderstanding what I had meant by "hash table of hash
+trees" and thought that the "hash table" was supposed to be embedded into the leaf rather that at root level
+as I had intended. And thus he ended up recreating a hash-trie (an idea which I had prematurely abandoned)
+except it's vastly simpler than my over-engineered and finicky HAMT implementation. Here's the entirety of
+the code:
+
+typedef struct HTrie {
+	Str key;
+	struct HTrie *slots[4];
+} HTrie;
+
+static HTrie *htrie_traverse(Arena *a, HTrie **t, Str key) {
+	for (u64 keyhash = str_hash(key); *t != NULL; keyhash <<= 2) {
+		if (str_eq(key, t[0]->key)) {
+			return t[0];
+		}
+		t = t[0]->slots + (keyhash >> 62);
+	}
+	if (a != NULL) {
+		*t = arena_alloc(a, sizeof **t);
+		**t = (HTrie){ .key = key };
+	}
+	return *t;
+}
+
+The hash of the key is used to traverse the trie and after each iteration the used 2 bits of the hash are
+shifted out. What happens when the hash runs out? It implicitly degrades into a linked list that always takes
+the 0th slot.
+
+Keep in mind that unlike a chained hash-table, a full hash collisions doesn't necessarily trigger the linear
+linked list probe. In order for it to degrade, you'd need to exhaust all the nodes in the path of that hash
+first. That's 32 nodes for a 64-bit hash. In my synthetic tests with 64-bit hashes my system would run out of
+memory before I could trigger the linked-list condition.
+
+How does it perform?
+
+------------------------------------------------
+Items-Name      Insert SLookup RLookup Mem (KiB)
+------------------------------------------------
+2048-HTable     132    156     139     64
+2048-HTHTree    205    214     217     80
+2048-HTrie      138    168     141     96
+16384-HTable    1163   1410    1229    512
+16384-HTHTree   2152   2225    2428    640
+16384-HTrie     1373   1615    1416    768
+131072-HTable   11816  19393   14526   4096
+131072-HTHTree  24673  30075   28696   5120
+131072-HTrie    16263  24299   22545   6144
+------------------------------------------------
+
+Quite a lot better than HTHTree! But without consuming crazy amount of memory compared with HAMT. And the
+implementation is also really simple and straight forward, unlike my HAMT implementation. This makes
+Hash-Tries my new favorite search data-structure when array resizes are to be avoided.
+
+Here's a 4-way Hash-Trie with 32 elements:
+
+img[HTrie-32]
+
+And here's one with 256 elements (click on the image to see full size):
+
+img[HTrie-256]
+
+Notice how wide (and short in height) the trie is compared to the binary hash tree? The significantly better
+performance shouldn't be a surprise.
+
+I've tried tuning the number of leafs but anything above 4 results in negligible amount of performance win
+while consuming significantly more memory. And so 4 is going to be a good default.
+
+Extensions
+Here are a couple more ideas and "extensions" which might be worth exploring.
+
+Compressed offset pointers
+On 64-bit systems, pointers are 64 bits (8 bytes), which is quite a lot. Instead you could use 32 bits (4
+bytes) self relative pointers for the Trie node pointers. This should work well with linear allocators.
+
+I haven't benchmarked this, but the following benchmark done by Chris Wellons shows compressed version not
+only saving a huge amount of memory, but actually outperforming uncompressed variant at larger Ns (perhaps
+due to better cache utilization?). However, keep in mind that Chris' benchmark is done with integer keys.
+Things might be a lot different with string keys.
+
+Hash smuggling
+Due to alignment requirements, the lowest couple bits of the node pointer is going to be 0-ed. Those bits can
+be used to smuggle extra bits of information. For example smuggling some of the hash bits for the hash-trie
+in order to avoid the string comparison in case of a hash mismatch may yield better performance.
+
+Concurrency
+Assuming your platform supports atomic operations on pointer sized objects, a fairly safe assumption, then
+it's pretty easy to turn a hash-trie into a lock-free concurrent hashmap using only an atomic load for
+loading the node and atomic compare-and-exchange for insertion.
+
+Malicious input
+How would you deal with potentially malicious input? The exact same way hash-tables deal with it, by using a
+secure hash-function (e.g siphash) with a secure seed.
+
+Rehashing on collisions
+Instead of shifting the hash, we could detect hash collisions and go for a rehash. In theory, this should
+improve cases where you're inserting large amount of items and hash collisions are likely. In my benchmarks
+with 64-bit hashes however, it made no difference.
+
+PRNG for traversal
+Instead of shifting the hash, you could use the hash as the initial seed for a PRNG and use the PRNG's output
+sequence to traverse the trie. In my synthetic benchmarks with string keys, this didn't really make any
+difference.
+
+Also beware not to do this when you have a hash function which doesn't produce collisions (e.g an integer
+hash). Since if you have collision-free hash, then the raw hash will provide a small worst case guarantee but
+a PRNG will not.
+
+Conclusions
+Here's a nice and pretty bar chart summarizing the benchmark data (also here's the benchmark code):
+
+bench-summary
+Here are my takeaways for the time being:
+
+  * If a reasonable upper-bound is known upfront, use "MSI" hash-table.
+  * Otherwise a 4-way Hash-Trie is a good default choice.
+  * If aiming for space-efficiency, use pointer compression on the Hash-Trie.
+  * HTHTree and Treap is usually not worth it over a Hash-Trie. But they're still worth keeping in mind.
+
+
+---
+[**1]
+https://nrk.neocities.org/articles/simple-treap
+
+Implementing and simplifying Treap in C
+13 Sep 2023
+
+Let's say that you're looking for a search data-structure with fast insertion and lookups. Hash-tables
+immediately comes to mind. However, unless you know the (maximum) number of elements up-front (or can compute
+it cheaply) then eventually you'll need to resize your hash-table. Resizing inherently comes with potential
+memory fragmentation issues and doesn't play nicely with simple linear allocators. And so I'm looking for a
+data-structure with the following requirements:
+
+  * Efficient (at least O(log N)) lookups and insertion.
+  * No resizing.
+  * Easy to implement (roughly 12~20 lines of non-finicky C code).
+
+The last point might seem odd, but I prefer data-structures that are easy to implement, because it usually
+implies ease of understanding. And if you understanding something deeply, then you can easily customize it to
+(better) fit your specific context.
+
+Basic Treap
+A tree like structure is an obvious choice for this. But most self-balancing trees with strong guarantees
+(such as red-black tree) tend to violate the ease of implementation requirement. Comparatively a treap is
+simpler to implement but doesn't have as strong worst case guarantees.
+
+Here's a simple and basic treap implementation in C as a starting point. We'll work our way through
+simplifying and improving it step by step.
+
+typedef struct Treap {
+	Str key;
+	struct Treap *parent;
+	struct Treap *child[2];
+	uint64_t priority;
+} Treap;
+
+static Treap *treap_traverse(Arena *a, Treap **t, Str key, uint64_t *rng) {
+	Treap *parent = NULL, **insert = t;
+	while (*insert != NULL) {
+		parent = *insert;
+		switch (str_cmp(parent->key, key)) {
+			case  0: return parent; break;
+			case -1: insert = parent->child + 0; break;
+			case  1: insert = parent->child + 1; break;
+			default: ASSERT(!"unreachable"); break;
+		}
+	}
+	if (a == NULL) { // lookup
+		return NULL;
+	}
+	Treap *new = arena_alloc(a, sizeof *new);
+	// advance the LCG state
+	*rng = *rng * 0x1337ACDCBABE5AAD + 7;
+	uint64_t new_priority = (*rng >> (*rng >> 59)) ^ *rng; // permute the state, i.e PCG
+	*new = (Treap){ .key = key, .parent = parent, .priority = new_priority };
+	*insert = new;
+
+	while (new->parent && new->parent->priority < new_priority) {
+		// update grandpa
+		Treap *grandpa = new->parent->parent;
+		if (grandpa != NULL) {
+			int d = grandpa->child[1] == new->parent;
+			grandpa->child[d] = new;
+		} else { // new is now the root
+			*t = new;
+		}
+
+		// update parent
+		Treap *oldparent = new->parent;
+		int d = oldparent->child[1] == new;
+		oldparent->parent = new;
+		// reparent child
+		oldparent->child[d] = new->child[!d];
+		if (new->child[!d] != NULL) {
+			new->child[!d]->parent = oldparent;
+		}
+
+		// update node
+		new->child[!d] = oldparent;
+		new->parent = grandpa;
+	}
+
+	return new;
+}
+
+Depending on whether an arena was provided or not, the routine acts either as an insertion routine or as a
+lookup routine. Random priorities are generated through a simple PCG generator (with ad-hoc constants).
+
+While I'm calling it a "basic" treap, this is already an improvement over the usual implementations which
+usually make the mistake of naming the child nodes left and right instead of using an index-able child array.
+I call it a mistake because it forces you to handle left vs right tree rotations separately, whereas with an
+array they can be done via the same piece of code by just inverting the index. ^[i]
+
+It's possible to leverage C's anonymous struct + union trick to access the child nodes both as named members
+as well as array indexes. But for my purposes it wasn't worth the effort.
+
+Understanding treaps
+Before trying to improve something, we need to understand how and more importantly why something works in the
+first place. And to a lot of people, who treat pseudo random number generators (PRNG) as a black-box that's
+easily available in the standard library, the workings of a treap may not be immediately obvious.
+
+The magic here lies in one of the properties of a PRNG: a well distributed output sequence. For example, if a
+8-bit PRNG (i.e output is between [0, 255]) outputs most of it's numbers above 60 or outputs all even
+numbers, then it's not well distributed. A good PRNG will output sequences that are well distributed within
+the output range.
+
+So if the output of a PRNG is well distributed, and we're rebalancing the tree based on that, then it follows
+that the tree will also end up fairly well distributed with a really high probability. And that's the key
+idea behind treaps.
+
+With that out of the way, here are some of the problems I have with the above "basic treap":
+
+  * It's too big (about ~40 loc) and the tree-rotation is too finicky and error prone.
+  * For each element, there's a memory overhead of 3 pointer + 1 priority (on modern 64bit computers that's
+    about 32 bytes of overhead per element!)
+  * Passing the PRNG state around is an annoyance (but using globals is not desirable either).
+
+Hash based priority
+If the key idea behind a treap is well distributed priorities, then the PRNG is only a means to that end. The
+priorities may come from elsewhere too, as long as they're well distributed. What else provides well
+distributed numbers? A hash function! So instead of passing a PRNG state around, we can simply hash the key
+itself to get the priority.
+
+This gets rid of having to pass around the PRNG state. And since the priority is now derived from the key, we
+can even drop the priority member from our Treap to save some space and recompute it later when needed.
+Rehashing isn't that bad if the length of your keys are small (4~12 bytes), but if your keys can be large
+then this starts to hurt performance quite noticeably.
+
+Maybe instead of the key, we can hash something else that's unique to the key. Or something unique to the
+node, e.g the node pointer itself! The node pointer has to be unique since no other object can occupy that
+memory address and so a hash of the node pointer is a valid source of randomness. And since a pointer is a
+fixed length integer, hashing it is really fast.
+
+@@ -17,11 +18,20 @@ typedef struct Treap {
+     Str key;
+     struct Treap *parent;
+     struct Treap *child[2];
+-    uint64_t priority;
+ } Treap;
+
++static uintptr_t
++hashptr(void *p)
++{
++    uintptr_t m = 0x5555555555555555;
++    uintptr_t h = (uintptr_t)p;
++    h ^= h >> (sizeof h * 4 - 1);
++    h *= m;
++    h ^= h >> (sizeof h * 4 + 1);
++    return h;
++}
++
+ static Treap *
+-treap_traverse(Arena *a, Treap **t, Str key, uint64_t *rng)
++treap_traverse(Arena *a, Treap **t, Str key)
+ {
+@@ -38,13 +48,11 @@ treap_traverse(Arena *a, Treap **t, Str key, uint64_t *rng)
+         return NULL;
+     }
+     Treap *new = arena_alloc(a, sizeof *new);
+-    // advance the LCG state
+-    *rng = *rng * 0x1337ACDCBABE5AAD + 7;
+-    uint64_t new_priority = (*rng >> (*rng >> 59)) ^ *rng; // permute the state, i.e PCG
+-    *new = (Treap){ .key = key, .parent = parent, .priority = new_priority };
++    *new = (Treap){ .key = key, .parent = parent };
+     *insert = new;
+
+-    while (new->parent->priority < new_priority) {
++    uint64_t new_priority = hashptr(new);
++    while (new->parent && hashptr(new->parent) < new_priority) {
+         // update grandpa
+         Treap *grandpa = new->parent->parent;
+         if (grandpa != NULL) {
+
+The hashptr() function is just a simple xor-shift, multiply, xor-shift (xmx) permutation with ad-hoc
+constants. On modern machines, it's really fast while providing some really high quality scrambling.
+
+Aside from the performance benefits, one other upside of using a node-pointer hash compared to a key-hash is
+that malicious party cannot control your priority via feeding pathological keys. But the downside of hashing
+pointer is that you lose out on some determinism offered by hashing the keys.
+
+One other cool trick you can do by hashing the node pointer is that you can nudge the hash function a bit to
+ensure that hashptr(NULL) maps to the max possible number, which would allow you do drop the new->parent NULL
+check from the while loop.
+
+	uintptr_t h = (uintptr_t)p - (uintptr_t)(void *)0; // ensure NULL maps to 0
+	// do the xmx permutation which will leave 0 at 0
+	return h - 1; // 0 - 1 == UINTPTR_MAX
+
+The first line ensures that h is initially set to 0 if the argument was NULL. After that, xor-shifting 0 will
+just result in 0. And multiplying anything with 0 also results in 0. Lastly, subtracting 1 from 0 in an
+unsigned type will give you the maximum of that unsigned type.
+
+In practice, this doesn't really make much of a difference compared to just having the NULL check. But it's a
+cool party trick that's surely(!) to impress the ladies.
+
+Removing the parent
+With the priority member removed from the node, now we're at 3 pointer overhead per element (about 24 bytes
+usually). Maybe we can remove the parent node too? And indeed we can. Since we're only interested in
+insertion and lookups, the only time the parent node is used is when doing "sift-up" to correct the heap
+property. But instead of storing the parent pointer in the node itself, we can simply remember all the
+parents when descending and pull them out later when correcting the heap. A stack is a natural fit for this.
+
+Let's remove the parent member and then create the "parent-stack" and push the parents onto it (avoiding
+pushes when we're only doing lookups):
+
+ typedef struct Treap {
+     Str key;
+-    struct Treap *parent;
+     struct Treap *child[2];
+ } Treap;
+
+@@ -34,9 +35,15 @@ hashptr(void *p)
+ static Treap *
+ treap_traverse(Arena *a, Treap **t, Str key)
+ {
++    Treap *pstack[128];
++    int phead = 0;
+     Treap *parent = NULL, **insert = t;
+     while (*insert != NULL) {
+         parent = *insert;
++        if (a != NULL) {
++            if (phead == ARRAY_LEN(pstack)) abort();
++            pstack[phead++] = parent;
++        }
+         switch (str_cmp(parent->key, key)) {
+         case  0: return parent; break;
+         case -1: insert = parent->child + 0; break;
+@@ -48,33 +55,20 @@ treap_traverse(Arena *a, Treap **t, Str key)
+         return NULL;
+     }
+     Treap *new = arena_alloc(a, sizeof *new);
+-    *new = (Treap){ .key = key, .parent = parent };
++    *new = (Treap){ .key = key };
+     *insert = new;
+
+The hard-coded 128 stack limit might stick out. But after some empirical testing, the treap depth seems to
+usually be around log2(N) * 2. So even when inserting 2^23 (~8 million) items, the treap depth usually sticks
+around at 55~57, never even going past 60. And so 128 is probably too much if you're not planning to insert
+millions of items (common case). If you are inserting millions of items, you can probably increase the limit
+to 192 (log2(2^64) * 3). Dynamically growing stack is also an option, but if your treap is reaching 192 depth,
+then something has likely gone wrong and you should probably bail (in my case, I'm using abort but you might
+want to keep your process alive depending on your context).
+
+Now it's time to correct the heap property after an insertion. Remember that the old sift-up loop was around
+~22 lines of error-prone code. Here's the new one:
+
+	uint64_t new_priority = hashptr(new);
+	while (phead > 0 && hashptr((parent = pstack[--phead])) < new_priority) {
+		if (phead > 0) { // update grandpa
+			Treap *gp = pstack[phead - 1];
+			gp->child[gp->child[1] == parent] = new;
+		} else { // otherwise new is now the root
+			*t = new;
+		}
+		int d = parent->child[1] == new;
+		parent->child[d] = new->child[!d]; // update parent
+		new->child[!d] = parent; // update child
+	}
+
+That's it. It's half the size of the previous while also being significantly easier to implement from
+scratch. So aside from reducing memory usage, we've also improved the ease of implementation, killing two
+stones with one bird!
+
+UPDATE: u/dongxy has also pointed out a recursive join based algorithm for treaps that doesn't require
+tree-rotations.
+
+Benchmarks
+Time for some benchmarks. The code used for benchmarks can be found here.
+
+"Insert" is the total time to insert all the items. "SLookup" is the total time to successfully lookup all
+the items. "RLookup" is random (and mostly failed) lookups. "Mem" is the memory usage (excluding the string/
+key itself). Time is measured in micro-seconds and memory usage is measured in KiB.
+
+The length of all the string is kept at 64 bytes since it's closer to what you will typically see in practice
+(8~32 bytes) while still being a somewhat larger. Half the input is generated randomly. The other half is
+duplicate of the first half but with one of their bytes flipped. This is to make the input more similar to
+real-world cases where there's some common prefix and suffix.
+
+"BasicTreap" is the initial treap implementation, while "Treap" is the final version with node-pointer hash
+and no parent pointer in node. As a base-line for comparison, I've also added a hash-table that's
+pre-allocated to N * 2 size. This of course is utterly unfair for insertion since the tree needs to allocate
+it's node one at a time while inserting. But it's still interesting to see. The lookup numbers also slightly
+favor the hash-table since the input is (mostly) randomly generated and thus evenly distributed already.
+
+First let's look at some small (but common) cases of 512 and 2048 items:
+
+---------------------------------------------------
+Name (items)       Insert SLookup RLookup Mem (KiB)
+---------------------------------------------------
+HashTable (512)    24     29      36      16
+BasicTreap (512)   47     56      40      24
+Treap (512)        47     56      40      16
+HashTable (2048)   125    112     130     64
+BasicTreap (2048)  242    256     227     96
+Treap (2048)       245    256     214     64
+---------------------------------------------------
+
+There's barely any difference between the "basic treap" and our simplified one. Aside from the memory usage
+being ~33% lower. That shouldn't be surprising since the simplified treap only has a 2 pointer overhead per
+element whereas the basic-treap has 3 pointer plus a priority integer worth of overhead.
+
+The hash-table and treap's memory usage ended up being the same coincidentally since I'm using a N * 2 size
+for the hash-table and 2 pointer is 16 byte on my system, the same as my Str type (which is a sized string
+consisting of a pointer + length pair). In practice, you'll likely need a value member as well and so the
+hash-table size at N * 2 will be larger.
+
+Now let's look at some larger Ns:
+
+------------------------------------------------------
+Name (items)          Insert SLookup RLookup Mem (KiB) 
+------------------------------------------------------
+HashTable (16384)     1155   1063    1221    512
+BasicTreap (16384)    2843   2821    3248    768
+Treap (16384)         3042   2673    3020    512
+HashTable (131072)    11738  16917   14517   4096
+BasicTreap (131072)   38759  44715   69502   6144
+Treap (131072)        44449  39799   61664   4096
+HashTable (1048576)   152390 224713  188419  32768
+BasicTreap (1048576)  677757 785431  1384892 49152
+Treap (1048576)       789008 688381  1198060 32768
+------------------------------------------------------
+
+The simpler treap routinely performs better than basic treap at lookups. But about 10~15% worse in insertion.
+From some casual testing, using a higher quality hash-function for the pointer hash instead of using ad-hoc
+constants tend to speed things up a tiny bit.
+
+And surprising perhaps no one, the hash-table beats both variants of the treap out of the water for large Ns.
+But for smaller Ns, the difference of a couple micro-seconds is usually not going to be a show stopper.
+
+Conclusions
+I'm fairly happy with how much simpler the implementation is, though I'd like it to be even simpler. And the
+performance at least under ~8K items pretty okay, though I'd like it to be even faster. And as it turns out,
+a data-structure that meets my criteria while being even simpler and even faster does exist.
+
+But this post has gotten quite long already, so I'll save that for my next article: "Hash based trees and
+tries".
+
+
+---
+

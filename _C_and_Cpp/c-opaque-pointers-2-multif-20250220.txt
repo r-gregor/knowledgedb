@@ -1,0 +1,585 @@
+filename: c_opaque-pointers_2-multif_20250220.txt
+https://blog.mbedded.ninja/programming/design-patterns/opaque-pointers/
+
+Opaque Pointers
+Feb 28, 2024
+
+   Opaque pointers is a design pattern that can be used to hide implementation details of what is being
+   pointed at. Typically a user for a different place in the code can use as see a pointer to a
+   particular type but cannot see any more details about the type itself
+
+   Opaque pointers is commonly used in the C programming language to hide implementation details of a
+   struct (object) from a user, and only operations with the object via a function-based API. It is not
+   as commonly used in C++ because C++ gives you the ability to define private and protected members of
+   your class, removing the need to implement the same behaviour with opaque pointers.
+
+   Likely the most significant disadvantage to this pattern is that memory allocation must be used in
+   the constructor to create the object, because the caller cannot create the object since the full size
+   of the type is hidden away from them.
+
+Example
+   The below example shows how to use the opaque pointer design pattern to implement a simple "Counter"
+   object (you could think of it as a class). The Counter object is defined in Counter.h/Counter.c and
+   created/used in main.c.
+
+   In the header Counter.h:
+
+#include <stdint.h>
+
+// Opaque declaration of the counter type.
+typedef struct Counter_t Counter_t;
+Counter_t *Counter_Init();
+void Counter_AddOne(Counter_t *me);
+uint8_t Counter_GetCount(Counter_t *me);
+void Counter_DeInit(Counter_t *me);
+
+   And in the .c file Counter.c:
+
+#include <stdlib.h>
+#include "Counter.h"
+
+// Implementation of Counter_t. Hidden from other files!
+struct Counter_t {
+	uint8_t count;
+};
+
+Counter_t *Counter_Init() {
+	// NOTE: Memory allocation here! May or not be ok for an embedded
+	// project, can be done at initialation time only.
+	Counter_t *newCounter = malloc(sizeof(Counter_t));
+	newCounter->count = 0;
+	return newCounter;
+}
+
+void Counter_AddOne(Counter_t *me) { me->count++; }
+uint8_t Counter_GetCount(Counter_t *me) { return me->count; }
+
+void Counter_DeInit(Counter_t *me) {
+	free(me);
+}
+
+   We can then use this Counter_t from other source files like main.c:
+
+#include <stdio.h>
+#include "Counter.h"
+
+int main(void) {
+	printf("Creating counter...\n");
+	// From main.c, we can't access any of the members of the
+	// opaque Counter_t struct, we only have a pointer and have to use
+	// the provided API in Counter.h.
+	Counter_t *myCounter = Counter_Init();
+	Counter_AddOne(myCounter);
+	uint8_t count = Counter_GetCount(myCounter);
+	printf("Count: %d\n", count);
+	// Finally, destroy counter
+	Counter_DeInit(myCounter);
+
+	return 0;
+}
+
+   Note how in main.c we can only create a pointer to the Counter (Counter_t *), we aren't given enough
+   information to create a Counter_t directly (if we could, then we would be able to access all the
+   internals - bypassing the public API). If we want to perform operations on it such as adding one or
+   getting the current count, we have to use the API like Counter_AddOne() and Counter_GetCount().
+
+
+---
+https://gist.github.com/hosaka/90854562693e12e2042d
+
+Abstract Data Type using opaque pointers in C
+
+Compile and run
+$> gcc adt.c array.c -o adt
+$> ./adt
+
+[adt.c]
+#include <stdio.h>
+#include <stdlib.h>
+#include "array_api.h"
+
+// Opaque pointer:
+// An ADT implementation hidden behind the interface that is abstract to
+// the client, making it easier to maintain, apply changes and improve
+// in this example the array_t data type provides a bunch of functins
+// for manipulating the array, these are accessed through the array_api.h
+// interface but the implementation stays hidded in array.c
+int main(int argc, char const *argv[]) {
+	// A static structure can not be defined because the compiler doesn't know
+	// how big the data type is since we didn't add any elements to it
+	// array_t new_array;
+	// error: storage size of 'new_array' isn't known
+	// We can however define a pointer to such structure because a pointer is
+	// always of a known size
+	array_t *arr;
+	// Create a new abstract array with size 3
+	arr = array_alloc(3);
+	// Set some values
+	array_set(arr, 0, 1);
+	array_set(arr, 1, 2);
+	array_set(arr, 2, 4);
+	// Display the array
+	array_print(array_begin(arr), array_end(arr));
+	// Cause the array to grow by setting new indices
+	array_set(arr, 3, 8);
+	array_set(arr, 6, 42);
+	// Display the array, note the empty indices 4 and 5 are set to zero
+	array_print(array_begin(arr), array_end(arr));
+	// Free up the array
+	array_free(arr);
+	return EXIT_SUCCESS;
+}
+
+
+[array.c]
+#include <stdio.h>
+#include <stdlib.h>
+#include "array_api.h"
+// this is the abstract implementation of the array api
+// including the header here helps us stay consistent with the public api we provide
+// this file can, of course, also have it's own private header file
+// abstract data type
+struct array_s {
+	int m_size;
+	int m_capacity;
+	int *m_data; // actual array data
+};
+
+// memory management
+array_t *array_alloc(int size) {
+	// memory for the return structure
+	array_t *ret = malloc(sizeof(array_t));
+
+	// size and capacity
+	ret->m_size = ret->m_capacity = size;
+
+	// array data allocation
+	ret->m_data = malloc(ret->m_capacity *sizeof(int));
+	return ret;
+}
+
+void array_free(array_t *arr) {
+	// free array data and struct itself
+	free(arr->m_data);
+	free(arr);
+}
+
+// manipulations
+void array_set(array_t *arr, int index, int value) {
+	// set the size if requested index is bigger than we have
+	if (index >= arr->m_size) {
+		arr->m_size = index + 1;
+	}
+
+	// check the capacity
+	if (arr->m_size >= arr->m_capacity) {
+		// grow the array by doubling it's current capacity
+		int new_capacity = arr->m_capacity * 2;
+		if (new_capacity <= arr->m_size) {
+			new_capacity = arr->m_size + 1;
+		}
+
+		// realloc more memory
+		arr->m_data = realloc(arr->m_data, new_capacity * sizeof(int));
+		arr->m_capacity = new_capacity;
+	}
+	// set the value
+	arr->m_data[index] = value;
+}
+
+void array_print(int *begin, int *end) {
+	while (begin != end) {
+		printf("%d ", *begin);
+		begin++;
+	}
+	printf("\n");
+}
+
+// array status info
+int *array_begin(array_t *arr) {
+	return arr->m_data;
+}
+
+int *array_end(array_t *arr) {
+	return arr->m_data + arr->m_size;
+}
+
+
+
+[array_api.h]
+#ifndef ARRAY_H
+#define ARRAY_H
+// Abstract Data Type
+//
+// This demonstrates information hiding (encapsulation) using C
+// If the declaration of array_t or the internal structure were to change
+// it would be unnecessary to recompile other modules, unless the API was also
+// changed
+// object of an incomplete type
+typedef struct array_s array_t;
+
+// interface for the ADT
+array_t *array_alloc(int size);
+void array_free(array_t *arr);
+void array_set(array_t *arr, int index, int value);
+int *array_begin(array_t *arr);
+int *array_end(array_t *arr);
+void array_print(int *begin, int *end);
+#endif
+
+   The purpose of opaque pointers is to keep the implementation separate, that allows you to do
+   "separate compilation", but the api is something that is NOT separate and this is an error to not
+   include it here.
+
+   It would be better to include array_api.h inside array.c that way the compiler could guarantee that
+   the definition used by the callers match the function declarations inside array.c
+
+   If at some point you decide to evolve the api, and you make the following mistake: the function
+   declarations and the header prototypes are not matching anymore because you copy pasted wrong, or
+   forgot something, then It is likely that everything will compile just fine and you will have ABI
+   errors at runtime. If you are not lucky they could even NOT trigger segmentation fault and go
+   undetected while you're code is not working.
+
+   you would have to remove that typedef to prevent a name conflict probably (did not test it)
+
+typedef struct array_s {
+	int m_size;
+	int m_capacity;
+	int *m_data; // actual array data
+} array_t;
+
+   would become
+#include "array_api.h"
+
+struct array_s {
+	int m_size;
+	int m_capacity;
+	int *m_data; // actual array data
+};
+
+
+---
+https://blog.aaronballman.com/2011/07/opaque-data-pointers/
+
+Opaque Data Pointers
+2011-07-25
+
+   Most of the frameworks that I work on need to be usable from multiple programming languages
+   (typically, C++, C# and Objective-C, but sometimes more). This means I must target the lowest common
+   denominator in terms of the function prototypes, so I write a lot of C header files. But I'm an
+   object-oriented junky at heart, and the languages which will eventually consume my frameworks all
+   support object-oriented paradigms, so many of my C APIs end up being a flattened "classes." This
+   shouldn't be too surprising as it's a common technique for C frameworks.
+
+   What this means from a practical standpoint is that there is usually one or two APIs responsible for
+   creating an "object" and this object gets passed into several other APIs as sort of a manual "this"
+   pointer. What I want to talk about today are possible ways to design that object reference, and the
+   pros and cons associated with each.
+   Because the goal is to design a clean API, we want to hide as many implementation details as
+   possible. This means that we do not want to expose a structure to the caller that allows them to
+   manipulate the internals of our object directly - they should be using our APIs to do that! So the
+   object pointer we give back to the user should be opaque in that it doesn't expose any data members
+   directly. Hence the term opaque data pointer
+
+   One of the most simplistic ways to expose an opaque data pointer is to use a void *. It can represent
+   an arbitrary memory location, but does not describe the format of the memory location in any way. So
+   you can pass back a pointer to a class instance, or a pointer to a structure instance, or an integer
+   into a std::map (cast as void *), etc. This is the approach taken in Win32, as a HANDLE object is
+   simply a void *.
+
+   The downside to using a void * is that you lose all semblance of type safety. I know that C isn't
+   well-known for being the most type-safe language in the world, but it at least makes some attempts to
+   ensure that you don't assign a struct foo * to a struct bar *! However, all void * are the same
+   datatype to the compiler, which means the user really could assign a struct foo * to a struct bar *
+   without knowing it. One way to combat this problem is to define a common structure format for all of
+   your "handle" types, and give it a magic value field. This way, when you receive a handle, you can
+   double-check to make sure it's a handle of the proper type. For instance:
+
+typedef struct handle_type {
+	unsigned long magic;
+} handle_type;
+
+#define HANDLE_TYPE_FOO         'foo '
+#define HANDLE_TYPE_QUUX        'QuuX'
+
+#define IS_HANDLE_TYPE( handle, type )  ((((handle_type *)handle)->magic == type) ? true : false)
+
+void FooDoSomething( void *handle ) {
+	if (IS_HANDLE_TYPE( handle, HANDLE_TYPE_FOO )) {
+	}
+}
+
+   By doing something along these lines, you can protect yourself from your user's mistakes. However, it
+   doesn't exactly make your framework user-friendly. It doesn't help the user in any way, it just
+   protects you when they mess up!
+
+   Another approach is to make use of the type system provided by C by creating unique types for all of
+   your different objects. By having a unique datatype for each object, you have less chance of the user
+   accidentally trying to pass the incorrect object instance around. You accomplish this by using
+   typedef to declare a unique structure for each of your object types, like this:
+
+typedef struct foo_ *FooPtr;
+typedef struct bar_ *BarPtr;
+
+void FooDoSomething( FooPtr handle );
+
+   Now if the user attempts to call FooDoSomething and pass in a BarPtr, they should get a compile error
+   due to the types not matching (assuming they're still in a language where they call these functions
+   directly instead of through interop). This approach to opaque data pointers is very popular on the
+   Mac; you'll see it all over the Core Foundation.
+
+   There are two different ways you can look at this approach as a framework designer. Either your
+   header contains a forward declaration for a structure you intend to define in one of your source
+   files, or your header contains an incomplete type declaration. Either way is perfectly fine, it just
+   boils down to your preference.
+
+   With the forward declaration, you are simply telling the consumer "here's a type that you know
+   nothing about", but you can use that type in your implementation files since it will be defined for
+   you. For instance, let's say you have a header like this:
+
+typedef struct foo_ *FooPtr;
+
+FooPtr FooCreate( void );
+void FooDestroy( FooPtr foo );
+
+int FooGetIntValue( FooPtr foo );
+void FooSetIntValue( FooPtr foo, int value );
+
+   Your implementation file could look like this:
+
+typedef struct foo_ {
+	int mVal;
+} foo_, *FooPtr;
+
+FooPtr FooCreate( void ) {
+	return new foo_;
+}
+
+void FooDestroy( FooPtr foo ) {
+	delete foo;
+}
+
+int FooGetIntValue( FooPtr foo ) {
+	return foo->mVal;
+}
+
+void FooSetIntValue( FooPtr foo, int value ) {
+	foo->mVal = value;
+}
+
+   In this case, you're header file acts as a forward declaration, and your implementation file
+   completes the type information. Then you can access the data with impunity as the framework
+   implementer, but your consumers won't be able to access the structure details except through the API
+   you provide.
+
+   The forward declaration form of opaque data pointers comes in very useful when you are working with
+   simple container objects that you treat as a POD (plain old datatype). You get the type safety, you
+   get the ease of use, and it works well. But it doesn't work well for more complex datatypes where you
+   are using classes instead of structures. You can't forward declare a class in a C header file, and
+   you shouldn't mix and match class and struct when defining your datatypes. In this case, it's best to
+   use an incomplete object datatype instead.
+
+   In that case, you are merely finding creative ways to turn a void * into a specific type - the end
+   result is that you get a typed pointer object, but it can only be used in very restrictive
+   circumstances. For instance, you cannot dereference an incomplete type. But the nice thing about this
+   approach is that you can be sure of the fact that the size of the pointer to the incomplete type is
+   the same as the size of the pointer to the actual type, so typecasting will be a safe, well-defined
+   operation.
+
+   For instance, if we were to use the declarations from above, but use FooPtr as an incomplete type,
+   our implementation file could look something like this:
+
+class Foo {
+	private:
+		int mVal;
+
+	public:
+		Foo() : mVal( 0 ) {}
+		virtual ~Foo();
+
+		int GetValue() const { return mVal; }
+		void SetValue( int val ) { mVal = val; }
+};
+
+
+FooPtr FooCreate( void ) {
+	return reinterpret_cast< FooPtr >( new Foo() );
+}
+
+void FooDestroy( FooPtr foo ) {
+	delete reinterpret_cast< Foo * >( foo );
+}
+
+int FooGetIntValue( FooPtr foo ) {
+	return reinterpret_cast< Foo * >( foo )->GetValue();
+}
+
+void FooSetIntValue( FooPtr foo, int value ) {
+	reinterpret_cast< Foo * >( foo )->SetValue( value );
+}
+
+The tradeoff with this approach is that you find yourself doing a lot of typecasting to go back and
+   forth between the types. However, it also means that you retain the typesafety of your opaque
+   datatype, but do not take a performance penalty by having the extra layer of indirection required by
+   the forward declaration approach (where you could put your class Foo * inside of your struct foo_
+   type).
+
+   The nice thing about either the forward declaration or the incomplete type approach to opaque
+   datatypes is that the consumer of the framework won't know the difference. You can switch between
+   them at-will, and the user won't know.
+
+   Regardless of what approach you take, using an opaque data pointer to hide the implementation details
+   of your framework is a great thing. It allows you to perform refactorings and optimizations with
+   considerably more ease because you don't have to worry about whether users are relying on those
+   details.
+
+   tl;dr: Opaque data types are a great approach that allow you to hide the implementation details of
+   your APIs.
+
+
+---
+https://stackoverflow.com/questions/7553750/what-is-an-opaque-pointer-in-c
+
+What is an opaque pointer in C?
+
+   May I know the usage and logic behind the opaque pointer concept in C?
+
+***
+   An opaque pointer is one in which no details are revealed of the underlying data (from a dictionary
+   definition: opaque: adjective; not able to be seen through; not transparent).
+
+   For example, you may declare in a header file (this is from some of my actual code):
+typedef struct pmpi_s *pmpi;
+
+   which declares a type pmpi which is a pointer to the opaque structure struct pmpi_s, hence anything
+   you declare as pmpi will be an opaque pointer.
+
+   Users of that declaration can freely write code like:
+pmpi xyzzy = NULL;
+
+   without knowing the actual "definition" of the structure.
+
+   Then, in the code that knows about the definition (ie, the code providing the functionality for pmpi
+   handling, you can "define" the structure:
+
+struct pmpi_s {
+	uint16_t *data;  // a pointer to the actual data array of uint16_t.
+	size_t sz;       // the allocated size of data.
+	size_t used;     // number of segments of data in use.
+	int sign;        // the sign of the number (-1, 0, 1).
+};
+
+   and easily access the individual fields of it, something that users of the header file cannot do.
+
+   More information can be found on the Wikipedia page for opaque pointers..
+
+   The main use of it is to hide implementation details from users of your library. Encapsulation
+   (despite what the C++ crowd will tell you) has been around for a long time :-)
+
+   You want to publish just enough details on your library for users to effectively make use of it, and
+   no more. Publishing more gives users details that they may come to rely upon (such as the fact the
+   size variable sz is at a specific location in the structure, which may lead them to bypass your
+   controls and manipulate it directly.
+
+   Then you'll find your customers complaining bitterly when you change the internals. Without that
+   structure information, your API is limited only to what you provide and your freedom of action
+   regarding the internals is maintained.
+
+***
+   Opaque pointers are used in the definitions of programming interfaces (API's).
+
+   Typically they are pointers to incomplete structure types, declared like:
+typedef struct widget *widget_handle_t;
+
+   Their purpose is to provide the client program a way to hold a reference to an object managed by the
+   API, without revealing anything about the implementation of that object, other than its address in
+   memory (the pointer itself).
+
+   The client can pass the object around, store it in its own data structures, and compare two such
+   pointers whether they are the same or different, but it cannot dereference the pointers to peek at
+   what is in the object.
+
+   The reason this is done is to prevent the client program from becoming dependent on those details, so
+   that the implementation can be upgraded without having to recompile client programs.
+
+   Because the opaque pointers are typed, there is a good measure of type safety. If we have:
+typedef struct widget *widget_handle_t;
+typedef struct gadget *gadget_handle_t;
+
+int api_function(widget_handle_t, gadget_handle_t);
+
+   if the client program mixes up the order of the arguments, there will be a diagnostic from the
+   compiler, because a struct gadget * is being converted to a struct widget * without a cast.
+
+   That is the reason why we are defining struct types that have no members; each struct declaration
+   with a different new tag introduces a new type that is not compatible with previously declared struct
+   types.
+
+   What does it mean for a client to become dependent? Suppose that a widget_t has width and height
+   properties. If it isn't opaque and looks like this:
+
+typedef struct widget {
+	short width;
+	short height;
+} widget_t;
+
+   then the client can just do this to get the width and height:
+int widget_area = whandle->width * whandle->height;
+
+   whereas under the opaque paradigm, it would have to use access functions (which are not inlined):
+// in the header file
+int widget_getwidth(widget_handle_t *);
+int widget_getheight(widget_handle_t *);
+
+// client code
+int widget_area = widget_getwidth(whandle) * widget_getheight(whandle);
+
+   Notice how the widget authors used the short type to save space in the structure, and that has been
+   exposed to the client of the non-opaque interface. Suppose that widgets can now have sizes that don't
+   fit into short and the structure has to change:
+typedef struct widget {
+	int width;
+	int height;
+} widget_t;
+
+   Client code must be re-compiled now to pick up this new definition. Depending on the tooling and
+   deployment workflow, there may even be a risk that this isn't done: old client code tries to use the
+   new library and misbehaves by accessing the new structure using the old layout. That can easily
+   happen with dynamic libraries. The library is updated, but the dependent programs are not.
+
+   The client which uses the opaque interface continues to work unmodified and so doesn't require
+   recompiling. It just calls the new definition of the accessor functions. Those are in the widget
+   library and correctly retrieve the new int typed values from the structure.
+
+   Note that, historically (and still currently here and there) there has also been a lackluster
+   practice of using the void * type as an opaque handle type:
+typedef void *widget_handle_t;
+typedef void *gadget_handle_t;
+
+int api_function(widget_handle_t, gadget_handle_t);
+
+   Under this scheme, you can do this, without any diagnostic:
+api_function("hello", stdout);
+
+   The Microsoft Windows API is an example of a system in which you can have it both ways. By default,
+   various handle types like HWND (window handle) and HDC (device context) are all void *. So there is
+   no type safety; a HWND could be passed where a HDC is expected, by mistake. If you do this:
+#define STRICT
+#include <windows.h>
+
+   then these handles are mapped to mutually incompatible types to catch those errors.
+
+***
+   Opaque as the name suggests is something we can't see through. E.g. wood is opaque. Opaque pointer is
+   a pointer which points to a data structure whose contents are not exposed at the time of its
+   definition.
+
+   Example:
+struct STest *pSTest;
+
+   It is safe to assign NULL to an opaque pointer.
+pSTest = NULL;
+
+
+---
+

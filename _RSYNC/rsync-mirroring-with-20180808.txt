@@ -1,0 +1,237 @@
+filename: rsync_mirroring_with_20180808.txt
+https://www.howtoforge.com/mirroring_with_rsync
+
+Mirror Your Web Site With rsync
+
+   This tutorial shows how you can mirror your web site from your main web server to a backup server
+   that can take over if the main server fails. We use the tool rsync for this, and we make it run
+   through a cron job that checks every x minutes if there is something to update on the mirror. Thus
+   your backup server should usually be up to date if it has to take over.
+
+   rsync updates only files that have changed, so you do not need to transfer 5 GB of data whenever you
+   run rsync. It only mirrors new/changed files, and it can also delete files from the mirror that have
+   been deleted on the main server. In addition to that it can preserve permissions and ownerships of
+   mirrored files and directories; to preserve the ownerships, we need to run rsync as root which is
+   what we do here. If permissions and/or ownerships change on the main server, rsync will also change
+   them on the backup server.
+
+   In this tutorial we will tunnel rsync through SSH which is more secure; it also means you do not have
+   to open another port in your firewall for rsync - it is enough if port 22 (SSH) is open. The problem
+   is that SSH requires a password for logging in which is not good if you want to run rsync as a cron
+   job. The need for a password requires human interaction which is not what we want.
+
+   But fortunately there is a solution: the use of public keys. We create a pair of keys (on our backup
+   server mirror.example.com), one of which is saved in a file on the remote system
+   (server1.example.com). Afterwards we will not be prompted for a password anymore when we run rsync.
+   This also includes cron jobs which is exactly what we want.
+
+   As you might have guessed already from what I have written so far, the concept is that we initiate
+   the mirroring of server1.example.com directly from mirror.example.com; server1.example.com does not
+   have to do anything to get mirrored.
+
+   I will use the following setup here:
+     * Main server: server1.example.com (server1) - IP address: 192.168.0.100
+     * Mirror/backup server: mirror.example.com (mirror) - IP address: 192.168.0.175
+     * The web site that is to be mirrored is in /var/www on server1.example.com.
+
+   rsync is for mirroring files and directories only; if you want to mirror your MySQL database, then
+   use MySQL mirroring/replication instead.
+
+   I want to say first that this is not the only way of setting up such a system. There are many ways of
+   achieving this goal but this is the way I take.
+
+1 Install rsync
+   First, we have to install rsync on both server1.example.com and mirror.example.com. For Debian and
+   Ubuntu systems, this looks like this:
+
+   server1/mirror:
+   (We do this as root!)
+   apt-get install rsync
+
+   On other Linux distributions, you would use yum (Fedora/CentOS) or yast (SuSE) to install rsync.
+
+2 Create An Unprivileged User On server1.example.com
+   Now we create an unprivileged user called someuser on server1.example.com that will be used by rsync
+   on mirror.example.com to mirror the directory /var/www (of course, someuser must have read
+   permissions on /var/www on server1.example.com).
+
+   server1:
+   (We do this as root!)
+   useradd -d /home/someuser -m -s /bin/bash someuser
+
+   This will create the user someuser with the home directory /home/someuser and the login shell
+   /bin/bash (it is important that someuser has a valid login shell - something like /bin/false does not
+   work!). Now give someuser a password:
+   passwd someuser
+
+3 Test rsync
+   Next, we test rsync on mirror.example.com. As root we do this:
+
+   mirror:
+   rsync -avz -e ssh [25][email protected]:/var/www/ /var/www/
+
+   You should see something like this. Answer with yes:
+The authenticity of host 'server1.example.com (192.168.0.100)' can't be established.
+RSA key fingerprint is 32:e5:79:8e:5f:5a:25:a9:f1:0d:ef:be:5b:a6:a6:23.
+Are you sure you want to continue connecting (yes/no)?
+   <-- yes
+
+   Then enter someuser's password, and you should see that server1.example.com's /var/www directory is
+   mirrored to /var/www on mirror.example.com.
+
+   You can check that like this on both servers:
+
+   server1/mirror:
+   ls -la /var/www
+
+   You should see that all files and directories have been mirrored to mirror.example.com, and the files
+   and directories should have the same permissions/ownerships as on server1.example.com.
+
+4 Create The Keys On mirror.example.com
+   Now we create the private/public key pair on mirror.example.com:
+
+   mirror:
+   (We do this as root!)
+   mkdir /root/rsync
+   ssh-keygen -t dsa -b 1024 -f /root/rsync/mirror-rsync-key
+
+   You will see something like this:
+Generating public/private dsa key pair.
+Enter passphrase (empty for no passphrase): [press enter here]
+Enter same passphrase again: [press enter here]
+Your identification has been saved in /root/cron/mirror-rsync-key.
+Your public key has been saved in /root/cron/mirror-rsync-key.pub.
+The key fingerprint is:
+68:95:35:44:91:f1:45:a4:af:3f:69:2a:ea:c5:4e:d7 [26][email protected]
+
+   It is important that you do not enter a passphrase otherwise the mirroring will not work without
+   human interaction so simply hit enter!
+
+   Next, we copy our public key to server1.example.com:
+
+   mirror:
+   (Still, we do this as root.)
+   scp /root/rsync/mirror-rsync-key.pub [27][email protected]:/home/someuser/
+
+   The public key mirror-rsync-key.pub should now be available in /home/someuser on server1.example.com.
+
+5 Configure server1.example.com
+   Now log in through SSH on server1.example.com as someuser (not root!) and do this:
+
+   server1:
+   (Please do this as someuser!)
+   mkdir ~/.ssh
+   chmod 700 ~/.ssh
+   mv ~/mirror-rsync-key.pub ~/.ssh/
+   cd ~/.ssh
+   touch authorized_keys
+   chmod 600 authorized_keys
+   cat mirror-rsync-key.pub >> authorized_keys
+
+   By doing this, we have appended the contents of mirror-rsync-key.pub to the file
+   /home/someuser/.ssh/authorized_keys. /home/someuser/.ssh/authorized_keys should look similar to this:
+
+   server1:
+   (Still as someuser!)
+   vi /home/someuser/.ssh/authorized_keys
+ssh-dss AAAAB3NzaC1kc3MAAA[...]lSUom [28][email protected]
+mirror
+
+   Now we want to allow connections only from mirror.example.com, and the connecting user should be
+   allowed to use only rsync, so we add
+command="/home/someuser/rsync/checkrsync",from="mirror.example.com",no-port-forwarding,no-X11-forwarding,no-pty
+
+   right at the beginning of /home/someuser/.ssh/authorized_keys:
+
+   server1:
+   (Still as someuser!)
+   vi /home/someuser/.ssh/authorized_keys
+command="/home/someuser/rsync/checkrsync",from="mirror.example.com",no-port-forwarding,no-X11-forwarding,no-pt
+y ssh-dss AAAAB3NzaC1kc3MAAA[...]lSUom [29][email protected]
+mirror
+
+   It is important that you use a FQDN like mirror.example.com instead of an IP address after from=,
+   otherwise the automated mirroring will not work!
+
+   Now we create the script /home/someuser/rsync/checkrsync that rejects all commands except rsync.
+
+   server1:
+   (We still do this as someuser!)
+   mkdir ~/rsync
+   vi ~/rsync/checkrsync
+#!/bin/sh
+case "$SSH_ORIGINAL_COMMAND" in
+        *\&*)
+                echo "Rejected"
+                ;;
+        *\(*)
+                echo "Rejected"
+                ;;
+        *\{*)
+                echo "Rejected"
+                ;;
+        *\;*)
+                echo "Rejected"
+                ;;
+        *\<*)
+                echo "Rejected"
+                ;;
+        *\`*)
+                echo "Rejected"
+                ;;
+        rsync\ --server*)
+                $SSH_ORIGINAL_COMMAND
+                ;;
+        *)
+                echo "Rejected"
+                ;;
+esac
+
+   chmod 700 ~/rsync/checkrsync
+
+6 Test rsync On mirror.example.com
+   Now we must test on mirror.example.com if we can mirror server1.example.com without being prompted
+   for someuser's password. We do this:
+
+   mirror:
+   (We do this as root!)
+   rsync -avz --delete --exclude=**/stats --exclude=**/error --exclude=**/files/pictures -e "ssh -i
+   /root/rsync/mirror-rsync-key" [30][email protected]:/var/www/ /var/www/
+
+   (The --delete option means that files that have been deleted on server1.example.com should also be
+   deleted on mirror.example.com. The --exclude option means that these files/directories should not be
+   mirrored; e.g. --exclude=**/error means "do not mirror /var/www/error". You can use multiple
+   --exclude options. I have listed these options as examples; you can adjust the command to your needs.
+   Have a look at man rsync for more information.)
+
+   You should now see that the mirroring takes place:
+receiving file list ... done
+sent 71 bytes  received 643 bytes  476.00 bytes/sec
+total size is 64657  speedup is 90.56
+
+   without being prompted for a password! This is what we wanted.
+
+7 Create A Cron Job
+   We want to automate the mirroring, that is why we create a cron job for it on mirror.example.com. Run
+   crontab -e as root:
+
+   mirror:
+   (We do this as root!)
+   crontab -e
+
+   and create a cron job like this:
+*/5 * * * * /usr/bin/rsync -azq --delete --exclude=**/stats --exclude=**/error --exclude=**/files/pictures -e
+"ssh -i /root/rsync/mirror-rsync-key" [31][email protected]:/var/www/ /var/www/
+
+   This would run rsync every 5 minutes; adjust it to your needs (see man 5 crontab ).
+   I use the full path to rsync here (/usr/bin/rsync) just to go sure that cron knows where to find
+   rsync. Your rsync location might differ. Run
+
+   mirror:
+   (We do this as root!)
+   which rsync
+
+   to find out where yours is.
+
+8 Links
+     * rsync: [32]https://rsync.samba.org/

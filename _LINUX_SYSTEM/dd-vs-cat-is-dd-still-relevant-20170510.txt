@@ -1,0 +1,209 @@
+filename: dd-vs-cat-is-dd-still-relevant_20170510.txt
+https://unix.stackexchange.com/questions/12532/dd-vs-cat-is-dd-still-relevant-these-days
+
+dd vs cat — is dd still relevant these days?
+
+   I recently realized we can use cat as much as dd, and it's [32]actually faster than dd
+
+   I know that dd was useful in dealing with tapes where block size actually mattered in correctness,
+   not just performance. In these days, though, are there situations where dd can do something cat
+   can't? (Here I would regard a less than 20% performance difference irrelevant.)
+
+7 Answers 7
+
+***
+   In appearance, [46]dd is a tool from an IBM operating system that's retained its foreign appearance
+   (its parameter passing), which performs some very rarely-used functions (such as EBCDIC to ASCII
+   conversions or endianness reversal… not a common need nowadays).
+
+   I [47]used to think that dd was faster for copying large blocks of data on the same disk (due to more
+   efficient use of buffering), but this [48]isn't true, at least on today's Linux systems.
+
+   I think some of dd's options are useful when dealing with tapes, where reading is really performed in
+   blocks (tape drivers don't hide the blocks on the storage medium the way disk drivers do). But I
+   don't know the specifics.
+
+   One thing dd can do that can't (easily) be done by any other POSIX tool is taking the first N bytes
+   of a stream. Many systems can do it with head -c 42, but head -c, while common, isn't in POSIX (and
+   isn't available today on e.g. OpenBSD). (tail -c is POSIX.) Also, even where head -c exists, it might
+   read too many bytes from the source (because it uses stdio buffering internally), which is a problem
+   if you're reading from a special file where just reading has an effect. (Current GNU coreutils read
+   the exact count with head -c, but FreeBSD and NetBSD use stdio.)
+
+   More generally, dd gives an interface to the underlying file API that is unique amongst Unix tools:
+   only dd can overwrite or truncate a file at any point or seek in a file. (This is dd's unique
+   ability, and it's a big one; oddly enough dd is best known for things that other tools can do.)
+     * Most Unix tools overwrite their output file, i.e. erase its contents and start it over from
+       scratch. This is what happens when you use > redirection in the shell as well.
+     * You can append to a file's contents with >> redirection in the shell, or with tee -a.
+     * If you want to shorten a file by removing all data after a certain point, this is supported by
+       the underlying kernel and C API through the [49]truncate function, but not exposed by any command
+       line tool [50]except dd:
+dd if=/dev/null of=/file/to/truncate seek=1 bs=123456  # truncate file to 123456 bytes
+
+     * If you want to overwrite data in the middle of a file, again, this is possible in the underyling
+       API by [51]opening the file for writing without truncating (and calling [52]lseek to move to the
+       desired position if necessary), but only dd can open a file without truncating or appending, or
+       [53]seek from the shell ([54]more complex example).
+# zero out the second kB block in the file (i.e. bytes 1024 to 2047)
+dd if=/dev/zero of=/path/to/file bs=1024 seek=1 count=1 conv=notrunc
+
+   So… As a system tool, dd is pretty much useless. As a text (or binary file) processing tool, it's
+   quite valuable!
+
+***
+   The dd command includes LOTS of options that cat is not able to accommodate. Perhaps in your usage
+   cases cat is a workable substitute, but it is not a dd replacement.
+
+   One example would be using dd to copy part of something but not the whole thing. Perhaps you want to
+   rip out some of the bits from the middle of an iso image or the partition table from a hard drive
+   based on a known location on the device. With dd you can specify the start, stop and quantity options
+   that allow these actions.
+
+   These options of dd make it indispensable for fine grained data manipulation whereas cat* can only
+   operate on whole file objects, devices or streams.
+
+   *As noted by Gilles in the comments, it is possible to combine cat with other tools to isolate parts
+   of something, but cat still operates on the whole object.
+
+***
+   dd actually has nothing to do with low-level devices, it needs an entry in /dev like the others. You
+   can copy a whole partition with cat, or a part of it with tail +c $(($start+1)) | head -c $count.
+
+***
+   Of course. ;-) And when I feed a 1.6TB disk image into cat | head | tail to fetch the last few MBs
+   the disk spin up will suck the moon in closer to earth. – [72]Caleb May 3 '11 at 17:01
+
+***
+   @Gilles Sorry I did mean to acknowledge that my use of the term "low level" wasn't very good diction,
+   although I was referring to data on devices, not devices. Perhaps "fine tuned data manipulation"
+   would be better than "manipulating low level data". – [73]Caleb May 4 '11 at 13:09
+
+***
+   No one has yet mentioned that you can use dd to create [74]sparse files, though truncate can also be
+   used for the same purpose.
+dd if=/dev/zero of=sparse-file bs=1 count=1 seek=10GB
+
+   This is almost instant and creates an arbitrary large file that can be used as a loopback file for
+   instance:
+loop=`losetup --show -f sparse-file`
+mkfs.ext4 $loop
+mkdir myloop
+mount $loop myloop
+
+   The nice thing is that it initially only uses a single block of diskspace, and thereafter grows only
+   as needed (ext4 formatting of a 10GB file consumes 291 MB on my system). Use du to see how much disk
+   space is actually used -- ls reports only the maximum size the file may grow to.
+
+***
+   ls -ls shows you the sparse size. – [78]jmtd May 7 '11 at 10:58
+   1
+   Your command writes a useless byte to the file. dd of=sparse-file bs=1 count=0 seek=10G would be
+   equivalent to truncate -s 10GB sparse-file. Confusingly enough, truncate and dd have exact opposite
+   interpretation of GB vs. G... – [79]frostschutz Feb 8 '13 at 2:49
+
+***
+   @frostschutz: man dd says: MB =1000*1000, M =1024*1024 and so on. And man truncate says: MB
+   1000*1000, M 1024*1024, so there is no difference. I use both dd and truncate from the GNU coreutils.
+   You should do so, too! :-) – [80]erik Jun 6 '13 at 9:20
+
+***
+   @erik: Thanks for the correction. If it wasn't changed recently I must've confused it with something
+   else somehow. – [81]frostschutz Jun 6 '13 at 16:05
+
+***
+   Override specific segments of a hard-drive with something is a common example. For example you might
+   want to delete your MBR using this command:
+dd if=/dev/zero of=/dev/sda bs=446 count=1
+
+   Also you can create empty files with it (say for loop disk images):
+dd if=/dev/zero of=10mb.file bs=1024k count=10
+
+***
+   @Kevin: Faster than head -c? Please share a [88]benchmark! – [89]Gilles May 3 '11 at 15:15
+
+***
+   dd is very useful for backing up the boot sector of a hard drive or other storage device (dd
+   if=/dev/sda of=boot_sector.bin bs=512 count=1 ) and then later rewriting it (dd if=boot_sector.bin
+   of=/dev/sda). It is similarly useful for backing up the headers of encrypted volumes.
+
+   cat might be able to be twisted into doing that but I wouldn't trust it on the rewriting part. It's
+   difficult to get cat to only read/write a certain number of bytes.
+
+***
+   I recently had had cause to clone some multiple-100s-of-GB partitions for the first time in my
+   linuxing history (c.f cp -ar or rsync which have served me well many times). Of course I turned to dd
+   'cos everyone knows that's what you use... and was appalled by the performance. A bit of googling
+   soon led me to [94]ddrescue, which I've used a few times now and works superbly well (much faster
+   than dd).
+
+***
+   ddrescue is great, especially for getting data out of failing disks. – [98]ryenus Apr 6 '16 at 2:39
+
+***
+   Here are some dd tricks I've come up with over the years..
+
+Cut-and-Paste on unfriendly tty or non-interactive mode bash
+   If you're in a situation where EOF/^D/^F is not detected you can use dd to transfer text files to a
+   host. Since it will stop reading after a specified amount of bytes automatically.
+
+   I used this as recently as last year during a security exercise where we were able to get non-tty
+   shells on a remote host and needed to transfer files in.
+
+   In fact, I even did a couple binary files by base64 encoding them and using a slow, but reliable
+   pure-bash base64 decoding script.
+dd of=textfile.txt bs=1 count=<size_of_data_in_paste_buffer>
+
+   A super cool trick is that while dd is running, if you send it a USR1 signal, it will emit it's
+   current status (bytes read, bytes per second..)
+
+Universal throughput state filter
+   I wrote this to act as a pure bash progress filter for any program that emits data through stdout.
+   (Note: Pretty much anything will emit data through stdout - for programs that don't, you can cheat if
+   they don't barf on you using /dev/stdout as a filename. But the idea is basically, every time you get
+   X amount of bytes, print hash marks (like old school FTP when you had hash mode on)
+
+   (Note) The progress file thing is lame, this was mostly a proof of concept. If I redid it, I'd just
+   use a variable.
+ dd bs=$BLKSZ of=${TMPFILE} 2>&1 \
+                | grep --line-buffered -E '[[:digit:]]* bytes' \
+                | awk '{ print $1 }' >> ${PROGRESS} &
+
+ while [[ $(pidof dd) -gt 1 ]]; do
+
+        # PROTIP: You can sleep partial seconds
+        sleep .5
+
+        # Force dd to update us on it's progress (which gets
+        # redirected to $PROGRESS file.
+        pkill -USR1 dd
+        local BYTES_THIS_CYCLE=$(tail -1 $PROGRESS)
+        local XFER_BLKS=$(((BYTES_THIS_CYCLE-BYTES_LAST_CYCLE)/BLKSZ))
+
+        if [ $XFER_BLKS -gt 0 ]; then
+                printf "#%0.s" $(seq 0 $XFER_BLKS)
+                BYTES_LAST_CYCLE=$BYTES_THIS_CYCLE
+        fi
+done
+
+slice-and-dice files using anonymous shell filehandles
+
+   Here's an extremely pseudo-code example of how you can have a signed tar file that you can extract
+   without errors by providing tar input through an anonymous filehandle - without using any tmp files
+   to store partial file data.
+generate_hash() {
+    echo "yay!"
+}
+
+# Create a tar file, generate a hash, append it to the end
+tar -cf log.tar /var/log/* 2>/dev/null
+TARFILE_SIZE=$(stat -f "%z" log.tar)
+SIGNATURE=$(generate_hash log.tar)
+echo $SIGNATURE >>log.tar
+
+# Then, later, extract without getting an error..
+
+tar xvf <(dd if=$OLDPWD/log.tar bs=1 count=${TARFILE_SIZE})
+
+   The tl;dr is: I find dd to be incredibly useful. And these are just the three examples I can think of
+   off the top of my head.

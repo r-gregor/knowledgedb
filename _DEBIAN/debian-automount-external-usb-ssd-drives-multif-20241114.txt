@@ -1,0 +1,576 @@
+filename: debian_automount_external_usb_ssd_drives-multif_20241114.txt
+https://www.naturalborncoder.com/2023/08/mounting-usb-drives-under-debian/
+
+Mounting USB Drives Under Debian
+Aug 14, 2023
+
+   I'm currently designing a backup system built around Resitc and removable USB drives. Before I
+   can really get started though I need to properly understand how to manage the drives, in particular
+   mounting and unmounting them. What I'm hoping I'll be able to achieve is a situation where I can
+   mount a drive somewhere (let's say /mnt/backup), then replace the drive with another once it's time
+   to swap drives (e.g. once a week) and the backup just continues to work smoothly.
+
+   What I've learnt from experience is that if there's any friction or pain points in the backup process
+   I just won't do it. For example, I tried to set up something like this under Windows. I bought three
+   1TB USB drives and tried to cycle through them. Getting Windows to mount them to the same drive
+   letter when they were replaced turned out to be a significant challenge though so the backups stopped
+   being taken. Yep, that's unbelievably lazy but at least I'm honest enough with myself to know the
+   level I need to achieve. I suspect I'll end up with a few scripts controlling the backup process but
+   I think that will be acceptable with proper documentation on how to run things.
+
+Creating a Mount Point
+   The first thing to decide is where to mount the drive. Many Linux distributions follow the
+   Filesystem Hierarchy Standard which provides two possible candidate locations /mnt and /media.
+   There's a lot of confusion over which of these should be used and when (especially for drvices that
+   are almost permanently mounted) but I think in this case it's fairly clear I should be mounting them
+   under /media.
+
+   Open a command prompt and create the directory /media/backup.
+$> cd /media
+$> sudo mkdir backup
+
+Find the Drive
+   Plug the drive into the system and then use lsblk -f to list filesystem information.
+$> lsblk -f
+NAME        FSTYPE FSVER LABEL                   UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
+sda
++-sda1
++-sda2      ntfs         Games                   9EFCCEA7FCCE78D3
+
+sdb
++-sdb1
++-sdb2      ntfs         Seagate Expansion Drive 1CD2FA89D2FA6704
+sdc
+
+sdd
++-sdd1      ntfs         backup-3                226AFB1D6AFAED03
+
+nvme1n1
++-nvme1n1p1 ntfs         Recovery                4E62220B6221F87B
++-nvme1n1p2 vfat   FAT32                         DC22-63C3
++-nvme1n1p3
++-nvme1n1p4 ntfs                                 6286234786231AD5
+
+nvme0n1
++-nvme0n1p1 vfat   FAT32                         F059-0450                             505.2M     1% /boot/efi
++-nvme0n1p2 ext4   1.0                           b28e9977-f9b7-4b35-91db-fa799f17f4f4  788.4G     9% /
++-nvme0n1p3 swap   1                             e11379bb-607b-45a6-8d30-454cefe67d59                [SWAP]
+
+   The -f flag tells the utility to output information about the filesystems it finds such as the type
+   and name, this can be very useful when identifying which disk you want to use. Looking at the output
+   above it's pretty obvious I want to mount backup-3 which is formatted as ntfs - this is one of the
+   drives I was using for the failed windows backup I mentioned above, we'll reformat it later. The
+   really important information shown here, though, is the UUID. This is a unique name for the partition
+   that shouldn't ever change so you can be sure you are always working with the correct device. It also
+   means you can use this name in /etc/fstab to refer to exactly the partition you want. Note, you can
+   also get UUID information from the command ls -l /dev/disk/by-uuid but its output isn't as user
+   friendly.
+
+Format the Disk
+   This step is optional and depends on the current state of the disk. Most disks come formatted either
+   vfat or ntfs which is fine if you are working on Windows but leaves a bit to be desired if you are
+   working under Linux. I'll be reformatting my backup drives to ext4 for easier use under Linux. Linux
+   has had excellent support for vfat and ntfs for years now but ext4 is still a better choice. Note
+   that it's possible to get an ext4 drive working under Windows but it's not trivial, by default
+   Windows won't recognize the drive.
+
+   There are numerous ways to reformat and repartition a drive under Linux. The two most popular command
+   line tools are fdisk and parted. Both will get the job done and are mature and robust. They are,
+   however, quite complex tools to use. For simplicities sake I use KDE Partition Manager because it's
+   already installed on my system and it's competent at what it does (I think the Gnome equivalent is
+   called Disks, there's also GParted).
+
+Manually Mount the Disk
+   Eventually we'll add an entry into /etc/fstab but I like to manually mount a device while I'm working
+   on a new project. This helps to avoid "oops, my computer won't boot" situations. To mount a device
+   you need to issue a mount command. If you're using modern desktop environment many of them will offer
+   to mount devices though the interface, for example in the tray area of my Plasma desktop I have a
+   widget called Disks and Devices. Since I'm preparing to use this on a server I'll mount it manually
+   at the command line.
+
+   Start by confirming your drive information with lsblk -f. I've only shown the relevant portion of the
+   output below. Notice that the UUID has changed, this is because I've repartitioned the disk when
+   converting it to ext4, the UUID is associated with the partition.
+sdd
++-sdd1      ext4   1.0   backup-3                11bcd17d-06b0-4345-8b5f-cc0fcbf88f41
+
+   The mount command to use looks like the one below, obviously change the UUID to match your partition.
+$> sudo mount -t ext4 /dev/disk/by-uuid/11bcd17d-06b0-4345-8b5f-cc0fcbf88f41 /media/backup/
+
+   If it works, unmount the drive and we'll make an entry in /etc/fstab.
+
+Edit fstab
+   Entries in /etc/fstab are essentially just provide the arguments to the mount command. As we're
+   looking to produce a system that's reliable over the long term we'll care a bit more about the
+   options we provide than when we manually mounted and left it up to the operating system. You should
+   start by reading about the fstab file format.
+
+   An example entry for the disk we want to mount is shown below.
+UUID=11bcd17d-06b0-4345-8b5f-cc0fcbf88f41 /media/backup ext4 defaults 0 0
+
+   This is super simple because we're using ext4 which integrates well with the rest of the system. The
+   first part specifies the UUID of the partition I want to mount. Then I tell it where to mount it and
+   what type of partition it is - the system could guess but we know so tell it explicitly. The options
+   can just be left at their defaults and then dump and pass are both left at 0. The dump number is a
+   marker to indicate a filesystem should be dumped to tape for backup, I'm pretty sure it's not used
+   any more. The pass number can be 0,1 or 2 and determines the order when an filesystem check is run.
+   To mount the device now you just need to use
+$> sudo mount -a
+
+There's a Problem!
+   If you unmount the drive, unplug it and then run the mount -a command again you'll get an error
+   message like this.
+mount: /media/backup: can't find UUID=11bcd17d-06b0-4345-8b5f-cc0fcbf88f41.
+
+   On the command line this isn't an issue but when you're booting your machine it is a problem because
+   the system will hang waiting for the drive to appear. To get around this issue you can add the nofail
+   option which will suppress warning messages. There's a lot of debate around what the nofail option
+   will do. I think I'm getting away with booting cleanly because I also have pass set to zero so
+   there's no attempt to do a filesystem check.
+UUID=11bcd17d-06b0-4345-8b5f-cc0fcbf88f41 /media/backup ext4 defaults,nofail 0 0
+
+
+---
+https://superuser.com/questions/1687421/mounting-2-external-drives-always-in-the-same-way-in-debian
+
+Mounting 2 external drives always in the same way in Debian
+
+   I would mount on Debian (on raspberrypi with nextcloudpi) two external USB drives always in the same
+   sequence (sda, sdb etc..)
+
+   Now i've attached one USB External Drive and Debian automap as
+/media/039256f6-3ba5-424f-b781-4d14a8746415   /dev/sda1   ext4    rw,nosuid,nodev,relatime
+
+   and there's a mount point called USBdrive but in the /etc/fstab there's no trace of this mount point
+   (where is written this mount point i don't know)
+
+   This is fstab file
+PARTUUID=037e0064-01  /boot  vfat    defaults          0       2
+PARTUUID=037e0064-02  /ext4          defaults,noatime  0       1
+
+   If i use
+$> ls /media/USBdrive
+
+   i can see the folders contained in.
+
+   The command
+$> ls /media/
+
+   shows me
+039256f6-3ba5-424f-b781-4d14a8746415  USBdrive
+
+   039256f6-3ba5-424f-b781-4d14a8746415 as shown in dark blue
+   USBdrive                             as shown in light blue color
+
+   If i connect also the second external USB drive, the USBdrive (mount point) is not accessible because
+   external USB drive has mounted as /dev/sdb1 and not /dev/sda1.
+
+   Anyway, i can't find where's written USBdrive mount point because my goal is to edit /etc/fstab and
+   mapping two external USB drive in correct sequence.
+
+   Any suggestions ?
+
+***
+   That's a FAQ. The thing to do is not to use the kernel assigned names /dev/sd* (because they are
+   essentially random), but instead use the symlinks that are provided through udev in /dev/by-* in
+   fstab.
+
+***
+   I believe you'll want to read the documentation of [udisks]. In short, when you insert a USB
+   drive it is read by the system and the appropriate entries are added in the /dev/ file system. When
+   you access it from a file manager it is automagically mounted under /media/ using udisksctl mount;
+   the mount point is the device's [UUID].
+
+   This is the "dynamic" way. If you want a more "static" behavior, you could add them in /etc/fstab
+   preferably using their respective UUIDs. This way the mount points will be depended on their unique
+   UUIDs and not on a random sdx enumeration they will get.
+
+
+---
+https://unix.stackexchange.com/questions/560358/how-do-i-automount-usb-drives-in-linux-debian
+
+How do I automount usb drives in Linux (Debian)?
+
+   With every new release the way to automount USB drives in Linux seems to change (fortunately I'm
+   using Debian, so I'm only losing a few days on this every 2 years). We used to have usbmount, udisks,
+   udisks2, udisks-glue, pmount, custom udev rules, and I'm probably forgetting many more. (A quick look
+   shows that at least a thing named afuse seems to exist, but is not documented too well). None of
+   these work anymore (for me at least).
+
+   What is the "current" way to automount USB drives in Debian? I used the following udev rule, but
+   since updating from stretch to buster this stopped working:
+SUBSYSTEM=="usb", DRIVERS=="usb-storage", ACTION=="add", \
+RUN+="mkdir /media/usb%n; mount -o gid=plugdev,umask=002,fmask=111,users /dev/%k%n /media/usb%n"
+
+   Also: what is the stable solution to do this, that will reliably work even after updating to a new
+   release, that I probably missed?
+
+***
+   You can create systemd.mount and systemd.automount unit files. Here is an example:
+
+   To mount /dev/sdb1 under /mnt/mountpoint , create a mnt-mountpoint.mount file:
+$> sudo nano /etc/systemd/system/mnt-mountpoint.mount
+
+   Note: The name of the unit file should be dir-sub-dir.mount extracted from the mount point
+   /dir/sub-dir (if you need to mount the device under /media/mountpoint the name will be
+   media-mountpoint.mount)
+
+   Then paste the following lines:
+[Unit]
+Description=Mount sdb1
+
+[Mount]
+What=/dev/disk/by-uuid/UUID_here
+Where=/mnt/mountpoint
+Type=auto
+Options=defaults
+
+[Install]
+WantedBy=multi-user.target
+
+   Use blkid to replace the UUID_here with the uuid of /dev/sdb1.
+
+   Create the mnt-mountpoint.automount file:
+$> sudo nano /etc/systemd/system/mnt-mountpoint.automount
+
+   To contain the following lines:
+[Unit]
+Description=Automount usb
+
+[Automount]
+Where=/mnt/mountpoint
+
+[Install]
+WantedBy=multi-user.target
+
+   Attach your USB then enable and start the units:
+sudo systemctl daemon-reload
+sudo systemctl enable --now  mnt-mountpoint.mount mnt-mountpoint.automount
+
+***
+   Update[2022-03-06]: Just apt install udisks2 should give you usb automounting.
+
+   I researched (reverse) package dependencies in Debian of nautilus, udisks2 and libglib2.0-bin (which
+   contains the gio binary). Based on this and on Archlinux Udisks page I now believe:
+     * The state of the art for the thing that actually does the mounting is udisks2. The next best
+       thing to automounting is udisksctl unmount -b /dev/$DEVICE.
+     * On a "standard" Debian Gnome installation, nautilus is controlling the icons on the Desktop. When
+       an USB drive gets plugged in, an icon gets shown for the drive but the drive only gets mounted on
+       click on the icon.
+     * The best choice for minimal desktops for usb automounting is probably udiskie.
+
+   I added a user systemd service to start udiskie:
+[Unit]
+Description=Udiskie automount daemon
+
+[Install]
+WantedBy=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/udiskie --verbose --use-udisks2 --automount --no-config --notify --tray --appindicator
+
+     * This worked great for me. If you want to have the mounts user-accessible, add this "[Service]
+       User=user Group=plugdev" above ExecStart. Also add a file
+       "/etc/polkit-1/localauthority/50-local.d/10-udiskie.pkla" with the contents: "[udisks]
+       Identity=unix-group:plugdev Action=org.freedesktop.udisks.* ResultAny=yes [udisks2]
+       Identity=unix-group:plugdev Action=org.freedesktop.udisks2.* ResultAny=yes"
+     * Seems like the --use-udisks2 option doesn't exist anymore, so it should be removed from the
+       ExecStart command (tested on Ubuntu 21.10).
+
+***
+   Same issue happened to me after upgrade from Stretch to Buster (headless Raspberry Pi Zero W). In my
+   case, I am using /etc/fstab, so systemd automatically generates mount units from it. All my disks are
+   specified in fstab, and they were automatically mounted on hot plugin just fine in Stretch. It all
+   stopped working in Buster. (The disks would mount fine on reboot, though.)
+
+   The culprit of the problem, it seems, was the change in new systemd version:
+
+    * The .device units generated by systemd-fstab-generator and other
+      generators do not automatically pull in the corresponding .mount unit
+      as a Wants= dependency. This means that simply plugging in the device
+      will not cause the mount unit to be started automatically. But please
+      note that the mount unit may be started for other reasons, in
+      particular if it is part of local-fs.target, and any unit which
+      (transitively) depends on local-fs.target is started.
+
+   I verified it with systemctl show my-mount.mount command: the device was missing in the WantedBy=
+   list, there was only local-fs.target. (While on Stretch there was local-fs.target and the
+   correspondent dev-sdaX.device, both were listed.) As a result, when the disk was inserted, it did not
+   trigger my-mount.mount unit to start.
+
+   So the solution which worked for me was creating the new udev rule that triggers local-fs.target each
+   time the new disk is inserted:
+$> cat /etc/udev/rules.d/98-usb-disk-mount.rules
+ACTION=="add", KERNEL=="sd?[0-9]", SUBSYSTEM=="block", RUN+="/bin/systemctl start local-fs.target"
+
+   (Note: the systemctl start local-fs.target command is recommended way to trigger fstab disks mount in
+   systemd manual.)
+
+
+---
+https://linuxconfig.org/automatically-mount-usb-external-drive-with-autofs
+
+Automatically mount USB external drive
+14 July 2021
+
+The default behavior of most Linux systems is to automatically mount a USB storage device (such as a flash
+drive or external drive) when it gets plugged into the computer. However, this is not the case across every
+distro, or sometimes configurations go awry and you may find that your device is not being automatically
+mounted. You may also just want your storage device to mount when you plug it in before booting.
+
+In this guide, we’ll go over the step by step instructions to configure a USB storage device to be
+automatically mounted on Linux. There are a couple different ways to go about this, which will be covered
+below, so choose whichever you find more appropriate for your scenario.
+
+In this tutorial you will learn:
+	How to mount USB drive automatically with autofs How to mount USB drive automatically via UUID
+
+Configuring a USB drive to mount automatically in Linux
+Configuring a USB drive to mount automatically in Linux Software Requirements and Linux Command Line
+Conventions Category Requirements, Conventions or Software Version Used System Any Linux distro Software
+autofs Other Privileged access to your Linux system as root or via the sudo command. Conventions # –
+requires given linux commands to be executed with root privileges either directly as a root user or by use of
+sudo command $ – requires given linux commands to be executed as a regular non-privileged user Automatically
+mount USB external drive with autofs
+
+If your external USB drive mounts when it is attached before booting you may have a line in your /etc/fstab
+configuration file which mounts it during the boot time. If this is the case and you plug in your external USB
+drive after the boot, execute as a root user:
+$> mount -a
+
+However, this may not be the most reliable solution since the base device file name for your drive can be
+different every time you plugin your USB disk. Your base device file name for your USB disk can be anything
+like: /dev/sdb1, /dev/sdd1 or /dev/sdXn.
+
+A very simple and neat solution to the problem is a tool called autofs. We’ll go over the setup and
+configuration in the following steps. But first, you will need to install the software on your system.
+
+To install autofs on Ubuntu, Debian, and Linux Mint:
+$> sudo apt install autofs
+
+To install autofs on CentOS, Fedora, AlmaLinux, and Red Hat:
+$> sudo dnf install autofs
+
+To install autofs on Arch Linux and Manjaro:
+$> sudo pacman -S autofs
+
+ To avoid any confusion whether base name for your USB block device is /dev/sdb1, /dev/sdd1 or /dev/sdXn,
+ we can make it permanently /dev/myusb any time you plug it in. This can be done with help of udev device
+ manager. Start by identifying the name of your USB drive:
+$> fdisk -l
+
+ This will return something like this:
+ Disk /dev/sdc: 2000.3 GB, 2000396746752 bytes 255 heads, 63 sectors/track, 243201 cylinders Units =
+ cylinders of 16065 * 512 = 8225280 bytes Disk identifier: 0x001425a0
+
+ Device Boot Start End Blocks Id System /dev/sdc1 1 243201
+ 1953512001 b W95 FAT32
+
+ The base name for our external USB device in this example happens to be /dev/sdc, but yours may be
+ different. Next, use udevinfo command with /dev/sdc as an argument to get model attribute:
+$> udevinfo -a -p /sys/block/sdX/ | grep model ATTRS{model}=="Ext HDD 1021 "
+
+ Now that we have the model attribute, we can add it to /etc/udev/rules.d/custom.rules with the following
+ line:
+
+ SUBSYSTEM=="scsi", ATTRS{model}=="Ext HDD 1021 ", SYMLINK+="myusb%n"
+
+ At this point all we need to do is restart udev device manager:
+$> sudo systemctl restart udev
+
+ Now when we plug in our USB device, it will be accessible under the following base name:
+
+$> sudo ls -l /dev/myusb* lrwxrwxrwx 1 root root 3 2011-02-23 12:36 /dev/myusb -> sdc lrwxrwxrwx 1 root root 12
+ 2011-02-23 12:36 /dev/myusb0 -> bsg/14:0:0:0 lrwxrwxrwx 1 root root 4 2011-02-23 12:36 /dev/myusb1 ->
+ sdc1 lrwxrwxrwx 1 root root 3 2011-02-23 12:36 /dev/myusb3 -> sg3
+
+ Please note that /dev/myusb points to a /dev/sdc1, which is exactly the partition we are interested in and
+ we use it next to configure autofs. Configuring autofs is rather simple task. All we need to do is to
+ edit two simple files. Let’s start with master file /etc/auto.master by appending the following line:
+ /media/ /etc/auto.ext-usb --timeout=10,defaults,user,exec,uid=1000
+
+ Next, edit /etc/auto.ext-usb file which we included in a master configuration file configuration:
+ myusb -fstype=auto :/dev/myusb1
+
+ Restart autofs for the changes to take effect:
+$> sudo systemctl restart autofs
+
+ Every time you now plug in your external USB drive, autofs will add your device to a list of Active Mount
+ Points. Plugin your external USB drive now and execute:
+
+$> sudo autofs status
+
+ Output:
+
+ Configured Mount Points:
+ ------------------------
+ /usr/sbin/automount --timeout=10 /media file /etc/auto.ext-usb ,defaults,user,exec,uid=1000
+
+ Active Mount Points:
+ --------------------
+ /usr/sbin/automount --pid-file=/var/run/autofs/_media.pid --timeout=10\ /media file /etc/auto.ext-usb ,defaults,user,exec,uid=1000
+
+ Please note, although our drive is now listed as an active mount point the disk is not mounted yet! autofs
+ only waits for user to access specified mount point directory and once that happens it will mount the
+ filesystem. For example:
+$> cd /media/
+$> ls
+$> cd myusb
+$> ls lost.dir music picture ps3 video mystuff
+$> cd ..
+$> ls myusb
+
+ From the output above you can see that myusb directory was created only when I tried to access it. Every
+ time you now plug in you USB external disk you can instantly access it via some sort of Desktop or
+ Bookmark shortcut.
+
+Automatically mount USB drive by UUID
+An alternative solution to the above is to mount a device automatically by its UUID.
+
+ Use the following command to retrieve the UUID of all storage devices plugged into your system.
+$> sudo blkid
+
+ Once you have indentified the proper UUID, edit the /etc/fstab file and append the following line:
+
+ UUID=17c1210c-8a88-42d6-b394-03f491415d5c /mnt/usb ext4 defaults 0 0
+
+ Of course, replace our example UUID with your own, and you may also use a different directory other than
+ /mnt/usb if you want to mount your partition somewhere else. Your USB device should now mount
+ automatically at boot (assuming it’s plugged in). Otherwise, just run the following command to mount it at
+ any time:
+$> sudo mount -a
+
+Closing Thoughts
+In this guide, we saw how to automatically mount a USB external drive at boot time in Linux. We used two
+separate methods to accomplish this task, leaving you free to choose whichever one you find most convenient.
+The UUID method is quicker and doesn’t require any extra software, but autofs may already be used on your
+system to mount NFS shares and the like. If that’s the case, it may be more convenient for you to add another
+mount point to your autofs config. The choice is yours.
+
+
+---
+https://www.baeldung.com/linux/automount-usb-device
+
+How to Automount USB Devices in Linux
+March 18, 2024
+
+1. Overview
+In this tutorial, we'll talk about automounting USB (Universal Serial Bus) devices on our Linux
+machines. This is especially relevant since the widely used usbmount tool has not been maintained in
+several years. It also doesn't support NTFS (New Technology File System) devices.
+
+2. Automatic Mounting at Startup With fstab
+If we're only interested in automatically mounting the USB drives whenever we boot our machine, we can use
+fstab.  fstab is a system file that comes from the standard util-linux, which is commonly available in
+most Linux distributions. We can install it if it's not present in our system with yum or apt. Let's
+imagine that we want to mount a USB stick located in /dev/sdb1. We need to edit the /etc/fstab file with our
+editor of choice and super-user rights and append this line:
+/dev/sdb1 /media/usb-stick auto defaults,nofail,x-systemd.automount 0 2
+
+We should keep in mind that this procedure only works for USB drives connected to the system at startup. Let's
+break apart the previous instruction to understand it.
+
+2.1. File System Specification
+The first part refers to the node of the file system that we want to mount: /dev/sdb1.
+We can also use the symbolic link that udev creates and which we can find in /dev/disk/by-id:
+/dev/disk/by-id/usb-VendorCo_ProductCode_9876012345F201230749-0:0-part /media/usb-stick auto defaults,nofail,x-systemd.automount 0 2
+
+However, both approaches based on the /dev folder might stop working if the hardware changes. When we modify
+the physical components of our machine, the ordering of the devices in the /dev folder changes, which might
+break the automounting functionality.  Thus, the recommended and most reliable way is to use the Unique
+Universal Identifier (UUID). The UUID is usually a 128-bit number used to uniquely identify disks so that the
+kernel maps them to the exact node location. We need to specify that we're using the UUID if we decide to do so:
+UUID=12ab345cd-1234-4166-8539-ff4ff3ff2ff1 /media/usb-stick auto defaults,nofail,x-systemd.automount 0 2
+
+We can retrieve the UUID with the blkid command.
+
+2.2. Directory Selection and Other Parameters
+The second item in the command is the mounting point. The one selected for the example is /media/usb-stick but
+we can certainly adapt it to our needs.
+
+If we know it, we can specify the type of the file system in the third element (such as FAT32, or exFAT).
+However, if we don't, we can always use the auto option as in the example.  The fourth element is the list of
+options. We specify the default ones followed by nofail (used to avoid reporting failures) and x-system.
+automount (which we need to instruct systemd to automatically mount the device). We can specify other
+options if we want to, with the exception of noauto, which prevents the automatic mounting of the drive.  The
+fifth element indicates whether we want to perform a check to dump files. This is usually set to 0 to not
+perform it.  Finally, the sixth element is the order in which the kernel checks the file systems at boot time.
+For root devices, the value is 1 but for our USB drive, it should be 2.
+
+2.3. Testing the Automatic Procedure
+We can use journalctl to check the output of the services and system manager, named systemd. We should
+insert a USB drive and reload the configuration:
+$> sudo systemctl daemon-reload
+What we need to find in the output of journalctl is something that indicates that the system correctly set up
+our mounting point:
+Nov. 21 03:15:11 root systemd: Mounted /media/usb-stick
+
+One of the reasons for failure is that our system might not have NTFS drivers, which we'd need to install with
+ntfs-3g.
+
+3. Use Tools Developed for That Purpose
+If we want to support the automatic mounting of USB drives when swapping them in, the previous approach
+doesn't work. However, there are some tools that independent developers create and maintain to automate the
+mounting of USB devices. For instance, tinymount and uam are currently maintained and don't require
+extensive dependencies.  These tools largely depend on udev. They are collections of curated udev rules
+combined with scripts to automate these rules, providing stable and tested behavior. We can install them and
+begin to use these rules without further complications, although we'll cover how these rules work in more
+detail in the next section.
+
+4. Custom Rules for Automatic Mounting With udev
+There are cases when we cannot install new tools or just want to keep the programs to a minimum. In those
+situations, we have to create the rules for udev ourselves.  Although we'll focus on the simplest case, we can
+certainly gather more information and use cases by looking at the rules of the tools mentioned in the previous
+section.  We need to have installed udev and autofs - which we can install with yum or apt. The procedure
+is split into two steps: creating the udev rules and setting autofs to automount certain folders.
+
+4.1. Creating an udev Rule
+To create the new rules, we need to add a file in the directory /etc/udev/rules.d/
+whose name ends in .rules. The file has to contain two rules:
+$> cat /etc/udev/rules.d/usb_auto_mount.rules
+ACTION=="add", KERNEL=="sd*", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+	SYMLINK+="usbdisks/%k", MODE:="0660", \
+	RUN+="/bin/rm /media/usb-sticks/%k", \
+	RUN+="/bin/ln -sf /media/auto_mount_usb/%k /media/usb-sticks/%k"
+ACTION=="remove", KERNEL=="sd*", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+	RUN+="/bin/rm /media/usb-sticks/%k"
+
+The first rule performs several actions when we connect a USB drive (as ACTION=="add"). We create a
+custom-named device node, named usbdisks, and create a subnode named %k (which refers to the kernel name of
+the device). Then, we specify the modes read and write for the users and group with 660. Finally, we remove
+any existing directories named /media/usb-sticks/%k and create a symbolic link from /media/auto_mount_usb/%k
+to /media/usb-sticks/%k.
+
+When we plug out the USB drive, we trigger the second rule (as ACTION=="remove"). This triggers the removal of
+the directory /media/usb-sticks/%k. Then, we need to reload the rules:
+$> sudo udevadm control --reload-rules
+
+4.2. Automounting With autofs
+In the second step, we need to instruct autofs to automatically mount a certain directory based on the
+automounter map. To do so, we append this line to the /etc/auto.master file:
+/media/auto_mount_usb /etc/auto_mount.usb --timeout=60
+
+The directory that we want to mount is /media/auto_mount_usb/%k and the automounter map is located in
+/etc/auto_mount.usb. We can also specify the unmounting option, in this case after 60 seconds of inactivity.
+Let's see the contents of the file /etc/auto_mount.usb:
+
+#!/bin/bash
+fstype=$(/sbin/blkid -o value -s TYPE /dev/usbdisks/${1})
+if [ "${fstype}" = "vfat" ] ; then
+	echo "-fstype=vfat,sync,uid=0,gid=plugdev,umask=007 :/dev/usbdisks/${key}"
+	exit 0
+fi
+exit 1
+
+We use blkid to know what type of filesystem is used in the partition.  Then, we check that it's FAT (File
+Allocation Table) and proceed to mount the file system with the selected options. We can certainly further
+customize /etc/auto_mount.usb to handle other types of filesystems.
+
+5. Conclusion
+In this article, we've learned how to automatically mount USB drives. We looked at the different tools
+available to automatically mount USB drives in our Linux system when we plug them in. Finally, we discussed
+how the rules of udev work and how to couple them with autofs.
+
+
+---
+

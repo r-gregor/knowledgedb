@@ -1,0 +1,144 @@
+filename: go_migrating-from-dep-to-go-1-11-modules_20191017.txt
+https://blog.callr.tech/migrating-from-dep-to-go-1.11-modules/
+
+Migrating from dep to Go 1.11+ modules
+September 11, 2018
+
+Quick guide for a smooth migration
+
+   This method works with Go 1.11, 1.12, and should work with every 1.X future release.
+     * move your code outside of GOPATH
+     * go mod init [module path]: this will import dependencies from Gopkg.lock.
+     * go mod tidy: this will remove unnecessary imports, and add indirect ones.
+     * rm -fr vendor/
+     * go build: is everthing ok?
+     * rm -f Gopkg.lock Gopkg.toml
+     * git commit -m 'chore(dep): migrated from dep to Go 1.11 modules'
+
+Introduction
+   Before Go 1.11, dependency management was left to the community. There was many solutions, but my
+   favorite was dep.
+
+   Like many dependency management tools from other languages, dep has a file for dependencies requests
+   (Gopkg.toml), a file to lock the exact versions used (Gopkg.lock), and a vendor directory to hold the
+   dependency files. A simple command dep ensure is doing all the work.
+
+   Also, before Go 1.11, you project source needed to be inside your GOPATH and you had to respect a
+   workspace layout.
+
+   Fortunately, with Go 1.11, your code can live anywhere on your disk! Also, dependency management is
+   handled by the go command, with the introduction of modules.
+
+Migration
+   After installing Go 1.11, start by moving your code outside of GOPATH:
+   (my GOPATH was ~/code/go/)
+
+$> mv go/src/gitlab.callr.tech/platform/asterisk-pbx-agi .
+
+   Now, my project is at ~/code/asterisk-pbx-agi.
+
+   Let's try go mod init:
+
+$> go mod init
+go: cannot determine module path for source directory ~/code/asterisk-pbx-agi (outside GOPATH, no import comments)
+
+   Ah. So because the code is outside GOPATH, go cannot determine the "module path" anymore. Makes
+   sense.
+
+   Let's try again with a module path:
+
+$> go mod init gitlab.callr.tech/platform/asterisk-pbx-agi
+go: creating new go.mod: module gitlab.callr.tech/platform/asterisk-pbx-agi
+go: copying requirements from Gopkg.lock
+
+   Go has imported my dependencies from dep by reading the Gopkg.lock file. Neat. It also created a
+   go.mod file:
+
+module gitlab.callr.tech/platform/asterisk-pbx-agi
+
+require (
+    github.com/zaf/agi v0.0.0-20160319110841-15f1ed9d87e3
+    go.uber.org/atomic v1.3.2
+    go.uber.org/multierr v1.1.0
+    go.uber.org/zap v1.8.0
+    gopkg.in/yaml.v2 v2.2.1
+)
+
+   At this point, a go build should work.
+
+   But let's try a go mod tidy first.
+$> go mod tidy
+
+   Here is go.mod after running it:
+
+module gitlab.callr.tech/platform/asterisk-pbx-agi
+
+require (
+    github.com/davecgh/go-spew v1.1.1 // indirect
+    github.com/pkg/errors v0.8.0 // indirect
+    github.com/pmezard/go-difflib v1.0.0 // indirect
+    github.com/stretchr/testify v1.2.2 // indirect
+    github.com/zaf/agi v0.0.0-20160319110841-15f1ed9d87e3
+    go.uber.org/atomic v1.3.2 // indirect
+    go.uber.org/multierr v1.1.0 // indirect
+    go.uber.org/zap v1.8.0
+    gopkg.in/yaml.v2 v2.2.1
+)
+
+   Interesting. go mod tidy has detected that some dependencies were "indirect" and marked them as such.
+   It also added some other ones, needed for go test.
+
+   When both go build and go test work, you can safely remove the old files:
+
+$> rm -fr Gopkg.* vendor/
+
+   And you're done.
+
+Updating your CI
+
+Before
+   Using Gitlab, here is how we used to build with Go 1.10 and dep:
+
+Build Go:
+  image: golang:1.10
+  stage: build
+  script:
+    - curl -fsSL -o /usr/local/bin/dep https://github.com/golang/dep/releases/download/v0.4.1/dep-linux-amd64 \
+    && chmod +x /usr/local/bin/dep
+    - ln -s `pwd` /go/src/asterisk-pbx-agi
+    - cd /go/src/asterisk-pbx-agi
+    - dep ensure -vendor-only
+    - GOOS=linux GOARCH=amd64 go build -ldflags "-linkmode external -extldflags -static" -a -o callr.agi
+  artifacts:
+    paths:
+      - callr.agi
+    expire_in: 1 week
+
+   Because of the GOPATH mess, we had to create a link to the code inside /go/src, and run dep and go
+   build inside it.
+
+After
+   Here is the same task with Go 1.11:
+
+Build Go:
+  image: golang:1.11
+  stage: build
+  script:
+    - GOOS=linux GOARCH=amd64 go build -ldflags "-linkmode external -extldflags -static" -a -o callr.agi
+  artifacts:
+    paths:
+      - callr.agi
+    expire_in: 1 week
+
+   Much simpler. go build will handle the dependencies automatically.
+
+Documentation
+     * [https://github.com/golang/go/wiki/Modules] Go wiki modules
+            filename: go_github-com_golang_go_wiki_Modules_20191017.txt
+     * Go command doc
+
+   2019-03-28 Update: this blog post has been updated to specify that the upgrade process works with Go
+   1.11 and beyond (1.12 tested and confirmed). It should work with all future 1.X releases.
+
+
+---

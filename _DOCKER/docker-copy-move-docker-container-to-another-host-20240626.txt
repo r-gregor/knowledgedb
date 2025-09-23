@@ -1,0 +1,163 @@
+filename: docker_copy-move-docker-container-to-another-host_20240626.txt
+https://www.maketecheasier.com/copy-move-docker-container-to-another-host/
+
+How to Copy/Move a Docker Container to Another Host
+Jun 15, 2024
+
+   Since Docker containers are little boxes of software, you can easily copy and move them around from
+   computer to computer. It may be that you worked on a Docker instance on your local computer and
+   decided to move it to a more powerful server. Or maybe you just want to deploy your custom container
+   on multiple computers, "copy and paste" it around. Other times, you may be dissatisfied with a
+   cloud-computing provider and want to switch to a different one. Here, we show you how to move your
+   existing Docker container image and data volumes from one Linux host to another.
+
+Save Container Image from Source Host
+   Start by listing the available Docker containers running on your system. In my case, I want to export
+   my Nginx Docker container to a new machine:
+$> docker ps
+
+   Find the container that you want to copy over then stop the instance:
+$> docker stop NAME_OF_INSTANCE
+
+   A Docker container is built out of a generic, initial image. Over time, you add your own changes to
+   this base image. Processes running inside the container might also save their own data or make other
+   changes. To preserve all of this, commit the current state of your container to a new image:
+$> docker commit NAME_OF_INSTANCE mycontainerimage
+
+   Note that if the instance is currently running, this action will pause it while its contents are
+   saved. If this is a problem, you can avoid this pause by entering docker commit -p=false
+   NAME_OF_INSTANCE mycontainerimage instead. However, don't do this unless absolutely necessary. The
+   odds of creating an image with inconsistent/incomplete data increase in this case.
+
+   Now, save your newly committed Docker container image to an archive file:
+$> docker save -o mycontainerimage.tar mycontainerimage
+
+   Use your preferred file transfer method and copy your .tar file to the host where you want to
+   move your Docker container. For example, the following command transfers my Nginx Docker image using
+   scp:
+$> scp ./mycontainerimage.tar ramces@my.ip.address.here:/home/ramces/
+
+Exporting a Docker Volume from Your Container
+   One of the downsides of saving a Docker image is that it doesn't come with the Docker accessories
+   you've set up alongside your container. This includes any network bind mounts and the volumes you've
+   made to store your persistent data.
+
+   To properly export your data volume, first install Git on your local machine:
+$> sudo apt install git
+
+   Run the following command to download the volume export script for Docker:
+$> git clone https://github.com/ricardobranco777/docker-volumes.sh.git
+
+   Make sure that the export script has the right permission bits, then copy it to your machine's
+   "/usr/local/bin:"
+$> sudo chmod +x ./docker-volumes.sh/docker-volumes.sh
+$> sudo cp ./docker-volumes.sh/docker-volumes.sh /usr/local/bin/
+
+   Test whether your script is working properly, then extract all the associated volumes for your
+   container:
+$> docker-volumes.sh -h
+$> docker-volumes.sh NAME_OF_INSTANCE save mycontainerimage-volume.tar
+
+   Send your newly archived Docker volume files to your remote machine:
+scp ./mycontainerimage-volume.tar ramces@my.ip.address.here:/home/ramces/
+
+Load Container Image on Destination Host
+   Log in to your remote host, then run the following command to load it to your remote machine's Docker
+   daemon:
+$> docker load -i ./mycontainerimage.tar
+
+   Use docker create to reinitialize your Docker container image with its original run flags from your
+   source machine. For instance, my Nginx Docker container originally had port 80 mapped to my host
+   machine's port 8080:
+$> docker create --name my-nginx-container -p 8080:80 mycontainerimage
+
+   Run your newly imported Docker container:
+$> docker start my-nginx-container
+
+   Confirm that your imported image is working properly by listing all the active containers in the
+   system:
+$> docker ps
+
+Importing a Docker Volume to Your Container
+   To import a .tar Docker volume file, first download Git on your new host:
+$> sudo apt install git
+
+   Just like with your original system, download the docker-volume.sh helper script, set its permissions
+   bits to "execute," then copy it to your new machine's "/usr/local/bin" directory.
+   A terminal showing the process of obtaining and installing the Docker Volume script for backing up
+   data associated with containers.
+
+   Create a new Docker container using your exported image file:
+$> docker create --name my-nginx-container -v myvol:/usr/share/nginx/html -p 8080:80 mycontainerimage
+
+   Run the docker-volume.sh script with your original .tar file to load it to your new system's Docker
+   daemon:
+$> docker-volumes.sh my-nginx-container load mycontainerimage-volume.tar
+
+   Start your new Docker container by running the following command:
+$> docker start my-nginx-container
+
+   Test if your container is loading your volume properly by looking at its internal config data:
+$> docker inspect -f '{{ .Mounts }}' my-nginx-container
+
+Transfer Image without Creating a File
+   Sometimes you may want to skip creating a mycontainerimage.tar.gz file. Maybe you don't have enough
+   disk space since the container has a lot of data in it. You can save, transfer, and load the image on
+   the destination host in one command. After running the docker commit command discussed above, you can
+   use this:
+$> docker save mycontainerimage | ssh ramces@my.ip.address docker load
+
+   It should work from Windows, too, since it now has a built-in SSH client (PuTTY not necessary
+   anymore).
+
+   Continue with the docker create command that applies to your situation.
+   A terminal showing the process of creating a new Docker container after moving its image through an
+   SSH pipe.
+
+   Note: Make sure that you've properly mounted any Docker volume that was previously attached to your
+   container before starting the imported image.
+
+   Lastly, start your newly imported Docker container by running docker start followed by your
+   container's name.
+
+Using Docker Compose to Move an Entire Docker Deployment
+   With its Compose plugin, Docker makes it possible to build, configure, and run complex programs
+   without worrying about the server's underlying software stack. This, in turn, allows you to build
+   reproducible application deployments across different Linux systems.
+
+   To start migrating your existing Docker setup to Docker Compose, first make sure that its plugin is
+   currently in your system:
+$> sudo apt install docker-compose-plugin docker-buildx-plugin
+
+   Create a new folder in your home directory for your Docker Compose installation:
+$> mkdir ~/my-docker-compose && cd ~/my-docker-compose
+
+   Use your favorite text editor to create a "docker-compose.yml" file for your application:
+$> nano ./docker-compose.yml
+
+   Paste the following block of code inside your Compose file, then tweak it to your specific needs:
+version: '3'
+
+volumes:
+  myvol: # Replace with the name of your imported volume.
+
+services:
+  nginx:
+    image: mycontainerimage # Replace with the name of your imported Docker image.
+    ports:
+      - "8080:80"
+    volumes:
+      - myvol:/usr/share/nginx/html # Replace "myvol" with the name of your mounted image.
+
+   Save your new Compose file, then run the following command to start it:
+$> docker compose up -d
+
+   Lastly, test if your Compose deployment is working properly. In my case, I will test my Nginx Docker
+   container by opening a web browser and navigate to "localhost:8080."
+
+   Learning how to copy and move your Docker container to other Linux hosts is just one of the few tasks
+   that you can do with your machine.
+
+
+---
+

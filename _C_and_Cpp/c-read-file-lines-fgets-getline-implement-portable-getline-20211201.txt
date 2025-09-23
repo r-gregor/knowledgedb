@@ -1,0 +1,420 @@
+filename: c_read-file-lines-fgets-getline-implement-portable-getline_20211201.txt
+https://solarianprogrammer.com/2019/04/03/c-programming-read-file-lines-fgets-getline-implement-portable-getline/
+
+C Programming - read a file line by line with fgets and getline, implement a portable getline version
+April 3, 2019
+
+   In this article, I will show you how to read a text file line by line in C using the standard C
+   function fgets and the POSIX getline function. At the end of the article, I will write a portable
+   implementation of the getline function that can be used with any standard C compiler.
+
+   Reading a file line by line is a trivial problem in many programming languages, but not in C. The
+   standard way of reading a line of text in C is to use the fgets function, which is fine if you know
+   in advance how long a line of text could be.
+
+   You can find all the code examples and the input file at the GitHub repo for this article.
+
+   Let's start with a simple example of using fgets to read chunks from a text file. :
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+	FILE *fp = fopen("lorem.txt", "r");
+	if (fp == NULL) {
+		perror("Unable to open file!");
+		exit(1);
+	}
+
+	char chunk[128];
+
+	while (fgets(chunk, sizeof(chunk), fp) != NULL) {
+		fputs(chunk, stdout);
+		fputs("|*\n", stdout);  // marker string used to show where the content of the chunk array has ende
+	}
+	fclose(fp);
+}
+
+   For testing the code I've used a simple dummy file, lorem.txt. This is a piece from the output of the
+   above program on my machine:
+$> clang -std=c17 -Wall -Wextra -pedantic t0.c -o t0
+$> ./t0
+Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+|*
+Fusce dignissim facilisis ligula consectetur hendrerit. Vestibulum porttitor aliquam luctus. Nam pharetra lorem vel ornare cond|*
+imentum.
+|*
+Praesent et nunc at libero vulputate convallis. Cras egestas nunc vitae eros vehicula hendrerit. Pellentesque in est et sapien |*
+dignissim molestie.
+|*
+
+   The code prints the content of the chunk array, as filled after every call to fgets, and a marker
+   string.
+
+   If you watch carefully, by scrolling the above text snippet to the right, you can see that the output
+   was truncated to 127 characters per line of text. This was expected because our code can store an
+   entire line from the original text file only if the line can fit inside our chunk array.
+
+   What if you need to have the entire line of text available for further processing and not a piece of
+   line ? A possible solution is to copy or concatenate chunks of text in a separate line buffer until
+   we find the end of line character.
+
+   Let's start by creating a line buffer that will store the chunks of text, initially this will have
+   the same length as the chunk array:
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+	FILE *fp = fopen("lorem.txt", "r");
+	// ...
+
+	char chunk[128];
+
+	// Store the chunks of text into a line buffer
+	size_t len = sizeof(chunk);
+	char *line = malloc(len);
+	if (line == NULL) {
+		perror("Unable to allocate memory for the line buffer.");
+		exit(1);
+	}
+
+	// "Empty" the string
+	line[0] = '\0';
+
+	// ...
+}
+
+   Next, we are going to append the content of the chunk array to the end of the line string, until we
+   find the end of line character. If necessary, we'll resize the line buffer:
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+	// ...
+
+	// "Empty" the string
+	line[0] = '\0';
+
+	while (fgets(chunk, sizeof(chunk), fp) != NULL) {
+		// Resize the line buffer if necessary
+		size_t len_used = strlen(line);
+		size_t chunk_used = strlen(chunk);
+
+		if (len - len_used < chunk_used) {
+			len *= 2;
+			if ((line = realloc(line, len)) == NULL) {
+				perror("Unable to reallocate memory for the line buffer.");
+				free(line);
+				exit(1);
+			}
+		}
+
+		// Copy the chunk to the end of the line buffer
+		strncpy(line + len_used, chunk, len - len_used);
+		len_used += chunk_used;
+
+		// Check if line contains '\n', if yes process the line of text
+		if (line[len_used - 1] == '\n') {
+			fputs(line, stdout);
+			fputs("|*\n", stdout);
+			// "Empty" the line buffer
+			line[0] = '\0';
+		}
+	}
+
+	fclose(fp);
+	free(line);
+
+	printf("\n\nMax line size: %zd\n", len);
+}
+
+   Please note, that in the above code, every time the line buffer needs to be resized its capacity is
+   doubled.
+
+   This is the result of running the above code on my machine. For brevity, I kept only the first lines
+   of output:
+$> clang -std=c17 -Wall -Wextra -pedantic t1.c -o t1
+$> ./t1
+Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+|*
+Fusce dignissim facilisis ligula consectetur hendrerit. Vestibulum porttitor aliquam luctus. Nam pharetra lorem vel ornare condimentum.
+|*
+Praesent et nunc at libero vulputate convallis. Cras egestas nunc vitae eros vehicula hendrerit. Pellentesue in est et sapien dignissim molestie.
+|*
+Aliquam erat volutpat. Mauris dignissim augue ac purus placerat scelerisque. Donec eleifend ut nibh eu elementum.
+|*
+
+   You can see that, this time, we can print full lines of text and not fixed length chunks like in the
+   initial approach.
+
+   Let's modify the above code in order to print the line length instead of the actual text:
+// ...
+
+int main(void) {
+	// ...
+
+	while (fgets(chunk, sizeof(chunk), fp) != NULL) {
+
+		// ...
+
+		// Check if line contains '\n', if yes process the line of text
+		if (line[len_used - 1] == '\n') {
+			printf("line length: %zd\n", len_used);
+			// "Empty" the line buffer
+			line[0] = '\0';
+		}
+	}
+
+	fclose(fp);
+	free(line);
+
+	printf("\n\nMax line size: %zd\n", len);
+}
+
+   This is the result of running the modified code on my machine:
+$> clang -std=c17 -Wall -Wextra -pedantic t1.c -o t1
+$> ./t1
+line length: 57
+line length: 136
+line length: 147
+line length: 114
+line length: 112
+line length: 95
+line length: 62
+line length: 1
+line length: 428
+line length: 1
+line length: 460
+line length: 1
+line length: 834
+line length: 1
+line length: 821
+
+
+Max line size: 1024
+
+   In the next example, I will show you how to use the getline function available on POSIX systems
+   like Linux, Unix and macOS. Microsoft Visual Studio doesn't have an equivalent function, so you won't
+   be able to easily test this example on a Windows system. However, you should be able to test it if
+   you are using Cygwin or Windows Subsystem for Linux.
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+	FILE *fp = fopen("lorem.txt", "r");
+	if (fp == NULL) {
+		perror("Unable to open file!");
+		exit(1);
+	}
+
+	// Read lines using POSIX function getline
+	// This code won't work on Windows
+	char *line = NULL;
+	size_t len = 0;
+
+	while (getline(&line, &len, fp) != -1) {
+		printf("line length: %zd\n", strlen(line));
+	}
+
+	printf("\n\nMax line size: %zd\n", len);
+
+	fclose(fp);
+	free(line);     // getline will resize the input buffer as necessary
+					// the user needs to free the memory when not needed!
+}
+
+   Please note, how simple is to use POSIX's getline versus manually buffering chunks of line like in my
+   previous example. It is unfortunate that the standard C library doesn't include an equivalent
+   function.
+
+   When you use getline, don't forget to free the line buffer when you don't need it anymore. Also,
+   calling getline more than once will overwrite the line buffer, make a copy of the line content if you
+   need to keep it for further processing.
+
+   This is the result of running the above getline example on a Linux machine:
+$> clang -std=gnu17 -Wall -Wextra -pedantic t2.c -o t2
+$> ./t2
+line length: 57
+line length: 136
+line length: 147
+line length: 114
+line length: 112
+line length: 95
+line length: 62
+line length: 1
+line length: 428
+line length: 1
+line length: 460
+line length: 1
+line length: 834
+line length: 1
+line length: 821
+
+
+Max line size: 960
+
+   It is interesting to note, that for this particular case the getline function on Linux resizes the
+   line buffer to a max of 960 bytes. If you run the same code on macOS the line buffer is resized to
+   1024 bytes. This is due to the different ways in which getline is implemented on different Unix like
+   systems.
+
+   As mentioned before, getline is not present in the C standard library. It could be an interesting
+   exercise to implement a portable version of this function. The idea here is not to implement the most
+   performant version of getline, but rather to implement a simple replacement for non POSIX systems.
+
+   We are going to take the above example and replace the POSIX's getline version with our own
+   implementation, say my_getline. Obviously, if you are on a POSIX system, you should use the version
+   provided by the operating system, which was tested by countless users and tuned for optimal
+   performance.
+
+   The POSIX getline function has this signature:
+ssize_t getline(char **restrict lineptr, size_t *restrict n, FILE *restrict stream);
+
+   Since ssize_t is also a POSIX defined type, usually a 64 bits signed integer, this is how we are
+   going to declare our version:
+int64_t my_getline(char **restrict line, size_t *restrict len, FILE *restrict fp);
+
+   In principle we are going to implement the function using the same approach as in one of the above
+   examples, where I've defined a line buffer and kept copying chunks of text in the buffer until we
+   found the end of line character:
+
+// This will only have effect on Windows with MSVC
+#ifdef _MSC_VER
+    #define _CRT_SECURE_NO_WARNINGS 1
+    #define restrict __restrict
+#endif
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <errno.h>
+
+/*
+POSIX getline replacement for non-POSIX systems (like Windows)
+Differences:
+    - the function returns int64_t instead of ssize_t
+    - does not accept NUL characters in the input file
+Warnings:
+    - the function sets EINVAL, ENOMEM, EOVERFLOW in case of errors. The above are not defined by ISO C17,
+    but are supported by other C compilers like MSVC
+*/
+int64_t my_getline(char **restrict line, size_t *restrict len, FILE *restrict fp) {
+	// Check if either line, len or fp are NULL pointers
+	if (line == NULL || len == NULL || fp == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	// Use a chunk array of 128 bytes as parameter for fgets
+	char chunk[128];
+
+	// Allocate a block of memory for *line if it is NULL or smaller than the chunk array
+	if (*line == NULL || *len < sizeof(chunk)) {
+		*len = sizeof(chunk);
+		if ((*line = malloc(*len)) == NULL) {
+			errno = ENOMEM;
+			return -1;
+		}
+	}
+
+	// "Empty" the string
+	(*line)[0] = '\0';
+
+	while (fgets(chunk, sizeof(chunk), fp) != NULL) {
+		// Resize the line buffer if necessary
+		size_t len_used = strlen(*line);
+		size_t chunk_used = strlen(chunk);
+
+		if (*len - len_used < chunk_used) {
+			// Check for overflow
+			if (*len > SIZE_MAX / 2) {
+				errno = EOVERFLOW;
+				return -1;
+			} else {
+				*len *= 2;
+			}
+
+			if ((*line = realloc(*line, *len)) == NULL) {
+				errno = ENOMEM;
+				return -1;
+			}
+		}
+
+		// Copy the chunk to the end of the line buffer
+		memcpy(*line + len_used, chunk, chunk_used);
+		len_used += chunk_used;
+		(*line)[len_used] = '\0';
+
+		// Check if *line contains '\n', if yes, return the *line length
+		if ((*line)[len_used - 1] == '\n') {
+			return len_used;
+		}
+	}
+
+	return -1;
+}
+
+   This is how we can use the above function, for simplicity I kept the code and the function definition
+   in the same file:
+
+// ...
+
+int64_t my_getline(char **restrict line, size_t *restrict len, FILE *restrict fp) {
+     // ...
+}
+
+int main(void) {
+	FILE *fp = fopen("lorem.txt", "r");
+	if (fp == NULL) {
+		perror("Unable to open file!");
+		exit(1);
+	}
+
+	// Read lines from a text file using our own a portable getline implementation
+	char *line = NULL;
+	size_t len = 0;
+
+	while (my_getline(&line, &len, fp) != -1) {
+		// fputs(line, stdout);
+		// fputs("|*\n", stdout);
+		printf("line length: %zd\n", strlen(line));
+	}
+
+	printf("\n\nMax line size: %zd\n", len);
+
+	fclose(fp);
+	free(line);
+}
+
+   The above code gives the same results as the code that uses the POSIX's getline function:
+$> clang -std=c17 -Wall -Wextra -pedantic t3.c -o t3
+$> ./t3
+line length: 57
+line length: 136
+line length: 147
+line length: 114
+line length: 112
+line length: 95
+line length: 62
+line length: 1
+line length: 428
+line length: 1
+line length: 460
+line length: 1
+line length: 834
+line length: 1
+line length: 821
+
+
+Max line size: 1024
+
+   I've also tested the code with the Microsoft C compiler and gives identical results for the same
+   input file.
+
+
+
+---
+

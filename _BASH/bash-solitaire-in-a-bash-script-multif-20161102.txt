@@ -1,0 +1,948 @@
+filename: /c/Users/gregor.redelonghi/Dropbox/ODPRTO/_TXT/solitaire-in-a-bash-script-multif_20161102.txt
+http://opensource-usability.blogspot.si/2016/10/solitaire-in-bash-script.html
+
+Solitaire in a Bash script
+
+   I like to write Bash scripts. It stems from my time as a Unix and Linux systems administrator, years
+   ago. I used to automated everything. So I got very good at writing shell scripts. Even today when
+   managing a personal server, I write Bash scripts to automate various jobs so I don't have to keep
+   logging into the server all the time. For example, I have a job that [2]parses an RSS news feed with
+   Bash.
+   I admit that my Bash scripts aren't always for automation. Some of my scripts are just for fun. Like
+   the Bash script to fill out my [3]March Madness basketball brackets. It can be an interesting
+   diversion to write a Bash script to do something innovative.
+   And lately, I've started writing another such Bash script. Let me tell you about it.
+   We all know the classic Klondike Solitaire card game. There have been countless computer
+   implementations of Solitaire on every platform. We even had a simple Solitaire game on our old Apple
+   IIe computer in the 1980s. If you run Linux, you may be familiar with [4]AisleRiot, which supports
+   multiple card solitaire games, including the classic Klondike Solitaire. More recently, Google now
+   provides a browser-based version of Klondike Solitaire; just search for the term [5]"solitaire" and
+   you'll get an option to "Click to play" the web version.
+   I wanted to write my own version of Klondike Solitaire as a Bash script. Sure, I could grab another
+   shell script implementation of Solitaire called [6]Shellitaire but I liked the challenge of writing
+   my own.
+   And I did. Or rather, I mostly did. I have run out of free time to work on it. So I'm sharing it here
+   in case others want to build on it. I have implemented most of the game, except for the card
+   selection. You might think that's the toughest part, but I don't think so; I'll explain at the end.
+   So, how do you write a solitaire card game in a shell script?
+   I found it was easiest to leverage the strength of shell scripts: files. I started with all 52 cards
+   in a single "deck" file, shuffled it, then "drew" cards from the deck into piles on the tableau.
+   Let's start with the basics. Creating 52 cards, comprised of thirteen cards of four different suits,
+   is straightforward:
+for s in c d h s ; do
+  for n in $(seq 1 13) ; do
+    echo "$s$n"
+  done
+done
+
+   You can direct the output to a file, and you have a file containing an ordered representation of all
+   52 cards. On a Linux system, you can use GNU shuf(1) to randomize ("shuffle") an input file, which
+   can also be a pipe. So to define a shuffled deck of 52 cards, you do this:
+deck=/tmp/sol/deck
+
+for s in c d h s ; do
+  for n in $(seq 1 13) ; do
+    echo "$s$n"
+  done
+done | shuf > $deck
+
+   Drawing cards from the deck requires a little more work, but not much more. I wrote a simple function
+   popn() that takes ("pops") the first n lines of a file and returns those lines, and shortens the file
+   at the same time. Usually, this will be one at a time, but we'll need the flexibility later.
+   On top of that function, I wrote another simple function drawcard() that draws a single card from the
+   deck and assigns it to the end of a "drawn cards" pile. This function also needs a little extra logic
+   to deal with an empty deck; if the deck is empty, we return the drawn cards to the deck and start
+   over. This is why it's important to pop from the start of the deck and append drawn cards to the end
+   of the "drawn cards" pile; you can easily reset the deck using the drawn cards:
+function popn() {
+  # pop the first n($2) items from a file($1) and print it
+  head -$2 $1
+  cp $1 /tmp/tempfile
+  awk "NR>$2 {print}" /tmp/tempfile > $1
+}
+
+function drawcard() {
+  if [ $(cat $deck | wc -l) -eq 0 ] ; then
+    cp $draw $deck
+    >$draw
+  fi
+
+  popn $deck 1 >> $draw
+}
+
+   In Klondike Solitaire, the play area is a tableau of seven piles of cards, where the first n-1 cards
+   are piled "face down" and the last card is placed "face up." So for the first column, there are no
+   "face down" cards, and only one "face up" card. On the seventh column, you start with six "face down"
+   cards, and only one "face up" card. The player must move cards on these seven piles, eventually
+   transferring the cards to four separate "foundation" piles, where each pile is dedicated to a
+   separate suit: clubs, diamonds, hearts, and spades.
+   Creating the play area requires the use of Bash arrays. I rarely use arrays in Bash, but they are a
+   very useful feature. Bash supports both indexed arrays (0, 1, 2, …) and associative arrays (where the
+   index is a string value). You define a variable as an indexed array using the declare -a directive,
+   and as an associative array with the declare -A directive.
+   With this, it's simple enough to define the tableau card piles as separate files, then use the popn()
+   function to deal cards from the deck into these files.
+declare -a tabdraw
+for n in $(seq 1 7) ; do tabdraw[$n]="/tmp/sol/tab.draw.$n" ; done
+
+declare -a pile
+for n in $(seq 1 7) ; do tab[$n]="/tmp/sol/tab.$n" ; done
+
+declare -A found
+for s in c d h s ; do found[$s]="/tmp/sol/found.$s" ; done
+
+# deal cards from deck into tableau {curly brackets needed on array refs}
+
+for n in $(seq 1 7) ; do popn $deck 1 >> ${tab[$n]} ; done
+
+for n in $(seq 1 7) ; do popn $deck $((n - 1)) >> ${tabdraw[$n]} ; done
+
+   And that's the guts of a Solitaire game in Bash! When assembled, my Bash script looked like this:
+#!/bin/bash
+
+# create work directory
+
+tmpdir="/tmp/sol.tmp.$RANDOM"
+[ ! -d $tmpdir ] && mkdir $tmpdir
+
+# create variables
+
+deck="$tmpdir/deck"
+draw="$tmpdir/draw"
+tmpf="$tmpdir/tmpf"
+
+declare -a tabdraw
+for n in $(seq 1 7) ; do tabdraw[$n]="$tmpdir/tab.draw.$n" ; done
+
+declare -a pile
+for n in $(seq 1 7) ; do tab[$n]="$tmpdir/tab.$n" ; done
+
+declare -A found
+for s in c d h s ; do found[$s]="$tmpdir/found.$s" ; done
+
+# create functions
+
+function popn() {
+  # pop the first n($2) items from a file($1) and print it
+  head -$2 $1
+  cp $1 $tmpf
+  awk "NR>$2 {print}" $tmpf > $1
+}
+
+function drawcard() {
+  if [ $(cat $deck | wc -l) -eq 0 ] ; then
+    cp $draw $deck
+    >$draw
+  fi
+
+  popn $deck 1 >> $draw
+}
+
+function showcards() {
+  # show the cards again - repaint the screen
+
+  clear
+
+  for n in $(seq 1 7) ; do cat ${tabdraw[$n]} | wc -l > $tmpdir/wc.$n ; done
+
+  paste $tmpdir/wc.[1-7]
+  paste ${tab[*]}
+
+  echo '___  ___  ___  ___'
+
+  paste ${found[*]}
+
+  echo '___'
+
+  cat $deck | wc -l
+  tail -1 $draw
+}
+
+# build and shuffle initial deck
+
+for s in c d h s ; do
+  echo "${s}0" > ${found[$s]}
+
+  for n in $(seq 1 13) ; do
+    echo "$s$n"
+  done
+done | shuf > $deck
+
+# deal cards from deck into tableau {curly brackets needed on array refs}
+
+for n in $(seq 1 7) ; do popn $deck 1 >> ${tab[$n]} ; done
+
+for n in $(seq 1 7) ; do popn $deck $((n - 1)) >> ${tabdraw[$n]} ; done
+
+# loop until quit ('q')
+
+input='n'
+while [ "$input" != "q" ] ; do
+  case "$input" in
+  'n')
+    # draw next card
+    drawcard
+    ;;
+  *)
+    # parse into card1,card2
+    # is this a valid request?
+    # is this a valid move?
+    ;;
+  esac
+
+  showcards
+
+  echo -n '?> '
+  read input
+done
+
+# cleanup
+
+rm -rf $tmpdir
+
+   I have left unfinished the logic to move cards around on the tableau. This might seem like the most
+   difficult part, but not really. Since every pile on the tableau is a file, it's easy enough to seek a
+   requested card in each of the "face up" piles, then extract all lines (cards) from that "face up"
+   pile and append them onto another "face up" pile. You'd need a little extra logic in there to move
+   Kings to an empty space on the tableau, but that's not very difficult.
+   I envisioned splitting the logic into three parts:
+   1. Verifying that this is a valid request
+
+     For example, the user is not allowed to move a black card onto a black card. Also, the user can
+     only move cards in descending order on the tableau, and ascending order on the foundation. That's
+     easy logic.
+
+   2. Confirming that the cards are there to move
+
+     This should be a fairly straightforward process using fgrep(1) to locate the requested cards on
+     the tableau or in the foundation.
+
+   3. Moving the cards
+
+     I believe this should be easy, if you remember that cards are only entries in files. You can
+     easily write a function that outputs all lines starting with card A, and appends them to the end
+     of another file. At the same time, the function can truncate the first file starting at card A.
+
+   When you start the script, you should see output similar to this:
+0       1       2       3       4       5       6
+s12     c11     s2      h7      s11     h11     d3
+___     ___     ___     ___
+c0      d0      h0      s0
+___
+23
+c13
+?>
+
+   The output is intentionally functional, and uses paste(1) to merge the output from several tableau
+   files. What you're seeing:
+     * The first line shows the number of cards remaining in each of the tableau "face down" piles.
+     * The second line shows the "face up" cards for each pile on the tableau. This sample output
+       indicates: 12 (Queen) of Spades, 11 (Jack) of Clubs, 2 of Spades, 7 of Hearts, 11 (Jack) of
+       Spades, 11 (Jack) of Hearts, and 3 of Diamonds.
+     * The third line shows the empty foundation piles. I initialized these as the "zero" cards so the
+       logic to transfer cards to the foundation could remain simple; you only move cards of the same
+       suit in ascending order.
+     * The fourth line shows the number of cards remaining to be drawn on the deck.
+     * The fifth line shows the "face up" card from the deck. In this case, it is the 13 (King) of
+       Clubs.
+     * The last line shows a prompt (?>) for the user to enter a command.
+
+   This Bash script was a lot of fun to write, but I don't have time to finish it. The script took an
+   afternoon to write, and an hour to tweak. Even so, I think this is a solid start to play Solitaire in
+   a Bash script.
+   Feel free to finish this script. Please assume [7]Creative Commons Attribution. So if you use it
+   somewhere else, such as to write an article and publish it, you should credit me as the original
+   author.
+
+
+
+---
+http://www.linuxjournal.com/content/parsing-rss-news-feed-bash-script
+
+Parsing an RSS News Feed with a Bash Script
+
+   Wed, 07/13/2016 - 11:11 — [6]Jim Hall
+
+   I am involved in several free software projects, including one or two where I maintain the website.
+   For one of those projects, we currently are updating the website. Ours is probably similar to other
+   free software projects. We use a hosting service for several key services, including news, but we run
+   our website on a web server that we own. In our case, we run most of our project on SourceForge and
+   run the website on a third-party service, so the news and website are on different systems.
+
+   Not surprisingly, our project uses an RSS feed to pull news items from SourceForge to display on the
+   project website. Previously, our website used a PHP script to cache a copy of the RSS file, then
+   parse it every time a visitor arrived at our front page. That worked well, but was somewhat fragile
+   if the remote news server was slow or temporarily unreachable.
+
+   As we work on the website update, however, I want to improve how we display news items. I want to
+   automate the news service to pull down a copy of the RSS feed, parse it and save the news items to a
+   local file that the website can just include. That reduces complexity on the website, and it means
+   the front page will load faster every time.
+
+   Initially, I adapted our previous PHP website code into a PHP script that I could run from the
+   command line. That did the job, but I thought there had to be a better way. I wondered if I could
+   parse the RSS feed from a Bash script instead—and, it turns out that you can! It's easy!
+
+A Brief RSS Primer
+   You may know that RSS is just a form of XML, which itself is a simple markup language. XML elements
+   are values set off by tags. A tag is any markup that begins with the less-than symbol (<) and ends
+   with the greater-than symbol (>). Tags are one of three types:
+    1. Start tags, to mark the start of a value (such as <item>).
+    2. End tags, to mark the end of a value (</item>).
+    3. "Empty element" tags, which might contain values as attributes (<feedburner:info
+       uri="linuxjournalcom" />).
+
+   In RSS feeds, most values are set off by start and end tags, like this link to Linux Journal:
+
+<link>http://www.linuxjournal.com/</link>
+
+   RSS feeds have a well defined format. After some header information to describe the news website or
+   "channel", the RSS feed displays separate news items inside <item>...</item> elements. Each news item
+   contains a title, link, publication date, full description and other fields. A sample RSS file might
+   look like this:
+
+<xml version="1.0" encoding="UTF-8" ?>
+<rss xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+   <channel>
+      <title>RSS title</title>
+      <link>http://www.example.com/</link>
+      <description>RSS description</description>
+      <language>en</language>
+      <item>
+         <title>News item title</title>
+         <link>http://www.example.com/link/to/news/item/</link>
+         <guid isPermaLink="true">identifier-5f4b02697d2006f72648ebd0d9c6ce96</guid>
+         <description>Full news item text.</description>
+         <pubDate>Fri, 01 Jul 2016 17:41:07 +0000</pubDate>
+      </item>
+   </channel>
+</rss>
+
+
+   Although in most news feeds, the RSS data is transmitted without the indents or newlines. For
+   example, the above sample RSS would more likely look like this:
+
+<xml version="1.0" encoding="UTF-8" ?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0"><channel>
+<title>RSS title</title><link>http://www.example.com/</link><description>RSS
+description</description><language>en</language><item><title>News item
+title</title><link>http://www.example.com/link/to/news/item/</link><guid
+isPermaLink="true">identifier-5f4b02697d2006f72648ebd0d9c6ce96</guid><description>Full
+news item text.</description><pubDate>Fri, 01 Jul 2016 17:41:07
++0000</pubDate></item></channel></rss>
+
+
+   When pulling news items from an RSS feed, I'm concerned only with a few elements:
+     * The title of the news item (<title>).
+     * The link to the full news item (<link>).
+     * The date the news item was published (<pubDate>).
+     * The full text of the news item (<description>).
+
+   And conveniently, all of those values are marked by start and end tags. That's the key assumption to
+   parsing an RSS feed with a Bash script. For an RSS parser, I just want to grab values surrounded by
+   start and end tags.
+
+The "Read" Statement
+
+   You may not think Bash can parse data files, but it can with some clever thinking. Bash, like other
+   UNIX shells before it, can read lines one at a time from a file via the built-in read statement.
+
+   By default, the read statement reads a line of data and splits it into fields. Usually, read splits
+   fields using space and tab, with newlines ending each lines, but you can change this behavior by
+   setting the Internal Field Separator (IFS) value and the end-of-line delimiter.
+
+   To parse an RSS feed using read, set the IFS to a greater-than symbol (>) and the delimiter to a
+   less-than symbol (<). Each time Bash reads a line, it reads up to the next < (the start of a tag)
+   then splits that data at each > (the end of a tag). This sample code reads the input and splits the
+   data into the TAG and VALUE variables:
+
+local IFS='>'
+read -d '<' TAG VALUE
+
+
+   Let's explore how this works. Consider this simple input:
+<title>RSS title</title>
+
+   The first time read parses this line, it stops at the first < symbol. Since < is the first character
+   of the input, that means Bash finds an empty string. The split TAG and VALUE strings are also empty,
+   which may seem odd, but that's okay, because an RSS parser isn't paying attention to empty tags
+   anyway.
+
+   The next time Bash reads the input, it gets title>RSS title and stops at the next < symbol. Then read
+   splits the line at the > symbol, which leaves TAG with title and VALUE with RSS title.
+
+   The third time read parses the input, it reads the remaining text and stops at the end of the file.
+   Bash splits the string /title> into TAG containing /title and an empty VALUE.
+
+A Simple Parser
+
+   With this read magic, it's easy to parse an RSS file with Bash. Let's start with a simple RSS parser
+   that displays tags between < > and values between { }, so you can see where tags and values begin and
+   end. First, you'll need a Bash function called xmlgetnext to parse the data using read, since you'll
+   be doing this again and again in the script:
+
+xmlgetnext () {
+   local IFS='>'
+   read -d '<' TAG VALUE
+}
+
+   Note that you define IFS locally, while leaving TAG and VALUE as global variables. Ordinarily,
+   variables and their values in a Bash function are shared between the function and its caller, so you
+   need to declare only IFS as local. You want the calling script to see the values of TAG and VALUE.
+
+   Then, you loop using while as you parse the RSS input file and print the resulting TAG and VALUE. The
+   Bash script is very brief:
+
+#!/bin/sh
+xmlgetnext () {
+   local IFS='>'
+   read -d '<' TAG VALUE
+}
+
+cat $1 | while xmlgetnext ; do
+   echo "<$TAG>{$VALUE}"
+done
+
+   Now, let's use the sample RSS file from earlier in the article. From that input, the simple parser
+   should print this:
+
+<>{}
+<xml version="1.0" encoding="UTF-8" ?>{}
+<rss xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">{}
+<channel>{}
+<title>{RSS title}
+</title>{}
+<link>{http://www.example.com/}
+</link>{}
+<description>{RSS description}
+</description>{}
+<language>{en}
+</language>{}
+<item>{}
+<title>{News item title}
+</title>{}
+<link>{http://www.example.com/link/to/news/item/}
+</link>{}
+<guid isPermaLink="true">{identifier-5f4b02697d2006f72648ebd0d9c6ce96}
+</guid>{}
+<description>{Full news item text.}
+</description>{}
+<pubDate>{Fri, 01 Jul 2016 17:41:07 +0000}
+</pubDate>{}
+</item>{}
+</channel>{}
+
+Parsing an RSS News Feed
+   Remember that the RSS feed displays separate news items inside <item>...</item> elements. Also, each
+   news item contains a title, link, publication date and full description as <title>...</title>,
+   <link>...</link>, <pubDate>...</pubDate> and <description>...</description>, respectively. To parse
+   this via a Bash script, you look for each <title>, <link>, <pubDate> and <description> tag, then
+   write the associated html code when you find the ending </item> tag.
+
+   Most websites display news items using the article's title as the header, such as an <h3> header, and
+   the full article text in the article body. If the feed does not already surround the article text
+   with <p> or <div> markup, you will need to provide that. You also may prefer to include the article's
+   publication date and link back to the original article for more details. With these assumptions and
+   the xmlgetnext function, it's easy to parse an RSS news feed in Bash:
+
+#!/bin/sh
+xmlgetnext () {
+   local IFS='>'
+   read -d '<' TAG VALUE
+}
+
+cat $1 | while xmlgetnext ; do
+   case $TAG in
+      'item')
+         title=''
+         link=''
+         pubDate=''
+         description=''
+         ;;
+      'title')
+         title="$VALUE"
+         ;;
+      'link')
+         link="$VALUE"
+         ;;
+      'pubDate')
+         pubDate="$VALUE"
+         ;;
+      'description')
+         description="$VALUE"
+         ;;
+      '/item')
+         cat<<EOF
+<article>
+<h3><a href="$link">$title</a></h3>
+<p>$description
+<span class="post-date">posted on $pubDate</span></p>
+</article>
+EOF
+         ;;
+      esac
+done
+
+   The script zeroes out the title, link, pubDate and description variables when the parser reaches the
+   first <item> tag and creates the HTML code when the parser reaches the next </item> tag. In between,
+   the script stores the title, link, pubDate and description values it finds in the RSS feed's article.
+   Running this script against the sample RSS file, you should see this output:
+<article>
+<h3><a href="http://www.example.com/link/to/news/item/">News item title</a></h3>
+<p>Full news item text.
+<span class="post-date">posted on Fri, 01 Jul 2016 17:41:07 +0000</span></p>
+</article>
+
+
+   You can make a few improvements based on this script. For example, the publication date isn't very
+   nice to read. Let's display this in a more human-friendly format and enclose the date in a
+   <time>...</time> HTML element so screen readers can better understand it. For that, you'll need to
+   convert the publication date into an ISO-8601 timestamp and create a "display" date in "MM/DD/YY
+   HH:MMam" format:
+
+#!/bin/sh
+xmlgetnext () {
+   local IFS='>'
+   read -d '<' TAG VALUE
+}
+
+cat $1 | while xmlgetnext ; do
+   case $TAG in
+      'item')
+         title=''
+         link=''
+         pubDate=''
+         description=''
+         ;;
+      'title')
+         title="$VALUE"
+         ;;
+      'link')
+         link="$VALUE"
+         ;;
+      'pubDate')
+         # convert pubDate format for <time datetime="">
+         datetime=$( date --date "$VALUE" --iso-8601=minutes )
+         pubDate=$( date --date "$VALUE" '+%D %H:%M%P' )
+         ;;
+      'description')
+         description="$VALUE"
+         ;;
+      '/item')
+         cat<<EOF
+<article>
+<h3><a href="$link">$title</a></h3>
+<p>$description
+<span class="post-date">posted on <time
+datetime="$datetime">$pubDate</time></span></p>
+</article>
+EOF
+         ;;
+      esac
+done
+
+
+   This script produces HTML that is both easier for a human to understand and for a screen reader to
+   interpret:
+
+<article>
+<h3><a href="http://www.example.com/link/to/news/item/">News item title</a></h3>
+<p>Full news item text.
+<span class="post-date">posted on <time datetime="2016-07-01T12:41-05:00">07/01/16
+12:41pm</time></span></p>
+</article>
+
+
+   If the full article text contains HTML tags, RSS will convert the HTML < and > to &lt; and &gt;. An
+   RSS parser will need to undo those changes. You can do this with an inline edit via sed, the stream
+   editor:
+
+#!/bin/sh
+xmlgetnext () {
+   local IFS='>'
+   read -d '<' TAG VALUE
+}
+
+cat $1 | while xmlgetnext ; do
+   case $TAG in
+      'item')
+         title=''
+         link=''
+         pubDate=''
+         description=''
+         ;;
+      'title')
+         title="$VALUE"
+         ;;
+      'link')
+         link="$VALUE"
+         ;;
+      'pubDate')
+         # convert pubDate format for <time datetime="">
+         datetime=$( date --date "$VALUE" --iso-8601=minutes )
+         pubDate=$( date --date "$VALUE" '+%D %H:%M%P' )
+         ;;
+      'description')
+         # convert '&lt;' and '&gt;' to '<' and '>'
+         description=$( echo "$VALUE" | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' )
+         ;;
+      '/item')
+         cat<<EOF
+<article>
+<h3><a href="$link">$title</a></h3>
+<p>$description
+<span class="post-date">posted on <time
+datetime="$datetime">$pubDate</time></span></p>
+</article>
+EOF
+         ;;
+      esac
+done
+
+
+   And with that, I have everything I need to update my project's website so it can be more efficient:
+
+wget --quiet -O $rsslocalfile $rssfeedurl
+./parse.sh $rsslocalfile > $newslocalfile.html
+
+
+   Now I can automate this hourly job to retrieve a copy of the RSS feed, parse it, and save the news
+   items to a local file that the website can incorporate. That reduces complexity on the website, with
+   only a little extra work by parsing the RSS news feed with a Bash script.
+
+
+
+---
+http://opensource-usability.blogspot.si/2016/03/march-madness-in-shell-script.html
+
+March Madness in a shell script
+   I don't really follow the sportsball. But I do like to engage with others at my office who do. So
+   every Spring, I feel somewhat left out as everyone at my office gets wrapped up in college basketball
+   fever. I watch them fill out their NCAA March Madness brackets, and I always think about
+   participating, but I know nothing about the sport other than you have to dunk the orange ball in the
+   other team's hoopy net.
+   I'd like to take part in the fun, maybe put my five dollars into the office pool, but I just don't
+   know enough about the teams to make an informed decision on my own March Madness bracket. So a few
+   years ago, I found another way: I wrote a little program to do it for me.
+   Computer models that predict the outcome of matches isn't a new topic. You can find lots of models,
+   including the Pythagorean Expectation Model or other algorithms that build on previous team
+   performance to predict future game outcomes. But that requires some research into sports statistics
+   and following each team throughout the season. That's too much work for me. I used a different method
+   that should be familiar to many of my fellow nerds: the "Dungeons and Dragons Model."
+   That's right! You can apply a simple D16 method to build a March Madness basketball bracket. How
+   scientific is this? Probably not very, but it's enough to give me a stake to follow March Madness
+   basketball, but not enough that I feel particularly saddened if my bracket doesn't perform well.
+   That's good enough for me.
+   Let me show you how to build a Bash shell script to build your own NCAA March Madness bracket. I'll
+   use the following three simple assumptions:
+    1. The NCAA March Madness basketball brackets are seeded with the NCAA's ranking of 64 college
+       basketball teams, divided into four regions, and ranked #1 through #16.
+    2. The NCAA March Madness basketball brackets are always initialized with the same contests: #1 vs
+       #16, #8 vs #9, #5 vs #12, and so on.
+    3. A #1 ranked team should perform better than a #16 team, but a #8 team should perform about the
+       same as a #9 team.
+
+   Using these assumptions, let's examine the D16 method. In a tabletop role-playing game, you might
+   throw a 1D16 to determine the outcome of an encounter. You would compare the value of the 1D16 to a
+   player's statistic, such as Dexterity or Strength. This kind of throw assumes a "probability" or
+   "likelihood" of an outcome based on the relative strength of the player. A player with a high
+   Dexterity is more likely to dodge a blow than a player with a lower Dexterity. Usually, I see the DM
+   compare the 1D16 to the player's statistic to determine the outcome.
+   Similarly, we can compare the outcome of a 1D16 to a team's NCAA ranking to determine the outcome of
+   a team's performance. A #1 team should be a strong team, so let's assume the #1 team has fifteen out
+   of sixteen "chances" to win, and one out of sixteen "chance" to lose. Without any other inputs, the
+   #1 team would win if the 1D16 value is two or greater, and the #1 team would lose if the 1D16 value
+   is one.
+   Using this assumption, we can throw a 1D16 to determine if team "A" wins, and a 1D16 to determine if
+   team "B" loses, or vice versa. If the two throws agree, we know the outcome of the game.
+   In Bash, we generate a random number every time you reference the $RANDOM environment variable. The
+   variable returns a value between 0 and 32,767, but we want a number between one and sixteen. We can
+   reduce the random number's range to sixteen values by using the modulo operator. Using modulo 16
+   returns a value between zero and fifteen. Adjusting that to a number between one and sixteen is
+   simple addition:
+d16=$(( ( $RANDOM % 16 ) + 1 ))
+
+   Here's a Bash function that assumes two inputs are the NCAA rankings of two teams, team "A" and team
+   "B." Using the D16 method, the function predicts the winner of a game and returns the winning team in
+   the function's exit value.
+function guesswinner {
+ rankA=$1
+ rankB=$2
+
+ d16A=$(( ( $RANDOM % 16 ) + 1 ))
+ d16B=$(( ( $RANDOM % 16 ) + 1 ))
+
+ if [ $d16A -gt $rankA -a $d16B -le $rankB ] ; then
+         # team A wins and team B loses
+         return $rankA
+ elif [ $d16A -le $rankA -a $d16B -gt $rankB ] ; then
+         # team A loses and team B wins
+         return $rankB
+ else
+         # no winner
+         return 0
+ fi
+}
+
+   Of course, the D16 method assumes the two outcomes agree. While this method works most of the time,
+   it's possible that neither results in a winner. A simple workaround is to try again. I find the
+   outcomes agree within one or a few throws, but for an evenly-matched game, such as a #1 team against
+   a #2 team, you might have to give up after too many attempts.
+   With that assumption, let's write a Bash function to repeatedly call guesswinner until the two
+   outcomes agree. The function prints the match-up, prints the winner, and returns the winning team via
+   the exit value.
+function winner {
+ teamA=$1
+ teamB=$2
+
+ echo -n "$teamA vs $teamB : "
+
+ count=0
+
+ # iterate and return winner, if found
+
+ while [ $count -lt 10 ] ; do
+         guesswinner $teamA $teamB
+         win=$?
+
+         if [ $win -gt 0 ] ; then
+                 # winner found
+                 echo $win
+                 return $win
+         fi
+
+         count=$(( $count + 1 ))
+ done
+
+ # no winner found, return a default winner
+
+ echo "=$teamA"
+ return $teamA
+}
+
+   The = in the last echo statement helps you see if the function was unable to determine a winner after
+   ten attempts.
+   With these two functions, it's very simple to run through all the first-round games to determine
+   winners, then iterate through those winners to build the rest of the basketball bracket. A few echo
+   statements help us to follow each round in the bracket. The function returns the winner of the
+   bracket via the return value.
+function playbracket {
+ echo -e '\nround 1\n'
+
+ winner 1 16
+ round1A=$?
+
+ winner 8 9
+ round1B=$?
+
+ winner 5 12
+ round1C=$?
+
+ winner 4 13
+ round1D=$?
+
+ winner 6 11
+ round1E=$?
+
+ winner 3 14
+ round1F=$?
+
+ winner 7 10
+ round1G=$?
+
+ winner 2 15
+ round1H=$?
+
+ echo -e '\nround 2\n'
+
+ winner $round1A $round1B
+ round2A=$?
+
+ winner $round1C $round1D
+ round2B=$?
+
+ winner $round1E $round1F
+ round2C=$?
+
+ winner $round1G $round1H
+ round2D=$?
+
+ echo -e '\nround 3\n'
+
+ winner $round2A $round2B
+ round3A=$?
+
+ winner $round2C $round2D
+ round3B=$?
+
+ echo -e '\nround 4\n'
+
+ winner $round3A $round3B
+
+ return $?
+}
+
+   Finally, we need only call the playbracket function for each of the four regions. We are left with
+   the "Final Four" with the winners of each bracket, but I'll leave the final determination of those
+   contests for you to resolve on your own.
+#!/bin/bash
+
+function guesswinner {
+ …
+}
+function winner {
+ …
+}
+function playbracket {
+ …
+}
+
+echo -e '\n___ MIDWEST ___'
+
+playbracket
+
+echo -e '\n___ EAST ___'
+
+playbracket
+
+echo -e '\n___ WEST ___'
+
+playbracket
+
+echo -e '\n___ SOUTH ___'
+
+playbracket
+
+   Every time you run the script, you will generate a fresh NCAA March Madness basketball bracket. It's
+   entirely random, based on a D16 prediction similar to Dungeons and Dragons, so each iteration of the
+   bracket will be different. In my experience, the D16 prediction works pretty well for the first few
+   rounds, but often predicts the #1 team will make it to the fourth round. It's not a very scientific
+   method, but I'll share that my computer-generated brackets usually fare well compared to others in my
+   office.
+   The point of using a script to build your NCAA March Madness basketball bracket isn't to take away
+   the fun of the game. On the contrary, since I don't have much familiarity with basketball, building
+   my bracket programmatically allows me to participate in the office basketball pool. It's entertaining
+   without requiring much familiarity with sports statistics. My script gives me a stake to follow the
+   games, but without the emotional investment if my bracket doesn't perform well. And that's good
+   enough for me!
+   Curious to see my brackets? The output isn't in "bracket" format, but you can see my bracket below,
+   as predicted by my script (at least, as of today):
+$ ./basketball.sh
+
+___ MIDWEST ___
+
+round 1
+
+1 vs 16 : 1
+8 vs 9 : 8
+5 vs 12 : 5
+4 vs 13 : 4
+6 vs 11 : 6
+3 vs 14 : 3
+7 vs 10 : 10
+2 vs 15 : 2
+
+round 2
+
+1 vs 8 : 1
+5 vs 4 : 4
+6 vs 3 : 3
+10 vs 2 : 2
+
+round 3
+
+1 vs 4 : 1
+3 vs 2 : 3
+
+round 4
+
+1 vs 3 : 1
+
+___ EAST ___
+
+round 1
+
+1 vs 16 : 1
+8 vs 9 : 9
+5 vs 12 : 5
+4 vs 13 : 4
+6 vs 11 : 6
+3 vs 14 : 3
+7 vs 10 : 7
+2 vs 15 : 2
+
+round 2
+
+1 vs 9 : 9
+5 vs 4 : 5
+6 vs 3 : 3
+7 vs 2 : 2
+
+round 3
+
+9 vs 5 : 5
+3 vs 2 : 3
+
+round 4
+
+5 vs 3 : =5
+
+___ WEST ___
+
+round 1
+
+1 vs 16 : 1
+8 vs 9 : 9
+5 vs 12 : 5
+4 vs 13 : 4
+6 vs 11 : 11
+3 vs 14 : 3
+7 vs 10 : 10
+2 vs 15 : 2
+
+round 2
+
+1 vs 9 : 1
+5 vs 4 : 4
+11 vs 3 : 3
+10 vs 2 : 2
+
+round 3
+
+1 vs 4 : 4
+3 vs 2 : 2
+
+round 4
+
+4 vs 2 : 4
+
+___ SOUTH ___
+
+round 1
+
+1 vs 16 : 1
+8 vs 9 : 9
+5 vs 12 : 5
+4 vs 13 : 4
+6 vs 11 : 6
+3 vs 14 : 3
+7 vs 10 : 7
+2 vs 15 : 2
+
+round 2
+
+1 vs 9 : 1
+5 vs 4 : 4
+6 vs 3 : 6
+7 vs 2 : 2
+
+round 3
+
+1 vs 4 : 1
+6 vs 2 : 6
+
+round 4
+
+1 vs 6 : 1
+
+   So for my Final Four, I'm left with Midwest #1, East #5, West #4, and South #1. I wonder how I'll do
+   in my office pool?

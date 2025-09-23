@@ -1,0 +1,306 @@
+filename: numfmt_20240822.txt
+https://www.pixelbeat.org/docs/numfmt.html
+
+numfmt
+Mar 4 2013
+
+Introduction
+   numfmt is a new command released with coreutils 8.21 in Feb 2013.
+   In its most basic usage, it can be used to generate a "human readable" number like:
+$> numfmt --to=si 4576881213
+4.6G
+$> numfmt --to=iec-i 4576881213
+4.3Gi
+
+   There have been a few requests for a general utility that could convert values to/from
+   human-readable formats. Pádraig Brady planned the original interface. Assaf Gordon implemented an
+   initial draft version, which evolved into the final version with many helpful comments and
+   suggestions from mailing-list participants.
+
+numfmt as a filter
+   More generally, numfmt can operate as a filter, and thus augment other commands, without requiring
+   them to add logic or options to support "human" readable formats. Given the various number formatting
+   options available, it's better to keep all the options involved in a single cohesive command.
+
+   To take a more concrete example, consider: sort -h. That was added to GNU sort in version 7.5
+   (2008), and can be used to sort "human" format numbers as follows:
+$> du -h /etc | sort -k1,1h | tail -n5
+2.1M    /etc/gconf
+6.5M    /etc/selinux/targeted/policy
+6.8M    /etc/selinux
+6.8M    /etc/selinux/targeted
+21M     /etc
+
+   The numfmt equivalent of this is:
+$> du -B1 /etc | sort -k1,1n | numfmt --to=iec | tail -n5
+   2.1M /etc/gconf
+   6.5M /etc/selinux/targeted/policy
+   6.8M /etc/selinux/targeted
+   6.8M /etc/selinux
+    21M /etc
+
+   While a slightly longer command, it does give more control, and more closely follows the UNIX ideal
+   of splitting operations to more functional units. Specific improvements to note with the numfmt
+   variant are:
+     * Numbers default to the natural right alignment for numeric data
+     * The order is more accurate, as the translation to human format is done just before output
+     * For this usage, neither du or sort need "human" specific logic or options
+     * More number formatting options are available that would ever be practical to add to du or sort
+       etc.
+
+Examples
+   Here we see a more involved example that takes the hard to read /proc/meminfo file, always expressed
+   in kB, and scales to "human" format output, while maintaining the alignment in the original input.
+$> numfmt --field=2 --from-unit=1024 --to=iec-i --suffix B < /proc/meminfo | sed 's/ kB//' | head -n4
+MemTotal:         2.8GiB
+MemFree:          198MiB
+Buffers:           24MiB
+Cached:           906MiB
+
+   A more involved example to show the capabilities (assuming you have a system with at least 2 CPUs),
+   is repeatedly reformatting /proc/interrupts which is a handy source of changing large numbers. This
+   demonstrates various formatting, conversion, header avoidance, auto padding and multiple column
+   processing features, to name a few.
+$> watch -n.1 \
+ 'numfmt --header --field=2 --to=iec-i --round=nearest < /proc/interrupts |
+  LC_ALL=en_US numfmt --header --field=3 --group --invalid=ignore --padding=16 |
+  pr -TW$COLUMNS'
+NMI:         11          256,239     312684     197958   Non-maskable interrupts
+LOC:      2.3Gi    1,511,623,621 1820062259 1554913196   Local timer interrupts
+SPU:          0                0          0          0   Spurious interrupts
+PMI:         11          256,239     312684     197958   Performance monitoring
+IWI:          0                0          0          0   IRQ work interrupts
+RES:      1.4Gi      841,865,346 1245521340  605146201   Rescheduling interrupts
+CAL:      7.7Mi        7,813,873    6896491    8490034   Function call interrupts
+TLB:       53Mi       23,815,900   30914142   19073343   TLB shootdowns
+TRM:          0                0          0          0   Thermal event interrupts
+THR:          0                0          0          0   Threshold APIC interrupts
+MCE:          0                0          0          0   Machine check exceptions
+MCP:       16Ki           16,444      16444      16444   Machine check polls
+
+Options
+
+--from, --to
+   The two most common options are --from=UNIT and --to=UNIT, where UNIT is auto, si, iec or iec-i (see
+   binary vs. decimal scales).
+$> for unit in 'si' 'iec' 'iec-i'; do numfmt --to=$unit 123456; done
+124K
+121K
+121Ki
+
+   With input, the auto unit can be specified, to auto determine decimal or binary bases depending on
+   whether the suffix contains i or not:
+$> printf '%s\n' 1G 1Gi | numfmt --from=auto
+1000000000
+1073741824
+
+   One can combine --from and --to, which can be used for example to illustrate discrepancies in
+   hard disk size reporting
+$> echo 500G | numfmt --from=si --to=iec
+466G
+
+--round
+   When converting numbers to human-readable format, some precision loss is expected (e.g. 4095 and 4096
+   can be represented as 4.0K). --round=METHOD controls the rounding method with the default matching
+   other coreutils, which is to round numbers up (if you're dealing with file sizes, overestimating the
+   size is better then underestimating it).
+$> for method in up down nearest; do
+  echo $method
+  numfmt --to=iec --round=$method 4095 4096 4097
+done | paste - - - -
+up      4.0K    4.0K    4.1K
+down    3.9K    4.0K    4.0K
+nearest 4.0K    4.0K    4.0K
+
+   With negative values the from-zero and towards-zero rounding methods are significant, with the former
+   being the equivalent to up for positive numbers, and is the default for the command.
+$> for method in up from-zero towards-zero; do
+  echo $method
+  numfmt --to=si --round=$method -- 9001 -9001
+done | paste - - - | column -t
+up            9.1K  -9.0K
+from-zero     9.1K  -9.1K
+towards-zero  9.0K  -9.0K
+
+--format
+   This enables PRINTF-style output formatting giving close control over the number format.
+$> numfmt --to=si --format "%f bottles of beer on the wall"  99999999
+100M bottles of beer on the wall
+
+$> numfmt --to=si --format "===%10f===" 12345678
+===       13M===
+
+$> numfmt --to=si --format "===%-10f===" 12345678
+===13M       ===
+
+--grouping
+   Locale aware grouping is supported through --format or --group
+$> LC_ALL=en_US.utf8 numfmt --grouping --from=si 9G
+9,000,000,000
+$> LC_ALL=fr_FR.utf8 numfmt --grouping --from=si 9G
+9 000 000 000
+$> LC_ALL=ta_IN.utf8 numfmt --grouping --from=si 9G
+9,00,00,00,000
+
+$> LC_ALL=en_US.utf8 numfmt --format "%'f" --from=si 9G
+9,000,000,000
+$> LC_ALL=fr_FR.utf8 numfmt --format "%'f" --from=si 9G
+9 000 000 000
+$> LC_ALL=ta_IN.utf8 numfmt --format "%'f" --from=si 9G
+9,00,00,00,000
+
+   Grouping is silently ignored with C/POSIX locale, i.e. with LC_ALL=C.
+
+--from-unit, --to-unit
+   These can be used to change the unit size used for scaling input and output. For example for programs
+   that report values in blocks of 1KiB, you can adjust their output like:
+$> numfmt --from-unit=1024 --from=iec --group 5M
+5,368,709,120
+
+$> numfmt --from-unit=1024 --from=iec --to=iec-i 5M
+5.0Gi
+
+--suffix
+   This option can be used to add a suffix (usually, descriptive units) to the converted number:
+$> numfmt --suffix B --to=si 500000000
+500MB
+
+# Note subtle differences between using --format and --suffix
+$> numfmt --format "==%-10fB==" --to=si 500000000
+==500M      B==
+
+# This is better
+$> numfmt --format "==%-11f==" --suffix B --to=si 500000000
+==500MB      ==
+
+Input Processing
+   As mentioned previously, numfmt can process input files or output of other programs. Several options
+   control input processing:
+     * --header[=N] print the first N lines (default N=1) without conversion.
+     * --field=N convert numeric values from column N (default: first column).
+     * --delimiter=X uses character X as field-separator (default: whitespace).
+     * --invalid=MODE control the program's behavior upon invalid input (see error handling below).
+
+   For example, here we use numfmt to adjust the output from ls -log, to convert the numbers to
+   human-readable representation:
+$> ls -log | numfmt --header --field 3 --to=iec
+total 44312
+-rw-r--r-- 1   130K Aug 30 10:43 Makefile
+-rw-r--r-- 1   152K Aug 30 10:42 Makefile.in
+-rwxr-xr-x 1   169K Feb  5 10:13 [
+-rwxr-xr-x 1   158K Jan 30 14:54 arch
+-rwxr-xr-x 1   192K Feb  5 10:13 base64
+-rw-r--r-- 1   8.3K Jan 30 17:02 base64.c
+-rw-r--r-- 1   1.3K Dec 26 16:43 base64.gcda
+-rw-r--r-- 1    11K Dec 21 18:17 base64.gcno
+-rw-r--r-- 1    50K Feb  5 10:13 base64.o
+
+   Note ls directly supports the -h option to display file sizes in human-readable format, though that's
+   less "UNIXy" as noted previously.
+
+Error Handling
+   For handling invalid input, use the --invalid=MODE option, while MODE can be:
+     * abort - Exit code 0 means all input was valid. Exit code 2 means some values were invalid.
+       Processing stops at the first error.
+     * fail - Exit code 0 means all input was valid. Exit code 2 means some values were invalid. Unlike
+       abort, processing continues past errors (so more than one error might be reported).
+     * warn - Always exit with code 0, even upon invalid input. Conversion errors are reported to
+       STDERR.
+     * ignore- Always exit with code 0, even upon invalid input. Unlike warn, conversion errors are
+       silently ignored.
+
+# This is our input
+$> printf "5000\nHello\n6000\n"
+5000
+Hello
+6000
+
+# IGNORE - Completely ignore errors, no STDERR messages, no exit code indication
+$> printf "5000\nHello\n6000\n" | ./numfmt --to=si --invalid=ignore ; echo Exit = $?
+5.0K
+Hello
+6.0K
+Exit = 0
+
+# WARN - Report errors to STDERR, but no exit code indication
+$> printf "5000\nHello\n6000\n" | numfmt --to=si --invalid=warn ; echo Exit = $?
+5.0K
+numfmt: invalid number: 'Hello'
+Hello
+6.0K
+Exit = 0
+
+# FAIL - Report errors to STDERR, exit with code 2 upon invalid input
+$> printf "5000\nHello\n6000\n" | numfmt --to=si --invalid=fail ; echo Exit = $?
+5.0K
+numfmt: invalid number: 'Hello'
+Hello
+6.0K
+Exit = 2
+
+# ABORT - Report errors to STDERR, exit with code 2 upon the first error
+$> printf "5000\nHello\n6000\n" | numfmt --to=si --invalid=abort ; echo Exit = $?
+5.0K
+numfmt: invalid number: 'Hello'
+Exit = 2
+
+   --invalid=abort is the safest option (and is the default).
+
+Mixing decimal and binary scales
+     Once upon a time, computer professionals noticed that 2^10 was very nearly equal to 1000 and
+     started using the metric prefix "kilo" to mean 1024. That worked well enough for a decade or two
+     because everybody who talked kilobytes knew that the term implied 1024 bytes. But, almost
+     overnight, a much more numerous "everybody" bought computers, and the true computer professionals
+     needed to talk to physicists and engineers and even to ordinary people, most of whom know that a
+     kilometer is 1000 meters and a kilogram is 1000 grams. Then data storage for gigabytes, and even
+     terabytes, became practical, and the storage devices were not constructed on binary trees, which
+     meant that, for many practical purposes, binary arithmetic was less convenient than decimal
+     arithmetic. The result is that today "everybody" does not "know" what a megabyte is. When
+     discussing computer memory, most manufacturers use megabyte to mean 1 048 576 bytes, but the
+     manufacturers of computer storage devices usually use the term to mean 1000000 bytes. Some
+     designers of local area networks have used megabit per second to mean 1,048,576 b/s, but all
+     telecommunications engineers use it to mean 10^6 b/s. [...] The confusion is real, as is the
+     potential for incompatibility in standards and in implemented systems.
+
+   numfmt supports both decimal (with --from=si) and binary (--from=iec) scales. It's important to use
+   the correct scale, based on your input.
+
+Similar functionality in other programming languages
+   Conversion to/from human-readable values is easily done in many other programming languages, but most
+   code snippets do not handle errors and other edge-cases properly, and lack some of the features of
+   numfmt.
+
+Perl
+   Number::Bytes::Human converts numbers to human sizes representation.
+   bs controls SI (1000) or IEC (1024) scaling.
+use Number::Bytes::Human qw(format_bytes);
+$size = format_bytes(0); # '0'
+$size = format_bytes(2*1024); # '2.0K'
+
+$size = format_bytes(1_234_890, bs => 1000); # '1.3M'
+$size = format_bytes(1E9, bs => 1000); # '1.0G'
+
+Python
+   hurry.filesize converts numbers to human sizes representation.
+   system=si changes the scale to 1000 (from the default of 1024):
+>>> from hurry.filesize import size, si
+>>> size(1024)
+'1K'
+>>> size(1000, system=si)
+'1K'
+
+
+   Many other snippets are found online, including my own human.py
+
+R
+   gdata converts numbers to human sizes representations.
+   standard controls the scale (SI=1000, Anything else = 1024).
+> library(gdata)
+> humanReadable(2e7,standard="SI")
+[1] "20 MB"
+> humanReadable(2e7,standard="IEC")
+[1] "19 MiB"
+
+
+---
+

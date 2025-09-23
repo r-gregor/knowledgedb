@@ -1,0 +1,1143 @@
+filename: c_relative_pointers_20240517.txt
+from: https://www.youtube.com/watch?v=_HGkhvpCbsk&t=3878s
+      What is Relative Pointers? -- Tsoding Daily
+
+Must include:
+#include <stdint.h>
+  .. before use ...
+
+In order to be able to serialize tree data structure with nodes, the absolute pointers inside Node struct
+must be converted to relative ones by converting each one of them into 32bit integer and fit them both into
+one 64bit integer.
+
+A - So, from:
+
+typedef struct Node Node
+struct Node {
+	char text[32];
+	Node *left;
+	Node *right;
+}
+
+ ... to ...
+
+typedef struct Node Node
+struct Node {
+	char text[32];
+	int32_t left;
+	int32_t right;
+}
+
+And inside Node *random_tree() function, from:
+
+Node *random_tree(Node_poll *np, size_t leve) {
+	if (level == 0) return NULL;
+
+	Node *root = node_pool_alloc_with_text(np, fruits[rand()%fruits_count]);
+	/* left, right are absolute pointers !! */
+	root->left  = random_tree(np, level - 1);   // to be converted from absolute to relative pointera - (1)
+	root->right = random_tree(np, level - 1);   // to be converted from absolute to relative pointer  - (2)
+	return root;
+}
+
+  ... to ...
+
+	root->left  = random_tree(np, level - 1) - &root->left;                         // faze 1: we get an offset but it is not in bytes
+	root->left  = (char *)random_tree(np, level - 1) - (char *)&root->left;         // faze 2a: cast both operands into (char *)    = bytes, or even better:
+	root->left  = (uint8_t *)random_tree(np, level - 1) - (uint8_t *)&root->left;   // faze 2b: cast both operands into (uint8_t *)    = bytes, or even better:
+	root->left  = (uint8_t *)random_tree(np, level - 1) - (uint8_t *)&root->left;   // and we get the distance in bytes, which then we need to convert into ...
+	//            +-----------------------------------+   +---------------------+
+    //                             |                                |
+    //                             |                                +--> pointer to the location that stores the relative one
+    //                             |
+    //                             +-----------------------------------> absolute pointer
+    //
+	root->left  = (int32_t)((uint8_t *)random_tree(np, level - 1) - (uint8_t *)&root->left); // into int32_t by casting whole rvalue into (int32_t) - (1)
+                                                                                             // so we convert an absolute pointer to a relative one,
+                                                                                             // that is relative to where the left is located
+    // and the same for root->right ...                                                      // - (2)
+	// ...
+
+B - Convert expression into macro ...
+
+// faze 1:
+// aptr  - absolute pointer (the value of memory address = value)
+// rloc  - location withe relative pointer (the name of the variable that stores the relative address = lvalue)
+#define abs2rel32(aptr, rloc) (int32_t)((uint8_t *)aptr - (uint8_t *)&rloc)  // faze 1
+
+  .. so (1) mecomes:
+  root->left = (int32_t)(abs2rel32(random_tree(np, level - 1), root->left))  // - (1)
+
+  .. but we want it to be assigned, so:
+
+// faze 2:
+// aptr  - absolute pointer (the value of memory address = value)
+// rloc  - location withe relative pointer (the name of the variable that stores the relative address = lvalue)
+#define abs2rel32(rloc, aptr) (rloc) = (int32_t)((uint8_t *)(aptr) - (uint8_t *)&(rloc))  // faze 2
+
+  .. so (1) and (2) mecome:
+  abs2rel32(root->left,  random_tree(np, level - 1))  // - (1)
+  abs2rel32(root->right, random_tree(np, level - 1))  // - (2)
+
+...
+
+---
+filname: relative_pointers_transcript.txt
+
+Intro
+0:06 looks like we're live hello everyone and welcome to another recreational programming session
+0:12 so let's make a little bit of an announcement and officially start the stream as usual as we usually do
+0:18 i just need to bring my discord server and let me do right circle live on
+0:26 twitch and what are we doing today on twitch.television
+0:31 let me see today we are exploring a very interesting technique in gi specifically
+0:37 not only in jail uh called relative pointers right so if you been following
+0:42 the development of gia you probably heard about these things and i would like today explore them a
+0:48 little bit closer so that's what we're gonna be doing today uh hello hello everyone welcome welcome
+0:56 welcome so it's just honking outside so uh to be fair i've been using
+1:05 a form of relative pointers um for quite some time already in my c c
+1:10 plus plus programs primarily c uh right because i don't really program in cpl's past very often unless it's
+1:17 absolutely necessary so let me go and create maybe a folder
+Binary Trees
+1:23 where we can do all of our experimentations right so relative buoyant ours
+1:30 right so and let me open like a c program of some sort
+1:36 all right [Music]
+1:42 so quite often instead of using pointers i would use
+1:47 um indices to a particular array right so let's imagine that i want to build a binary tree so i'm going to define
+1:54 a node right and a node is going to contain some sort of a text right so it's going
+2:00 to contain some sort of text let's say it's going to be 32 characters right it's not going to be very big text some
+2:05 sort of a label and it is going to store a point to the left subtree and the right subtree and
+2:12 that definition is not going to work right because uh we're referring to node
+2:17 before it was actually properly defined because it's c so we have to do instead we actually have to
+2:23 move this thing like that right and then define uh something like this right so
+2:30 we predefine this tract and only then we'll be able to uh you know
+2:36 uh to forward uh refer to that i'm doing i don't remember so we have to forward declare this internet i think
+2:43 right so uh this is how you can define a binary tree but quite often what i would do i would actually have some sort of a
+2:50 pool of the nodes right so node pool and um i'm going to have a certain
+2:57 capacity of that node pool right so let's actually define something like this and let's say that we're going to
+3:02 have uh 1024 of such things and instead of referring to left and
+3:09 right as an absolute point in the memory i would use some sort of an index within that array so
+3:16 effectively uh what's interesting in here is that this becomes a relative point
+3:22 it re uh refers relative to the beginning of that array and every time you want to
+3:28 access the left subtree you would have to literally just do that right so we have a note you have a root and then to
+3:34 get the left subtree you'll have to do node uh pull root left
+3:39 and there you go you got the left subtree right and the advantages of this sort of
+3:45 approach is actually quite cool um one of them is you can make the pointers way
+3:51 smaller than they are because on the more than 64-bit architectures the pointers is actually 64 bits but here
+3:57 since it's just an index relative to some absolute absolute address i can make it as big as i want or as small as
+4:04 i want those if i have a lot of notes i could compress you know a lot of memory
+4:10 so this is one of the things i can do another cool thing i can do is serializability right essentially if i
+4:17 do not refer to the memory in absolute values i can just dump this entire array to file uh right i can download the file
+4:25 and then load it up and it's going to be the same because uh like every time you run the program position of this thing
+4:31 may be actually different you never know where exactly it is located in the memory and you don't have to if you're
+4:36 operating um in terms of relative values right so this is kind of the things you
+4:41 can do i've been doing the version of that in my c c plus plus programs for quite often for quite some time i'm
+4:48 sorry and uh yeah so apparently gia has a similar thing built into the language
+4:56 but it's rather interesting so jai is using a different point relative to
+5:01 which it is computing the pointer right so the way it works it's actually
+5:08 storing the relative point of stores the offset relative to the place
+5:14 where this variable is located right so this variable is located
+5:20 somewhere in the memory and within itself it stores an offset to
+5:26 the left or to the right on how you have to move so essentially if you have
+5:32 some sort of a node right and you want to go to the left sub tree what you will have to do right
+5:38 essentially you will have to take the left variable take a pointer of that thing you take an
+5:45 absolute pointer to that specific variable and you convert it to a pointer
+5:50 character so we can do all of the parental arithmetics and bytes and then you offset
+5:57 by the values stored within that variable so of course you can address less memory
+6:05 to the left to the right but you also take up less space
+6:10 to to store that so this is actually pretty cool because you don't even have to know the uh the
+6:18 beginning of your sort of pull array the variable itself is the center right and
+6:24 you can go left and right so this is how gi handles relative points
+6:29 but it actually handles that a little bit more smart because it uses a special encoding
+6:35 uh right and this is precisely what i would want to explore today
+6:40 and i think the best way to explore uh gi relative pointers is actually to
+6:46 implement them in c because in c we'll have to work work
+6:52 with them explicitly uh so jay when you work with the gi uh relative pointers
+6:57 like there's a lot of stuff that gi does implicitly like all of this stuff uh
+7:02 like taking the absolute value then of setting all of that is going to be completely implicit and generated by the
+7:07 compiler so to actually expose all of that to make it more explicit and
+7:12 visible i would like to implement all of that of those ideas in c and maybe come
+7:18 up with some sort of macros and stuff like that right so um and then once we you know explore that
+7:25 and see we can re-implement the same code in jai to sort of compare how it
+7:31 would look like how it looks like when we don't have that built in into the language and how it looks like uh how
+7:37 it's built into the language does it actually saves you on the boilerplate and stuff like that does it make it uh
+7:43 you know more robust and less error porn you know what i'm talking about
+7:49 [Music] so yeah that's actually pretty good idea and when you use the uh you know the
+7:54 variable itself the address of the variable itself as the uh you know the beginning of the relative point
+8:01 relative to which you're you know complete and everything it you still have the same advantages right so you
+8:07 still have a pretty um you know pretty good uh resign
+8:12 serials serializability pretty good serializability and also you save up on on space as well
+8:20 uh reverse engineering giant compiler i'm not really reverse engineering giant compiler i'm actually going off uh from
+8:26 the description that is given in the documentation for gi in the documentation for j there is a how-to
+8:32 on how relative pointers works and they even explain how exactly they work like
+8:37 what kind of like bit operations they apply there and stuff like that we're gonna explore all of that today
+8:46 all right so let's actually implement uh like a very simple binary tree
+Node Pool
+8:52 generator right so so we're gonna have a text
+8:58 and uh i'm gonna just have a node right so i'm gonna just implement all of that
+9:03 with absolute pointers just to um just to have something going
+9:09 right uh so we definitely gonna have a note pool and stuff like that
+9:16 and what do we want to uh do first of all i want to be able to allocate the
+9:22 node within this pool right so i need to be able to track uh how many nodes
+9:27 already allocated so what i'm thinking is that maybe i'm gonna uh like put that pool into a structure right so let's
+9:33 actually define struct and that's track is a note uh pool right so and here
+9:39 we're gonna have i suppose nodes right so this is the nodes and how many of them we already
+9:46 allocated right so this is the nodes and this is the size i'm going to put size at the beginning
+9:52 right so the beginning of the memory we have the size and then we have the notes themselves
+9:58 uh hello hello everyone welcome welcome welcome how are you guys doing okay so and in here i'm gonna just allocate the
+10:04 node pool uh in global static memory so this is a node pool and it's static and
+10:11 also gonna zero initialize this entire thing so let's create a procedure node
+10:17 pull a lock right so and this thing is going to basically and allocate the node
+10:23 within that pool right so that's the only thing it's going to do so it will return us the the absolute point the
+10:30 absolute pointer right so and how we're going to do that first we need to assert right we need to
+10:36 assert that we still have some space within the pool right so um by the way i think it makes sense
+10:43 to actually accept that pool as a parameter so maybe you you're going to have several pulls right so let's
+10:49 actually let's actually do that node pool uh it's called np right so
+10:54 this is the north pole let's assert that the size of the pool is the amount
+11:00 of allocated nodes is actually less than the node pool capacitor right so this is a no pull capacitor
+11:07 uh right after that i'm going to take the last node right so this is the node
+11:13 right right in here and i'm going to take a pointer to it so that's the node we'll have to return in
+11:20 here all right after we have taken it we need to increment the amount of nodes we have allocated so
+11:27 here you go we implemented a very simple uh linear allocator right so we just bump the counter and there you go
+11:34 very simple allocator maybe it also makes sense to zero initialize the entire thing because why not right so it's actually
+11:42 quite cool if the allocator uh you know mem sets to zero everything for us
+11:48 uh all right so lm element zero two sixteen uh thank you so
+11:53 much for six months of tier one subscription thank you thank you thank you uh always happy to watch the stream
+11:59 relative pointers today fun yeah they're actually kind of interesting so this is actually very cool technique
+12:05 uh and it's extremely extremely useful it's pretty cool that there are languages that support that like
+12:10 natively built in [Music]
+12:16 okay so okay
+12:22 all right so let me try to compile this entire thing uh i'm going to create build.sh
+Build Script
+12:29 right so a simple script that is going to uh you know build everything in here
+12:35 so let's do clang wlw extra so i'm going to enable as many
+12:40 warnings as possible and uh i'm going to try to compile this entire thing so i'm also going to set xe
+12:47 so essentially it will trace it will print each individual command it's pro it's executing and also it will fail the
+12:54 whole script on the first failed command right so that's what we're gonna be doing in here and let's mark this build
+13:00 script as executable and run the script as you can see it is printing the
+13:05 command that is currently executing and it has a couple of warnings a couple of errors that we'll need to fix so assert
+13:12 we need to include assert let's also include stdlib just in case because usually you want to have that
+13:18 all right so memsat is located in string as far as i know and this thing is not z
+13:26 s it's s z right it stands for size and we have unused variable in here because we never actually like use it uh so for
+13:34 instance here i can do the following thing i can create a root uh node
+13:39 pull a lock so this is the node pool uh i wanna call
+13:44 it like something like global node pool right and let me go here and
+13:50 say it's a global note pool and in here we can print
+13:55 something in here all right so we're gonna print the pointer the absolute point to that
+14:02 specific route and let's try to execute okay so that's the point that's the
+14:08 absolute point uh okay zarys thank you so much for for your one six month yo yo yo
+14:20 thank you so much for two months of twitch transcription hey telling i really enjoy watching your videos and streams thank you i really enjoy making
+14:26 them um [Music]
+14:37 all right so uh let's go so we probably want to also set the um
+14:45 the text in here right so i made the text actually fixed right because it's
+14:50 like because it makes it a part of the note uh it also makes it limited because we
+14:55 cannot store more than 32 characters but that is fine i don't plan
+15:00 to store an infinite text in there so how we're going to be storing the size of that string right so we can
+15:08 allocate maybe additional variable that stores the size but maybe we can make it
+15:13 a new terminated we can basically reserve last one character always for no
+15:19 right and that way yeah it is always no terminated i think for for this specific thing it can be
+15:24 fine right yeah so it's a fixed string but at the
+15:30 same time it is compatible with multimedia strings of c and we are programming in c so it kind of makes
+15:36 sense you know what i mean uh you know what i mean it kind of makes sense so let's create a
+Set Text
+15:42 function that will do that for us right so maybe it's going to be a node set text all right and it's going to accept
+15:49 the new terminator string hello world and we'll do everything to just set that
+15:55 text properly into the nodes because we also need to be able to handle like overflows what if we're trying to set
+16:00 the text that is bigger than 32 bytes so we'll probably have to truncate it right and don't save everything because
+16:07 otherwise we're gonna have a buffer overflow right and some restitution out there is gonna have a heart attack
+16:13 because of that so we have to prevent that um
+16:22 all right so let's do uh the following thing note set text
+16:28 we're gonna accept the node and we're gonna accept the text
+16:33 sister we're gonna add the sufix sister to indicate that it's a c string and
+16:39 what c string means it means that it's multimedia right so we sort of documenting with the names of the
+16:44 variable it's almost like hungary notation but it's not really hungarian edition uh
+16:50 potato passing by thank you so much for two months uh okay so let me let me see
+16:56 so what we need to do is essentially uh we need to
+17:02 see if the size of the text is not overflowing the capacity all right so but to do that
+17:09 we actually need to compute the size of the text so esther len uh text sister right so
+17:16 let me let me see if n is greater than size of
+17:23 node text so that will give me the size of the entire array but we also need to preserve one character for the new
+17:30 terminator so i'm going to do -1 if it is greater than the size -1 we'll
+17:37 have to set this thing to that specific value
+17:43 right so and then after that we can quite easily do mem copy write to them copy
+17:50 node text uh text sister and we copy exactly and characters but we also need to make
+17:56 sure that it's non-terminated so i'm gonna do mem set of node text with size of
+18:03 um node text just to make sure that it's all you know no terminated and then i'm
+18:09 gonna copy it right like so uh there you go so here we have uh not
+18:16 pull a lock and then we set the text maybe it would make sense to somehow
+18:21 combine these two functions right so maybe we could do node pull a lock with
+18:27 text so we allocate and simultaneously set the text for this entire thing hello
+18:34 uh world right so that doesn't really sound like a bad idea i think
+18:42 all right so okay so here we have to provide the node
+18:49 pool and p cons char text system right
+18:56 and what are we going to do so here i'll have to return the point to the right so this is the node this is the result and
+19:03 know the pool uh allocate i'm just allocating a new node and i'm simultaneously setting it
+19:11 text to the provided text right there you go
+19:18 and then i want to return this result there you go so it will be also nice to have
+19:25 a facility that prints the the tree right so since we have three in here let's actually
+19:31 uh do something like print tree so it probably should accept the file into which we are
+19:38 printing everything right we're going to be printing into the standard output and also the root right so this is what we
+19:44 need to have in here uh print tree file um let's put let's
+19:50 call it stream right so this is going to be a stream and we're going to accept the note maybe
+19:55 by constant maybe it doesn't matter so i don't really want to go into the const correction correctness right now
+20:02 uh and uh let's actually do something like an implemented right so let's actually mark this thing as not
+20:08 implemented was not implemented
+20:17 [Music] all right
+20:23 so let's try to compile this entire thing and see where exactly it fails let's implement not implemented
+20:30 right uh one two three four um
+20:36 so we're gonna one two three four print f uh we actually have to print the std
+20:42 error so this one is gonna be the file in which that happened the line on which it
+20:48 happened and we're gonna say unimplemented so the file is file the line is line
+20:54 and then we're gonna exit with the one right and then we're gonna just do this
+20:59 entire thing all right so we have a couple of unused things in here so maybe i'm going to
+21:05 actually mark them as in used unused stream and use node and
+21:13 unused is essentially a thing that is not used okay so as you can see this thing is not
+21:20 implemented yet okay uh
+21:26 cool how we're gonna be implementing all of that so i suppose uh we're going to do the following thing so maybe i also
+21:33 need to keep track of the level right so because i also need to indent
+21:38 things if you know what i mean right so i need to properly indent things uh okay so when i'm printing the note
+21:46 right uh depending on the level right i'm gonna do the following thing
+21:52 size t less than level plus plus i
+21:57 and i suppose i'm going to do the following thing so each level is going to be two spaces right so each level is
+22:04 two spaces and bring that into the stream so after that i want to print the
+22:10 uh the text within the node right so we're going to do f puts know the text and also into the stream
+22:17 and then we're going to do f put c new line right into the string so we're
+22:24 just printing the uh the current node right so the text of the current node
+22:30 after that we have to recurse to left subtree and right subtree so we have to do print three
+22:37 uh stream node left
+22:42 level plus one and note right but we probably have to do that only if
+22:49 left and right subtree are not nulls so we have to do if lab subtree is not null
+22:55 and if uh right subtree is not no only then we
+23:00 do recurse and we continue printing right as soon as we encounter that there are no we shouldn't try to do that i
+23:07 think otherwise we may try to reference a new point and another restitution out
+23:12 there is going to have another heart attack right so we want to prevent that as well
+23:18 okay [Music]
+23:29 people are just kind of discussing why spaces very interesting okay so uh let's go ahead and try to
+23:37 uh execute this program right at this compile right so it doesn't compile because here i have to specify
+23:44 uh v0 unfortunately i don't program in c plus plus right in simple spots i could have done something like this
+23:49 but in c in prc it will not compile c does not support default arguments so
+23:55 the funny thing is that compiler knows what is the default argument but it also knows that c doesn't support
+24:01 them right so it recognized the feature that i'm trying to use but it doesn't allow me to
+24:07 use that because no no no this is not c plus right it's especially funny like the
+24:13 compiler knows the feature i'm trying to use but it just can't allow me to use that because otherwise this is not the c
+24:18 plus this is not a c anymore as you can see we have hello or hello world right
+24:24 so that's basically what we have uh then we can just go ahead and maybe
+24:30 uh allocate more notes right so for the left subtree we can do
+24:35 left is going to be equal to global
+24:42 foo and the right is going to be the bar
+24:47 right so i'm allocating sub trees for for the route as you can see so it
+24:52 actually indented all of them more or less correctly noticed how i
+24:58 uh well i mean yeah so the cool thing about this like a pool um instead of
+25:03 using maloconfree is that because i never have to de-allocate anything right because i'm allocating in this static
+25:10 memory i'm technically never calling malloc and since i'm technically never calling malik i never have to call free
+25:17 right so i'm not leaking any memory right
+25:22 so quite quite often people don't like to program in c because oh it's so difficult to manage the memory you have
+25:29 to call malloc and you should not forget to call free otherwise you're leaking the memory but people then do not
+25:35 realize that you never have to call free if you never called malloc
+25:41 think about that and i'm not even joking i'm not trying to make a joke or meme about like this is like a genuine thing
+25:47 that i'm trying to tell you you never have to call free if you never called malloc
+25:54 if you architect your entire program around the idea to reduce the amount of malex as
+26:01 much as possible you actually have a good time of not managing memory at all
+26:07 like you just don't this is like and a lot of problems that you have with memory management in c are kind of
+26:14 eliminated they just don't exist so yeah think about that
+26:22 um
+26:28 why the guys create rust then well you have to spend you know investors money
+26:33 somewhere because mozilla as a company have a lot of investors right with a lot
+26:39 of money so they invest into that company and you have to spend this money
+26:44 somewhere you have to burn it on something right so that's what
+26:50 i'm joking by the way this is a joke uh so what i was talking about memory management before was not a joke right i
+26:56 was trying to genuinely share my knowledge whatever i said about mozilla it was a joke this is already irony so i
+27:02 noticed that people quite often do not distinguish when i'm actually joking and when i'm not joking so i'm telling that
+27:07 explicitly to you just in case all right so
+27:16 you know i think we need to generate uh like a bigger tree
+27:22 not bigger tree but you know a bigger tree
+27:27 you know what i'm talking about so we need a bigger tree the tree that is bigger
+27:33 so how can we do that um we can uh we can actually just do that
+27:40 recursively right so we can say okay like create a tree of the
+27:45 depth of three right so we don't really want to go too deep because it grows exponentially
+27:52 right so it's an exponential explosion uh so maybe like three or four levels but then we'll have to generate random
+27:59 text every time i need to generate a random text i usually pull out my
+List of Fruits
+28:05 list of fruits right so i have a project called gym which is
+28:11 actually pretty cool project by the way so it's a immediate juice and serializer so essentially it's a library that
+28:17 allows you to write this kind of code right so you sort of like describe
+28:22 json in an immediate intermediate style like immediate ui and this library generates you like an actual json so
+28:30 with this library it's actually a pretty cool library you can have a tree just like a tree data structure you can
+28:35 iterate through that tree data structure recursively and call corresponding functions in here and you can
+28:40 automatically turn it into json but you can automatically serialize it into json it's actually quite convenient and it's
+28:46 like a very simple c library i do recommend you to check it out right so in here uh for the tests i have an
+28:54 interesting file called fruits.h right so if you open that file uh
+29:00 it's it it's it's literally a list of fruits i don't know what you expected but this is literally a list of fruits like i
+29:06 have a lot of fruits in here so i usually use it for for different kind of tests so i also stole the list of fruits on
+29:14 here right so let's actually download it so i'm gonna be using this list of foods
+Random Fruits
+29:20 for trend lives thank you so much for your one subscription thank you thank you thank you so okay
+29:27 uh i'm gonna just download the list of fruits
+29:32 we used to use to use them let's take a look at what kind of fruits we have we have a honeyberry
+29:38 huckleberry jackfruit
+29:44 are those really fruits i know lemon i know lemon lemon is a
+29:49 fruit okay oh look
+29:55 this is the creator of c plus plus i didn't know he was a fruit
+30:05 sorry uh all right so let's actually try to um to to hook it up into the main
+30:12 problem so fruits.h
+30:17 and how many frogs do we have so we can try to do the following thing
+30:26 so we have a fruits count so let's actually iterate to the center i think for
+30:33 size i less fruits count and we can just print each individual fruit
+30:39 in here so fruits by that ago
+30:45 and here are all the fruits especially like ugly fruit i don't know why is it is it so ugly um
+30:54 is it really so ugly um okay so and essentially now what we
+30:59 can do if we want to generate like a random fruit right so you want to generate a random fruit you take
+31:05 the amount of fruits right so fruits count and you just generate a random number within the range of of these
+31:12 fruits and you get a bunch of random fruits so we can generate 10 random fruits right so here is the 10 31:19 random fruits if we also initialize the uh random number generator right so
+31:25 we're gonna get uh different 10 different fruits each time so they can be actually repeating
+31:31 themselves uh right but as you can see we get a different different fonts which
+31:36 is kind of convenient so we can use them to generate different um you know different um texts for for
+31:43 the notes she was uh subscribed with twitch prime twice
+31:50 which is kind of weird so this is kind of strange so as you can see she was subscribed twice i don't know
+31:56 how i don't know why but i really appreciate i uh how they say that wisely appreciate is
+32:03 that even a word i'm not sure doubly appreciate right
+32:11 it is actually called ugly because it is ugly from wikipedia nice thank you that's very interesting
+32:19 um [Music] jeff bezos special yes it is
+32:26 destroy computers thank you so much for the 39 months of tier 1 subscription hello epic
+32:33 relative streamer thank you i'm not an absolute streamer anymore right i'm just a relative
+32:41 oh you mean like relatives okay that's actually very interesting playing
+Generating a Random Tree
+32:46 on words um [Music] alrighty so let's generate a random tree like
+32:56 genu uh what's called random tree and i suppose we're gonna just take uh
+33:04 something like this it is going to accept the node pool
+33:09 right so because we're going to be allocating the nodes within the pool right and i suppose we're also going to accept
+33:15 the level right so because we want to generate the tree of
+33:20 a particular level so that's definitely what we want to do uh how we're going to be doing all of that right
+33:27 so [Music] i need to generate the root
+33:33 right so this is going to be the root and i'm doing node pull a lock with the
+33:39 text right i'm allocated into np but the text i'm going to be using i'm going to be doing
+33:44 fruits rend fruits count there we go
+33:50 then i need to call this function this specific function recursively so i'm
+33:57 gonna be generating the left subtree with the same allocator but with the
+34:02 level less than one right and then i'm going to be doing the uh a right subtree
+34:09 uh also with the level less than one and that way i'm sort of going recursively and i'm just generating the tree until i
+34:15 ran out of levels or ran out of memory uh right so but luckily every time i allocate i actually check if i have
+34:22 enough space within the pool so if i try to generate more than 1024 34:28 uh nodes it will actually crash it will you know fail the assertion and it's not that difficult to actually do that i
+34:34 just need to generate the tree with the level of 10 right so 2 to
+34:39 the power 10 right so yeah uh if i try to do that if i try to generate more it will instantly fail
+Generating a Deep Tree
+34:46 right so and in here probably want to do the following thing if the level uh is
+34:52 is equal zero then i just have to return nu right indicating that uh that's it so we
+34:59 don't have anything to generate okay so let's go ahead and just simply generate
+35:06 a tray right so i'm going to keep srand to you know randomize the random number
+35:14 generator and let's generate a random tree i'm gonna provide the uh global node pool we're gonna be allocating
+35:20 there and let's generate like three levels right so this is the node uh root and then i'm gonna try to print
+35:27 the tree into the std out right is it gonna work let's actually see and
+35:32 it doesn't even compile i'm super happy about that uh what we have to do we have to return
+35:38 uh okay so we have another thing in here uh too few arguments we have to provide
+35:43 the level in here and look at that so i promised you that is gonna be three
+35:49 levels deep tree there you go it is three levels deep tree
+35:56 so you can you can clearly see that isn't that cool isn't it cool i think it's pretty cool we can actually
+36:01 increase the amount of levels let's actually do four uh now this is four levels of
+36:08 uh of the tree and then we can have five and if we have five as you can see it
+36:13 grows exponentially so i think five is more than enough
+36:18 right that's pretty cool uh sam
+36:24 samj and which same i don't know how to pronounce correctly your name but yeah
+36:30 okay so a passion fruit a passion fruit
+36:36 okay that's pretty cool so but all of that is done using uh
+36:42 absolute pointers right all of that done is using absolute pointers and which means that you can't just
+36:48 save the uh pool into the file system and
+36:53 read it back and expect all the pointers working correctly maybe it will work correctly by accident but i actually
+37:00 doubt that it's actually very interesting [Music]
+Saving Node Pool
+37:05 it is actually very very interesting we can try to do that so let's actually do
+37:11 something like save node pool to file uh and we're going to accept node pool
+37:18 right so this is in p and we're gonna also accept the file path
+37:24 all right so in here we can open the file uh right so it's gonna be out
+37:31 uh f open file path right so this is the file path we're gonna open it in a write mode
+37:38 binary right so and if that failed right we'll have to print something
+37:44 so it's actually the only thing it's the error error could not
+37:49 write to file s because of that file path str error
+37:56 error no so basically error node contains the um the number of an error and str error converts that to a string
+38:03 and we're printing the reason why this entire thing felt that's what we're doing today all right so and then after that we're
+38:09 gonna close this entire thing so and dumping this entire thing uh is rather straightforward i would say
+38:16 we can just use f right actually f right
+38:22 designed specifically to save a raise of items right so notice how it accepts two sizes
+38:29 first it accepts the size of the element and then the amount of elements and quite often uh people just like use one
+38:36 or another and set one to one uh right but here it is designed
+38:41 specifically to save a race right so i can take an array uh np
+38:48 data the size of the single element i'm saving is the size of node and the
+38:53 amount of elements i have is mp as size right so as you can see it fits perfectly into our
+39:00 into our purpose right so we're saving an array of things uh and in here it
+39:05 also returns how many of things it's saved here we can just um you know maybe assert that it saved exactly as
+39:13 many as i have in here and if i got an error right
+39:19 i can also print this entire thing why not uh all right so we have some problem
+39:26 here is it not called data i think it is called nodes it is not called data it is
+39:31 called nodes okay that makes sense what else do we have in here uh we have to include error no
+39:38 all right and f close it's not called after this flow is called out okay cool
+39:44 but we never actually saved anything so let's actually generate a random tree then let's print it and uh call save
+39:52 node pool to file all right so essentially in here we're going to be saving
+39:58 global node pool to let's call this
+40:03 tree bean maybe we can call it fruits bean
+40:10 all right so and it it failed i'm actually surprised that it failed
+40:18 is that because it really didn't save as many as i would expect let me try to
+40:24 bring this into i think so i'm going to do a z and is equal to that and n p s z is
+40:30 equal to that and uh and p s z so something
+40:36 something was not particularly correct and i'm actually surprised
+40:42 so i forgot to put a new line so it flashed everything and yeah it returned zero because i was
+40:49 trying to read instead of writing them so i supposed to write them as you can see everything
+40:55 worked perfectly okay so we have a binary binary file in here
+41:01 so uh let's actually take a look inside of that file and see if we can distinguish anything there it's actually
+41:07 rather interesting so what is this called uh relative point s relative pointers so
+41:15 hex editor fruits beam okay so as you can see here
+41:22 uh if you look in here we have the the name right we have the name
+41:27 and then we have padding with zero right we have padding with zero until we get the point
+41:35 and the pointer is supposed to be this long right so this is the left subtree this is the right subtree and then we
+41:42 have a pitch which actually starts here right so yeah that makes
+41:48 sense so we have this big uh this big string right 32 characters and then the left subtree and right
+41:55 subtree and all that uh the absolute point is within the memory at the moment of executing the program all of them are
+42:02 absolute and as already said uh we cannot rely on them
+42:07 working after we try to load up that file we can actually try to do that right so we have a function that saves
+42:13 node pull to file but let's actually implement uh load node pool from file who said we
+42:20 can't do that we can try to do that right but it's not really clear
+42:25 what we have to consider the uh the root in that case but i'm gonna
+42:31 assume that the root is allocated the first so the first element of the notepool is going to be the root i think
+42:39 it's a very safe thing to assume in this particular case what do you guys think right so we can kind of do that
+42:48 [Music] i program pascal for work i can't
+42:53 imagine why you would willingly do that to yourself i do not believe you i don't think you actually program in
+43:00 pascal at work you're probably working in one of those nasty extensions of
+43:06 pascal like object pascal or delphi which are in fact unbearable and they're
+43:12 basically massacring the you know original idea of pascal being like a
+43:18 very simplistic language on the level of c so i do not believe that your program in
+43:24 the original nicholas with pascal nobody programs in that pascal anymore unfortunately except
+43:31 me i programmed in it uh on one of the previous streams so uh all right
+43:38 let's continue i ran out of water unfortunately
+43:43 um i really like the original pascal right the og pascal yes yes pit stream is actually correct i really really love
+43:50 it because it's basically like a better c right so it's more strongly typed uh it
+43:56 allows you to do one of the things that i do quite often in c which is basically indexing industry arrays with
+44:03 enumerations it has that feature built in it allows you to strongly um to index a race with
+44:10 enumerations in a strongly typed manner which is not really supported in that many languages these days in like the
+44:18 only other language i know supports that is ada right so there's only two
+44:23 languages i know for sure support this kind of stuff like industry arrays uh with enumerations in a strongly typed
+44:29 manner where it actually checks the enumeration that you're trying to in this array with it's only pascal and ada
+44:35 right i don't know any other language maybe there are some other languages but i just don't know them
+44:41 um all right okay
+44:46 so let's continue so this is going to be node pool into which we're like loading everything and
+Calculating Node Pool
+44:52 we don't really know how many nodes we have there that's kind of the problem
+44:58 though though we can compute the size of the file right we can compute the size of the
+45:04 file and based on the size of the file uh compute the amount of nodes we can take the size of the file in bytes and
+45:11 divide it by the size of the nodes and this is how many nodes we have in there so this is one of the things we can do
+45:17 which is a rather good idea i think so let's go ahead and do that so file path
+45:23 uh all right all right all right
+45:30 so [Music]
+45:35 out f open all right so we open in the file so this is the file path we're opening it for
+45:41 reading in binary uh so i'm gonna copy paste some of the error handling in here so could not
+45:48 read from file that is because of that so and now the time has come to figure
+45:55 out the size of the file right so the usual way we do that we use f6 so the
+46:00 when you open the file it has a cursor so we set the cursor to the end of the file and we get its value and that's the
+46:06 size of the file in bytes right so we have to do f6 46:11 f6 we provide a file and we seek to the end
+46:18 right so we stick to the end and then we try to get the value of that cursor
+46:26 right so m is basically the size of that file right and then we actually have to go
+46:32 back otherwise we won't be able to read that file seek set
+46:38 okay interestingly enough um we need to assert
+46:43 we need to assert that m is divisible by the size of the notes
+46:49 right we need to assert that if it's not that means we have the file of the wrong
+46:55 size so after that we need to compute how many nodes are going to happen there so
+47:01 this is going to be a z and i literally just divide m by
+47:07 node there we go so this is s-z but here's the interesting thing node pool has a limited capacity so another
+47:14 thing we want to assert is uh this thing not being greater than the
+47:20 node pool capacity if it is greater well it is an error it is invalid file so we
+47:26 probably we don't really want to read that okay so after that we can try to read this entire thing so let's go ahead and
+47:32 do that so we're gonna use you know a similar function but f write if read
+47:39 uh it literally has the same interface in fact right so it literally has the same interface and here we can also
+47:47 assert that we did that and then we're going to close the file right
+47:52 so it's not it's not there all right so let me try to compile this entire thing and like make sure that it
+47:59 compiles cool so now uh what i want to do what i want to do
+48:05 i want to create another entry point and in that entry point uh we're going to try to read
+48:15 let me actually take this name and maybe save it to some sort of a constant like
+48:21 fruits bean path right so let's take a fruits bean
+48:26 and save it in here so we can refer to that fruits bean in the same manner right and if i change
+48:33 that name it will change everywhere where i refer to it okay so what i want to do i want to load
+48:40 the notepool from file i can't actually go yeah there we go
+48:50 i'm going to be reading everything into the global note pool and then fruits bean path
+48:58 bean path there we go we load loaded this entire thing up and then as i already said i'm going to
+49:04 simply assume that the root is uh the first node
+49:10 right so this is the nodes zero and this is the root so and then i'm
+49:16 gonna try to print this entire route and everyth if everything went according to the plan
+49:23 the program should suck fault so there we go
+49:31 and it didn't fall but it didn't print anything either and you know why because i never actually run it so that's why
+49:37 because i only compiled it uh all right so let's actually try to do that and
+49:43 yeah that's very cool something something actually failed so i have to
+49:49 check for that right it's a reversed condition right as you can see it sec folded
+49:55 that's exactly what i wanted to see it's a very very rare situation when i
+50:00 explicitly wanted the program to seg-fault i spent like 10 minutes
+50:06 writing this piece of code that is sec faulting and it does in fact segfaults i
+50:12 call it a success all right what do you think so this is
+50:17 pretty expected because again we're using absolute pointers right
+50:24 we use absolute points so now if we try to switch to relative pointers this
+50:30 problem should go away right this problem in fact should go away but
+50:36 we're going to do that after a small break after i make a cup of tea so
+Implementing Relative Pointers
+50:43 okay let's continue so as already promised right we're going to implement the jai style relative pointers right
+50:51 so how we're going to be doing that so i think the coolest thing about such pointers would be that we can
+50:58 take these two pointers and essentially fit them into 64-bit integer right so
+51:04 essentially it's going to be int 32 and in 32 right and uh both of
+51:11 the pointers right essentially fit into the 64 bit point right uh so i'm using signed integers in here
+51:19 this is very important uh jay does the same essentially it allows the pointer to point not only forward from the place
+51:26 where it is located but also backwards right so it addresses the range to the
+51:32 right and to the left or to the left or to the right for you because you're watching on um looking at me through the
+51:39 camera right so and essentially how we're gonna be doing all of that right so if i want to
+51:46 uh let's go ahead and simply
+51:52 get rid of this entry point that loads the file and leave only the thing that saves the
+51:58 file and let's try to compile since we change the definition of this entire thing it will fail in
+52:04 all of the places where it's trying to work with the pointers and we're going to fix those places and refactor
+52:09 everything right so and surprisingly this kind of worked well i mean
+52:15 yeah that's kind of surprising so and the reason why it works is because all those things are warning so
+52:22 ac allows a lot of implicit conversions so let's actually fix that but by making
+52:27 uh warnings errors right and now it should not compile all right
+52:33 so we're going to be doing here uh so i'm printing the trim
+52:38 i'm not sure if printing is something that one i want to do right now right
+52:44 because printing will require to convert a relative pointer to the absolute one
+52:50 to continue the recursion right so i think i'm going to do the following thing i'm going to comment out uh the
+52:57 the function right i'm going to count out the function uh the function that prints and i'm going to continue
+53:02 compilation because i want to focus on converting absolute pointers to the relative ones right so i want to focus
+53:09 on that operation first uh okay so this is the random tree and this is actually a very interesting one
+Random Tree
+53:17 so as you can see in here we get an absolute point right so this is the absolute pointer but when we try to
+53:23 assign it to left we can't do that because left is a relative point so what we need to do
+53:31 we need to take this thing right and then take a pointer to the location
+53:38 to the left and subtract it that way we get an offset
+53:44 right to the left or to the right depending on where we're located but we want all of this point or arithmetic to
+53:50 be in bytes so that's why we have to convert uh all of these things to point
+53:55 to a byte right in our case uh character is a byte though we can be a little bit
+54:00 more explicit and we can replace character to uint 8 underscore t right so as you can see here is one
+54:07 point the absolute pointer and here is the pointer to the location that stores
+54:13 a relative one right so after that we have uh a distance right in bytes which then we
+54:20 convert to you int 32 all right and this is how effectively
+54:25 we convert an absolute point to a relative one a relative to where the left is located
+54:32 does this operation make sense does this separation make sense we have to do the same thing for for the right one
+54:39 uh right so this one i'm going to convert this thing to a pointer to you eight and then um
+54:45 so we have to also make it a pointer and eight t and the score
+54:51 right and then i take a pointer to the uh to the right so i subtract those two
+54:56 things and then i do you int
+55:01 right so this is a little bit cu some as you can see right it's a bit cucumber some
+55:08 so i think it makes sense to wrap that in a macro this is one of the reasons why you probably want to have some sort
+55:13 of a language support for this kind of point is because you don't really want to do this kind of thing manually all the time
+55:19 right what i'm doing here i'm just casting an absolute point to a relative one and what if i make any mistake in
+55:25 here this is very error porn this is straight up error rule 34 55:34 right so that's what it is cheers by the way i'm gonna keep drinking my piss
+55:42 [Music] airborne
+55:50 [Music]
+55:55 okay so how we're gonna call this thing uh let's actually call it something like
+56:01 abs not bass but abs to rel but we're gonna say that it's
+56:06 specifically 32 right because you can actually have uh relative pointers of different size
+56:12 right so in here i have 32 bits but what if i had 16 of course i would address a smaller
+56:19 range but then the like you know the pointers themselves take up less less space and maybe i can have relative
+56:26 points of this size of eight these pointers can't really address that much right
+56:32 uh but still right they're gonna be pointers so in our case we're gonna use 32 and to indicate that we're working
+56:38 with the pointers of 32 bits i'm going to put 32 in here this is a very uh readable macro maybe i should not
+56:45 capitalize that because like it's yeah yeah so the the digits at least stand
+56:50 out right so you can kind of read it a little bit better i think abs to rel with like small letters is a little bit
+56:55 more readable right if we like to talk about readability okay so here i'm going to accept um
+57:05 it's rather interesting i'm going to accept the absolute
+57:10 pointer right so this is absolute pointer and then i'm gonna accept relative um
+57:18 location right because i'm not accepting really a pointer as a value i'm accepting the
+57:25 name of the variable that stores the relative point and that's a huge difference so it's actually called this something like
+57:32 a ptr and then r lock right so aptr is
+57:38 absolute pointer right um the value
+57:44 of an of a memory address right and then we have uh our lock
+57:52 relative location right maybe location with the relative pointer
+57:59 uh the name of the variable that stores the relative point
+58:06 the relative address right so this this is a huge difference because one thing is uh a straight up value another one is
+58:13 more like um l value if you know what i mean right it's more of a l value if we're going to use this terminology in
+58:19 um in c right so and in here what i want to do i want to convert the absolute point to the point of u uh u int
+58:27 so ap to r then i'm gonna subtract uh the pointer to r lock right so and
+58:34 that's the reason why i accept the name because i want to take a point of this entire thing
+58:39 um right
+58:45 [Music] and then i'm effectively assigning it
+58:51 back to you in so that means i have to uh maybe maybe it was fine i just don't
+58:58 know if that's the way i want to do that i think that's that's the way i want to do that why not all right so it made it a little bit
+59:05 more real maybe is to rail32 and then i'm going to accept
+59:11 this thing though interestingly enough i might as well also assign it right because the
+59:18 only purpose i take this thing is because i want to assign it so i want to do this the following thing r look and
+59:24 this thing becomes straight up a statement right and to actually say that i'm assigning
+59:31 the right hand side value to the left hand side i think it makes sense to actually swap their location and now what i'm effectively
+59:39 doing is write ideas to a row right so that makes sense
+59:44 that's actually pretty cool so that way i can just do right and look how readable it is it
+59:49 still looks like because the language doesn't really have a support
+59:54 uh but anyway [Music]
+1:00:01 so what's interesting is that usually in in the macros you want to wrap all of that stuff in parenthesis
+1:00:07 right because those things can be expressions so you want this thing to be parsed properly
+1:00:13 and there we go so we've got this stuff and let's continue compiling uh so expected expression
+1:00:23 but this is not particularly an expression maybe this is because i should not put parenthesis in here um
+1:00:30 expected expression from uh you int 8 and
+1:00:38 oh boy what do you want from me i'm really not
+1:00:43 sure what do you want from me expand it from macro use of an eye
+1:00:52 okay so it's basically an error within the error right so i should have
+1:00:58 included the std int in here thank you singapore
+1:01:03 very cool right so and we have an unused variable in here um
+1:01:08 which i i don't know i can say that it's unused right so it's totally fine for this variable to be unused and uh
+1:01:15 everything seems to be working so uh yep so now we have all that stuff uh saved
+1:01:22 to the file right and look at that the file actually became smaller so the previous file i don't
+1:01:29 know for sure i think what was around 1.5 right i'm pretty sure it was around 1.5 1:01:35 in fact we can make it even smaller we can reduce the size of the text right so
+1:01:41 we need to know what's the biggest size of the fruits right
+1:01:46 so i think we can quite easily do that so we can do something like into maine
+1:01:53 so biggest fruit
+1:02:01 okay so we're going to iterate through all the fruits zero fruits count plus plus i
+1:02:10 um and if so maybe i should probably save
+1:02:17 something like this n str land fruits pie if
+1:02:23 and is greater than the biggest fruit we found the biggest fruit
+1:02:30 and then we can print this thing biggest fruit has
+1:02:35 length equal to zero right and we're gonna just try the print
+1:02:42 the biggest fruit and what we're gonna do we're gonna try to find the closest point uh power of
+1:02:47 two okay so uh 17 and the close power of two is 32 which we already have
+1:02:53 right so that's kind of funny but i mean it is what it is
+1:02:59 so interestingly enough we can put 24 in here and this is
+1:03:04 actually kind of cool so 24 and then additional eight bytes from two points
+1:03:10 is in here right so and we have exactly 32 bytes so with this kind of point is we can
+1:03:16 actually control exactly the size of the structure um which is kind of cool i think what
+1:03:22 you guys think i think it's actually pretty cool uh let me let me see so let's try
+1:03:28 to generate the fruits with the new size
+1:03:34 uh huh so yeah it became less than one kilobyte now
+1:03:39 right so it's kind of interesting so we're talking about like a couple of bites right a couple of bytes but we
+1:03:44 have a lot of nodes and all of this like like small amount of bytes they actually add up when you
+1:03:50 have a lot of nodes and that's why we can like actually change this size and furthermore the
+1:03:56 amount of nodes grows exponentially based on the uh on the level right on
+1:04:02 how deep the trick goes so one additional bytes one additional byte per node on an
+1:04:09 exponential level of things adds up really really quickly that's why
+1:04:14 even with the modern computers we may want to care about this kind of thing sometimes not always but i mean if you
+1:04:20 have a data structure that just grows exponentially right so that means your additional bytes will stack up
+1:04:27 exponentially as well so yeah i mean if you're writing just like a
+1:04:35 website in react that doesn't really do much you probably don't even care about this kind of stuff but we're exploring
+1:04:41 serious software development in here okay is it a common technique to use relative
+1:04:48 point as far as knowing game development it is especially in not really game development but game
+1:04:53 engine development right because uh these days game development is just like
+1:04:59 throwing a bunch of assets and unity and call today right so i'm not talking about that game development i'm talking
+1:05:05 about the old style game development where people actually develop their own engines i mean people still develop
+1:05:11 their own engines right different companies and stuff
+1:05:20 so um i was just writing some react so it
+1:05:26 hurts i do understand you because i uh write uh well i mean i haven't probably react
+1:05:33 for quite some time but i have to do web development from time to time and if in fact hurts
+1:05:38 i do understand you so i do understand you so it is what it is
+1:05:44 and it isn't what it isn't a web is kind of painful i don't really
+1:05:50 know wow people hating on web dev well i would be surprised if people not hating
+1:05:56 on web dev because that's a good sign that they have a stockholm syndrome
+1:06:02 right if you're not hating on the web and you're a web developer well you probably have a problem
+1:06:09 straight up a stockholm syndrome you may want to work on that so uh anyway so let's continue
+1:06:18 what do we want to do now we want to be able to actually um
+1:06:26 [Music] how is it called dereference that thing right so we know
+1:06:31 how to convert absolute pointers to relatives to store them and now we have to do the opposite thing we have to take
+1:06:39 relative pointers and convert them to absolute ones right so that's what we have to do
+1:06:44 so i'm going to uncomment the print stream um as i already said i didn't want to do
+1:06:49 that because i didn't want to focus on that i wanted to focus first on absolute reality and let's go through the compilation
+1:06:55 errors right this one is rather interesting so uh let me move this entire think
+1:07:02 somewhere here uh and what i want to do in here right so we actually accept an absolute
+1:07:09 pointer right and as we print as we recurse down we want to be constantly converting
+1:07:15 relative points left to the absolute ones right so that's what we want to be doing
+1:07:21 so let's implement rail2abs32 right so
+1:07:27 abs 32 uh and let's define this thing so as far as i know here we don't really need
+1:07:33 anything else because we're using the location the relative location as the starting point for for all of the
+1:07:40 arithmetics right so the rail to abs 32 relative location
+1:07:47 and as i already mentioned uh what we have to do we have to take the pointer to that specific location and convert it
+1:07:53 to uiint8 so all of the uh all of the point arithmetic is you know in bytes uh
+1:07:59 rather than the items and i'm gonna be adding the value of that thing itself
+1:08:06 right i'm adding the value of that thing itself and interestingly enough i need to
+1:08:11 convert it into the pointer of a specific type in that case the type of the node but from this macro i don't
+1:08:18 really know that type so maybe another parameter that i have to accept is the
+1:08:24 uh you know is the type the point of which i'm trying to compute
+1:08:30 right something like this and because of that here i'll have to put a node
+1:08:36 okay so yeah we essentially implement everything so i'm not sure if i have to do like our
+1:08:43 login here because it's only for expressions but i'm actually taking l values so l value
+1:08:50 as an expression do i really care i don't know maybe
+1:08:56 we'll see if that will create an error like a problem i'll fix that accordingly so for now it doesn't really create any
+1:09:02 problems so whatever and as you can see it sack faulted
+1:09:07 interestingly enough it suck fault it and i wonder why
+1:09:14 i wonder why it suck faulted so it's segfelt it's specifically on trying to print right so
+1:09:21 if i don't try to print anything in here as you can see it works but if i do try
+1:09:26 to print it doesn't work uh
+1:09:34 if not left you think it's because of because of that
+1:09:40 right so but that's really strange right so essentially if it's zero if it's point
+1:09:47 pointing to its to itself right if it is pointing to itself
+1:09:53 it is gonna be zero and that means it's not going to continue
+1:09:59 right oh this one is interesting wait a second
+1:10:05 right so if we get a zero we actually have a legit pointer right
+1:10:11 but then it should stop at some point in here
+1:10:18 okay if the next one hmm
+1:10:25 so i want to understand precisely
+1:10:32 so maybe maybe that's what we have to do like if uh node
+1:10:39 equal nu right so let's actually confirm that it is like that so we have to return it
+1:10:44 like that so and then we can just do it like this
+1:10:50 and it works correctly so it has something to do with uh with zero right and representing new
+1:10:56 point in with the relative pointers is actually rather interesting all right
+1:11:02 uh because uh zero with the relative pointers is a
+1:11:08 valid pointer it is not new right so and
+1:11:13 as far as you know like people solve this kind of problem differently some people just say okay
+1:11:19 uh you can't point to yourself if you're using relative pointers and that way
+1:11:25 zero becomes the uh like a natural null right and the reason why you want to use
+1:11:30 zero as the new even for relative point is is because of this zero initialization approach that i use and
+1:11:37 many other c developers use as well where quite often you want to just take a structure
+1:11:43 mem set it to 0 and it has to be a valid structure with the reasonable default values and a reasonable default value as
+1:11:50 0 for a pointer is a new point or a non-existing point that's why even for relative pointers you want to use 0 as
+1:11:57 the null right because it just makes sense it solves a lot of problems
+1:12:02 right so and so essentially as already said what
+1:12:08 people do they say okay you use zero as the null
+1:12:13 and because of that you can't point to yourself but it's kind of a limited solution right because sometimes you
+1:12:19 want to point to yourself for instance what if i have a like a recycled linked list right
+1:12:26 and it has a one element so it points to yourself to itself how do i encode that with
+1:12:32 relative pointers how do i do that right and you know what's funny jay
+1:12:38 actually solves that problem right so it uses a special encoding a special
+1:12:44 encoding that allows you to use zero for relative pointers as the null
+1:12:50 right but it still has a null okay so here's how this entire idea
+1:12:56 works it's actually really cool i really like how gi approaches that but as far as i know that is
+1:13:02 not sort of like the final solution for relative pointers and jay uh john said himself that he picked just uh like
+1:13:10 whatever he had at the top of the his head or maybe i don't know he just picked one in coding uh right and called
+1:13:17 the day right so but in he doesn't claim that this is the best encoding for relative points it's just the encoding
+1:13:22 that he picked uh right so there could be maybe better encoding that actually makes it easier
+1:13:27 more reliable more uh you know fast and stuff like that so the id is
+1:13:33 the following imagine that we have a relative pointer of the size 8. so what's the range of the values for
+1:13:41 int 8 what's the range of the values
+1:13:46 uh it's from -128 to 127 in in fact
+1:13:54 this is uh the case for all of the side integers all of this uh signed integers
+1:14:00 have this extra element on the left side this extra element on the left side
+1:14:06 which is kind of weird so the idea that jai has is okay let's actually pick
+1:14:12 this element as the null right this is going to be our null so
+1:14:17 the the range now becomes uh that available to us is from minus 127 to
+1:14:22 127. we just lose one number and the range itself becomes actually even right
+1:14:28 so it's from minus 127 to uh plus 127 and it's the same for 16 bits 32 64 1:14:37 whatever you call it right but here is an interesting thing so we say this is a null so that means we need to come up
+1:14:44 with special encoding uh for relative points so that when you
+1:14:50 encode minus 128 it is equal to zero
+1:14:56 right so what kind of encoding we can come up with
+1:15:03 and here's an interesting thing uh 128 minus 128 1:15:08 in binary is equal to um
+1:15:14 one zero zero zero zero zero zero zero so minus 128 1:15:21 is just one highest bit so that's what it is and essentially the idea is the
+1:15:27 following when you wanna encode a relative pointer to save some
+1:15:33 somewhere relative ptr what you do well what's actually called x you just saw it
+1:15:40 with this thing and every time you want to do any
+1:15:45 arithmetics and you want to decode that you do it again so encoding and decoding is just like
+1:15:52 every time you soar with this specific value and that actually creates the situation
+1:15:59 when the encoded null is equal to zero so when you
+1:16:05 take a structure with relative pointers and mem set it to zero they all equal zero and zero is an encoded null
+1:16:13 zero in unquoted form is 100 minus 128. so that works out
+1:16:19 so that's basically how it works and it works because xor has a very interesting value uh x sore y
+1:16:27 sore y is equal to x so essentially by like uh sorry in this
+1:16:33 value you simultaneously encode and decode
+1:16:39 don't all negative numbers become positive yes that's true that's why before trying to add
+1:16:45 your relative pointer right you have a relative pointer that's why before trying to add this
+1:16:51 thing to absolute pointer you have to decode it we saw it with this thing only for
+1:16:59 storage purposes and as soon as we need to do any arithmetic we decode it and
+1:17:04 bring it back so the reason why we have to do that is that why we have to decode it and store
+1:17:09 it in encoded form is because we need to compare it to new to zero
+1:17:14 you see what i mean so that does not affect arithmetics
+1:17:20 right so essentially we just map one range of values to another range of well is where
+1:17:26 zero is the null so that's how it's done and we sacrificed like one levy one value at
+1:17:32 the left of the range so that's how it works
+1:17:38 and that's how as far as no jai does that so essentially what we have to do now
+1:17:44 and what we have to do uh when we do abs uh
+1:17:50 abs to rail or rail to abs like in here right so here is the um
+1:17:56 yeah we take a pointer and stuff like that so what we have to do now we have to soar
+1:18:03 uh so i'm gonna use hex right so in hex when the highest bit is set is basically
+1:18:08 eight zero zero zero zero zero zero zero right so this is the hex is in in binary
+1:18:14 it's equal to one zero zero zero zero zero zero right so here i've got the value of the
+1:18:20 relative pointer and i encoded it i encoded it
+1:18:25 then here when i need to relative to abs before adding it i'm decoding it back
+1:18:32 and there you go so now when you try to
+1:18:38 do a relative to abs and your relative
+1:18:44 right your relative is equal to zero uh right so you do something like node and x right so
+1:18:51 x is equal to zero you try to do this thing and as you can see here the first thing that will happen is we're gonna
+1:18:57 store x with this value which will turn this entire thing into one zero zero zero
+1:19:04 zero you will try to add that thing and you will try to access the wrench after it so basically you're trying to
+1:19:09 dereference new pointer right so that's basically what's going on and that way
+1:19:16 that way uh we can bring back the check
+1:19:23 in here if node is left if not is left
+1:19:29 if node is right and that should work
+1:19:35 because now if the relative point is equal to no its encoded value is going to be null anyway
+1:19:41 right so let's actually give it a try and see if it's going to work um so something something went wrong
+1:19:48 here i wonder what exactly
+1:19:53 expand it for mac and when it opens to binary operation
+1:19:59 it's probably really so it doesn't like this thing but our
+1:20:05 lock um operands to binary expression
+1:20:14 is that because i have to do something like this yeah and it failed anyway
+1:20:20 uh so how many characters do i have in here so i have add characters so this is gonna be
+1:20:26 one two three four uh and in here
+1:20:38 all right my internet went down uh so i'm now recording completely offline
+1:20:43 uh so because i really want to finish the the entire thing uh okay so
+1:20:50 uh we need to understand what exactly went wrong and why it doesn't doesn't work right
+1:20:56 so because according to my calculations it should work right so essentially we compute the difference
+1:21:02 between these two things right and then we zoro it right so we set the
+1:21:09 highest bit 2 to 1 but i'm not sure if i'm doing this
+1:21:14 thing correctly so it's eight characters one two three four four bites in here we
+1:21:20 saw everything so i really don't know what exactly is wrong in here
+1:21:26 uh i really don't uh so interestingly though interesting though
+1:21:34 if i don't print uh right let's try to not print anything in here
+1:21:40 uh let's try to not print and i'm gonna even like comment everything out and uh everything seems to be okay and
+1:21:47 if we take a look at the binary um let's take a look at the binary it's actually rather interesting so
+1:21:54 here we have a grape all right and then we
+1:21:59 have actually pointers in here so coconut starts at here so the four pointers are
+1:22:06 in here and here is another point so here we have like one uh
+1:22:11 byte set to zero uh interestingly enough so it's um
+1:22:17 it's a little engine right so that's why this thing is set like that
+1:22:23 your ppf so i don't really know what's the problem right so i don't see
+1:22:28 it's probably something extremely stupid i'm pretty sure i'm really confident that this is something
+1:22:35 stupid very very very stupid okay so i take a pointer to
+1:22:42 the location of this thing then
+1:22:48 i zore the value stored in that location and then i edit in here
+1:22:55 um i'm not sure am i doing the the right thing so maybe i'm computing the offset
+1:23:02 and correctly so that could be the case or maybe i made a typo in here
+1:23:07 one two three four wait this is ten characters and this is
+1:23:14 ten characters as well okay so that's that's fine i don't know why uh for some reason i thought it's 11 1:23:19 characters [Music]
+1:23:26 so it's something with print so that means it's something in here
+1:23:36 damn i don't see any problem like what sort
+1:23:43 of the problem in here but if i
+1:23:50 okay so what if i bring this thing i have a feeling that i do not understand how like what exactly is
+1:23:57 going on all right so what is the problem
+1:24:04 oh and let me also bring this entire thing yeah it's it's still suck faults
+1:24:11 still cells
+1:24:16 and it actually shouldn't
+1:24:25 if i try to print
+1:24:31 if i try to print z
+1:24:38 where i take 0 zore
+1:24:44 that's kind of dumb but let me actually do something like this x zor zero x
+1:24:58 something which is yeah it is in fact correct
+1:25:03 all right and then if i try to do this thing it becomes zero
+1:25:08 so everything works exactly as i would expect right so everything's fine in here
+1:25:16 so we take a pointer to the location convert this entire thing to you in so
+1:25:22 we can do all of the computations in um in bytes
+1:25:28 all right then i take the value inside of that location i sort of decode it so if it
+1:25:34 was like mine something it would work and
+1:25:39 right and i really don't see like what the hell
+1:25:45 um so maybe maybe i should like a gdb step debug the center i think yeah so let's
+1:25:52 give it a try let's try to gdb step debug um so aka
+1:26:01 what expanded for macro inverted operands
+1:26:08 man so is that because i need to do like that
+1:26:16 i'm going insane already
+1:26:24 hey what why don't you why don't you like it
+1:26:30 anymore so it kind of it kind of worked before now unassigned
+1:26:41 left okay
+1:26:47 invalid
+1:26:59 operands to binary expression but our lock is not it's not that isn't
+1:27:05 it our lock is you int so it should
+1:27:11 should work i'm i'm going insane
+1:27:18 okay uh that's probably why you have to have a built-in support for this entire thing
+1:27:24 in the language right so you don't go insane like that uh all right so let's actually try to gdp this into a thing
+1:27:30 because it's just like really impossible to understand probably something with conversions and stuff like that and all
+1:27:36 of those bugs are extremely annoying um right because you never really know like
+1:27:42 what exactly is going on there uh okay break at print tree
+1:27:48 right and then just to run this entire thing uh let's enable tui and let's take a
+1:27:53 look at the node right so in the node we have this thing uh and let me see
+1:28:02 will we ever have so let's actually try to generate a thing with a single layer this instantly
+1:28:09 gave me an idea all right so we're going to have a single layer in here so that already gives me ideas that's cool
+1:28:15 all right and it yeah so because then we can quite easily go
+1:28:21 inside print three run
+1:28:27 to e enable and i can print the node right
+1:28:32 and that is very strange thing right why do we have this stuff
+1:28:38 on the left and the right right where did that stuff come from
+1:28:46 where did it come from because all this both of these things have to be zero
+1:28:52 so let me let me see [Music]
+1:29:02 uh so when we generate a random tree when we generate a random tree
+1:29:10 so i feel like
+1:29:16 so this is probably why it is happening but when i allocate a new think
+1:29:24 do i not mem set to zero everything i was quite confident that i'm set to
+1:29:31 zero everything and that's precisely what's going on in here i have a strange feeling that something
+1:29:38 went wrong during the year like generating a random tree right
+1:29:44 so we're generating a random trim correctly so let's actually try to break there so uh a random tree break random tree
+1:29:54 and let's just try to run that and let me see uh alright
+1:30:00 so cool i generated a root and if i try to print that everything
+1:30:07 is fine which is kind of not because i set
+1:30:12 generated with this with the text and where is the text i don't see that
+1:30:18 so maybe we can display oh here it is i just didn't see it properly i'm sorry uh
+1:30:24 right so and at the left i have zero so i have to go deeper
+1:30:30 uh right i have to go deeper i think i know what is going on in here
+1:30:41 right because we take an absolute no absolute no
+1:30:50 yeah i see what's going on uh we need a special yeah i didn't think
+1:30:55 about that we need a special function that converts an absolute null
+1:31:00 to relative okay this took me 10 minutes to realize
+1:31:06 unfortunately yeah that's another thing we actually need we need a special utility that converts
+1:31:15 absolute null to relative null because you can't use the same procedure to convert absolute null to relative one
+1:31:22 okay i'm really glad that i tried to debug it uh so let's let's quickly try to fix that so right now the easiest way to fix
+1:31:29 that is probably something like this if level is greater
+1:31:36 than one then go down and if the level greater than one then go down it's kind of
+1:31:42 similar right it's kind of similar to what we were doing in here right
+1:31:47 uh yeah yeah that that work that works if this
+1:31:54 thing is that if this thing is that uh all right and
+1:32:01 yeah i think that should fix it because effectively we're not gonna go down
+1:32:07 recursively we're not gonna recurse in any of the sub trace so that means it's going to stay zero right and everything
+1:32:15 should work accordingly let me try to compile so everything works nothing's like false let's put
+1:32:21 five in here right and there you go as you can see we have everything working with relative points so that's pretty
+1:32:29 cool these are relative pointers
+1:32:36 and the coolest thing here is that now uh i can load up this file back into
+1:32:42 memory and all of the pointers are going to work so everything should should work
+1:32:47 correctly because they are not absolute values uh okay so let's actually try to do that
+1:32:55 so i'm going to do this int main [Music]
+1:33:02 return 0 and we need to load node pool from file
+1:33:10 all right we're loading it from file so this one is a global
+1:33:16 node pool and we're going to be providing the fruit bin path cool so as i already
+1:33:23 mentioned we're going to assume the first element to be the root and let's try to print
+1:33:29 the um the root so this is going to be global node pool
+1:33:34 nodes zero and we're gonna take the absolute point in here and we're gonna start from
+1:33:40 zero in here there we go so let's try to run this entire thing and as you can see we're actually
+1:33:47 reading it and it's the same file right it is the same file so as you can see it starts with key kiwana i don't
+1:33:53 know what is this boy passion fruit and it it keeps being the
+1:34:01 same right so because we're reading that uh data from the file uh with the
+1:34:06 relative pointers and stuff right so my internet is still down surprisingly uh yeah i think it's gonna stay down so
+1:34:14 it's probably for for a long time right so yeah so we we use relative pointers we
+1:34:21 use an encoding that uh allows us to use uh new relative pointers that actually
+1:34:27 zero so we can use the use the usual uh null logic and as i already mentioned
+1:34:33 um as far as i know gi works precisely like that jai uses the same uh encoding
+1:34:41 and one of the things i want to use uh to try to try to do in um in today's
+1:34:46 stream right it's a fly stream already but anyway is to preserve this binary file
+1:34:54 and write a similar gi program that loads up the same uh the
+1:34:59 same file and iterates through the tree and see if it will work
+1:35:04 right i want you to confirm that we match the giant semantic uh when it comes to working with the relative
+1:35:10 pointers so let's actually try to do that so i'm going to create my engine all right i'm going to create my nj and
+1:35:17 um so i'm going to import basics for the for the text facilities
+1:35:24 and let's create an entry point right in the entry point i'm gonna do
+1:35:29 uh hello sailor just to confirm that everything is uh working all right and i'm gonna do
+1:35:37 gi linux main giant and i'm gonna run the program simultaneously
+1:35:43 it's gonna take some time because because it you know caches the uh the disk and stuff like that and
+1:35:49 there you go all right so we need to define a similar structure
+1:35:54 that we have in here right so let's define a node right that
+1:36:00 let's define the text which is going to be array of uh u8 as far as i know gi doesn't have a
+1:36:08 characters it just has u8 and let's define the left and
+1:36:13 right sub trees right so the pointers uh in jai are defined like this
+1:36:20 but the relative points are defined with the additional tilde and after the tilde you also specify
+1:36:28 what's going to be the underlying type for the relative point so as you can see in here we use sine 32-bit integer and
+1:36:35 you can do the same uh in gi as well so you say it's a relative point but it's assigned 32 bits
+1:36:42 right so let's actually try to compile and see if it compiles uh right it has to be struck in here
+1:36:48 right it has to be struck uh attempt to subscribe non-array as far
+1:36:54 as i know the size of the array is put in here right so it goes first as you can see it compiles right so this syntax
+1:37:01 is correct and this is relative pointer right okay so now
+1:37:07 what we can do let's actually define a pool right so um node pool
+1:37:13 and it's going to be array of 1024 nodes one of the things we would like to
+1:37:19 probably check is the size maybe of this structure first just to
+1:37:25 confirm that you know uh it is what it is uh size of node
+1:37:30 uh it's right now it's a size of node so let me see
+1:37:36 it's 32 it is exactly 32 just like in a c version right because 24 bytes for the
+1:37:43 text and uh four bytes for left subtree and right and four bytes for right subtree okay
+1:37:50 so let's define the pool right so this is going to be node pool which is uh 1024.
+1:37:58 honestly i don't think we need to have a pull because uh jay has a very cool function
+1:38:06 right so how to uh not really how to but module file
+1:38:12 uh let me see so read the entire file right it just
+1:38:18 like reads the entire file we can go ahead and read the entire file who said we can't do that right
+1:38:25 fruits bean path and fruits bean path is
+1:38:32 essentially fruits bean
+1:38:39 that should give us this string um
+1:38:45 content okay right if not okay just return
+1:38:51 um we can say something maybe before returning
+1:38:56 we can exit with one to indicate an error and we can also say something like print
+1:39:02 uh could not make error could not read file this
+1:39:07 which is fruits [Music] okay so in here now we can try to construct
+1:39:14 like a slice of nodes right so we have a nodes pool
+1:39:19 which is essentially a slice of nodes right and for the nodes pool
+1:39:25 for the data we're going to set the contents data this is the constant contents data but
+1:39:31 we're going to cast this entire thing to the pointer to the node right so that's
+1:39:37 what we do here so then the count is going to be the
+1:39:43 content count but divided by the size of node
+1:39:48 and that way we get uh you know all the necessary nodes
+1:39:53 okay so uh let me see how many notes we uh have read so red
+1:40:01 maybe we can just go ahead and just print each individual note can we can we actually do that that's a
+1:40:07 very good question so i'm gonna iterate through all of the notes
+1:40:13 right maybe maybe by a point because why not and i'm gonna literally just print their
+1:40:18 text it's not gonna look like a string right it's going to be array of bytes but
+1:40:24 hopefully we'll see something interesting within this arrays of bytes all right so let's move the text
+1:40:30 and uh let's just go ahead and run this into everything so something failed and the identifier content uh should have
+1:40:37 done something like this and uh read entire file and declare the identifier because i need to import file
+1:40:44 all right and it looks like it's true right
+1:40:50 so yeah here are all of the things and how many of those things we have in here should be power of two uh 31 1:40:57 surprisingly uh 31 31 31 i don't know why
+1:41:03 is what it is i would expect actually power too but maybe i'm missing something anyway this looks like a
+1:41:08 correct data right so we have some stuff in here so that's fine um i wonder if there is there any
+1:41:15 facilities in gi that lets you take c string and convert it to
+1:41:21 um [Music] you know to gi string because as far as there is
+1:41:27 a team pc string all right so if we take a look at the j
+1:41:34 modules there is a function tmpc string
+1:41:40 which does the opposite thing which converts the gi string into c string but we want to do an opposite thing so maybe
+1:41:46 in the same place where temp c string is defined we have a similar thing that does the opposite job so let's actually
+1:41:52 go there um so copying temporary string copy string
+1:41:58 um c string
+1:42:06 ooh okay so there is a two string for instance
+1:42:11 right which allows you to take the pointer to the byte you can also take the buffer but this entire thing kind of
+1:42:17 two c strings allocates memory c style ester len
+1:42:24 this could be useful all right because we can do c style ester lim on that thing and then we can
+1:42:30 um you know turn it into a string so that's that's what we can do
+1:42:36 yeah i think that's precisely what we can do all right so let's actually implement a function that you know
+1:42:41 prints the tree right so print tree so here we accept the root which is the
+1:42:47 absolute pointer we can only pass the absolute pointers the relative points smgi work exactly like you they work in
+1:42:54 c if you implement them yourself it's just like uh gi automates uh this entire
+1:42:59 border plate with uh with macros and stuff like that so basically one of the important things jay does is
+1:43:05 just like automates this and hides this stuff from you though you kind of has to have to be aware of how it encodes
+1:43:12 because you may want to rely on that logic but it's not necessarily a good idea but you know you have to be aware
+1:43:19 right you have to be aware of that logic right okay we're going to have a level and i program in gi and enjoy i do have
+1:43:27 uh the default values so i can do this kind of thing which is cool right finally a good language finally
+1:43:33 all right so might as well actually open this side by side and start translating
+1:43:38 this entire logic right okay so uh for
+1:43:45 zero to level minus one i'm going to do print
+1:43:52 like so then what i need to do i need to construct uh a text right so the text is
+1:43:58 essentially two string right where i take you know i can do the
+1:44:04 following thing using um
+1:44:11 text [Music] text
+1:44:17 c style strllen and c style strllen what does it do
+1:44:26 simple string c style strln accepts a pointer to data so we have to do data
+1:44:32 right and then we do two string so we do it like that
+1:44:38 um i wish there was like um maybe a better way of doing that it's it's a bit cute cumbersome
+1:44:44 uh tmp yeah so you have to do c style thing which is
+1:44:50 kind of but it is what it is all right so then we print this stuff
+1:44:56 and now we have to recurse in different mineral places so we have to do if left
+1:45:02 then print three left level plus one
+1:45:08 if right this is right level plus one
+1:45:15 there we go um so i probably also have to import simple string but i want to compile to
+1:45:20 tell me that this is not what i want right now i want to grab anything thank you very much
+1:45:26 uh okay so cool now
+1:45:31 what i want to do i want to print so i'm going to print three
+1:45:36 notes pool and i'm taking the zeros one and taking the pointer and
+1:45:41 let's see if it's gonna do the the trick and it does it works
+1:45:47 right so the file with the relative pointers that we generated in c
+1:45:55 just works in j so we managed to replicate the encoding of giant
+1:46:00 right unfortunately you couldn't see that live all right so you couldn't see that live but i managed to you know
+1:46:08 how to say that um record record that moment offline that's what
+1:46:15 they wanted to say this is actually kind of cool right so yeah and as you can see you literally
+1:46:21 didn't even have to do anything in here so what's funny is that here i pass a relative point as an absolute one and it
+1:46:28 automatically converts it to absolute one because left is a yeah
+1:46:33 and one of the advantages by the way the built-in language support provides is
+1:46:38 that uh it's type save what if i change this thing to
+1:46:43 int it's not going to compile it makes sure that all of the types matched so this is
+1:46:50 something that we can't have in c of course you can implement the same encoding in c but you don't get the same
+1:46:57 type checking as if you had the built-in support for this kind of thing um
+1:47:02 so yeah that's basically relative points of of gi and you can control the size of them
+1:47:09 right so you can provide like maybe uh 16 and the code you don't even have to change anything in here right so the
+1:47:15 compiler is going to do everything automatically for you or maybe so and this is another cool thing
+1:47:21 at any point you can say okay i'm going to use absolute ones and the code here this specific code is still going to
+1:47:28 work because syntactically it's not distinguishable from the one that works
+1:47:33 with the relative ones so it's it's very ergonomic it's really easy to refactor from
+1:47:39 absolute pointers to relative ones and back so yeah that's actually pretty cool um
+1:47:46 so this kind of stuff can be probably implemented with the same level of convenience in c plus plus if you use
+1:47:53 templates and operator overloading right so for instance here what you can do you
+1:47:58 can probably define a structure a rel ptr where uh you would maybe accept as a
+1:48:06 parameter uh the store the storage rather and the
+1:48:11 type that you're referring to so as you can see the the type that we point into is also part of the point of the
+1:48:18 relative pointer type so it gives the same benefits of type checking right so the store in here is a storage
+1:48:24 right so and then you can implement all sorts of operators in here all right operate uh
+1:48:31 operator like this where you would do all of this decoding
+1:48:38 encoding and the cool thing with c plus plus approach is that you have a customizable
+1:48:46 um customizable decoding algorithm right so the problem with
+1:48:52 jay here is that you can only stick to one specific way of decoding things like
+1:48:58 decoding relative points it's it's the way of like setting the the high bits with zord and if you use a different
+1:49:05 encoding well you have to go back uh to implementing everything manually as far as they know right maybe there there is
+1:49:11 a way to customize you know decoding and encoding of the relative points but i'm not aware of one if if there is
+1:49:18 it's actually quite good i'm really happy but in simplest paths you can achieve that very naturally by
+1:49:25 you know just implementing a class like a template class and stuff like that but at the same time
+1:49:30 the advantage of gi is that since it's a built-in things thing it's a
+1:49:36 standardized thing so all the libraries if they want to use relative points as they use the same
+1:49:42 relative pointer mechanism right so and in c plus plus if you want to use
+1:49:47 relative points it's like different libraries are probably going to be using different implementations of relative pointers and
+1:49:54 yeah so it is what it is so the the way by the way these kind of problems this kind of
+1:50:01 standards is standardization between different parts of the application is solved is through the context right
+1:50:09 maybe in jai you can come up with a mechanism that adds the decoding
+1:50:14 encoding algorithm of relative pointers into the context so if the library is using relative
+1:50:20 pointers but you want to supply your own algorithm of decoding encoding them you
+1:50:26 can do that through the context but maybe it is already implemented like that but it's just like my random thoughts
+1:50:32 uh all right so that's basically everything what i want you to do today all right so i just want you to
+1:50:38 explore relative points also jay in like um in a very detailed way
+1:50:45 right and the the best way to do that is to actually implement them from scratch in a language that doesn't support them
+1:50:51 which is c and yeah so that's that's what we did in here so
+1:50:57 that's how they work internally and we proved that it is
+1:51:02 in fact true by implementing the corresponding program programming j all right so i'm going to concatenate two
+1:51:07 streams i'm going to concatenate the live part and off line part and upload it to youtube as a
+1:51:12 single thing and that's it for today thanks everyone who's watching right now i really
+1:51:18 appreciate it have a good one and see you uh on the next recreation programming session
+1:51:24 love you all
+
+
+---
+

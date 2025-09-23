@@ -1,0 +1,358 @@
+filename: jv_concurrency-volatile-keyword_20231103.txt
+https://stackabuse.com/concurrency-in-java-the-volatile-keyword/
+
+Concurrency in Java: The volatile Keyword
+
+Introduction
+   Multi-threading is a common cause of headaches for programmers. Since humans are naturally not used
+   to this kind of "parallel" thinking, designing a multithreaded program becomes much less
+   straight-forward than writing software with a single thread of execution.
+
+   In this article, we will take a look at some common multithreading problems which we can overcome
+   using the volatile keyword.
+
+   We'll also take a look at some more complex problems where volatile is not enough to fix the
+   situation, which means that upgrades to other safety mechanisms are necessary.
+
+Variable Visibility
+   There is a common problem with visibility of variables in multithreaded environments. Let's assume
+   that we have a shared variable (or object) that is being accessed by two different threads (each
+   thread on its own processor).
+
+   If one thread updates the variable/object, we cannot know for sure when exactly this change will be
+   visible to the other thread. The reason why this happens is because of CPU caching.
+
+   Each thread that uses the variable makes a local copy (i.e. cache) of its value on the CPU itself.
+   This allows for reading and writing operations to be more efficient since the updated value doesn't
+   need to "travel" all the way to the main memory, but can instead be temporarily stored in a local
+   cache:
+
+   +---------------------------+      +---------+
+   |   CPU 1                   |      |         |
+   | [          ]-->[       ]--|----->|         |
+   | [ Thread 1 ]   [ CPU 1 ]  |      |         |
+   | [          ]<--[ cache ]<-|------|         |
+   |                           |      |         |
+   +---------------------------+      |  Main   |
+                                      |  Memory |
+   +---------------------------+      |         |
+   |   CPU 2                   |      |         |
+   |                           |      |         |
+   | [          ]-->[       ]--|----->|         |
+   | [ Thread 2 ]   [ CPU 2 ]  |      |         |
+   | [          ]<--[ cache ]<-|------|         |
+   |                           |      |         |
+   +---------------------------+      +---------+
+   CPU caching in Java
+
+   If Thread 1 updates the variable, it updates it in the cache and Thread 2 still has the outdated copy
+   in its cache. Thread 2's operation might depend on the result of Thread 1, so working on the outdated
+   value will produce a completely different result.
+
+   Finally, when they'd like to commit the changes to the main memory, the values are completely
+   different, and one overrides the other.
+
+   In a multi-threaded environment, this can be a costly problem because it can lead to some serious
+   inconsistent behavior. You wouldn't be able to rely on the results and your system would have to have
+   expensive checks to try and get the updated value - possibly without a guarantee.
+
+   In short, your application would break.
+
+The volatile Keyword
+   The volatile keyword marks a variable as, well, volatile. By doing so, the JVM guarantees that each
+   write operation's result isn't written in the local memory but rather in the main memory.
+
+   This means that any thread in the environment can access the shared variable with the newest,
+   up-to-date value without any worry.
+
+   A similar, but not identical behavior, can be achieved with the synchronized keyword.
+
+Examples
+   Let's take a look at some examples of the volatile keyword in use.
+
+Simple Shared Variable
+   In the code example below, we can see a class representing a charging station for rocket fuel which
+   can be shared by several spaceships. Rocket fuel represents a shared resource/variable (something
+   that can be changed from the "outside") while spaceships represent threads (things that change the
+   variable).
+
+   Let's now go ahead and define a RocketFuelStation. Each Spaceship will have a RocketFuelStation as a
+   field, since they're assigned to it and, as expected, the fuelAmount is static. If a spaceship takes
+   some fuel from the station, it should be reflected in the instance belonging to another object as
+   well:
+
+public class RocketFuelStation {
+	// The amount of rocket fuel, in liters
+	private static int fuelAmount;
+
+	public void refillShip(Spaceship ship, int amount) {
+		if (amount <= fuelAmount) {
+			ship.refill(amount);
+			this.fuelAmount -= amount;
+		} else {
+			System.out.println("Not enough fuel in the tank!");
+		}
+	}
+	// Constructor, Getters and Setters
+}
+
+   If the amount we wish to pour in a ship is higher than the fuelAmount left in the tank, we notify the
+   user that it's not quite possible to refill that much. If not, we happily refill the ship and reduce
+   the amount left in the tank.
+
+   Now, since each Spaceship will run on a different Thread, we'll have to extend the class:
+
+public class Spaceship extends Thread {
+
+	private int fuel;
+	private RocketFuelStation rfs;
+
+	public Spaceship(RocketFuelStation rfs) {
+		this.rfs = rfs;
+	}
+
+	public void refill(int amount) {
+		fuel += amount;
+	}
+
+	// Getters and Setters
+
+	public void run() {
+		rfs.refillShip(this, 50);
+	}
+}
+
+   There are a couple of things to note here:
+     * The RocketFuelStation is passed to the constructor, this is a shared object.
+     * The Spaceship class extends Thread, which means we've got to implement the run() method.
+     * Once we instantiate the Spaceship class and call start(), the run() method will also be executed.
+
+   What this means is that once we create a spaceship and start it, it'll refuel from the shared
+   RocketFuelStation with 50 liters of fuel.
+
+   And finally, let's run this code to test it out:
+
+RocketFuelStation rfs = new RocketFuelStation(100);
+Spaceship ship = new Spaceship(rfs);
+Spaceship ship2 = new Spaceship(rfs);
+
+ship.start();
+ship2.start();
+
+ship.join();
+ship2.join();
+
+System.out.println("Ship 1 fueled up and now has: " + ship.getFuel() + "l of fuel");
+System.out.println("Ship 2 fueled up and now has: " + ship2.getFuel() + "l of fuel");
+
+System.out.println("Rocket Fuel Station has " + rfs.getFuelAmount() + "l of fuel left in the end.");
+
+   Since we can't guarantee which thread will run first in Java, the System.out.println() statements are
+   located after running the join() methods on the threads. The join() method waits for the thread to
+   die, so we know that we print out the results after the threads actually finish. Otherwise, we can
+   run into unexpected behavior. Not always, but it's a possibility.
+
+   A new RocketFuelStation() is made with 100 liters of fuel. Once we start both of the ships, both
+   should have 50 liters of fuel and the station should have 0 liters of fuel left.
+
+   Let's see what happens when we run the code:
+
+Ship 1 fueled up and now has: 0l of fuel
+Rocket Fuel Station has 0l of fuel left
+Rocket Fuel Station has 50l of fuel left
+Ship 2 fueled up and now has: 50l of fuel
+Rocket Fuel Station has 0l of fuel left in the end.
+
+   That's not right. Let's run the code again:
+
+Ship 1 fueled up and now has: 0l of fuel
+Ship 2 fueled up and now has: 0l of fuel
+Rocket Fuel Station has 50l of fuel left
+Rocket Fuel Station has 0l of fuel left
+Rocket Fuel Station has 100l of fuel left in the end.
+
+   Now both are empty, including the fuel station. Let's try that again:
+
+Ship 1 fueled up and now has: 50l of fuel
+Rocket Fuel Station has 0l of fuel left
+Rocket Fuel Station has 50l of fuel left
+Ship 2 fueled up and now has: 50l of fuel
+Rocket Fuel Station has 0l of fuel left in the end.
+
+   Now both have 50 liters, and the station is empty. But this is due to pure luck.
+
+   Let's go ahead and update the RocketFuelStation class:
+   Free eBook: Git Essentials
+
+   Check out our hands-on, practical guide to learning Git, with best-practices, industry-accepted
+   standards, and included cheat sheet. Stop Googling Git commands and actually learn it!
+
+public class RocketFuelStation {
+	// The amount of rocket fuel, in liters
+	private static volatile int fuelAmount;
+
+	// ...
+}
+
+   The only thing we change is to tell the JVM that the fuelAmount is volatile and that it should skip
+   the step of saving the value in cache and commit it straight to the main memory.
+
+   We'll also change the Spaceship class:
+
+public class Spaceship extends Thread {
+	private volatile int fuel;
+
+	// ...
+}
+
+   Since the fuel can also be cached and improperly updated.
+
+   When we run the previous code now, we get:
+
+Rocket Fuel Station has 50l of fuel left
+Rocket Fuel Station has 0l of fuel left
+Ship 1 fueled up and now has: 50l of fuel
+Ship 2 fueled up and now has: 50l of fuel
+Rocket Fuel Station has 0l of fuel left in the end.
+
+   Perfect! Both ships have 50 liters of fuel and the station is empty. Let's try that again to verify:
+
+Rocket Fuel Station has 50l of fuel left
+Rocket Fuel Station has 0l of fuel left
+Ship 1 fueled up and now has: 50l of fuel
+Ship 2 fueled up and now has: 50l of fuel
+Rocket Fuel Station has 0l of fuel left in the end.
+
+   And again:
+
+Rocket Fuel Station has 0l of fuel left
+Rocket Fuel Station has 0l of fuel left
+Ship 1 fueled up and now has: 50l of fuel
+Ship 2 fueled up and now has: 50l of fuel
+Rocket Fuel Station has 0l of fuel left in the end.
+
+   If we encounter a situation like this, where the starting statement is "Rocket Fuel Station has 0l of
+   fuel left" - the second thread has gotten to the fuelAmount -= amount line before the first thread
+   got to the System.out.println() line in this if statement:
+
+if (amount <= fuelAmount) {
+	ship.refill(amount);
+	fuelAmount -= amount;
+	System.out.println("Rocket Fuel Station has " + fuelAmount + "l of fuel left");
+}
+
+   While it seemingly produces a wrong output - this is unavoidable when we work in parallel with this
+   implementation. This happens due to the lack of Mutual Exclusion when using the volatile keyword.
+   More on that in Insufficiency of Volatile.
+
+   What's important is that the end result - 50 liters of fuel in each spaceship and 0 liters of fuel in
+   the station.
+
+Happens-Before Guarantee
+   Let's now assume that our charging station is a bit larger and that it has two fuel dispensers
+   instead of one. We'll cleverly call the amounts of fuel in these two tanks fuelAmount1 and
+   fuelAmount2.
+
+   Let's also assume that spaceships now fill two types of fuel instead of one (namely, some spaceships
+   have two different engines which run on two different types of fuel):
+
+public class RocketFuelStation {
+	private static int fuelAmount1;
+	private static volatile int fuelAmount2;
+
+	public void refillFuel1(Spaceship ship, int amount) {
+		// Perform checks...
+		ship.refill(amount);
+		this.fuelAmount1 -= amount;
+	}
+
+	public void refillFuel2(Spaceship ship, int amount) {
+		// Perform checks...
+		ship.refill(amount);
+		this.fuelAmount2 -= amount;
+	}
+
+	// Constructor, Getters and Setters
+}
+
+   If the first spaceship now decides to refill both types of fuel, it can do so like this:
+
+station.refillFuel1(spaceship1, 41);
+station.refillFuel2(spaceship1, 42);
+
+   The fuel variables will then internally be updated as:
+
+fuelAmount1 -= 41; // Non-volatile write
+fuelAmount2 -= 42; // Volatile write
+
+   In this case, even though only fuelAmount2 is volatile, fuelAmount1 will be written to the main
+   memory too, right after the volatile write. Thus, both variables will immediately be visible to the
+   second spaceship.
+
+   The Happens-Before Guarantee will make sure that all updated variables (including non-volatile ones)
+   will get written to the main memory along with the volatile variables.
+
+   It's worth noting, however, that this kind of behavior occurs only if the non-volatile variables are
+   updated before the volatile ones. If the situation is reversed, then no guarantees are made.
+
+Insufficiency of Volatile
+   So far we've mentioned some ways in which volatile can be very helpful. Let's now see a situation in
+   which it isn't enough.
+
+Mutual Exclusion
+   There is one very important concept in multithreaded programming called Mutual Exclusion. The
+   presence of Mutual Exclusion guarantees that a shared variable/object can only be accessed by one
+   thread at a time. The first one to access it locks it and until it's done with the execution and
+   unlocks it - other threads have to wait.
+
+   By doing so, we avoid a race condition between multiple threads, which can cause the variable to
+   become corrupt. This is one way to solve the issue with multiple threads trying to access a variable.
+
+   Let's illustrate this problem with a concrete example to see why race conditions are undesirable:
+
+     Imagine that two threads are sharing a counter. Thread A reads the counter's current value (41),
+     adds 1, and then writes the new value (42) back to the main memory. In the meantime (i.e. while
+     Thread A is adding 1 to the counter), Thread B does the same thing: reads the (old) value from the
+     counter, adds 1, and then writes this back to the main memory.
+
+     Since both threads read the same initial value (41), the final counter value will be 42 instead of
+     43.
+
+   In cases like this, using volatile is not enough because it doesn't ensure Mutual Exclusion. This is
+   exactly the case highlighted above - when both threads reach the fuelAmount -= amount statement
+   before the first thread reaches the System.out.println() statement.
+
+   Instead, the synchronized keyword can be used here because it ensures both visibility and mutual
+   exclusion, unlike volatile which ensures only visibility.
+
+     Why not use synchronized always then?
+
+   Due to performance-impact, don't overdo it. If you need both, use synchronized. If you need only
+   visibility, use volatile.
+
+   Race conditions occur in situations in which two or more threads both read and write to a shared
+   variable whose new value depends on the old value.
+
+   In case threads never need to read the variable's old value to determine the new one, this problem
+   doesn't occur because there is no short amount of time in which the race condition could happen.
+
+Conclusion
+   volatile is a Java keyword used to ensure the visibility of variables in multithreaded environments.
+   As we've seen in the last section, it isn't a perfect thread-safety mechanism, but it wasn't meant to
+   be.
+
+   volatile can be seen as a lighter version of synchronized as it doesn't ensure mutual exclusion so it
+   shouldn't be used as its replacement.
+
+   However, since it offers less protection than synchronized, volatile also causes less overhead so it
+   can be used more liberally.
+
+   In the end, it comes down to the exact situation which needs to be handled. If performance is not an
+   issue, then having a fully thread-safe program with everything synchronized doesn't hurt. But if the
+   application needs fast response times and low overhead, then it's necessary to take some time and
+   define critical parts of the program which need to be extra-safe and those that don't require such
+   strict measures.
+
+
+---
+

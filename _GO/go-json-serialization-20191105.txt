@@ -1,0 +1,734 @@
+filename: go_json-serialization_20191105.txt
+https://code.tutsplus.com/tutorials/json-serialization-with-golang--cms-30209
+
+JSON Serialization With Golang
+
+Overview
+JSON is one of the most popular serialization formats. It is human readable, reasonably concise, and can be
+parsed easily by any web application using JavaScript. Go as a modern programming language has first-class
+support for JSON serialization in its standard library. 
+
+But there are some nooks and crannies. In this tutorial you'll learn how to effectively serialize and
+deserialize arbitrary as well as structured data to/from JSON. You will also learn how to deal with advanced
+scenarios such as serialization enums.
+
+The json Package
+Go supports several serialization formats in the encoding package of its standard library. One of these is
+the popular JSON format. You serialize Golang values using the Marshal() function into a slice of bytes. You
+deserialize a slice of bytes into a Golang value using the Unmarshal() function. It's that simple. The
+following terms are equivalent in the context of this article:
+
+  * Serialization/Encoding/Marshalling
+  * Deserialization/Decoding/Unmarshalling
+
+I prefer serialization because it reflects the fact that you convert a potentially hierarchical data
+structure to/from a stream of bytes.
+
+Marshal
+The Marshal() function can take anything, which in Go means the empty interface and return a slice of bytes
+and error. Here is the signature:
+
+func Marshal(v interface{}) ([]byte, error)
+
+If Marshal() fails to serialize the input value, it will return a non-nil error. Marshal() has some strict
+limitations (we'll see later how to overcome them with custom marshallers):
+
+  * Map keys must be strings.
+  * Map values must be types serializable by the json package.
+  * The following types are not supported: Channel, complex, and function.
+  * Cyclic data structures are not supported.
+  * Pointers will be encoded (and later decoded) as the values they point to (or 'null' if the pointer is
+    nil).
+
+Unmarshal
+The Unmarshal() function takes a byte slice that hopefully represents valid JSON and a destination interface,
+which is typically a pointer to a struct or basic type. It deserializes the JSON into the interface in a
+generic way. If the serialization failed, it will return an error. Here is the signature:
+
+func Unmarshal(data []byte, v interface{}) error
+
+Serializing Simple Types
+You can easily serialize simple types like using the json package. The result will not be a full-fledged JSON
+object, but a simple string. Here the int 5 is serialized to the byte array [53], which corresponds to the
+string "5".
+
+    // Serialize int
+    var x = 5
+    bytes, err := json.Marshal(x)
+    if err != nil {
+        fmt.Println("Can't serislize", x)
+    }
+
+    fmt.Printf("%v => %v, '%v'\n", x, bytes, string(bytes))
+
+    // Deserialize int
+    var r int
+    err = json.Unmarshal(bytes, &r)
+    if err != nil {
+        fmt.Println("Can't deserislize", bytes)
+    }
+
+    fmt.Printf("%v => %v\n", bytes, r)
+
+Output:
+
+- 5 => [53], '5'
+- [53] => 5
+
+If you try to serialize unsupported types like a function, you'll get an error:
+
+    // Trying to serialize a function
+    foo := func() {
+        fmt.Println("foo() here")
+    }
+
+    bytes, err = json.Marshal(foo)
+    if err != nil {
+        fmt.Println(err)
+    }
+
+Output:
+
+json: unsupported type: func()
+
+Serializing Arbitrary Data With Maps
+The power of JSON is that it can represent arbitrary hierarchical data very well. The JSON package supports
+it and utilizes the generic empty interface (interface{}) to represent any JSON hierarchy. Here is an example
+of deserializing and later serializing a binary tree where each node has an int value and two branches, left
+and right, which may contain another node or be null.
+
+The JSON null is equivalent to the Go nil. As you can see in the output, the json.Unmarshal() function
+successfully converted the JSON blob to a Go data structure consisting of a nested map of interfaces and
+preserved the value type as int. The json.Marshal() function successfully serialized the resulting nested
+object to the same JSON representation.
+
+    // Arbitrary nested JSON
+    dd := `
+    {
+        "value": 3,
+        "left": {
+            "value": 1,
+            "left": null,
+            "right": {
+                "value": 2,
+                "left": null,
+                "right": null
+            }
+        },
+        "right": {
+            "value": 4,
+            "left": null,
+            "right": null
+         }
+    }`
+
+    var obj interface{}
+    err = json.Unmarshal([]byte(dd), &obj)
+    if err != nil {
+        fmt.Println(err)
+    } else {
+        fmt.Println("--------\n", obj)
+    }
+
+
+    data, err = json.Marshal(obj)
+    if err != nil {
+        fmt.Println(err)
+    } else {
+        fmt.Println("--------\n", string(data))
+    }
+}
+
+Output:
+
+--------
+ map[right:map[value:4
+               left:<nil>
+               right:<nil>]
+     value:3
+     left:map[left:<nil>
+              right:map[value:2
+                        left:<nil>
+                        right:<nil>]
+              value:1]]
+--------
+ {"left":{
+      "left":null,
+      "right":{"left":null,"right":null,"value":2},
+      "value":1},
+  "right":{"left":null,
+           "right":null,
+           "value":4},
+  "value":3}
+
+To traverse the generic maps of interfaces, you'll need to use type assertions. For example:
+
+func dump(obj interface{}) error {
+    if obj == nil {
+        fmt.Println("nil")
+        return nil
+    }
+    switch obj.(type) {
+    case bool:
+        fmt.Println(obj.(bool))
+    case int:
+        fmt.Println(obj.(int))
+    case float64:
+        fmt.Println(obj.(float64))
+    case string:
+        fmt.Println(obj.(string))
+    case map[string]interface{}:
+        for k, v := range(obj.(map[string]interface{})) {
+            fmt.Printf("%s: ", k)
+            err := dump(v)
+            if err != nil {
+                return err
+            }
+        }
+    default:
+        return errors.New(
+            fmt.Sprintf("Unsupported type: %v", obj))
+    }
+
+    return nil
+}
+
+Serializing Structured Data
+Working with structured data is often the better choice. Go provides excellent support for serializing JSON
+to/from structs via its struct tags. Let's create a struct that corresponds to our JSON tree and a smarter
+Dump() function that prints it:
+
+type Tree struct {
+    value int
+    left *Tree
+    right *Tree
+}
+
+func (t *Tree) Dump(indent string) {
+    fmt.Println(indent + "value:", t.value)
+    fmt.Print(indent + "left: ")
+    if t.left == nil {
+        fmt.Println(nil)
+    } else {
+        fmt.Println()
+        t.left.Dump(indent + "  ")
+    }
+
+    fmt.Print(indent + "right: ")
+    if t.right == nil {
+        fmt.Println(nil)
+    } else {
+        fmt.Println()
+        t.right.Dump(indent + "  ")
+    }
+}
+
+This is great and much cleaner than the arbitrary JSON approach. But does it work? Not really. There is no
+error, but our tree object is not getting populated by the JSON.
+
+    jsonTree := `
+    {
+        "value": 3,
+        "left": {
+            "value": 1,
+            "left": null,
+            "right": {
+                "value": 2,
+                "left": null,
+                "right": null
+            }
+        },
+        "right": {
+            "value": 4,
+            "left": null,
+            "right": null
+         }
+    }`
+
+
+    var tree Tree
+    err = json.Unmarshal([]byte(dd), &tree)
+    if err != nil {
+        fmt.Printf("- Can't deserislize tree, error: %v\n", err)
+    } else {
+        tree.Dump("")
+    }
+
+Output:
+
+value: 0
+left: <nil>
+right: <nil>
+
+The problem is that the Tree fields are private. JSON serialization works on public fields only. So we can
+make the struct fields public. The json package is smart enough to transparently convert the lowercase keys
+"value", "left", and "right" to their corresponding uppercase field names.
+
+type Tree struct {
+    Value int   `json:"value"`
+    Left  *Tree `json:"left"`
+    Right *Tree `json:"right"`
+}
+
+
+Output:
+
+value: 3
+left:
+  value: 1
+  left: <nil>
+  right:
+    value: 2
+    left: <nil>
+    right: <nil>
+right:
+  value: 4
+  left: <nil>
+  right: <nil>
+
+The json package will silently ignore unmapped fields in the JSON as well as private fields in your struct.
+But sometimes you may want to map specific keys in the JSON to a field with a different name in your struct.
+You can use struct tags for that. For example, suppose we add another field called "label" to the JSON, but
+we need to map it to a field called "Tag" in our struct. 
+
+type Tree struct {
+    Value int
+    Tag string    `json:"label"`
+    Left  *Tree
+    Right *Tree
+}
+
+func (t *Tree) Dump(indent string) {
+    fmt.Println(indent + "value:", t.Value)
+    if t.Tag != "" {
+        fmt.Println(indent + "tag:", t.Tag)
+    }
+    fmt.Print(indent + "left: ")
+    if t.Left == nil {
+        fmt.Println(nil)
+    } else {
+        fmt.Println()
+        t.Left.Dump(indent + "  ")
+    }
+
+    fmt.Print(indent + "right: ")
+    if t.Right == nil {
+        fmt.Println(nil)
+    } else {
+        fmt.Println()
+        t.Right.Dump(indent + "  ")
+    }
+}
+
+Here is the new JSON with the root node of the tree labeled as "root", serialized properly into the Tag field
+and printed in the output:
+
+    dd := `
+    {
+        "label": "root",
+        "value": 3,
+        "left": {
+            "value": 1,
+            "left": null,
+            "right": {
+                "value": 2,
+                "left": null,
+                "right": null
+            }
+        },
+        "right": {
+            "value": 4,
+            "left": null,
+            "right": null
+         }
+    }`
+
+
+    var tree Tree
+    err = json.Unmarshal([]byte(dd), &tree)
+    if err != nil {
+        fmt.Printf("- Can't deserislize tree, error: %v\n", err)
+    } else {
+        tree.Dump("")
+    }
+
+Output:
+
+value: 3
+tag: root
+left:
+  value: 1
+  left: <nil>
+  right:
+    value: 2
+    left: <nil>
+    right: <nil>
+right:
+  value: 4
+  left: <nil>
+  right: <nil>
+
+Writing a Custom Marshaller
+You will often want to serialize objects that don't conform to the strict requirements of the Marshal()
+function. For example, you may want to serialize a map with int keys. In these cases, you can write a custom
+marshaller/unmarshaller by implementing the Marshaler and Unmarshaler interfaces.
+
+A note about spelling: In Go, the convention is to name an interface with a single method by appending the
+"er" suffix to the method name. So, even though the more common spelling is "Marshaller" (with double L), the
+interface name is just "Marshaler" (single L).
+
+Here are the Marshaler and Unmarshaler interfaces:
+
+type Marshaler interface {
+        MarshalJSON() ([]byte, error)
+}
+
+type Unmarshaler interface {
+        UnmarshalJSON([]byte) error
+}
+
+You must create a type when doing custom serialization, even if you want to serialize a built-in type or
+composition of built-in types like map[int]string. Here I define a type called IntStringMap and implement the
+Marshaler and Unmarshaler interfaces for this type.
+
+The MarshalJSON() method creates a map[string]string, converts each of its own int keys to a string, and
+serializes the map with string keys using the standard json.Marshal() function.
+
+type IntStringMap map[int]string
+
+func (m *IntStringMap) MarshalJSON() ([]byte, error) {
+    ss := map[string]string{}
+    for k, v := range *m {
+        i := strconv.Itoa(k)
+        ss[i] = v
+    }
+    return json.Marshal(ss)
+}
+
+The UnmarshalJSON() method does the exact opposite. It deserializes the data byte array into a map[string]
+string and then converts each string key to an int and populates itself.
+
+func (m *IntStringMap) UnmarshalJSON(data []byte ) error {
+    ss := map[string]string{}
+    err := json.Unmarshal(data, &ss)
+    if err != nil {
+        return err
+    }
+    for k, v := range ss {
+        i, err := strconv.Atoi(k)
+        if err != nil {
+            return err
+        }
+        (*m)[i] = v
+    }
+    return nil
+}
+
+Here is how to use it in a program:
+
+    m := IntStringMap{4: "four", 5: "five"}
+    data, err := m.MarshalJSON()
+    if err != nil {
+        fmt.Println(err)
+    }
+    fmt.Println("IntStringMap to JSON: ", string(data))
+
+
+    m = IntStringMap{}
+
+    jsonString := []byte("{\"1\": \"one\", \"2\": \"two\"}")
+    m.UnmarshalJSON(jsonString)
+
+    fmt.Printf("IntStringMap from JSON: %v\n", m)
+    fmt.Println("m[1]:", m[1], "m[2]:", m[2])
+
+Output:
+
+IntStringMap to JSON:  {"4":"four","5":"five"}
+IntStringMap from JSON: map[2:two 1:one]
+m[1]: one m[2]: two
+
+Serializing Enums
+
+Go enums can be pretty vexing to serialize. The idea to write an article about Go json serialization came out
+of a question a colleague asked me about how to serialize enums. Here is a Go enum. The constants Zero and
+One are equal to the ints 0 and 1.
+
+type EnumType int
+
+const (
+    Zero     EnumType = iota
+    One
+)
+
+While you may think it's an int, and in many respects it is, you can't serialize it directly. You must write
+a custom marshaler/unmarshaler. That's not a problem after the last section. The following MarshalJSON() and
+UnmarshalJSON() will serialize/deserialize the constants ZERO and ONE to/from the corresponding strings
+"Zero" and "One".
+
+func (e *EnumType) UnmarshalJSON(data []byte) error {
+    var s string
+    err := json.Unmarshal(data, &s)
+    if err != nil {
+        return err
+    }
+
+    value, ok := map[string]EnumType{"Zero": Zero, "One": One}[s]
+    if !ok {
+        return errors.New("Invalid EnumType value")
+    }
+    *e = value
+    return nil
+}
+
+func (e *EnumType) MarshalJSON() ([]byte, error) {
+    value, ok := map[EnumType]string{Zero: "Zero", One:"One"}[*e]
+    if !ok {
+        return nil, errors.New("Invalid EnumType value")
+    }
+    return json.Marshal(value)
+}
+
+Let's try to embed this EnumType in a struct and serialize it. The main function creates an EnumContainer and
+initializes it with a name of "Uno" and a value of our enum constant ONE, which is equal to the int 1.
+
+type EnumContainer struct {
+    Name                string
+    Value               EnumType
+}
+
+
+func main() {
+    x := One
+    ec := EnumContainer{
+        "Uno",
+        x,
+    }
+    s, err := json.Marshal(ec)
+    if err != nil {
+        fmt.Printf("fail!")
+    }
+
+    var ec2 EnumContainer
+    err = json.Unmarshal(s, &ec2)
+
+    fmt.Println(ec2.Name, ":", ec2.Value)
+}
+
+Output:
+
+Uno : 0
+
+The expected output is "Uno : 1", but instead it's "Uno : 0". What happened? There is no bug in the marshal/
+unmarshal code. It turns out that you can't embed enums by value if you want to serialize them. You must
+embed a pointer to the enum. Here is a modified version where that works as expected:
+
+type EnumContainer struct {
+    Name                string
+    Value               *EnumType
+}
+
+func main() {
+    x := One
+    ec := EnumContainer{
+        "Uno",
+        &x,
+    }
+    s, err := json.Marshal(ec)
+    if err != nil {
+        fmt.Printf("fail!")
+    }
+
+    var ec2 EnumContainer
+    err = json.Unmarshal(s, &ec2)
+
+    fmt.Println(ec2.Name, ":", *ec2.Value)
+}
+
+Output:
+
+Uno : 1
+
+Conclusion
+
+Go provides many options for serializing and deserializing JSON. It's important to understand the ins and
+outs of the encoding/json package to take advantage of the power.
+
+This tutorial put all the power in your hands, including how to serialize the elusive Go enums.
+
+Go serialize some objects!
+
+Advertisement
+Advertisement
+ 
+Gigi Sayfan
+Gigi Sayfan
+Principal Software Architect at Helix
+Gigi Sayfan is a principal software architect at Helix - a bioinformatics and genomics start-up. Gigi has
+been developing software professionally for more than 20 years in domains as diverse as instant messaging,
+morphing, chip fabrication process control, embedded multimedia applications for game consoles,
+brain-inspired machine learning, custom browser development, web services for 3D distributed game platforms,
+IoT sensors and virtual reality. He has written production code in many programming languages such as Go,
+Python, C, C++, C#, Java, Delphi, JavaScript, and even Cobol and PowerBuilder for operating systems such as
+Windows (3.11 through 7), Linux, Mac OSX, Lynx (embedded), and Sony PlayStation. His technical expertise
+includes databases, low-level networking, distributed systems, unorthodox user interfaces, and general
+software development life cycle.
+
+  * Feed
+  * Like
+  * Follow
+
+Weekly email summary
+Subscribe below and we'll send you a weekly email summary of all new Code tutorials. Never miss out on
+learning about the next big thing.
+Update me weekly
+Advertisement
+Translations
+
+Envato Tuts+ tutorials are translated into other languages by our community members-you can be involved too!
+
+Translate this post
+Powered byNative
+Advertisement
+ 
+Advertisement
+Advertisement
+Looking for something to help kick start your next project?
+Envato Market has a range of items for sale to help get you started.
+ 
+WordPress Plugins
+From $5
+ 
+PHP Scripts
+From $5
+ 
+JavaScript
+From $3
+ 
+Mobile App Templates
+From $5
+ 
+Unlimited Downloads
+From $16.50/month
+Get access to over one million creative assets on Envato Elements.
+ 
+Over 9 Million Digital Assets
+Everything you need for your next creative project.
+ 
+Create Beautiful Logos, Designs
+& Mockups in Seconds
+Design like a professional without Photoshop.
+ 
+Join the Community
+Share ideas. Host meetups. Lead discussions. Collaborate.
+Quick LinksExplore popular categories
+
+  * Curated Design Assets
+  * Best Cool Fonts
+  * InDesign Magazine Templates
+  * Photoshop Actions
+  * InDesign Newsletter Templates
+  * InDesign Templates
+
+  * Curated Web Design Assets
+  * Responsive WordPress Themes
+  * WordPress Themes for Consultants
+  * Wireframe Templates
+  * Best Shopify Themes
+  * Masonry WordPress Themes
+
+  * Web Themes & Templates
+  * WP Themes
+  * HTML Templates
+  * Shopify Themes
+  * Bootstrap Themes
+  * Free WordPress Themes
+
+  * Video
+  * After Effects Templates
+  * Apple Motion Templates
+  * Video Effects
+  * Lower Thirds
+  * Stock Footage
+
+  * Design Maker
+  * Logo Maker
+  * Business Card Maker
+  * T-Shirt Maker
+  * Banner Maker
+  * Flyer Maker
+
+  * Curated Video Assets
+  * After Effects Slideshow Templates
+  * Premiere Pro Video Intro Templates
+  * Final Cut Pro Templates
+  * Final Cut Pro Title Templates
+  * Premiere Pro Video Effects
+
+  * Curated Presentation Assets
+  * Keynote Pitch Deck Templates
+  * Google Slides Business Templates
+  * PowerPoint Pitch Deck Templates
+  * Best Shopify Mobile Themes
+  * Best Presentation Templates
+
+  * Video Maker
+  * Intro Maker
+  * Slideshow Maker
+  * Instagram Story Video Maker
+  * Offer / Sales
+  * Content Teaser
+
+  * Elements
+  * WordPress Themes
+  * Stock Images
+  * Website Templates
+  * Logos
+  * Fonts
+
+  * Tuts+
+  * Learn JavaScript
+  * Photoshop Tutorials
+  * How to Draw
+  * How to Use WordPress
+  * How to Use PowerPoint
+
+Envato Tuts+
+ 
+About Envato Tuts+
+Terms of Use
+Advertise
+Join our Community
+ 
+Teach at Envato Tuts+
+Translate for Envato Tuts+
+Forums
+Help
+ 
+FAQ
+Help Center
+envato-tuts+
+28,284
+Tutorials
+1,267
+Courses
+39,866
+Translations
+
+  * Envato.com
+  * Our products
+  * Careers
+  * Sitemap
+
+© 2019 Envato Pty Ltd. Trademarks and brands are the property of their respective owners.
+
+  * Follow Envato Tuts+
+  * Facebook
+  * Twitter
+  * Pinterest
+
+*
+
+
+---
+

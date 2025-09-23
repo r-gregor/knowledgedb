@@ -1,0 +1,107 @@
+filename: tar-vs-rsync_20160412.txt
+http://freedompenguin.com/articles/quick-tips/tar-vs-rsync/
+
+Tar vs Rsync
+
+   Files getting lost or corrupted? A most heinous challenge, dude! So when strange things are afoot at
+   the Linux-workstation, we totally hit our backups. We need to get started…but what commands should we
+   use? We can use:
+
+   1. tar to make daily backups of all files,
+   2. or combine find and tar to back up changed files…
+   3. or use the magical rsync.
+
+   Some need more scripting to backup and some need more scripting to restore. Let’s hop in the phone
+   booth and zoom through our options…
+
+Tar: Whole Directories
+   Excellent: The clear advantage to tarring whole directories is that you are accounting for missing
+   files when you restore from any particular point in time. You can also do a wholesale recovery very
+   quickly, just by expanding the tarball for that directory. Below is an example of how to apply
+   parallel compression to speed up your archive compression:
+tar cf $backup.tbz2 --use-compress-program lbzip2 .
+
+   Bogus: Many of your data files are pretty large: megabytes, even gigabytes. Backing one of those up
+   every day is likely going to be costly, especially when it rarely changes.
+
+Tar: changed files
+   Excellent: We immediately start saving space. We can even detect when directories have had no changes
+   since last backup and avoid making a misleading empty archive. You can detect when files disappear by
+   creating a list of files with ls:
+find -mindepth 0 -maxdepth 1 -type f | sort > .files
+touch .recent
+find -type f -newer .recent > backup-list
+tar cf $backup.tbz2 --use-compress-program lbzip2 -T backup-list
+
+   The . filesfile will be picked up in the backup-list file. And while we’re here, let’s make a
+   shortcut function for our tar command, so we can save our righteous keystrokes:
+function Tarup() {
+tar cf "$1" --use-compress-program lbzip2 $@
+}
+function Untar() {
+tar xf "$1" --use-compress-program lbzip2 $@
+}
+
+   Bogus: Restoration of this type of backup strategy is more difficult. To start a restoration, you
+   have to first start with a full backup (a grandfather backup, yearly full, monthly full, or such).
+   Then you have to apply each archive file, and at the end of that series, use your .files list and
+   remove any files that were not present during the last backup.
+cd /home
+yesterday=2016-11-02
+Untar /mnt/backups/yearly-home.tbz2
+for f in /mnt/backups/home-*.tbz2 ; do
+[ x$f == x/mnt/backups/home/home-$yesterday.tbz2 ] && break;
+Untar $f
+done
+find -mindepth 0 -maxdepth 1 -type f > .newfiles
+diff .files .newfiles | grep '^>'
+read -p "These files will be deleted, proceed?" ANS
+if [ x$ANS == xy ] ; then
+diff .files .newfiles \
+| grep '^>' \
+| tr -d '>' \
+| while read F; do rm -f $F ; done
+done
+
+   You will have to verify this process. File names with spaces and subdirectories might not work with
+   this example as I have coded it. This is why you totally verify your backup and restore process!
+
+Rsync and daily backups
+   Excellent: there are a lot of advantages to rsync:
+     * iffiles are modified but their mtimedoesn’t change they will still get backed up.
+     * For simple backups you typically need little to no scripting.
+     * It is most excellent with ssh!
+     * A clever exclude syntax that comes with the command.
+     * With the --deleteswitch you can remove files that were deleted on your disk.
+
+   So, rsyncis great if you want mirror directories.
+
+   Totally cool: rsynccan also do hard links across directories! You can save radical space by providing
+   a previous backup directory on the backup file system to keep only one copy of the file. You use the
+   --link-destswitch:
+rsync -a --delete --link-dest=/mnt/backups/home-$yesterday.d \
+/home /mnt/backups/home-$today.d
+
+   This requires a home-2016-11-06.d directory and creates the home-2016-11-07.ddirectory. Files deleted
+   on the seventh are still there in sixth’s directory. Files that are the same are just hard-links
+   between the directories home-2016-11-06.d and home-2016-11-07.d. (Refer to Jeff Layton’s article
+   about using rsync [16]for incremental backups.)
+
+   Bogus: Rsync might not be excellent for your needs:
+     * No on-disk compression of backups (compression only over ssh)
+     * A point-in-time set of backup uses a new directory for each day with the hard-link technique
+       above. This requires scripting.
+     * Be careful of the -b option! It means backup…but that renames each old file on the server
+       directory you’re backing up to. If you have two years of backups, you’ll have 730 copies:
+
+.ssh/known-hosts.729
+.ssh/known-hosts.728
+.ssh/known-hosts.727
+...
+.ssh/known-hosts
+     * Millions of small files? Whoa, dude: rsynccan slow down with very large sets of small files. You
+       might need to run a few rsync commands in parallel.
+     * Limited memory? I’ve seen rsync take up hundreds of megabytes of memory backing when up hundreds
+       of thousands of files (to store the list of file attributes for comparison). You might have to
+       script your rsync(s) so they walk up a directory tree so as to only backup hundreds of files at a
+       time.

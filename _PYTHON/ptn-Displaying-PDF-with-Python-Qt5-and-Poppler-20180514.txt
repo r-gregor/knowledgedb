@@ -1,0 +1,97 @@
+filename: ptn_Displaying-PDF-with-Python-Qt5-and-Poppler_20180514.txt
+http://shallowsky.com/blog/programming/qt5-poppler-pdf.html
+
+Displaying PDF with Python, Qt5 and Poppler
+
+   I had a need for a Qt widget that could display PDF. That turned out to be surprisingly hard to do.
+   The Qt Wiki has a page on [3]Handling PDF, which suggests only two alternatives: QtPDF, which is C++
+   only so I would need to write a wrapper to use it with Python (and then anyone else who used my code
+   would have to compile and install it); or Poppler. Poppler is a common library on Linux, available as
+   a package and used for programs like evince, so that seemed like the best route.
+
+   But Python bindings for Poppler are a bit harder to come by. I found a little [4]one-page example
+   using Poppler and Gtk3 via gi.repository ... but in this case I needed it to work with a Qt5 program,
+   and my attempts to translate that example to work with Qt were futile. Poppler's page.render(ctx)
+   takes a Cairo context, and Cairo is apparently a Gtk-centered phenomenon: I couldn't find any way to
+   get a Cairo context from a Qt5 widget, and although I found some web examples suggesting
+   renderToImage(), the Poppler available in gi.repository doesn't have that function.
+
+   But it turns out there's another Poppler: [https://pypi.org/project/python-poppler-qt5/]
+   popplerqt5, available in the Debian package python3-poppler-qt5. That Poppler does have renderToImage,
+   and you can take that image and paint it in a paint() callback or turn it into a pixmap you can use with
+   a QLabel. Here's the basic sequence:
+    document = Poppler.Document.load(filename)
+    document.setRenderHint(Poppler.Document.TextAntialiasing)
+    page = document.page(pageno)
+    img = self.page.renderToImage(dpi, dpi)
+
+    # Use the rendered image as the pixmap for a label:
+    pixmap = QPixmap.fromImage(img)
+    label.setPixmap(pixmap)
+
+   The line to set text antialiasing is not optional. Well, theoretically it's optional; go ahead, try
+   it without that and see for yourself. It's basically unreadable.
+
+   Of course, there are plenty of other details to take care of. For instance, you can get the size of
+   the rendered image:
+    size = page.pageSize()
+
+   ... after which you can use size.width() and size.height(). They're in points. There are 72 points
+   per inch, so calculate accordingly in the dpi values you pass to renderToImage if you're targeting a
+   specific DPI or need it to fit in a specific window size.
+
+Window Resize and Efficient Rendering
+   Speaking of fitting to a window size, I wanted to resize the content whenever the window was resized,
+   which meant redefining resizeEvent(self, event) on the widget. Initially my PDFWidget inherited from
+   Qwidget with a custom paintEvent(), like this:
+        # Create self.img once, early on:
+        self.img = self.page.renderToImage(self.dpi, self.dpi)
+
+    def paintEvent(self, event):
+        qp = QPainter()
+        qp.begin(self)
+        qp.drawImage(QPoint(0, 0), self.img)
+        qp.end()
+
+   (Poppler also has a function page.renderToPainter(), but I never did figure out how to get it to do
+   anything useful.)
+
+   That worked, but when I added resizeEvent I got an infinite loop: paintEvent() called resizeEvent()
+   which triggered another paintEvent(), ad infinitum. I couldn't find a way around that (GTK has
+   similar problems -- seems like nearly everything you do generates another expose event -- but there
+   you can temporarily disable expose events while you're drawing). So I rewrote my PDFWidget class to
+   inherit from QLabel instead of QWidget, converted the QImage to a QPixmap and passed it to
+   self.setPixmap(). That let me get rid of the paintEvent() function entirely and let QLabel handle the
+   painting, which is probably more efficient anyway.
+
+Showing all pages in a scrolled widget
+   renderToImage gives you one image corresponding to one page of the PDF document. More often, you'll
+   want to see the whole document laid out, with all the pages. So you need a way to stack a bunch of
+   widgets vertically, one for each page. You can do that with a QVBoxLayout on a widget inside a
+   QScrollArea.
+
+   I haven't done much Qt5 programming, so I wasn't familiar with how these QVBoxes work. Most toolkits
+   I've worked with have a VBox container widget to which you add child widgets, but in Qt5, you create
+   a widget (no particular type -- a QWidget is enough), then create a layout object that modifies the
+   widget, and add the sub-widgets to the layout object. There isn't much documentation for any of this,
+   and very few examples of doing it in Python, so it took some fiddling to get it working.
+
+Initial Window Size
+   One last thing: Qt5 doesn't seem to have a concept of desired initial window size. Most of the
+   examples I found, especially the ones that use a .ui file, use setGeometry(); but that requires an
+   (X, Y) position as well as (width, height), and there's no way to tell it to ignore the position.
+   That means that instead of letting your window manager place the window according to your
+   preferences, the window will insist on showing up at whatever arbitrary place you set in the code.
+   Worse, most of the Qt5 examples I found online set the geometry to (0, 0): when I tried that, the
+   window came up with the widget in the upper left corner of the screen and the window's titlebar
+   hidden above the top of the screen, so there's no way to move the window to a better location unless
+   you happen to know your window manager's hidden key binding for that. (Hint: on many Linux window
+   managers, hold Alt down and drag anywhere in the window to move it. If that doesn't work, try holding
+   down the "Windows" key instead of Alt.)
+
+   This may explain why I've been seeing an increasing number of these ill-behaved programs that come up
+   with their titlebars offscreen. But if you want your programs to be better behaved, it works to
+   self.resize(width, height) a widget when you first create it.
+
+   The current incarnation of my PDF viewer, set up as a module so you can import it and use it in other
+   programs, is at [https://github.com/akkana/scripts/blob/master/qpdfview.py] qpdfview.py on GitHub.

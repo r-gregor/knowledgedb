@@ -1,0 +1,822 @@
+filename: rst_iterating-trees_20230728.txt
+https://blog.danieljanus.pl/2023/07/20/iterating-trees/
+
+A visual tree iterator in Rust
+20 July 2023
+
+   My adventure with learning Rust continues. As a quick recap from the previous post, I'm writing a
+   tree viewer. I have now completed another major milestone, which is to rewrite the tree-printing
+   function to use an iterator. (Rationale: it makes the code more reusable - I can, for instance,
+   easily implement a tree-drawing view for Cursive with it.)
+
+   And, as usual, I've fallen into many traps before arriving at a working version. In this post, I'll
+   reflect on the mistakes I've made.
+
+The problem
+   Let's start with establishing the problem. Given a Tree struct defined as:
+
+pub struct Tree<T> {
+	value: T,
+	children: Vec<Tree<T>>,
+}
+
+   I want it to have a lines() method returning an iterator, so that I can implement print_tree as:
+
+fn print_tree<T: Display>(t: &Tree<T>) {
+	for line in t.lines() {
+		println!("{}", line);
+	}
+}
+
+   and have the output identical to the previous version.
+
+   root
+   |-- one
+   |   |-- two
+   |   ^^^^^^^ .................. IMEDIATE PREFIX
+   |   +-- three
+   |       ^^^^^ ................ node value
+   |       |
+   |       +-- four
+   ^^^^^^^^ ..................... parent prefix
+   +-- five
+       |
+       +-- six
+
+The algorithm
+   Before we dive into the iterator sea, let's have a look at the algorithm. Imagine that we're printing
+   the tree (in sexp-notation) (root (one (two) (three (four))) (five (six))). This is its dissected
+   visual representation:
+
+   Each line consists of three concatenated elements, which I call "parent prefix", "immediate prefix",
+   and "node value". The immediate prefix is always (except for the root node) "+- " or "+- ", depending
+   on whether the node in question is the last child of its parent or not. The parent prefix has
+   variable length that depends on the node's depth, and has the following properties:
+	* For any node, all its subnodes' parent prefixes start with its parent prefix.
+	* For any node, the parent prefixes of its direct children are obtained by appending "   " or "|  "
+	  to its own parent prefix, again depending on whether the node is its parent's last child or not.
+
+   This gives rise to the following algorithm that calls itself recursively:
+
+fn print_tree<T>(t: &Tree<T>,
+				parent_prefix: &str,
+				immediate_prefix: &str,
+				parent_suffix: &str)
+	where T: Display
+{
+	// print the line for node t
+	println!("{0}{1}{2}", parent_prefix, immediate_prefix, t.value);
+
+	// print all children of t recursively
+	let mut it = t.children.iter().peekable();
+	let child_prefix = format!("{0}{1}", parent_prefix, parent_suffix);
+
+	while let Some(child) = it.next() {
+		match it.peek() {
+			None	=> print_tree(child, &child_prefix, "+- ", "   "),
+			Some(_) => print_tree(child, &child_prefix, "|- ", "|  "),
+		}
+	}
+}
+
+   The three extra string arguments start out as empty strings and become populated as the algorithm
+   descends into the tree. The implementation uses a peekable iterator over the children vector to
+   construct the prefixes appropriately.
+
+Building an iterator, take 1
+   So the printing implementation is recursive. How do we write a recursive iterator in Rust? Is it even
+   possible? I initially thought I would have to replace the recursion with an explicit stack stored in
+   the iterator's mutable state, started to write some code, and promptly got lost.
+
+   I then searched for the state-of-the-art on iterating through trees, and found [**1]this post by Amos
+   Wenger. You might want to read it first before continuing; my final implementation ended up being an
+   adaptation of one of the techniques described there.
+
+   My definition of tree is slightly different than Amos's (mine has only one value in a node), but it's
+   easy enough to adapt his final solution to iterate over its values:
+
+impl<T> Tree<T> where T: Display {
+	pub fn lines<'a>(&'a self) -> Box<dyn Iterator<Item = String> + 'a> {
+		let child_iter = self.children.iter().map(|n| n.lines()).flatten();
+
+		Box::new(
+			once(self.value.to_string()).chain(child_iter)
+		)
+	}
+}
+
+   (Note the dyn keyword; Rust started requiring it in this context sometime after Amos's article was
+   published.)
+
+   Clever! This sidesteps the issue of writing a custom iterator altogether, by chaining some standard
+   ones, wrapping them in a box and sprinkling some lifetime annotation magic powder to appease the
+   borrow checker. We also make it explicit that the iterator is returning strings, no matter what the
+   type of tree nodes is.
+
+   But... while it compiles and produces a sequence of strings, they don't reflect the structure of the
+   tree: there's no pretty prefixing going on.
+
+   Let's try to fix that. Clearly, the iterator-returning function will now need to take three
+   additional arguments, just like print_tree - the first one will now be a String because we'll be
+   building it at runtime, and the other two are string literals so can just be &'static strs. Let's
+   try:
+
+// changing the name because we now accept extra params
+// I want the original lines() to keep its signature
+pub fn prefixed_lines<'a>(&'a self,
+						parent_prefix: String,
+						immediate_prefix: &'static str,
+						parent_suffix: &'static str)
+						-> Box<dyn Iterator<Item = String> + 'a>
+{
+	let value = format!("{0}{1}{2}", parent_prefix, immediate_prefix, self.value);
+	let mut peekable = self.children.iter().peekable();
+	let child_iter = peekable
+		.map(|n| {
+			let child_prefix = format!("{0}{1}", parent_prefix, parent_suffix);
+			let last = !peekable.peek().is_some();
+			let immediate_prefix = if last { "+- " } else { "+- " };
+			let parent_suffix = if last { "   " } else { "|  " };
+			n.prefixed_lines(child_prefix, immediate_prefix, parent_suffix)
+		})
+		.flatten();
+
+	Box::new(
+		once(value).chain(child_iter)
+	)
+}
+
+   And, sure enough, it doesn't compile. One of the things that Rust complains about is:
+
+error[E0373]: closure may outlive the current function,
+	but it borrows `peekable`, which is owned by the current function
+  --> src/main.rs:55:18
+   |
+55 |	 .map(|n| {
+   |		  ^^^ may outlive borrowed value `peekable`
+56 |		 let child_prefix = format!("{0}{1}"...
+57 |		 let last = !peekable.peek().is_some();
+   |					 -------- `peekable` is borrowed here
+   |
+note: closure is returned here
+  --> src/main.rs:64:9
+   |
+64 | Box::new(once(value).chain(child_iter))
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: to force the closure to take ownership of `peekable`
+	  (and any other referenced variables), use the `move` keyword
+   |
+55 |	 .map(move |n| {
+   |		  ++++
+
+   So trying to borrow the iterator from within the closure passed to map() is non-kosher. I'm not sure
+   where the "may outlive the current function" comes from, but I think this is because the iterator
+   returned by map is lazy, and so the closure needs to be able to live for at least as long as the
+   resulting iterator does. The suggestion of using move doesn't work, because it then invalidates the
+   map call. (Rust complained about borrowing parent_prefix and parent_suffix as well, and move does
+   work for those.)
+
+Taking a step back
+   I was not able to find a way out of this conundrum. But after re-reading Amos's post, I've decided to
+   revisit his "bad" approach, with a custom iterator (which I now think is actually not bad at all). It
+   made all the more sense to me when I considered future extensibility: eventually I want to be able to
+   render certain subtrees collapsed, and I want the iterator to know about that.
+
+   It took me a while to understand how that custom iterator works. It doesn't have an explicit
+   stack and doesn't try to "de-recursivize" the process! Instead, it holds two sub-iterators, one
+   initially iterating over the node values (viter) and the other over children (citer). The next()
+   method just tries viter first; if it returns nothing, then a next subtree is picked from citer, and
+   viter (by now already consumed) is replaced by another instance of the same iterator, but for that
+   subtree.
+
+   Meditate on this for a while. There's a lot going on here.
+	 * viter starts out as an iterator over a vector (a std::slice::Iter), and then gets replaced by a
+	   tree iterator (Amos's NodeIter).
+	 * This is possible because it's declared as a Box<Iterator<Item = &'a i32> + 'a>. TIL: in Rust, you
+	   can't use a trait directly as a type for a struct field (because there's no telling what its size
+	   will be), but you can put it into a Box (or, I guess, Rc or Arc). Polymorphism, baby!
+	 * Recursion is achieved by having NodeIter contain a member that, at times, is itself another
+	   NodeIter; whereas the correct behaviour is obtained by having those NodeIters instantiated at the
+	   right moment.
+
+   Whoa. Now that's clever. I probably wouldn't have thought about this. It's good to be standing on the
+   shoulders of giants. Thanks, Amos.
+
+   Anyway, let's adapt it to our use-case and add the prefixes to the iterator's state:
+
+pub struct TreeIterator<'a, T> {
+	parent_prefix: String,
+	immediate_prefix: &'static str,
+	parent_suffix: &'static str,
+	viter: Box<dyn Iterator<Item = String> + 'a>,
+	citer: Box<dyn Iterator<Item = &'a Tree<T>> + 'a>,
+}
+
+   And our iterator implementation follows Amos's, except that we handle the prefixes and initialize
+   viter with a Once iterator:
+
+impl<T> Tree<T> where T: Display {
+	pub fn prefixed_lines<'a>(&'a self,
+					parent_prefix: String,
+					immediate_prefix: &'static str,
+					parent_suffix: &'static str)
+					-> TreeIterator<'a, T>
+	{
+		TreeIterator {
+			parent_prefix: parent_prefix,
+			immediate_prefix: immediate_prefix,
+			parent_suffix: parent_suffix,
+			viter: Box::new(once(format!("{}", &self.value))),
+			citer: Box::new(self.children.iter().peekable()),
+		}
+	}
+}
+
+impl<'a, T> Iterator for TreeIterator<'a, T> where T: Display {
+	type Item = String;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if let Some(val) = self.viter.next() {
+			Some(format!("{0}{1}{2}", self.parent_prefix, self.immediate_prefix, val))
+		} else if let Some(child) = self.citer.next() {
+			let last = !self.citer.peek().is_some();
+			let immediate_prefix = if last { "+- " } else { "+- " };
+			let parent_suffix = if last { "   " } else { "|  " };
+			let subprefix = format!("{0}{1}", self.parent_prefix, self.parent_suffix);
+			self.viter = Box::new(child.prefixed_lines(subprefix, immediate_prefix, parent_suffix));
+			self.next()
+		} else {
+			None
+		}
+	}
+}
+
+   Looks sensible, right? Except (you guessed it!) it doesn't compile:
+
+error[E0599]: no method named `peek` found for struct
+	`Box<(dyn Iterator<Item = &'a Tree<T>> + 'a)>` in the current scope
+  --> src/main.rs:38:36
+   |
+38 |	 let last = !self.citer.peek().is_some();
+   |							^^^^ help: there is a method with a
+   |								 similar name: `peekable`
+
+   Ah, right. We've forgotten to tell Rust that citer contains a Peekable. Let's fix that:
+
+pub struct TreeIterator<'a, T> {
+	// ... other fields as before
+	citer: Box<Peekable<dyn Iterator<Item = &'a Tree<T>> + 'a>>,
+}
+
+   Nope, that doesn't compile either:
+
+error[E0277]: the size for values of type `(dyn Iterator<Item = &'a Tree<T>> + 'a)`
+	cannot be known at compilation time
+  --> src/main.rs:16:12
+   |
+16 |	 citer: Box<Peekable<dyn Iterator<Item = &'a Tree<T>> + 'a>>,
+   |			^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |			doesn't have a size known at compile-time
+   |
+   = help: the trait `Sized` is not implemented for
+		   `(dyn Iterator<Item = &'a Tree<T>> + 'a)`
+note: required by a bound in `Peekable`
+
+   Bummer. We can put a trait of unknown size in a Box, but we can't put a Peekable in between! Peekable
+   needs to know the size of its contents at compile time. Trying to convince it by sprinkling + Sized
+   in various places doesn't work.
+
+   Fortunately, we know the actual type of citer. It's an iterator over Vec<Tree<T>>, so it's a
+   std::slice::Iter<Tree<T>>. Let's put it in the definition of TreeIterator:
+
+use std::slice::Iter;
+
+pub struct TreeIterator<'a, T> {
+	// ... other fields as before
+	citer: Box<Peekable<Iter<'a, Tree<T>>>>,
+}
+
+   And it compiles!
+
+Removing the root
+   Here's what happens when you try to run treeviewer with this implementation on a very simple tree:
+$> echo -e 'one\ntwo' | ./target/debug/treeviewer
+
+|- one
++- two
+
+   Seems good, but that empty line is worrying. That's because treeviewer takes slash-separated paths as
+   input, and because the paths can begin with anything, it puts everything under a pre-existing root
+   node with an empty value. We don't want the output to contain that root node.
+
+   Simple, right? We just need to initialize viter with an empty iterator if one of the prefixes is also
+   empty:
+pub fn prefixed_lines<'a>(&'a self,
+						parent_prefix: String,
+						immediate_prefix: &'static str,
+						parent_suffix: &'static str)
+						-> TreeIterator<'a, T>
+{
+	TreeIterator {
+		// ... other fields as before
+		viter: Box::new(if immediate_prefix.is_empty() {
+						   empty()
+						} else {
+						   once(format!("{}", &self.value))
+						}),
+	}
+}
+
+   And (this is becoming obvious by now) we're rewarded by yet another interesting error message:
+error[E0308]: `if` and `else` have incompatible types
+  --> src/main.rs:49:32
+   |
+46 |   viter: Box::new(if immediate_prefix.is_empty() {
+   |  _________________-
+47 | |					  empty()
+   | |					  ------- expected because of this
+48 | |				   } else {
+49 | |					  once(format!("{}", &self.value))
+   | |					  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |						expected `Empty<_>`, found `Once<String>`
+50 | |				   }),
+   | |_________________- `if` and `else` have incompatible types
+   |
+   = note: expected struct `std::iter::Empty<_>`
+			  found struct `std::iter::Once<String>`
+
+   Ahhh. Even though both branches of the if expression have types that meet the trait requirement
+   (Iterator), these are different types. Apparently, if insists on both branches being the same type.
+
+   What we can do is lift the if upwards:
+pub fn prefixed_lines<'a>(&'a self,
+						parent_prefix: String,
+						immediate_prefix: &'static str,
+						parent_suffix: &'static str)
+						-> TreeIterator<'a, T>
+{
+	if immediate_prefix.is_empty() {
+		TreeIterator {
+			// ... other fields as before
+			viter: Box::new(empty()),
+		}
+	} else {
+		TreeIterator {
+			// ... other fields as before, repeated
+			viter: Box::new(once(format!("{}", &self.value))),
+		}
+	}
+}
+
+   Yuck. We needed to duplicate most of the instantiation details of TreeIterator. But at least it
+   compiles and works - the root is gone!
+
+$> echo -e 'one\ntwo' | ./target/debug/treeviewer
+|- one
++- two
+
+Fixing a bug
+   Or does it? Let's try the original tree from our illustration:
+$> echo -e 'one/two\none/three/four\nfive/six' | ./target/debug/treeviewer
+|- one
+|- |  |- two
+|- |  +- three
+|- |  +- |    +- four
++- five
++-    +- six
+
+   Uh oh. It's totally garbled. Time to go back to the drawing board.
+
+   It took me quite a few println!() debugging statements to figure out what was going on. Remember, the
+   TreeIterator for the whole tree will contain a nested TreeIterator in its viter field, which in turn
+   may contain another nested TreeIterator, and so on. Each of these nested iterators eventually passes
+   its value to the "parent" iterator... decorating it with prefixes, again and again!
+
+   To fix this, we need to differentiate between two cases:
+	1. We're producing the value for the node we're holding (that's when we need the prefixes);
+	2. We're propagating up the value returned by viter that holds a nested TreeIterator (in this case
+	   we need to return it unchanged).
+
+   We'll add two more fields to TreeIterator: a boolean indicating whether we've already emitted the
+   value at the node in question, and a reference to that value itself.
+pub struct TreeIterator<'a, T> {
+	// ... other fields as before
+	emitted: bool,
+	value: &'a T,
+}
+
+   And we initialize them as follows:
+pub fn prefixed_lines<'a>(&'a self,
+						parent_prefix: String,
+						immediate_prefix: &'static str,
+						parent_suffix: &'static str)
+						-> TreeIterator<'a, T>
+{
+	TreeIterator {
+		emitted: immediate_prefix.is_empty(),
+		value: &self.value,
+		viter: Box::new(empty()),
+		// ... other fields as before
+	}
+}
+
+   Note that the logic of skipping emitting the root has been moved to the initialization of emitted.
+   This lets us kill the duplication! We now initialize viter to empty() - it no longer matters; this
+   initial value will be unused and eventually replaced by child TreeIterators.
+
+   Finally, we need to amend the implementation of next():
+fn next(&mut self) -> Option<Self::Item> {
+	if !self.emitted {
+		self.emitted = true;
+		// decorate value with prefixes
+		Some(format!("{0}{1}{2}", self.parent_prefix, self.immediate_prefix, self.value))
+	} else if let Some(val) = self.viter.next() {
+		Some(val) // propagate unchanged
+	} else if let Some(child) = self.citer.next() {
+		// ... this part doesn't change
+	} else {
+		None
+	}
+}
+
+   And this version, finally, compiles and works as expected:
+$> echo -e 'one/two\none/three/four\nfive/six' | ./target/debug/treeviewer
+|- one
+|  |- two
+|  +- three
+|     +- four
++- five
+   +- six
+
+Takeaways
+   There are quite a few things I learned about Rust in the process, and then there are meta-learnings.
+   Let's recap the Rust-specific ones first.
+	* You can't put a trait in a struct directly, but you can put a Box of traits.
+	* But not a Box of Foo of traits, where Foo expect its parameter to be Sized.
+	* If you're map()ping a closure over an iterator, you can't access that iterator itself from within
+	the closure.
+	* Closures by default borrow stuff that they close over, but you can move that stuff to the closure
+	instead with the move keyword. If I understand correctly, it's an all-or-nothing move; no mix and
+	match.
+	* In an if expression, all branch expressions must be of the same type; conforming to the same
+	trait is not enough.
+
+   And now the general ones.
+   First off, Rust is hard. (The least wonder in the world.) Most of the traps I've fallen into are
+   accidental complexity, not inherent in the simple problem. I guess that it's really a matter of the
+   initial steepness of Rust's learning curve, and that things become easier once you're past the
+   initial hurdles - you train your instincts to avoid these tarpits and keep the compiler happy.
+
+   I'm still very much a newcomer to Rust, so I'm pretty sure I ended up taking a suboptimal approach. A
+   seasoned Rustacean would probably write this code in an altogether different way. If you have
+   suggestions how to improve my code, or how to attack the problem from different angles, tell me!
+
+   As an experiment in learning, I've decided to reflect on my mistakes more frequently. I elaborate on
+   it in my previous post, which also discusses changes I've made to my workflow to make learning
+   easier.
+
+   Writing the present post showed me how much time it takes. It took me just over an hour to fall into
+   all the traps described in this post and find a way out. A few hours, if you count reading Amos's
+   post and contemplating the problem. In contrast, this write-up took about two days, plus some yak
+   shaving it led me to. Part of the reason is that the actual road that I went through was much more
+   bumpy than described here. While writing this, I had to go through no fewer than fifty-six
+   compilation attempts. Here are some of them, with one-line descriptions and a tick or cross to
+   indicate whether the compilation attempt was successful:
+   Some compilation attempts
+
+   Yet I think it's worth it. Some of the errors I've fixed groping in the dark, kind of randomly: I
+   have now revisited them and I feel I have a much more solid understanding of what's going on.
+
+   And finally: if you're into Rust, Amos's blog (fasterthanli.me) is an excellent resource. Go
+   sponsor him on GitHub if these articles are of value to you.
+
+
+---
+[**1]
+https://fasterthanli.me/articles/recursive-iterators-rust
+
+Recursive iterators in Rust
+May 8, 2019
+
+   I've been looking for this blog post everywhere, but it doesn't exist, so I guess it's my turn to
+   write about Some Fun with Rust.
+
+The task at hand
+
+   Let's say you have a recursive, acyclic data structure, like so:
+
+struct Node {
+	values: Vec<i32>,
+	children: Vec<Node>,
+}
+
+   This allows you to represent a tree-like structure:
+   [1, 2, 3]
+       /\
+      /  \
+     /    \
+    /      \
+   /        \
+[4, 5]    [6, 7]
+
+   Now let's say you want to iterate over the values of the root node and all its children, recursively,
+   so that you get the sequence [1, 2, 3, 4, 5, 6, 7].
+
+A naive implementation
+   This is what I originally came up with:
+
+impl Node {
+	fn values(&self) -> impl Iterator<Item = &i32> {
+		self.values
+			.iter()
+			.chain(self.children.iter().map(|n| n.values()).flatten())
+	}
+}
+
+   Let's unpack that. So first, we generate an iterator over our own values [1, 2, 3]. Then, we take an
+   iterator over our children, and map it to an iterator of iterators over all of their values.
+
+   You can think of the result of map() as an iterator over [[4, 5], [6, 7]]. Then we flatten() it so
+   that it becomes an iterator over [4, 5, 6, 7],
+
+   And finally, we chain both iterators together, so that we get an iterator over [1, 2, 3, 4, 5, 6, 7].
+   Sounds good, right?
+
+   Except it doesn't compile. (Not with Rust 1.34.1, at least)
+
+   Here's the error message we get:
+error[E0720]: opaque type expands to a recursive type
+ --> src/main.rs:8:25
+  |
+8 |     fn values(&self) -> impl Iterator<Item = &i32> {
+  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^ expands to self-referential type
+  |
+  = note: expanded type is `std::iter::Chain<std::slice::Iter<'_, i32>, std::iter::Flatten<std::iter::Map<std:
+:slice::Iter<'_, Node>, [closure@src/main.rs:11:45: 11:59]>>>`
+
+   If we clean up the expanded type a little, we have:
+
+T = Chain(
+		Slice,
+		Flatten(
+			Map(Slice, T)
+		)
+	)
+
+   Which, well, the compiler isn't wrong. The structure could be arbitrarily big at runtime, yet it
+   wants to determine its size at compile time.
+
+   This is because - if I'm understanding it correctly - you can't return a trait:
+
+// does not compile
+fn foo() -> fmt::Display {
+	"hi"
+}
+
+   But you can return a concrete type that implements a trait:
+
+// should be fine!
+fn foo() -> impl fmt::Display {
+	"hi"
+}
+
+   But it still needs to know the size of that concrete type at compile time, because when you later do
+
+fn main() {
+	let s = foo();
+	println!("{}", s);
+}
+
+   s is allocated on the stack, so we need to know its size before calling into foo.
+
+   So, our impl trait-returning foo behaves sorta like a generic version:
+
+// does not compile
+fn foo<T>() -> T
+where
+	T: fmt::Display,
+{
+	"hi"
+}
+
+   ...except that version does not compile either because although "hi" (a &'static str) satisfies the
+   constraints for T, it isn't T. In fact, nothing would prevent us from calling foo::<i32>().
+
+   In summary: returning an impl trait allows us to have a generic function, except with a return type
+   parameter, that's inferred from the function's body rather than its arguments. Also, it allows us to
+   hide the real type of what it is we return. The caller will only ever see the trait we want them to
+   see, even though after compilation it will allocate the exact right amount for the concrete type.
+
+   Phew, hope that makes sense.
+
+A bad solution
+   So, we can't return a self-referential type, but we can.. build our own iterator.
+   
+// does not compile
+struct NodeIter<'a> {
+	viter: Iterator<Item = &'a i32>,
+	citer: Iterator<Item = &'a Node>,
+}
+
+   The plan is to first yield values out of viter (for val iterator), and when we get a None, to get the
+   next value from citer, and replace viter with an iterator over it.
+
+   But wait, that's not a valid struct. Our fields can't be traits, just like you can't just return
+   traits from functions. We need to put both of them in a box.
+   
+struct NodeIter<'a> {
+	viter: Box<Iterator<Item = &'a i32>>,
+	citer: Box<Iterator<Item = &'a Node>>,
+}
+
+impl<'a> Iterator for NodeIter<'a> {
+	type Item = &'a i32;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		unimplemented!()
+	}
+}
+
+   So, now our values method returns a concrete type:
+   
+impl Node {
+	fn values<'a>(&'a self) -> NodeIter<'a> {
+		NodeIter {
+			// does not compile
+			viter: Box::new(self.values.iter()),
+			citer: Box::new(self.children.iter()),
+		}
+	}
+}
+
+   But we're already running into other compile errors
+error[E0495]: cannot infer an appropriate lifetime for lifetime parameter in function call due to conflicting
+requirements
+  --> src/main.rs:69:45
+   |
+69 |                 viter: Box::new(self.values.iter()),
+   |                                             ^^^^
+   |
+note: first, the lifetime cannot outlive the lifetime 'a as defined on the method body at 67:23...
+  --> src/main.rs:67:23
+   |
+67 |         pub fn values<'a>(&'a self) -> NodeIter<'a> {
+   |                       ^^
+note: ...so that reference does not outlive borrowed content
+  --> src/main.rs:69:33
+   |
+69 |                 viter: Box::new(self.values.iter()),
+   |                                 ^^^^^^^^^^^
+   = note: but, the lifetime must be valid for the static lifetime...
+   = note: ...so that the expression is assignable:
+           expected std::boxed::Box<(dyn std::iter::Iterator<Item=&i32> + 'static)>
+              found std::boxed::Box<dyn std::iter::Iterator<Item=&i32>>
+
+   It took me a while to figure this one out, but, apparently, there is a way to specify the lifetime of
+   the contents of a box. Lifetimes are part of generic types and functions' signatures, so you can just
+   add a constraint in there:
+   
+// before
+struct NodeIter<'a> {
+	viter: Box<Iterator<Item = &'a i32>>,
+	citer: Box<Iterator<Item = &'a Node>>,
+}
+
+// after
+struct NodeIter<'a> {
+	viter: Box<Iterator<Item = &'a i32> + 'a>,
+	citer: Box<Iterator<Item = &'a Node> + 'a>,
+}
+
+   Which says: not only should our Iterator return references that are valid for 'a , the iterator
+   itself should also live at least as long as 'a. I'm not sure why that distinction has to be made
+   explicitly right now, but I at least know the compiler agrees with us.
+
+   Implementing the iterator itself is annoying, but it does work that way:
+   
+impl<'a> Iterator for NodeIter<'a> {
+	type Item = &'a i32;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		// if we still have some values of our own to yield...
+		if let Some(val) = self.viter.next() {
+			// then yield them
+			Some(val)
+		} else {
+			// if we're out of values, but we still have children to walk...
+			if let Some(child) = self.citer.next() {
+				// then yield all their values.
+				self.viter = Box::new(child.values());
+				// call next() again, hopefully immediately yielding the
+				// branch's next value, but if not, we'll just keep recursing
+				// until we find a non-empty branch or run out of nodes.
+				self.next()
+			} else {
+				None
+			}
+		}
+	}
+}
+
+   If we try to use it in an example:
+   
+fn main() {
+	let n = Node {
+		values: vec![1, 2, 3],
+		children: vec![
+			Node {
+				values: vec![4, 5],
+				children: vec![],
+			},
+			Node {
+				values: vec![6, 7],
+				children: vec![],
+			},
+		],
+	};
+	let v: Vec<_> = n.values().collect();
+	println!("{:?}", v);
+}
+
+   We get the expected output: [1, 2, 3, 4, 5, 6, 7].
+
+   Feel free to mess around with that version on the playground. Try removing some stuff you think
+   is unnecessary, see which compiler error messages you get.
+
+A better solution
+   So let's recap. Our original approach didn't work because rust wanted to be able to allocate the
+   whole iterator on the stack, and it needed to know its exact size.
+
+   Can't we just return a boxed iterator? Let's try it out:
+   
+impl Node {
+	pub fn values<'a>(&'a self) -> Box<Iterator<Item = &i32>> {
+		Box::new(
+			self.values
+				.iter()
+				.chain(self.children.iter().map(|n| n.values()).flatten()),
+		)
+	}
+}
+
+   At first, it doesn't appear to work
+error[E0495]: cannot infer an appropriate lifetime for lifetime parameter in function call due to conflicting
+requirements
+  --> src/main.rs:33:22
+   |
+33 |                     .iter()
+   |                      ^^^^
+   |
+note: first, the lifetime cannot outlive the lifetime 'a as defined on the method body at 30:23...
+  --> src/main.rs:30:23
+   |
+30 |         pub fn values<'a>(&'a self) -> Box<Iterator<Item = &i32>> {
+   |                       ^^
+note: ...so that reference does not outlive borrowed content
+  --> src/main.rs:32:17
+   |
+32 |                 self.children
+   |                 ^^^^^^^^^^^^^
+   = note: but, the lifetime must be valid for the static lifetime...
+   = note: ...so that the expression is assignable:
+           expected std::boxed::Box<(dyn std::iter::Iterator<Item=&'a i32> + 'static)>
+              found std::boxed::Box<dyn std::iter::Iterator<Item=&i32>>
+
+   ...but wait, that error seems familiar - we encountered it when implementing our custom iterator.
+   Don't we just need to add a lifetime constraint to our box?
+   
+    // before:
+    pub fn values<'a>(&'a self) -> Box<Iterator<Item = &i32>> {
+        // ...
+    }
+
+    // after:
+    pub fn values<'a>(&'a self) -> Box<Iterator<Item = &i32> + 'a> {
+        // ...
+    }
+
+   Sure enough, this version compiles and runs fine!
+
+   You can play with the final code on the Rust playground.
+
+Conclusion
+   Gather round team: what did we learn?
+     * impl trait return types are cool, but they're not magic.
+     * Amos needs to stop thinking of Rust generics as Java generics. In Rust, generics are reified,
+       which is good for performance, bad for binary size, but mostly it means the compiler needs to
+       figure out a lot more stuff ahead of time.
+     * Lifetime constraints are not only for references (&'a str), but also for all generic type
+       parameters (Box<T + 'a>).
+     * The rust playground uses GitHub gist for storing code, which is neat. I was wondering how they
+       handled long-term storage of snippets, and seeing it's handled by GitHub makes me more confident
+       in sharing some code that way.
+
+   If you liked this article, you can watch me struggle my way through some Rust in near-realtime on
+   twitter at @fasterthanlime, and if you'd like me to write about something in particular, you can
+   poke me there.
+
+   I've written a follow-up to this article: Rust vs Java generics
+
+
+---
+

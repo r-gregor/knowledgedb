@@ -1,0 +1,274 @@
+filename: zig_read-command-line-arguments_multif_20250317.txt
+https://ziggit.dev/t/read-command-line-arguments/220/9
+
+Read command line arguments
+November 20, 2023
+
+Hi,
+
+I'm looking for a simple way to read the command line arguments, passed to my program. I don't want to use a
+full fledged command line parser, since this program is for personal use only and I hope to learn zig a little
+more with this approach.
+
+Is there a zig equivalent to argc and *argv[] like in C?
+
+***
+Take a look at std.process.args() and related. The source files for zig's standard library are very easy to
+follow. Mine are located at homebrew/Cellar/zig/0.9.1/lib/zig/std.
+
+***
+I struggle to do it right. To be honest, I'm a little bit frustrated, I'm sure this is an easy task, but the
+lack of documentation makes this really hard.
+
+var args = std.process.args(); //why does this only compile with "var"??
+_ = args.skip();               //to skip the zig call
+
+const allocator = std.heap.page_allocator;
+const file_path = try args.next(allocator); 
+...
+
+but the compiler want's me to remove the try before args.next(allocator), but why?
+
+***
+Note: English is not my native language therefore i always struggled to write English but i tried my best to
+explain you if you get confused let me know :slight_smile:
+
+Ok let me explain to you why it only compiles using var by a simple example.
+
+const Student = struct {
+	name: []const u8,
+
+	pub fn init() Student {
+		return Student{.name = undefined};
+	}
+
+	pub fn setName(self: *Student, name: []const u8) void {
+		self.name = name;
+};
+
+pub fn main() !void {
+	var student1 = Student.init();
+	student1.setName("foo");
+}
+
+In the above example method setName sets the member name therefore in order to change the member of itself it
+needs to take a mutable pointer to itself. But if you decalre a student1 with const it will be become
+immutable so when you call student1.setName it will be passed as *const Student (immutable) where setName
+expects *Student (mutable).
+
+In this case std.process.args() returns a ArgIterator
+[https://github.com/ziglang/zig/blob/master/lib/std/process.zig#L735]here is the actual code of it
+
+For second problem: Why compiler wants you to remove try keyword?
+
+try keyword is used when a function returns either an error or a value. Which means when you use const val =
+try someFun() it basically means "if someFunc() returns an error catch it and return it to the caller
+otherwise store the actual value to val"
+
+In your case next() returns an optional value.
+So to unwrap the actual value you can do const file_path = args.next().?; Notice .? at the end which basically
+means if next() returns a value give me that value otherwise panic with the message attempt to use null value
+
+I hope i explain to you properly.
+
+***
+An alternative is to use std.process.argsAlloc() so that you can allocate a copy of the argv as an array of
+strings, which might be easier to iterate over.
+
+***
+Sorry to play necromancer on this thread, but this forum post continues to be the first thing that comes up
+when I search the Web for "zig args", so I thought it would be nice to have a simple, complete, working
+example.
+
+### No allocations (won't work on Windows or WASI) ###
+Uses std.os.argv (prepopulated on program startup):
+
+const std = @import("std");
+
+pub fn main() !void {
+	std.debug.print("There are {d} args:\n", .{std.os.argv.len});
+	for(std.os.argv) |arg| {
+		std.debug.print("  {s}\n", .{arg});
+	}
+}
+
+### Or with allocations ###
+This uses std.process.argsAlloc() to parse the args into a handy array of strings:
+
+const std = @import("std");
+
+pub fn main() !void {
+	// Get allocator
+	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+	const allocator = gpa.allocator();
+	defer _ = gpa.deinit();
+
+	// Parse args into string array (error union needs 'try')
+	const args = try std.process.argsAlloc(allocator);
+	defer std.process.argsFree(allocator, args);
+
+	// Get and print them!
+	std.debug.print("There are {d} args:\n", .{args.len});
+	for(args) |arg| {
+		std.debug.print("  {s}\n", .{arg});
+	}
+}
+
+### Building and running either version ###
+As separate steps:
+
+$> zig build-exe arg-test.zig
+$> ./arg-test foo bar baz
+There are 4 args:
+  ./arg-test
+  foo
+  bar
+  baz
+
+As a single step (what I usually do while developing)
+
+$> zig run arg-test.zig -- foo bar baz
+There are 4 args:
+  /home/dave/.cache/zig/o/2679ea75d45ed3a8c27da28ac64a89b4/arg-test
+  foo
+  bar
+  baz
+
+***
+Here's a bit of code I and ChatGPT wrote together to parse some simple command line arguments. I wrote it to
+learn some zig.
+
+const ParsedArgs = struct {
+	num_words: u64,
+	seed: u64,
+	capitalize: bool,
+};
+
+const ArgParseError = error{
+	MissingArgument,
+	InvalidNumber,
+	InvalidSeed,
+	UnknownArgument,
+	PrintHelp,
+};
+
+fn parseArgs(allocator: Allocator) !ParsedArgs {
+	const args = std.process.argsAlloc(allocator) catch |err| {
+		std.debug.print("Failed to allocate arguments\n", .{});
+		return err;
+	};
+
+	var num_words: u64 = DEFAULT_NUM_WORDS;
+	var seed: u64 = @intCast(std.time.milliTimestamp());
+	var capitalize = false;
+
+	var i: usize = 1;
+	while (i < args.len) : (i += 1) {
+		const arg = args[i];
+		if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--num-words")) {
+			i += 1;
+			if (i >= args.len) {
+				std.debug.print("Missing argument for -n\n", .{});
+				return ArgParseError.MissingArgument;
+			}
+			num_words = std.fmt.parseInt(u64, args[i], 10) catch {
+				std.debug.print("Invalid number for -n\n", .{});
+				return ArgParseError.InvalidNumber;
+			};
+		} else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--seed")) {
+			i += 1;
+			if (i >= args.len) {
+				std.debug.print("Missing argument for -s\n", .{});
+				return ArgParseError.MissingArgument;
+			}
+			seed = std.fmt.parseInt(u64, args[i], 10) catch {
+				std.debug.print("Invalid seed for -s\n", .{});
+				return ArgParseError.InvalidSeed;
+			};
+		} else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--capitalize")) {
+			capitalize = true;
+		} else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+			printHelp() catch |err| {
+				std.debug.print("Failed to print help\n", .{});
+				return err;
+			};
+			return ArgParseError.PrintHelp;
+		} else {
+			std.debug.print("Unknown argument: {s}\n", .{arg});
+			return ArgParseError.UnknownArgument;
+		}
+	}
+
+	const parsed_args = ParsedArgs{
+		.num_words = num_words,
+		.seed = seed,
+		.capitalize = capitalize,
+	};
+
+	return parsed_args;
+}
+
+
+---
+https://www.reddit.com/r/Zig/comments/18ebxmc/seeking_help_with_zig_command_line_arguments/?rdt=46639
+
+Seeking help with Zig command line arguments
+
+Hey Zig community!
+I'm relatively new to Zig and currently working on a simple program to handle command line arguments. In C, I
+would do something like this:
+
+int main(int argc, char* argv[]) {
+	if (argc < 2) {
+		printf("No args\n");
+		return 1;
+	}
+	printf("File path: %s\n", argv[1]);
+	return 0;
+}
+
+***
+I posted this just yesterday which includes code samples on how to read CLI args:
+https://renatoathaydes.github.io/zig-common-tasks/#get-command-line-args
+[zig_common-tasks_20250317.txt]
+
+It shows how to do it using an allocator and without one (which is non-portable but works on all major OSs
+except Windows - though this may have changed since I wrote that).
+
+***
+[5pp]
+Yes you are kinda on the right track, but Zig handles command line arguments a bit differently than C. You
+need to utilize the process namespace from the standard library. I made a basic version of what I presume you
+were trying to achieve here.
+
+const std = @import("std");
+
+pub fn main() void {
+	// Initialize an allocator
+	// Can be any one of them, this is the most basic one
+	var allocator = std.heap.page_allocator;
+
+	// Initialize arguments
+	// Then deinitialize at the end of scope
+	var argsIterator = try std.process.ArgIterator.initWithAllocator(allocator);
+	defer argsIterator.deinit();
+
+	// Skip executable
+	_ = argsIterator.next();
+
+	// Handle cases accordingly
+	if (argsIterator.next()) |path| {
+		std.debug.print("File path: {s}\n", .{path});
+	} else {
+		std.debug.print("No args\n", .{});
+	}
+}
+
+***
+You should use
+[https://ziglang.org/documentation/master/std/#A;std:process.argsWithAllocator]std.process.argsWithAllocator,
+then collect that into an ArrayList, which can then be used as a slice of strings. Just make sure to deinit
+that at the end.
+
+---
+

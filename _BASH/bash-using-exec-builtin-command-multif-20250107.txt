@@ -1,0 +1,984 @@
+filename: bash_using-exec-builtin-command-multif_20250107.txt
+https://www.baeldung.com/linux/exec-command-in-shell-script
+
+The Uses of the Exec Command in Shell Script
+March 18, 2024
+
+1. Overview
+When we create Bash scripts, we may want to redirect the output of all the echo statements into a log file
+without explicitly specifying the redirection operator and log file name after every echo statement. The Bash
+exec command is a powerful built-in utility that can be utilized for this purpose.
+
+In this tutorial, we'll take a look at how we can use the exec command for adding error and output logging to
+shell scripts. We'll also explore other uses of this command within shell scripts.
+
+2. The Basics
+Whenever we run any command in a Bash shell, a subshell is created by default, and a new child process is
+spawned (forked) to execute the command. When using exec, however, the command following exec replaces the
+current shell. This means no subshell is created and the current process is replaced with this new command.
+
+Let's run an experiment to understand it better:
+
+$> pstree -p
+init(1)-+-init(52)---bash(53)
+        |
+        +-init(78)---bash(79)---pstree(108)
+        |
+        +-{init}(7)
+$> echo $$
+79
+$> exec sleep 300
+
+We checked the PID of the current shell using echo $$ and pstree commands and then executed a sleep of 300
+seconds using exec. Let's now switch to a different terminal to check the process list:
+
+$> ps -aef | grep $USER
+user1       53    52  0 23:37 tty2     00:00:00 -bash
+user1       79    78  0 23:39 tty1     00:00:00 sleep 300
+user1      111    53  0 23:40 tty2     00:00:00 ps -aef
+user1      112    53  0 23:40 tty2     00:00:00 grep --color=auto
+
+As we can see, PID 79, which was initially assigned to Bash, is now assigned to the sleep command.
+
+We'll also observe that after 300-second sleep finishes, the session (terminal), which had PID 79, exited
+since the shell was replaced by exec command, and its execution has completed.
+
+3. Process Replacement Using the exec Command
+Overriding an existing process with a different command can be a powerful tool. Let's explore this idea with
+some other examples.
+
+3.1. User Login Profile
+Let's assume Bash is not the default shell of our Linux box. Interestingly, using exec command, we can replace
+the default shell in memory with the Bash shell by adding it to the user's login profile:
+
+exec bash
+
+There are scenarios where we would want to add a specific program or a menu to the user's login profile
+(.bashrc or .bash_profile), and in such cases, we can prevent the user to have Bash prompt access after the
+program exits irrespective of its exit status:
+
+exec operations_menu.sh
+
+3.2. Program Calls Within Scripts
+We can call scripts or other programs within a script using exec to override the existing process in memory.
+This saves the number of processes created and hence the systems resources. This implementation is
+particularly useful in cases when we don't want to return to the main script once the sub-script or program is
+executed:
+
+#! /bin/bash
+
+while true; do
+	echo "1. Disk Stats "
+	echo "2. Send Evening Report "
+	read Input
+
+	case "$Input" in
+		1) exec df -kh ;;
+		2) exec /home/SendReport.sh  ;;
+	esac
+done
+
+In this simple user input driven script, we executed the df command and a script using exec within different
+menu options.  4. File Descriptors and Logging in Shell Scripts Using the exec Command
+
+The exec command is a powerful tool for manipulating file-descriptors (FD), creating output and error logging
+within scripts with a minimal change. In Linux, by default, file descriptor 0 is stdin (the standard input), 1
+is stdout (the standard output), and 2 is stderr (the standard error).  4.1. Logging Within Scripts
+
+We can dynamically open, close, and copy stdout to achieve logging operations. Let's redirect stdout (FD 1) to
+the log file:
+
+#! /bin/bash
+script_log="/tmp/log_`date +%F`.log"
+exec 1>>$script_log
+echo "This will be written into log file rather than terminal.."
+echo "This too.."
+
+We checked how we can write standard output to files, now let's check how we can also write the standard error
+to the same file:
+
+#! /bin/bash
+script_log="/home/shubh/log_`date +%F`.log"
+exec 1>>$script_log
+exec 2>&1
+datee
+echo "Above command is wrong, error will be logged in log file"
+date
+echo "Output of correct date command will also be logged in log file, including these echo statements"
+
+Here we copied the stderr (2) to stdout (1), and stdout was already changed to write into the log file.
+
+4.2. Changing Stdin to Read From a File
+Let's create a sample input file:
+
+$> cat input_csv
+SNo,Quantity,Price,Value
+1,2,20,40
+2,5,10,50
+3,1,70,70
+
+Let's now run an example to read from the file we created:
+
+#! /bin/bash
+exec < input_csv
+read row1
+echo -n "The contents of first line are: "
+echo $row1
+echo -n "The contents of second line are: "
+read row2
+echo $row2
+
+And this is what we get:
+
+The contents of first line are: SNo,Quantity,Price,Value
+The contents of second line are: 1,2,20,40
+
+4.3. Changing File Descriptors and Restoring the Defaults
+We can also open and close new file descriptors for reading and writing from files. Let's use the same input
+file as in the previous section to demonstrate this:
+
+#! /bin/bash
+exec 3< input_csv
+read -u 3 row1
+echo $row1
+exec 3<&-
+exec 4>&1
+exec > out.txt
+echo "Output will be logged in out.txt"
+exec 4>&-
+
+Here we first opened the input file on FD 3, read from the file, and printed its contents on the terminal
+(which defaults to stdout). Finally, we used &- to close FD 3. When This script executes with the following
+output:
+
+SNo,Quantity,Price,Value
+
+Additionally, the script also creates an output file out.txt:
+
+$> cat out.txt
+Output will be logged in out.txt
+
+Note that the output of the script contains only the first echo statement. Interestingly, after the first echo
+statement, we copied stdout to FD 4 and redirected it to another file. Later, in the last line, we regained
+access to stdout by closing FD 4.
+
+5. Running Scripts in a Clean Environment
+We can reset all the environment variables for a clean run using the -c option:
+
+exec -c printenv
+
+As printenv command lists the environment variables, giving it as an argument to exec command here prints an
+empty output.
+
+6. Usage With the Find Command
+The exec option can be used to perform operations like grep, cat, mv, cp, rm, and many more on the files found
+by the find command. Let's use an example from our article on the find command to find all .java files
+containing the word "interface" in the "src" directory:
+
+find src -name "*.java" -type f -exec grep -l interface {} \;
+
+Here we specified the option -type f  to find only the regular files. Thereafter, we used the -exec option to
+execute the grep command on the list of files returned by the find command. Note the semi-colon at the end
+causes the grep command to be executed for each file, one at a time, as the {} is replaced by the current file
+name. Note also a backslash is required to escape the semi-colon from being interpreted by the shell.
+
+7. Conclusion
+In this tutorial, we've seen the various usages of the Bash built-in exec command in shell scripts.
+
+Simply put, it's a powerful tool for process replacements. Specifically, its usage with file descriptors in
+scripts makes it one of the most powerful tools available for flexible script logging.
+
+
+---
+https://linuxhandbook.com/exec-command-shell-scripts/
+
+Using exec Command in Bash Shell Scripts
+Jan 6, 2025
+
+   The exec command in shell scripts is super useful for logging, reading from files and running
+   commands by replacing the current process.
+
+
+Using exec Command in Bash Shell Scripts
+   The shell built-in exec command is used for executing commands in shell scripts.
+
+   Wait! Don't shell scripts execute Linux commands already? They do. But exec runs the Linux commands
+   without starting a new process. It replaces the shell process with the specified command.
+
+   Seems complex? Let me give you some examples of using the exec command in shell scripts:
+     * Process replacement
+     * Logging within the shell script
+     * Change standard input to read a file
+     * Change file descriptors
+
+   So let's start with the first one.
+
+1. Use the exec command to replace process in shell script
+   Replacing the process is one of the most known implementations of exec in the shell script.
+
+   So here, I will be using a simple script that will display how the exec command in the script can be
+   used to replace the current shell process.
+
+   First, use the following command to use the nano to create and edit a new script:
+nano process_replacement.sh
+
+   And paste the following:
+#!/bin/bash
+
+echo "Before exec: This is the original script"
+exec ls -l
+echo "After exec: This line will not be executed"
+
+   Once done, save the changes and exit from the nano text editor.
+
+   Now, let me explain what this script will do.
+
+   Here are three command statements. First will print the basic text indicating the original script
+   which is meant to be replaced.
+
+   The second statement involves the usage of the exec command with the ls command to list the contents
+   of the current working directory and it will replace the previous process too!
+
+   Now, the third statement won't be executed as the process was replaced by the exec previously, and
+   there were no additional arguments to support the execution of the third command statement.
+
+   Simply put, the process will be replaced by the 2nd command argument, and the 3rd command won't be
+   executed.
+
+   And here's the output if you execute the shown script:
+$> bash process_replacement.sh
+Before exec: This is the original script
+total 137
+-rw-rw-r--+ 1 gregor.redelonghi Domain Users     41 Jan  7 10:46 output1
+-rw-rw-r--+ 1 gregor.redelonghi Domain Users    635 Jan  7 10:45 process_replacement.sh
+
+   And as you can see, the 3rd command statement which was supposed to print "After exec: This line will
+   not be executed" is shown here.
+
+   That does not seem very practical? Here's another example.
+
+2. Use exec command in shell scripts for logging
+   Yet another interesting and easy implementation of the exec is where you can redirect the output
+   to a file.
+
+   Here, I will be using 3 arguments, two for the standard output and one for standard error.
+
+   Here's a script:
+#!/bin/bash
+
+LOG_FILE="script.log"
+
+# Redirect stdout and stderr to the log file
+exec &> "$LOG_FILE"
+
+# Start logging
+echo "Script started at $(date)"
+
+# Perform some operations
+echo "Performing operation 1 (stdout)..."
+ls -l /path/to/directory
+
+echo "Performing operation 2 (stderr)..."
+grep "search term" /path/to/nonexistentfile
+
+echo "Performing operation 3 (stdout)..."
+cat /path/to/file
+
+# Log completion
+echo "Script completed at $(date)"
+
+   I have created an empty file named script.log in the same directory where the above script is located
+   to store the logs.
+
+   Here, the exec command will redirect the output to the log file including when is started and ended.
+
+   When I ran the script, the file containing the log file looked like this:
+
+$> cat script.log
+Script started at Tue, Jan  7, 2025 10:52:46 AM
+Performing operation 1 (stdout)...
+ls: cannot access '/path/to/directory': No such file or directory
+Performing operation 2 (stderr)...
+grep: /path/to/nonexistentfile: No such file or directory
+Performing operation 3 (stdout)...
+cat: /path/to/file: No such file or directory
+Script completed at Tue, Jan  7, 2025 10:52:46 AM
+
+3. Change standard input to read files using exec
+   This can be very helpful when performing certain operations over the file.
+
+   Here, I will be using a simple text file named Hello.txt that contains some random text lines:
+Ubuntu, openSUSE, Arch, Debian, Fedora
++ - / *
+2 4 6 1
+4 6 1 2
+
+   And here's the script which will read from the file and output the contents to the standard output:
+#!/bin/bash
+
+INPUT_FILE="Hello.txt"
+
+# Redirect stdin to read from a file
+exec < "$INPUT_FILE"
+
+# Read the entire file as a single input
+content=$(cat)
+
+# Process the input
+echo "Read: $content"
+
+   Now, let me explain the script.
+     * INPUT_FILE specifies which file to read from.
+     * exec < "$INPUT_FILE" is a redirection to read from the specified file
+     * content=$(cat) will read the entire text file and assign it to the content variable.
+     * echo "Read: $content" will print the value of the content variable.
+
+   And if you execute the script, the result will look like this:
+$> bash script3.sh
+Read: Ubuntu, openSUSE, Arch, Debian, Fedora
++ - / *
+2 4 6 1
+4 6 1 2
+
+4. Change file descriptors using exec in the shell script (advanced)
+   There are three standard file descriptors in Linux:
+    1. Standard input (stdin - file descriptor 0)
+    2. Standard output (stdout - file descriptor 1)
+    3. Standard error (stderr - file descriptor 2)
+
+   And using the exec command, you can change the descriptors. For example, you can use any number to
+   use the preferred data stream, such as using 3 for stdin.
+
+   Let me share the script first and then explain how it functions:
+#!/bin/bash
+
+# Open a file for writing
+exec 3> output.txt
+
+# Redirect stdout to file descriptor 3
+exec 1>&3
+
+# Print some output
+echo "This is a test message"
+
+# Close the file descriptor
+exec 3>&-
+
+   Here, I have opened a output.txt file and assigned file descriptor 3 which means anything sent to
+   file descriptor 3 will be written to the file.
+
+   Using exec 1>&3, I have redirected the standard output (1) to the file descriptor 3 which means
+   anything written to the standard output will be sent to the file descriptor 3 (to the output.txt in
+   my case).
+
+   The echo statement prints the text to the standard output (which will be sent to the file as we
+   changed the file descriptor earlier).
+
+   And exec 3>&- kills the file descriptor 3 as it is no longer needed!
+
+   You can expect the following results after executing the above script:
+   Change file descriptors using exec in the shell script
+
+$> bash script4.sh
+$> cat output.txt
+This is a test message
+
+Do more by pairing exec with the find command
+   Did you know that you can use the find command with the exec and trust me, it makes a killer
+   combination? It's not the same exec discussed here, though.
+
+   I hope you will find this guide helpful. And if you have doubts, leave a comment.
+
+
+
+---
+https://phoenixnap.com/kb/linux-exec
+
+Linux exec Command With Examples
+April 28, 2022
+
+   Introduction
+   The Linux exec command executes a Shell command without creating a new process. Instead, it replaces
+   the currently open Shell operation. Depending on the command usage, exec has different behaviors and
+   use cases.
+
+   This article demonstrates how to use the exec command in Linux.
+   Linux exec Command With Examples
+
+   Prerequisites
+     * Access to the command line/terminal as sudo.
+     * Basic understanding of Linux terminal commands (use our Linux commands cheat sheet).
+     * A Linux text editor such as nano.
+
+Linux exec Command Syntax
+   The exec command syntax is:
+exec [options] [command [arguments]] [redirection]
+
+   The command behaves differently depending on the number of arguments:
+     * If an argument is present, the exec command replaces the current shell with the executed program.
+       In a Bash script, any commands after do not get executed.
+     * If no command argument is present, all redirections occur in the current shell.
+
+   The exec command never returns to the original process unless there's an error or the command runs in
+   a subshell.
+
+Linux exec Command Options
+   Below is a brief explanation of all exec options:
+   --------------------------------------------------------
+   Option      Description
+   --------------------------------------------------------
+   -c          Executes the command in an empty environment.
+   -l          Passes a dash (-) as the zeroth argument.
+   -a [name]   Passes a [name] as the zeroth argument.
+   --------------------------------------------------------
+
+Linux exec Command Examples
+   The examples below demonstrate the behavior of the exec command in the terminal and through Bash
+   scripts.
+
+Basic Use (Process Replacement)
+   To see how exec works, do the following:
+
+   1. Open the terminal and list the running processes:
+ps
+
+$> ps
+      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND
+    10146   10145    9213       2884  pty5     1056210 11:38:35 /usr/bin/ps
+     9599    1715    9599      15500  pty1     1056210 11:04:25 /usr/bin/bash
+
+   The output shows the currently running Bash shell and the ps command. The Bash shell has a unique
+   PID.
+
+   2. To confirm, check the current process ID with:
+$> echo $$
+10317
+
+   The PID is the same as the output from the ps command, indicating this is the currently running Bash
+   process.
+
+   3. Now, run exec and pass the sleep command for one hundred seconds:
+exec sleep 100
+
+   The sleep command waits for 100 seconds.
+
+   4. In another terminal tab, list all currently running processes and grep the sleep command:
+$> ps -ae | grep sleep
+   10426   10317   10426      18404  pty7     1056210 11:49:54 /usr/bin/sleep
+           .....
+
+   The PID for the process is the same as the Bash shell PID, indicating the exec command replaced the
+   Bash shell process.
+
+   The Bash session (terminal tab) closes when the one hundred seconds are complete and the process
+   ends.
+
+Replace Current Shell Session
+   Use the exec command to replace the current shell session:
+
+   1. Check the current shell PID:
+$> echo $$
+10317
+
+   2. Use exec to switch to the Bourne Shell:
+$> exec sh
+
+   exec sh current pid terminal output exec sh current pid terminal output
+
+   3. In another tab, check the PID for the Bourne Shell process:
+$> ps -ae | grep "\bsh\b"
+ 10317   10316   10317      11840  pty7     1056210 11:46:22 /usr/bin/sh
+
+   Note: The \b in grep is Regex for matching word boundary, allowing an exact match of sh in the
+   output. Learn more in our Grep Regex tutorial.
+
+   The command replaces the Bash process. Exiting the Bourne Shell exits the terminal session
+   completely.
+
+Program Calls With exec in Bash Scripts
+   To see how exec works in Bash scripts, do the following:
+
+   1. Open a text editor, such as Nano, and create a script file:
+nano [script name]
+
+   2. Paste the following code:
+#!/bin/bash
+
+while true; do
+	echo "1. Update "
+	echo "2. Upgrade "
+	echo "3. Exit"
+	read Input
+	case "$Input" in
+		1) exec sudo apt update ;;
+		2) exec sudo apt upgrade  ;;
+		3) break
+	esac
+done
+
+   The script does the following:
+     * Line 3 creates an infinite while loop.
+     * Lines 5-7 print the three possible options.
+     * Line 8 reads the user's input into the variable $Input.
+     * Line 9 starts a case statement checking the user's input.
+     * Lines 10-11 execute the apt update or apt upgrade command in place of the current shell. When the
+       update or upgrade process ends, the terminal session exits.
+     * Line 12 uses the break statement to exit the infinite while loop and ends the script. The
+       session returns to the current shell as usual.
+
+   3. Save the script and close Nano.
+
+   4. Run the Bash script in the current environment to see the results:
+$> . select.sh
+1. Update 
+2. Upgrade 
+3. Exit
+>
+
+   Executing the script with the source command applies the script behavior to the current Bash
+   shell. Use exec to run Bash scripts within other programs for a clean exit.
+
+Logging Bash Scripts
+   The exec command finds use in manipulating file descriptors for error logging in Bash scripts. The
+   default Linux file descriptors are:
+     * stdin (0) - Standard in
+     * stdout (1) - Standard out
+     * stderr (2) - Standard error
+
+   Use the exec command and redirect the file descriptors to a file to create logs. To see how logging
+   works, follow the steps below:
+
+   1. Create a sample Bash script:
+nano logging.sh
+
+   2. Paste the code into the file:
+#!/bin/bash
+
+# Create test.log file
+touch test.log
+
+# Save test.log to log_file variable
+log_file="test.log"
+
+# Redirect stdin to $log_file
+exec 1>>$log_file
+
+# Redirect stderr to the same place as stdin
+exec 2>&1
+
+echo "This line is added to the log file"
+echo "And any other lines after"
+eho "This line has an error and is logged as stderr"
+
+   The script redirects all command outputs and errors to the same file (test.log).
+
+   3. Save the script and close the text editor.
+
+   4. Change the script permission to executable:
+chmod +x logging.sh
+
+   5. Run the script:
+./logging.sh
+
+   The script does not output any code. Instead, all the output logs to the test.log file.
+
+   6. Use the cat command to see the test.log file contents:
+$> cat test.log
+This line is added to the log file
+And any other lines after
+./logginng.sh: line 17: eho: command not found
+
+   The log file contains all the standard outputs and error messages. Use exec to debug scripts and log
+   inputs, outputs, or errors depending on the situation.
+
+   Note: Learn how to redirect stdout and stderr to a file in Bash.
+
+Run Scripts in a Clean Environment
+   The -c option for the exec command creates a clean environment. To demonstrate, do the following in
+   the terminal:
+
+   1. Start a new Bash shell session:
+$> bash
+
+   2. Use the printenv command to print all the environment variables in the current Bash shell:
+$> printenv
+...
+ProgramFiles(x86)=C:\Program Files (x86)
+SHELL=/bin/bash
+NUMBER_OF_PROCESSORS=16
+FPS_BROWSER_USER_PROFILE_STRING=Default
+PROCESSOR_LEVEL=6
+LESS=-QR -x4 -Xr
+HISTCONTROL=ignoreboth
+TERM_PROGRAM_VERSION=3.7.0
+USERDOMAIN_ROAMINGPROFILE=JHL
+HOMESHARE=\\jhl.si\dfs\jpe\home\gregor.redelonghi
+HOSTNAME=PC-GREDELONGHI
+HISTSIZE=10000
+PROGRAMFILES=C:\Program Files
+...
+HOMEDRIVE=h:
+EDITOR=/usr/bin/vim
+USERDOMAIN=JHL
+USERDNSDOMAIN=JHL.SI
+...
+CURRENT_YEAR_ENV=2025
+...
+
+   The command prints all the environment variables for the current Bash shell session.
+
+   3. Run the same command using exec with the -c flag:
+$> exec -c printenv
+SYSTEMROOT=C:\WINDOWS
+WINDIR=C:\WINDOWS
+
+   The command printenv runs in a clean environment, and no variables output to the console. Use the -c
+   option to run scripts or commands in clean environments.
+
+exec With find Command
+   The find command in Linux has the exec command as an option to execute an action on discovered
+   content. For example, the line below executes the chmod command on the find command results:
+$> find -name "test.log" -exec chmod +x '{}' \;
+$> ls -l test.log
+-rwxrwxr-x+ 1 gregor.redelonghi Domain Users 108 Jan  7 12:02 test.log
+
+   The find command searches through the home directory (~) for the test.log file and executes the
+   permission change.
+
+   Conclusion
+   After following the examples from this tutorial, you should know how to use the exec command
+   effectively in Bash scripts.
+
+
+
+---
+https://serverfault.com/questions/368054/run-an-interactive-bash-subshell-with-initial-commands-without-returning-to-the
+
+Run an interactive bash subshell with initial commands without returning to the ("super") shell immediately
+
+   I want to run a bash subshell, (1) run a few commands, (2) and then remain in that subshell to do as
+   I please. I can do each of these individually:
+    1. Run command using -c flag:
+$> bash -c "ls; pwd; <other commands...>"
+
+       however, it immediately returns to the "super" shell after the commands are executed. I can also
+       just run an interactive subshell:
+
+    2. Start new bash process:
+$> bash
+       and it won't exit the subshell until I say so explicitly... but I can't run any initial commands.
+       The closest solution I've found is:
+$> bash -c "ls; pwd; <other commands>; exec bash"
+
+       which works, but not the way I wanted to, as it runs the given commands in one subshell, and then
+       opens a separate one for interaction.
+
+   I want to do this on a single line. Once I exit the subshell, I should return back to the regular
+   "super"shell without incident. There must be a way~~
+
+   NB: What I am not asking...
+    1. not asking where to get a hold of the bash man page
+    2. not asking how to read initializing commands from a file... I know how to do this, it's not the
+       solution I'm looking for
+    3. not interested in using tmux or gnu screen
+    4. not interested in giving context to this. I.e., the question is meant to be general, and not for
+       any specific purpose
+    5. if possible, I want to avoid using workarounds that sort of accomplish what I want, but in a
+       "dirty" way. I just want to do this on a single line. In particular, I don't want to do something
+       like xterm -e 'ls'
+
+***
+   This can be easily done with temporary named pipes:
+$> bash --init-file <(echo "ls; pwd")
+
+   Credit for this answer goes to the comment from Lie Ryan. I found this really useful, and it's
+   less noticeable in the comments, so I thought it should be its own answer.
+
+***
+   Try this instead:
+$> bash -c "ls;pwd;other commands;$SHELL"
+
+   $SHELL It makes the shell open in interactive mode, waiting for a close with exit.
+
+***
+   You can do this in a roundabout way with a temp file, although it will take two lines:
+echo "ls; pwd" > initfile
+bash --init-file initfile
+
+***
+   The "Expect solution" I was referring to is programming a bash shell with the Expect programming
+   language:
+
+#!/usr/bin/env expect
+set init_commands [lindex $argv 0]
+set bash_prompt {\$ $}              ;# adjust to suit your own prompt
+spawn bash
+expect -re $bash_prompt {send -- "$init_commands\r"}
+interact
+puts "exiting subshell"
+
+   You'd run that like: ./subshell.exp "ls; pwd"
+
+***
+   Why not use native subshells?
+bash-4.4$> ( ls; pwd; exec $BASH; )
+bar     foo     howdy
+/tmp/hello/
+bash-4.4$>
+bash-4.4$> exit
+
+   Enclosing commands with parentheses makes bash spawn a subprocess to run these commands, so you can,
+   for example, alter the environment without affecting parent shell. This is basically more readable
+   equivalent to the bash -c "ls; pwd; exec $BASH".
+
+   If that still looks verbose, there are two options. One is to have this snippet as a function:
+bash-4.4$> run() { ( eval "$@"; exec $BASH; ) }
+bash-4.4$> run 'ls; pwd;'
+bar     foo     howdy
+/tmp/hello/
+bash-4.4$> exit
+bash-4.4$> run 'ls;' 'pwd;'
+bar     foo     howdy
+/tmp/hello/
+bash-4.4$> exit
+
+   Another is to make exec $BASH shorter:
+bash-4.4$> R() { exec $BASH; }
+bash-4.4$> ( ls; pwd; R )
+bar     foo     howdy
+/tmp/hello/
+bash-4.4$> exit
+
+   I personally like R approach more, as there is no need to play with escaping strings.
+
+***
+   What you need is to execute a startup script, then proceed with the interactive session.
+
+   The default startup script is ~/.bashrc, another script could be given with the --init-file option.
+   If you simply pass an --init-file option, your script would replace the default, rather than augment
+   it.
+
+   The solution is to pass, using the <(...) syntax, a temporary script that sources the default
+   ~/.bashrc followed by any other commands:
+$> bash --init-file <(echo ". ~/.bashrc; ls; pwd; ### other commands... ###")
+
+***
+   If sudo -E bash does not work, I use the following, which has met my expectations so far:
+sudo HOME=$HOME bash --rcfile $HOME/.bashrc
+
+   I set HOME=$HOME because I want my new session to have HOME set to my user's HOME, rather than root's
+   HOME, which happens by default on some systems.
+
+***
+$> bash --init-file <(echo 'ls; pwd')
+$> bash --rcfile <(echo 'ls; pwd')
+
+   In case you can't use process substitution:
+$> cat script
+ls; pwd
+$> bash --init-file script
+
+   With sh (dash, busybox):
+$> ENV=script sh
+
+   Or:
+$> bash -c 'ls; pwd; exec bash'
+$> sh -c 'ls; pwd; exec sh'
+
+***
+   I don't have enough reputation here to comment yet, but I think the various solutions with bash's
+   --rcfile (aka --init-file) are the most practical.
+
+   For a POSIX-compatible solution, you could also try something like
+$> sh -si < my_init_file
+
+   where my_init_file terminates with
+$> exec </dev/tty
+
+   which connects stdin to the terminal.
+
+   You could even try
+$> sh -i -c'my startup commands; exec </dev/tty'
+
+***
+   less elegant than --init-file, but perhaps more instrumentable:
+
+fn() {
+	echo 'hello from exported function'
+}
+
+while read -a commands
+do
+	eval ${commands[@]}
+done
+
+***
+   I accomplish basically the same thing by just using a script, typically for the purpose of setting
+   environment variables for use in a specific project directory;
+$> cat shell.sh
+#!/bin/bash
+export PATH=$PWD/bin:$PATH
+export USERNAME=foo
+export PASSWORD=bar
+export DB_SERVER=http://localhost:6001
+bash
+
+$> echo ${USERNAME:-none}
+none
+
+$> ./shell.sh
+
+$> echo $USERNAME
+foo
+
+   This drops you into an interactive bash shell after all the environment adjustments are made; you can
+   update this script with the relevant other commands you want to run.
+
+
+---
+https://stackoverflow.com/questions/34284238/what-is-different-between-running-a-program-directly-and-calling-exec-in-script
+
+What is different between running a program directly and calling exec in script?
+
+   What is the difference between running a program with exec command or not ?
+
+   For instance, If I made a script file like below.
+#script1
+python test.py
+
+#script2
+exec python test.py
+
+   Both seem to return the same result.
+
+   Are they equivalent?
+
+***
+   exec is a shell built-in, which replaces the image of the current process with new process. It's not
+   same as calling a binary/executable.
+
+   To see the difference, do:
+#script1
+python test.py
+echo Hello
+
+#script2
+exec python test.py
+echo Hello
+
+   You will not see the Hello getting printed in the second script.
+
+   exec also another purpose in shells. It can be used for redirection. For example,
+exec 1>file
+
+   redirects the stdout of the process to file.
+
+   If you had:
+exec 1>file
+echo hello
+echo world
+
+   then script would redirect hello and world to file instead of stdout.
+
+
+---
+https://unix.stackexchange.com/questions/286378/why-do-some-linux-shell-scripts-use-exec-to-run-commands
+
+Why do some Linux shell scripts use exec to run commands? [duplicate]
+
+***
+   This question already has answers here:
+   [**1][https://unix.stackexchange.com/questions/279024/reason-for-exec-in-wrapper-scripts]reason for exec in
+   wrapper scripts (2 answers) Closed 8 years ago.
+
+   In a Linux bash script such as:
+exec /usr/lib/4.5/mono-service.exe ./AudioVideoRecorder.exe "$@"
+
+   , why do I have to exec the command and not just run it without the exec part?
+
+***
+   The short answer is: you don't, but it saves about 1ms of CPU time (on modern CPUs). (Note that you
+   should exec only at the end of a script, because nothing after the exec will get run).
+
+   The longer answer is: Exec replaces the process image of the current process with the process image
+   of the executable you exec. That means that the moment you exec, the shell process that does the
+   execing gets completely destroyed and replaced by the execed program. When you don't exec, the shell
+   forks itself, execs in the fork, and waits around for the child process to exit, collecting its
+   return status, in the hope there might be additional commands to run afterwards (fork + exec is the
+   standard procedure by which new commands get spawned). Since there are none, the fork is a complete
+   waste of time and you might as well exec directly and save on that forking time.
+
+   For most intents and purposes, it's essentially a microoptimization based on the knowledge of how
+   process get spawned on Unices.
+
+   Note: (thanks to ilkkachu) Where it makes a slight semantic difference is if the process spawning
+   the script cares about how the maybe-exec'ed program dies. If the maybe-exec'ed child exits normally,
+   the exec and non-exec form are equivalent since the shell script forwards the last waited-on exit
+   status to its own exit status. If, however, the child dies from signal n, then the shell would
+   convert that to exit status 128+n, effectively losing the was-signaled information. (The information
+   is not lost if you're sure the child never regularly exits with an exit code >128, which is usually
+   the case.). When you do exec, there's no middleman shell anymore, and the exit status info goes
+   directly to the caller of the execing script (and the info about whether the child exited or was
+   signaled is preserved, as there's no middleman shell to merge it into an exit code). (See
+
+
+---
+[**1]
+https://unix.stackexchange.com/questions/279024/reason-for-exec-in-wrapper-scripts
+
+Reason for exec in wrapper scripts
+
+   I have seen wrapper script examples which in a nutshell are following:
+#!/bin/bash
+
+myprog=sleep
+echo "This is the wrapper script, it will exec "$myprog""
+
+exec "$myprog" "$@"
+
+   As seen above, they use exec to replace the newly created shell almost immediately with the $myprog.
+   One could achieve the same without exec:
+#!/bin/bash
+
+myprog=sleep
+echo "This is the wrapper script, it will exec "$myprog""
+
+"$myprog" "$@"
+
+   In this last example, a new bash instance is started and then $myprog is started as a child process
+   of the bash instance.
+
+   What are the benefits of the first approach?
+
+***
+   Using exec makes the wrapper more transparent, i.e. it makes it less likely that the user or
+   application that calls the script needs to be aware that it's a relay that in turns launches the
+   "real" program.
+
+   In particular, if the caller wants to kill the program, they'll just kill the process they just
+   launched. If the wrapper script runs a child process, the caller would need to know that they should
+   find out the child of the wrapper and kill that instead. The wrapper script could set a trap to relay
+   some signals, but that wouldn't work with SIGSTOP or SIGKILL which can't be caught.
+
+   Calling exec also saves a bit of memory (and other resources such as PIDs etc.) since it there's no
+   need to keep an extra shell around with nothing left to do.
+
+   If there are multiple wrappers, the problems add up (difficulty in finding the right process to kill,
+   memory overhead, etc.).
+
+   Some shells (e.g. the Korn shell) automatically detect when a command is the last one and there's no
+   active trap and put an implicit exec, but not all do (e.g. not bash).
+
+***
+   Finding no duplicates... refer to the FreeBSD handbook, which gives a good enough reason:
+
+     The exec statement replaces the shell process with the specified program. If exec is omitted, the
+     shell process remains in memory while the program is executing, and needlessly consumes system
+     resources.
+
+   which is essentially the reason explained to me quite a while back (by one of the porters), and is
+   fairly well-known.
+
+
+---
+

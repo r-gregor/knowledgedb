@@ -1,0 +1,276 @@
+filename: rust-sold-on-rust-by-showing-cpp-20250605.txt
+https://www.collabora.com/news-and-blog/blog/2025/05/06/matt-godbolt-sold-me-on-rust-by-showing-me-c-plus-plus/
+
+Matt Godbolt sold me on Rust (by showing me C++)
+May 06, 2025
+
+   Matt Godbolt, of Compiler Explorer fame, is awesome and you should scour the web for every single bit of
+   content he puts out. That is exactly what I was doing when I watched
+   [https://www.youtube.com/watch?v=nLSm3Haxz0I]"Correct by Construction: APIs That Are Easy to Use and Hard
+   to Misuse". After 20+ years of working with C/C++, this theme resonates a lot with me.
+
+   While watching the talk I kept thinking "Yes! And that's why Rust does it that way." I came out at
+   the end thinking that this talk was actually a great way of getting the intuition for how Rust helps
+   you beyond the whole memory safety thing, and that is what this article intends to show.
+
+   But before we talk about that we should talk about the problems Matt raised and how he proposes to
+   solve them in C++. Do yourself a favor and watch the full talk, but let me break one of them down!
+
+What's in a type
+   Matt starts the talk by showing what a function that sends orders to a stock exchange might look
+   like.
+void sendOrder(const char *symbol, bool buy, int quantity, double price)
+
+   Before we go any further, let me just say he acknowledges floating point is not right for price and
+   later talks about how he usually deals with it. But it makes for a nice example, bear with us.
+
+   Another obvious improvement that anyone used to this stuff will call out immediately is the bool for
+   identifying a buy. That is error prone and Matt does call it out towards the end of this section.
+
+   But he first focuses on quantity and price and how C++ makes it really hard for you to stop callers
+   from confusing them: the compiler will allow 1000.00 for quantity and 100 for price with no warnings,
+   despite them being different types. It just silently converts.
+
+   How about some type aliasing?
+#include
+
+using Price = double;
+using Quantity = int;
+
+void sendOrder(const char *symbol, bool buy, int quantity, double price) {
+	std::cout << symbol << " " << buy << " " << quantity << " " << price << std::endl;
+}
+
+int main(void) {
+	sendOrder("GOOG", false, Quantity(100), Price(1000.00)); // Correct
+	sendOrder("GOOG", false, Price(1000.00), Quantity(100)); // Wrong
+}
+
+   No luck! Both clang 19 and gcc 14 will take that and not complain - even with -std=c++23 -Wall
+   -Wextra -Wpedantic, which I use for all of the C++ code in this article! A few rounds of improvements
+   and we have the following version:
+#include
+
+class Price {
+	public:
+		explicit Price(double price) : m_price(price) {};
+		double m_price;
+};
+
+class Quantity {
+	public:
+		explicit Quantity(unsigned int quantity) : m_quantity(quantity) {};
+		unsigned int m_quantity;
+};
+
+void sendOrder(const char *symbol, bool buy, Quantity quantity, Price price) {
+	std::cout << symbol << " " << buy << " " << quantity.m_quantity << " " << price.m_price << std::endl;
+}
+
+int main(void) {
+	sendOrder("GOOG", false, Quantity(100), Price(1000.00));  // Correct
+	sendOrder("GOOG", false, Quantity(-100), Price(1000.00)); // Wrong
+}
+
+   We have classes, we have explicit constructors (very important or C++ will trip you!), we have
+   unsigned types... and now it's hard to put a Price where you want a Quantity! But we can still give
+   Quantity a negative value without a single compiler warning, even though we moved to an unsigned
+   type. A bit more magic and we can make that go away:
+
+#include
+#include
+
+class Price {
+	public:
+		explicit Price(double price) : m_price(price) {};
+		double m_price;
+};
+
+class Quantity {
+	public:
+		template  explicit Quantity(T quantity) : m_quantity(quantity) {
+			static_assert(std::is_unsigned(), "Please use only unsigned types");
+		}
+
+		unsigned int m_quantity;
+};
+
+void sendOrder(const char *symbol, bool buy, Quantity quantity, Price price) {
+	std::cout << symbol << " " << buy << " " << quantity.m_quantity << " " << price.m_price << std::endl;
+}
+
+int main(void) {
+	sendOrder("GOOG", false, Quantity(100u), Price(1000.00)); // Correct
+	sendOrder("GOOG", false, Quantity(-100), Price(1000.00)); // Wrong
+}
+
+   Finally we can get clang (and gcc) to complain loudly that this is being misused. All it took was a
+   templated constructor that performs a static assert at compile time. Nice!
+order/order-5.cpp:13:19: error: static assertion failed due to requirement 'std::is_unsigned()': Please use only unsigned types
+   13 |     static_assert(std::is_unsigned(), "Please use only unsigned types");
+      |                   ^~~~~~~~~~~~~~~~~~~~~
+order/order-5.cpp:26:28: note: in instantiation of function template specialization 'Quantity::Quantity' reque
+sted here
+   26 |   sendOrder("GOOG", false, Quantity(-100), Price(1000.00)); // Wrong
+      |                            ^
+1 error generated.
+
+   It's a lot of code, but at least we now have compiler protection. We are good, there is no other way
+   to misuse quantity and price. Right?
+
+   What if we need to pass in a value the user typed on a UI, such that we need to convert it from
+   string? Well, you are out of luck again:
+
+sendOrder("GOOG", false, Quantity(static_cast(atoi("-100"))),
+            Price(1000.00)); // Wrong
+
+   Not only will it not fail to compile, but it will also not produce any errors at runtime. You will
+   end up selling 4294967196 shares and going bankrupt.
+
+   Not ideal.
+
+   Matt keeps going, showing a few more magic tricks (and their pitfalls) to perform the runtime checks
+   you will need to fully defend against this. I think this is a good point for us to stop on the C++
+   side and look at how Rust does, shall we?
+
+Enter Rust
+   So is Rust any better? Rust has the benefit of decades of learning from all of these issues. And
+   learn it did. Let's take a look. How does our first attempt fare?
+
+fn send_order(symbol: &str, buy: bool, quantity: i64, price: f64) {
+	println!("{symbol} {buy} {quantity} {price}");
+}
+
+fn main() {
+	send_order("GOOG", false, 100, 1000.00); // Correct
+	send_order("GOOG", false, 1000.00, 100); // Wrong
+}
+
+   After all the work we had to do with C++ it can't be this easy, can it?
+error[E0308]: arguments to this function are incorrect
+ --> order/order-1.rs:7:5
+  |
+7 |     send_order("GOOG", false, 1000.00, 100); // Wrong
+  |     ^^^^^^^^^^                -------  --- expected `f64`, found `{integer}`
+  |                               |
+  |                               expected `i64`, found `{float}`
+  |
+note: function defined here
+ --> order/order-1.rs:1:4
+  |
+1 | fn send_order(symbol: &str, buy: bool, quantity: i64, price: f64) {
+  |    ^^^^^^^^^^ ------------  ---------  -------------  ----------
+help: swap these arguments
+  |
+7 |     send_order("GOOG", false, 100, 1000.00); // Wrong
+  |               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+   Welp, what do you know? It even tells us the arguments we swapped, and everything. It's like we live
+   in the future! Ok, but numbers are still easy to confuse, we could also create types like we did in
+   C++ to make it extra explicit, right? Indeed, and let's throw in protection against negative values
+   by switching from i64 to u64. Is it that easy?
+
+struct Price(pub f64);
+struct Quantity(pub u64);
+
+fn send_order(symbol: &str, buy: bool, quantity: Quantity, price: Price) {
+	println!("{symbol} {buy} {} {}", quantity.0, price.0);
+}
+
+fn main() {
+	send_order("GOOG", false, Quantity(100), Price(1000.00));  // Correct
+	send_order("GOOG", false, Quantity(-100), Price(1000.00)); // Wrong
+}
+
+   Yes, it is that easy:
+error[E0600]: cannot apply unary operator `-` to type `u64`
+  --> order/order-4.rs:10:40
+   |
+10 |     send_order("GOOG", false, Quantity(-100), Price(1000.00)); // Wrong
+   |                                        ^^^^ cannot apply unary operator `-`
+   |
+   = note: unsigned values cannot be negated
+
+   Ok, all that remains is the case where we need to convert the number from a string the user typed. I
+   got you now, Rust... runtime input is not something you can fix at compile time, how would you ever be
+   able to improve on the C++ case?
+
+struct Price(pub f64);
+struct Quantity(pub u64);
+
+fn send_order(symbol: &str, buy: bool, quantity: Quantity, price: Price) {
+	println!("{symbol} {buy} {} {}", quantity.0, price.0);
+}
+
+fn main() {
+	send_order("GOOG", false, Quantity(100), Price(1000.00)); // Correct
+	send_order(
+		"GOOG",
+		false,
+		Quantity("-100".parse::<u64>()),
+		Price(1000.00),
+	); // Wrong
+}
+
+   How about forcing the user to handle potential bad conversions caused by the target type not being
+   able to represent the number we have on the string, does that help?
+error[E0308]: mismatched types
+  --> order/order-6.rs:13:18
+   |
+13 |         Quantity("-100".parse::<u64>()),
+   |         -------- ^^^^^^^^^^^^^^^^^^^^^ expected `u64`, found `Result<u64, ParseIntError>`
+   |         |
+   |         arguments to this struct are incorrect
+   |
+   = note: expected type `u64`
+              found enum `Result<u64, ParseIntError>`
+note: tuple struct defined here
+  --> order/order-6.rs:2:8
+   |
+2  | struct Quantity(pub u64);
+   |        ^^^^^^^^
+help: consider using `Result::expect` to unwrap the `Result<u64, ParseIntError>` value, panicking if the value is a `Result::Err`
+   |
+13 |         Quantity("-100".parse::<u64>().expect("REASON")),
+   |                                       +++++++++++++++++
+
+error: aborting due to 1 previous error
+
+   Yes, it does help, I can't just blindly cast.
+
+   Damn, you're good.
+
+   This error should be enough for me as a user of this API to understand that I should elegantly handle
+   this possibility and maybe return an error all the way to the UI saying "no negative numbers,
+   please". But what if I just go ahead and add that .expect() it is telling me about and then a user
+   types a negative number? Well, then I get a crash at runtime. Better than going bankrupt? I would say
+   so.
+
+> ./order-6
+GOOG false 100 1000
+thread 'main' panicked at order/order-6.rs:16:18:
+Quantities cannot be negative: ParseIntError { kind: InvalidDigit }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+Closing thoughts
+   You know what's the most interesting part of this whole article? The thing Rust is very famous for,
+   memory safety, did not feature at all. Sure, you could make the argument that mixing integers with
+   floats is a memory issue, but you'd be stretching the definition most people have for memory safety.
+
+   What we learn in this exercise is that a well designed language can protect you from mistakes in ways
+   that go way beyond stopping you from writing a use after free or a data race. The design can save you
+   a lot of brain cycles by not forcing you to think about how to protect your code from the simplest
+   mistakes - the language has your back.
+
+   Now, let's be honest. Most of the brain power you save will go, as a Rust beginner, to figuring out
+   how to convince the borrow checker what you are doing is correct. It gets better, I promise. But I
+   won't lie to you: your first few months with the borrow checker will suck.
+
+   Are we done here? Not really. There are two more topics that Matt covers in his talk that I will
+   discuss in future articles, one of them related to my biggest pet peeve with C++. And for those of
+   you who are thinking "if C++ had decades to learn it would also have features that are this well
+   designed", well... let's just say you are in for a treat.
+
+
+---
+

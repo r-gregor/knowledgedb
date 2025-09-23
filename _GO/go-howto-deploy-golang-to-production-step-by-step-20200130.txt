@@ -1,0 +1,204 @@
+filename: go_howto-deploy-golang-to-production-step-by-step_20200130.txt
+https://kenyaappexperts.com/blog/how-to-deploy-golang-to-production-step-by-step/
+
+How to Deploy golang to production Step by Step
+
+   Golang is one of the best programming language to work with.It makes everything so easy during
+   deployment as no dependencies or installation are needed.
+
+   In this tutorial am going to show you how to deploy a golang application to digital ocean.However
+   you can use the same steps in any environment or hosting service.
+
+Making A simple Go rest api
+   I assume at this point you have your go application ready but for the sake of clarity lets start by
+   making a very small rest api that will fetch us some jobs.
+
+   This will be our project structure.
+ ./
+ main.go
+ handlers/
+    handlers.go
+ models/
+    models.go
+
+   The handlers.go - has all the handlers(controllers) we want to hook to our routes
+
+   The models.go - This contains all our model definition which in this case is our job model.
+
+   The main.go - This is our entry point where we shall serve our application from.
+
+Defining our model
+   In this simple api we are going to use only one model.That is the job model.But in general an
+   application has many models which may be defined here.
+
+   Write the following code in your models.go
+
+<code>
+package models
+type Job struct {
+        ID int `json:"id"`
+        Name string `json:"name"`
+}
+</code>
+
+Writing a handler to get our jobs
+   Now that we have our model its time to write an endpoint that will fetch our jobs. The endpoint will
+   return a json response which we can consume.
+
+   Lets go ahead and write our code in the handlers.go file.
+
+<code>
+package handlers
+import (
+        "deploy-go/models"
+        "net/http"
+        "encoding/json"
+)
+
+//A handler to fetch all the jobs
+func GetJobs(w http.ResponseWriter, r *http.Request) {
+        //make a slice to hold our jobs data
+        var jobs []models.Job
+        ///add some job to the slice
+        jobs = append(jobs, models.Job{ID: 1, Name: "Accounting"})
+        jobs = append(jobs, models.Job{ID: 2, Name: "Programming"})
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(jobs)
+}
+</code>
+
+Adding A router to our api
+   In this tutorial i am going to use the Chi router to handle our routing but feel free to use any
+   router available.
+
+   You may check out [10]httprouter or even [11]gorrila mux but it all a matter of preference.
+
+   Open you main.go file and paste this code.
+
+<code>
+package main
+
+import (
+        "deploy-go/handlers"
+        "log"
+        "net/http"
+        "github.com/go-chi/chi"
+)
+
+func main() {
+        router := chi.NewRouter()
+        router.Get("/api/jobs", handlers.GetJobs)
+        //run it on port 8080
+        err := http.ListenAndServe("0.0.0.0:8080", router)
+        if err != nil {
+                log.Fatal(err)
+        }
+}
+</code>
+
+   our simple api is now complete test it by running:
+$> go run main.go on the terminal.
+
+   If you followed this code to the latter you can visit
+http://localhost:8080/api/jobs
+
+   You should see the jobs displayed.
+
+Deploying our go rest api to digital ocean
+   Now that we have our app ready it is time to deploy it.
+
+   I assume that your serve is running on a linux droplet thus i am going to compile our application for
+   linux.It does not matter which machine you are using for development as go allows you to build for
+   any os.In my case i am using macos but i will show you how to use it to build for linux.
+
+Building our app
+   Cd you project(where your main.go is located )and run this command to build for linux.
+$> GOOS=linux GOARCH=amd64 go build
+
+   if you look at you folder you will notice that a new file called jobs has been created.
+   This is the compiled binary file that is needed to execute our api. You just have to upload this
+   binary file to your server and run it.
+
+   Scp this binary file to the server(For instance for my case to upload it to my server i would write)
+$> scp jobs  root@example.com:/var/www/go
+
+   Replace the domain name with your droplet domain name or ip address and (/var/www/go) with the
+   location you want to store it.
+
+Writing a systemd file to manage our app
+   We need a way to stop ,restart and start our app.For this we are going to use systemd which will
+   simplify our job.
+   You can also use supervisor for this task.
+
+   Create a unit file with the extension .service within the /etc/systemd/system directory to begin:
+$> sudo nano /etc/systemd/system/jobs.service
+
+   Inside copy the following script.
+Description= instance to serve jobs api
+After=network.target
+
+[Service]
+User=root
+Group=www-data
+ExecStart=/home/path/to/binary/you/uploaded(which in my case is/var/www/go/jobs)
+[Install]
+WantedBy=multi-user.target
+
+   Thats all is needed.
+
+   We can now start our script by simply running.
+$> sudo systemctl start jobs
+$> sudo systemctl enable jobs
+
+   Now visit the port you configured you go app to use (Which in my case is :8080) your app should be
+   running and ready for use.
+
+Configuring Nginx to Proxy Requests your go rest api
+   Using nginx with go is not really necessary. However I would advice on using it since it helps you to
+   manage security for your application as its very easy to add ssl with nginx. It is also easier to configure
+   load balancing with nginx.
+
+   The nginx setup is very simple.
+
+   Begin by creating a new server block configuration file in Nginx sites-availableÂ directory.
+
+   We will simply call this file jobs to keep in line with the rest of the guide:
+$> sudo nano /etc/nginx/sites-available/jobs
+
+   Open up a server block and tell Nginx to listen on the default port 80.
+   We also need to tell it to use this block for requests for our server's domain name or IP address:
+server {
+listen 80 default_server;
+listen [::]:80 default_server;
+server_name example.com www.example.com ;
+location / {
+        proxy_pass http://localhost:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+
+   Replace the port number with the port you used.The server_name should also be replaced with you
+   domain name.
+
+   To enable the Nginx server block configuration we have just created, we need to create a symbolic link
+   of our conf file to the sites-enabled directory:
+$> sudo ln -s /etc/nginx/sites-available/jobs /etc/nginx/sites-enabled
+
+   We can test for syntax errors by typing:
+$> sudo nginx -t
+
+   If this returns without indicating any issues, we can restart the Nginx process to read the our new
+   config:
+$> sudo systemctl restart nginx
+
+Conclusion
+   In this tutorial we have seen how to deploy a golang app to digital ocean in linux.However you can
+   user this same setup for any machine or server running a linux distribution.
+   I hope this tutorial helped you to understand how to deploy a golang app.
+
+
+---

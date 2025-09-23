@@ -1,0 +1,165 @@
+filename: jv_5p_java-9-modularization-to-ship-zero-dependency-native-apps_20200418.txt
+https://steveperkins.com/using-java-9-modularization-to-ship-zero-dependency-native-apps/
+
+Using Java 9 Modularization to Ship Zero-Dependency Native Apps
+October 20, 2017
+
+"Why can't I just build an .EXE?"
+   When Java was first introduced, mainstream programming languages mostly either compiled to standalone
+   executables (e.g. C/C++, COBOL), or else ran in an interpreter (e.g. Perl, Tcl). For many
+   programmers, Java's need for both a bytecode compiler and a runtime interpreter was a shift in
+   thought. The compilation model made Java better suited for business programming than "scripting"
+   languages. Yet the runtime model required a suitable JVM to be deployed and available on each target
+   machine.
+
+   People bristled at this somewhat (at least I remember doing so!). Early web forums, and later
+   StackOverflow questions, were full of developers looking for some way to ship their Java applications
+   as "native" executables. To avoid the need for a Java runtime to be installed on the target machine
+   prior to deployment.
+
+   There have been solutions from nearly the beginning. Excelsior JET is an ahead-of-time (AOT) Java
+   compiler, providing a more-or-less C++ style experience. However, with licensing costs in the
+   thousands of dollars, it has always been a niche option. On the free-as-in-beer end, there is
+   Launch4j, and JDK 8's javapackager tool. These allow you to bundle a Java Runtime Environment,
+   with a launcher executable for starting your app with that JRE. However, embedding a JRE adds roughly
+   200 megabytes. It's difficult to trim that down, due to technical reasons as well as tricky licensing
+   issues.
+
+Along Comes Java 9
+   The most publicized new feature in Java 9 is the new modularization system, known as Project
+   Jigsaw. The full scope of this warrants many blog articles, if not complete books. However, in a
+   nutshell, the new module system is about isolating chunks of code and their dependencies.
+
+   This applies not only for external libraries, but even the Java standard library itself. Meaning that
+   your application can declare which parts of the standard library it really needs, and potentially
+   exclude all the other parts.
+
+   This potential is realized through the jlink tool that now ships with the JDK. At a superficial
+   first glance, jlink is similar to javapackager. It generates a bundle, consisting of:
+    1. your application code and dependencies,
+    2. an embedded Java Runtime Environment, and
+    3. a native launcher (i.e. bash script or Windows batch file) for launching your application with
+       the embedded JRE.
+
+   However, jlink establishes "link time" as a new optional phase, in between compile-time and run-time,
+   for performing optimizations such as removing unreachable code. Meaning that unlike javapackager,
+   which bundles the entire standard library, jlink bundles a stripped-down JRE with only those modules
+   that your application needs.
+
+A Demonstration
+   The difference between jlink and it's older alternatives is striking. To illustrate, let's look at a
+   sample project: https://github.com/steve-perkins/jlink-demo
+
+(1) Create a modularized project
+   This repo contains a multi-project Gradle build. The cli subdirectory is a "Hello World" command-line
+   application, while gui is a JavaFX desktop app. For both, notice that the build.gradle file
+   configures each project for Java 9 compatibility with this line:
+sourceCompatibility = 1.9
+
+   This, along with creating a module-info.java file, sets up each project for modularization.
+
+   /cli/src/main/java/module-info.java:
+module cli {
+}
+
+   /gui/src/main/java/module-info.java:
+module gui {
+    requires javafx.graphics;
+    requires javafx.controls;
+
+    exports gui;
+}
+
+   Our CLI application is just a glorified System.out.println() call, so it depends only on the
+   java.base module (which is always implicit, and needs no declaration).
+
+   Not all applications use JavaFX, however, so our GUI app must declare its dependency on the
+   javafx.graphics and javafx.controls modules. Moreover, because of the way that JavaFX works, the
+   low-level library needs access to our code. So the module's exports gui line grants this visibility
+   to itself.
+
+   It's going to take some time for Java developers (myself included!) to get a feel for the new
+   standard library modules and what they contain. The JDK includes a jdeps tool that can help with
+   this. However, once a project is setup for modularization, IntelliJ is great at recognizing missing
+   declarations and helping auto-complete them. I assume that if Eclipse and NetBeans don't have similar
+   support already, then they soon will.
+
+(2) Build an executable JAR
+   To build a deployable bundle with jlink, you first want to package up your application into an
+   executable JAR file. If your project has third-party library dependencies, then you'll want to use
+   your choice of "shaded" or "fat-JAR" plugins to generate a single JAR with all dependencies included.
+   In this case, our examples use only the standard library. So building an executable JAR is a simple
+   matter of telling Gradle's jar plugin to include a META-INF/MANIFEST.MF file declaring the executable
+   class:
+jar {
+    manifest {
+        attributes 'Main-Class': 'cli.Main'
+    }
+}
+
+(3) Run jlink on it
+   As far as I know, Gradle does not yet have a plugin offering clean and seemless integration with
+   jlink. So my build scripts use an Exec task to run the tool in a completely separate process. It
+   should be easy to follow, such that you can tell the command-line invocation would look like this:
+[JAVA_HOME]/bin/jlink --module-path libs:[JAVA_HOME]/jmods --add-modules cli --launcher cli=cli/cli.Main \
+--output dist --strip-debug --compress 2 --no-header-files --no-man-pages
+
+     * The --module-path flag is analogous to the traditional CLASSPATH. It declares where the tool
+       should look for compiled module binaries (i.e. JAR files, or the new JMOD format). Here, we tell
+       it to look in the project's libs subdirectory (because that's where Gradle puts our executable
+       JAR), and in the JDK directory for the standard library modules.
+     * The --add-modules flag declares which modules to add to the resulting bundle. We only need to
+       declare our own project modules (cli or gui), because the modules that it depends on will be
+       pulled in as transitive dependencies.
+     * The resulting bundle will include a /bin subdirectory, with a bash script or Windows batch file
+       for executing your application. The --launcher flag allows you to specify a name for this script,
+       and which Java class it should invoke (which seems a bit redundant as this is already specified
+       in the an executable JAR). Above, we are saying to create a script named bin/cli, which will
+       invoke the class cli.Main in module cli.
+     * The --output flag, intuitively enough, specifies a subdirectory in which to place the resulting
+       bundle. Here, we are using a target directory named dist.
+     * These final flags, --strip-debug, --compress 2, --no-header-files, and --no-man-pages, are some
+       optimizations I've tinkered with to further reduce the resulting bundle size.
+
+   At the project root level, this Gradle command builds and links both sub-projects:
+./gradlew linkAll
+
+   The resulting deployable bundles can be found at:
+[PROJECT_ROOT]/cli/build/dist
+[PROJECT_ROOT]/gui/build/dist
+
+Results
+   Let's take a took at size of our linked CLI and GUI applications, with their stripped-down embedded
+   JRE's:
+   App Raw Size     Compressed with 7-zip
+   cli 21.7 MB      10.8 MB
+   gui 45.8 MB      29.1 MB
+
+   This is on a Windows machine, with a 64-bit JRE (Linux sizes are a bit larger, but still roughly
+   proportionate). Some notes:
+     * For comparison, the full JRE on this platform is 203 megabytes.
+     * A "Hello World" CLI written in Go compiles to around 2 MB. Hugo, the website generator used
+       to publish this blog, is a 27.2 megabyte Go executable.
+     * For cross-platform GUI development, a typical Qt or GTK application ships with around 15 megs of
+       Windows DLL's for the GUI functionality alone. Plus any other shared libs, for functionality that
+       Java provides in its base standard library. The Electron quick-start example produces a 131
+       MB deliverable.
+
+Conclusion
+   To be fair, an application bundle with a launch script is not quite as clean as "just building an
+   .EXE", and having a single monolithic file. Also, the JRE is comparatively sluggish at startup, as
+   its JIT compiler warms up.
+
+   Even so, Java is now at a place where you can ship self-contained, zero-dependency applications that
+   are comparable in size to other compiled languages (and superior to web-hybrid options like
+   Electron). Also, Java 9 includes an experimental AOT compiler, that might eliminate sluggish
+   startup. While only available for 64-bit Linux initially, this jaotc tool will hopefully soon expand
+   to other platforms.
+
+   Although Go has been very high-profile in the early wave of cloud infrastructure CLI tools (e.g.
+   Docker, Kubernetes, Consul, Vault, etc)... Java is becoming a strong alternative,
+   especially for shops with established Java experience. For cross-platform desktop GUI apps, I would
+   argue that JavaFX combined with Java 9 modularization is hands-down the best choice available today.
+
+
+---

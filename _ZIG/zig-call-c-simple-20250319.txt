@@ -1,0 +1,950 @@
+filename: zig_call-c-simple_20250319.txt
+https://mtlynch.io/notes/zig-call-c-simple/
+
+A Simple Example of Calling a C Library from Zig
+November 19, 2023
+
+   Zig is a new, independently developed low-level programming language. It's a modern reimagining
+   of C that attempts to retain all of C's performance benefits while also taking advantage of
+   improvements in tooling and language design from the last 30 years.
+
+   Because Zig is designed to replace C, one of the first-class features is that you can call into C
+   libraries from a Zig application. I couldn't find any simple examples demonstrating Zig's C interop
+   functionality, so I decided to write my own.
+
+Existing resources about calling C from Zig
+   I found a few articles that described how to call C code from Zig. They all had useful information,
+   but they were either too abstract or described scenarios that were more complex than what I was
+   trying to accomplish:
+     * [**1][https://zig.news/kristoff/compile-a-c-c-project-with-zig-368j]"C/C++/Zig" by Loris Cro
+          + This is a great tutorial, but it's complex. It's not just calling into a C library - it's
+            figuring out how to build a huge C application with Zig and then writing a new function that
+            both calls the original C code and receives calls from the C code.
+          + I learned a lot from the tutorial, but I had a hard time figuring out from this series how
+            to call C from Zig in a simpler scenario.
+          + This tutorial was also written for Zig 0.8.1, and the code no longer compiles with Zig
+            0.11.0.
+     * [**2][https://krowemoh.com/devlog/extending-a-c-project-with-zig.html]"Extending a C Project with Zig" (2023)
+          + This is a recent article, so it still compiles with the current version of Zig.
+          + Similar to the above tutorial, this article tackles how to compile a large, complex C
+            application, so I had a hard time understanding how to apply the lessons to a simpler
+            scenario.
+     * [https://ziglearn.org/chapter-4/]ziglearn Chapter 4 - Working with C
+          + This article describes low-level mechanisms for Zig-C interop, but doesn't show any complete
+            examples.
+
+   One of the major limitations of the two "extend a C project" tutorials above is that they assume you
+   know how to port complex Makefiles into the Zig build system. Both of them say, "Hey, look at this
+   confusing 100-line Makefile. Voila, now it's a confusing 100-line build.zig file!" and they don't
+   really explain how (unless you watch this [https://vimeo.com/524007646]90-minute video).
+
+   As a complete Zig novice, I didn't want to learn how to convert large Makefiles to the Zig build
+   system. Instead, I wanted to try a simple example where I only used Zig to build a portion of a C
+   application rather than porting the entire application to Zig's native build system.
+
+Create a simple C application
+   The thing that tripped me up in other Zig + C examples was that the C code was so complicated that it
+   obscured the basic mechanics of calling into C code from Zig.
+
+   To make Zig's C interop functionality simpler, I decided to create a simple C application and
+   library.
+
+   Here's my first C header file:
+
+// arithmetic.h
+int add(int x, int y);
+
+   And here's the implementation:
+
+// arithmetic.c
+#include "arithmetic.h"
+
+int add(int x, int y) {
+	return x + y;
+}
+
+   I'm not doing anything fancy. The goal is to keep things as simple as possible.
+
+   Finally, I'll create a test application to exercise the add function:
+
+// main.c
+#include <stdio.h>
+#include "arithmetic.h"
+
+int main(void) {
+	int x = 5;
+	int y = 16;
+	int z = add(x, y);
+	printf("%d + %d = %d\n", x, y, z);
+	return 0;
+}
+
+   Okay, if everything works correctly, I should be able to compile this application with gcc, a
+   standard C compiler:
+$> gcc arithmetic.c main.c -o ./bin/example
+$> ./bin/example
+5 + 16 = 21
+
+   Great, everything works!
+
+Switching the compiler to Zig
+   So far, this is a pure C project, and I haven't used Zig at all.
+
+   Now, I'll install Zig. There are a few ways to install Zig, but I'm using Nix, as it's my new
+   favorite package manager. I only use Nix for the installation, so feel free to install Zig 0.11.0
+   another way if you're not yet in the cult of Nix.
+
+   I added the following flake.nix file to my project, which pulls Zig 0.11.0 into my environment:
+
+{
+	description = "Dev environment for zig-c-simple";
+
+	inputs = {
+		flake-utils.url = "github:numtide/flake-utils";
+
+		# 0.11.0
+		zig-nixpkgs.url = "github:NixOS/nixpkgs/46688f8eb5cd6f1298d873d4d2b9cf245e09e88e";
+	};
+
+	outputs = { self, flake-utils, zig-nixpkgs }@inputs :
+		flake-utils.lib.eachDefaultSystem (system:
+		let
+			zig-nixpkgs = inputs.zig-nixpkgs.legacyPackages.${system};
+		in
+		{
+			devShells.default = zig-nixpkgs.mkShell {
+				packages = [
+					zig-nixpkgs.zig
+				];
+
+				shellHook = ''
+				echo "zig" "$(zig version)"
+				'';
+			};
+		});
+}
+
+   From here, I can run nix develop, and I see that Nix 0.11.0 is available in my project environment:
+$> nix develop
+zig 0.11.0
+
+   Zig has a built-in C compiler that can act as a drop-in replacement for gcc. I'll retry the previous
+   compilation, but instead of calling gcc, I call zig cc:
+$> zig cc arithmetic.c main.c -o ./bin/example
+$> ./bin/example
+5 + 16 = 21
+
+   Cool, everything is still working, and now I'm using Zig for compilation. I'm not using any Zig code
+   yet, so that's next.
+
+Creating an equivalent Zig app
+   To create my Zig application, I'll use zig init-exe, which creates a boilerplate Zig executable:
+$> zig init-exe
+info: Created build.zig
+info: Created src/main.zig
+
+   I replace src/main.zig with the following contents, which creates a Zig application that's equivalent
+   to my main.c above.
+
+// src/main.zig
+const std = @import("std");
+
+fn add(x: i32, y: i32) i32 {
+	// TODO: Instead of reimplementing this in Zig, call the C version.
+	return x + y;
+}
+
+pub fn main() !void {
+	const x: i32 = 5;
+	const y: i32 = 16;
+	var z: i32 = add(x, y);
+
+	const stdout_file = std.io.getStdOut().writer();
+	var bw = std.io.bufferedWriter(stdout_file);
+	const stdout = bw.writer();
+
+	try stdout.print("{d} + {d} = {d}\n", .{ x, y, z });
+	try bw.flush();
+}
+
+test "test add" {
+	try std.testing.expectEqual(@as(i32, 21), add(5, 16));
+}
+
+   And if I run it, I get the same output as the C version:
+$> zig build run
+5 + 16 = 21
+
+   Cool, but my goal is to call into C code from Zig, not just rewrite everything in Zig. Next, I'll
+   figure out how to replace my Zig implementation of add with the native C implementation.
+
+Linking a Zig application against a native C library
+   Okay, everything so far has been basic "hello, world!" kind of stuff. Now, we're at the part that has
+   been my stumbling block previously: calling into native C code from Zig.
+
+   First, I'll reorganize my files to separate my Zig code from my C code. Here's my new folder layout:
+
+c-src/
+	arithmetic.c
+	arithmetic.h
+	main.c
+src/
+	main.zig
+build.zig
+
+   Next, I adjust my build.zig so that my Zig application has access to my C source files:
+
+const exe = b.addExecutable(.{
+	.name = "zig-c-simple",
+	.root_source_file = .{ .path = "src/main.zig" },
+	.target = target,
+	.optimize = optimize,
+});
+
+exe.addIncludePath(.{ .path = "c-src" });   // Look for C source files
+
+And I do the same thing for Zig's unit test build target:
+
+const unit_tests = b.addTest(.{
+	.root_source_file = .{ .path = "src/main.zig" },
+	.target = target,
+	.optimize = optimize,
+});
+
+unit_tests.addIncludePath(.{ .path = "c-src" }); // Look for C source files
+
+   I've now adjusted my Zig build so that it has access to my C arithmetic library, but I haven't called
+   the library yet. To complete this example, I need to make the following change to my src/main.zig
+   file:
+
+// src/main.zig
+const arithmetic = @cImport({
+	@cInclude("arithmetic.c");
+});
+
+fn add(x: i32, y: i32) i32 {
+	return arithmetic.add(x, y);
+}
+
+The above change replaces my Zig-native implementation of the add function with a wrapper to call the
+   native C add function in my arithmetic.c file.
+
+   Now is the moment of truth. Does everything compile and run as expected?
+
+$> zig build run
+5 + 16 = 21
+
+   Cool, it works!
+
+   And I'll try my unit test as well:
+
+$> zig build test --summary all
+Build Summary: 3/3 steps succeeded; 1/1 tests passed
+test success
++- run test 1 passed 1ms MaxRSS:1M
+   +- zig test Debug native success 2s MaxRSS:201M
+
+   Unit tests are passing as well. Everything looks great!
+
+Is Zig really calling C?
+   I've tried calling C code from other programming languages, and it's never been this easy. I worried
+   that I was somehow tricking myself, and Zig wasn't really calling my C code, so I deliberately
+   introduced a bug into my C code:
+
+// arithemtic.c
+int add(int x, int y) {
+	return x + y - 1; // Intentionally return incorrect results.
+}
+
+If my Zig application is really calling into C, then my Zig unit test should fail because the
+   underlying C code is now incorrect.
+
+   I ran my unit tests to see what would happen:
+$> zig build test --summary all
+run test: error: 'test.simple test' failed: expected 21, found 20
+/nix/store/bg6hyfzr1wzk795ii48mc1v15bswcvp3-zig-0.11.0/lib/zig/std/testing.zig:84:17: 0x2244b3 in expectEqual__anon_1014 (test)
+                return error.TestExpectedEqual;
+                ^
+/home/mike/zig-c-simple/src/main.zig:27:5: 0x2245fb in test.simple test (test)
+    try std.testing.expectEqual(@as(i32, 21), add(x, y));
+    ^
+run test: error: while executing test 'test.simple test', the following test command failed:
+/home/mike/zig-c-simple/zig-cache/o/60df9dade81f9ba62609a6cbf833478c/test --listen=-
+
+   Great! That test failed as expected with the error expected 21, found 20. The unit test correctly
+   identified the bug I introduced into my C add function.
+
+Is Zig following header references?
+   The other piece of this solution that works surprisingly well is that I can reference the function
+   through the .h file. I haven't done C/C++ programming in a long time, but my memory is that importing
+   by a .c file isn't possible, so it's surprising how easy it is in Zig.
+
+   To test whether Zig is cheating somehow, I added a new function and preprocessor macro to my
+   arithmetic.h header:
+
+// arithmetic.h
+#define INCREMENT_AMOUNT 1
+int increment(int x);
+
+   And I add this new function definition to arithmetic.c:
+// arithemtic.c
+
+int increment(int x) {
+	return x + INCREMENT_AMOUNT;
+}
+
+   Finally, I add a quick unit test for this new function in my src/main.zig file:
+
+test "test increment" {
+	try std.testing.expectEqual(@as(i32, 6), arithmetic.increment(5));
+}
+
+   If Zig is ignoring the C header #include directives, this should either cause a compilation error or
+   my tests should stop passing. Time to run the new test:
+
+$> zig build test --summary all
+Build Summary: 3/3 steps succeeded; 2/2 tests passed
+test success
++- run test 2 passed 830us MaxRSS:1M
+   +- zig test Debug native success 2s MaxRSS:201M
+
+   It passed! This shows that Zig has a convenient feature of following #include references in my C
+   sources, which makes calling into C code easier than any other language I've used.
+
+Summary
+   This article showed the simplest example I could think of for showing how to call C code from Zig.
+
+   Using this technique, it's possible to port a piece of a C library to the Zig build system and then
+   use Zig to call into that library.
+
+
+---
+[**1]
+https://zig.news/kristoff/compile-a-c-c-project-with-zig-368j
+
+Compile a C/C++ Project with Zig
+
+     Zig is not just a programming language but also a toolchain that can help you maintain and
+     gradually modernize existing C/C++ projects, based on your needs. In this series we're using
+     Redis, a popular in-memory key value store written in C, as an example of a real project that can
+     be maintained with Zig. You can read more in "Maintain it with Zig".
+
+What is Zig?
+   Zig is a programming language with no runtime, a focus on simplicity, and great C interoperability.
+   Zig bundles LLVM to create optimized release builds and so it's also a full-fledged C/C++ compiler.
+
+   Zig has zig cc and zig c++, two commands that expose an interface flag-compatible with clang,
+   allowing you to use the Zig compiler as a drop-in replacement for your existing C/C++ compiler.
+
+   For a more complete overview you can check out https://ziglang.org.
+
+Why not just stick with gcc/clang/msvc?
+   As we'll see in the next posts in this series, there are a few different reasons to consider making
+   Zig your default C/C++ compiler, but for now let's just focus on some basic advantages that you can
+   get without any extra effort.
+
+Ease of setup
+   Zig is distributed as a ~40MB archive (by comparison LLVM is about 200MB). Unzip it and you're good
+   to go. No extra dependencies needed. The only (optional) extra step is to include zig to your PATH,
+   to be able to invoke compilation from any directory.
+
+   This is great for creating build pipelines, for example: no complex Chef scripts, Docker containers
+   or VM images. Just download, unzip and run.
+
+Caching system
+   Making a change to a single compilation unit should not trigger a full recompilation of the entire
+   project. If you're using a build system like Make, then you're good, but if you're just using a
+   simple build script that invokes the compiler directly, you're out of luck... unless you use Zig.
+
+   Zig keeps track of all dependencies for each compilation unit and can compile your project
+   incrementally without requiring any configuration or external build system.
+
+Better defaults
+   By default Zig enables all the features present in your CPU (e.g. SSE, AVX), producing more efficient
+   binaries out of the box than other compilers. In debug builds Zig also enables UBSAN by default.
+
+   Finally, all of this is especially relevant when it comes to common libraries like libc, libcxx,
+   compiler-rt, tsan, libunwind. All these libraries are bundled in Zig in source form and gain native
+   improvements when being built for your native target.
+
+Compiling Redis with Zig
+   Let's see how hard it is to compile Redis with Zig. Note that Redis doesn't support Windows so you
+   will need a Linux/macOS/BSD host to reproduce the following steps.
+
+Download Zig
+   Read the getting started guide to learn how to get a copy of Zig. You can choose between
+   downloading a tarball directly and using a package manager.
+
+!! VERY IMPORTANT NOTE !!
+   To be able to follow along and reproduce this blog post, you will need to use Zig 0.8.1 and commit
+   be6ce8a of Redis. Both Zig and Redis are being actively developed and over time things will change,
+   potentially breaking the code in this series. Of course the same general approach will keep working
+   over time but this is the only way of guaranteeing that you can follow along and have everything work
+   first try.
+
+Get Redis
+   You can get a copy of Redis by cloning the official repository.
+git clone https://github.com/redis/redis.git
+
+# Don't forget to checkout the right commit
+git checkout be6ce8a
+
+Compile!
+   If you read Redis' README you can see that to build it all you need to do is call make. To make make
+   use Zig, all you have to do is specify a couple of variables when invoking the command.
+make CC="zig cc" CXX="zig c++"
+
+   If you're wondering why we are also specifying a C++ compiler, it's because jemalloc, one of Redis'
+   optional dependencies, is a C++ project.
+
+   If everything went well, you should see a message inviting you to run the tests and freshly build
+   executables inside src.
+
+   If you got something wrong, make sure to run make distclean before trying again.
+
+
+---
+[**2]
+https://krowemoh.com/devlog/extending-a-c-project-with-zig.html
+
+Extending a C Project with Zig
+2023-10-01
+
+   In this post I'm going to take a plain C project and get it running with Zig and then have the C
+   project call a Zig function.
+
+   It is now 2023 so there have been some changes and I think having more examples may be helpful going
+   forward.
+
+   We will be using Zig 0.11. 0.12 is available but has a regression that I believe affects me.
+
+   This is also a very real project and so I'm going to outline the hacks I made to get things to work.
+   I'll need to go back and fix them properly at some point.
+
+ScarletDME
+   The project I'm going to extend with Zig is called ScarletDME. It is a multivalue (pick) database
+   environment where the core idea is that everything is a string. All the fields of a record are
+   delimited by special characters and each field could contain a variable number of things with in.
+   These things are also delimited by another special character.
+
+   ScarletDME is a fork of OpenQM 2.6 and I think it would be fun to hack on. The fork I'm playing with
+   is what I'm gonig to use in this post. It's funny that the project that I'm extending is a database
+   similar to Loris's redis post. Maybe databases lends themselves to this stuff.
+
+   I've cleaned up the Makefile so that it was as simple as possible. I figured this would give me the
+   best chance to get everything working with zig.
+
+   I want to learn to use Zig and I want to hack on ScarletDME so I think this would be a good way to do
+   that.
+
+Getting ScarletDME
+   The first step is to get a copy of my version of ScarletDME and to checkout the commit before I
+   started hacking zig into things.
+$> git clone https://github.com/Krowemoh/ScarletDME
+$> git checkout 1d6838b
+
+   You can then install ScarletDME by doing:
+$> make
+$> sudo make install
+
+   You may have issues here with dependencies. You will need gcc, make, openssl headers and possibly
+   more. There shouldn't be anything too wild here.
+
+   Start ScarletDME:
+$> sudo qm -start
+$> cd /usr/qmsys
+$> qm
+
+   This should place you inside the ScarletDME environment. You can exit by simply typing in OFF.
+
+   This is enough to get things going. I'll be showing a tiny bit of the Pick system and Pick BASIC
+   further down.
+
+Compiling ScarletDME with zig cc
+   Now that we have ScarletDME installed and building, it's time to take a look at the Makefile.
+
+# default target builds 64-bit, build qm32 target for a 32-bit build
+
+COMP      := gcc
+OSNAME    := $(shell uname -s)
+
+MAIN      := $(shell pwd)/
+GPLSRC    := $(MAIN)gplsrc/
+GPLDOTSRC := $(MAIN)utils/gpl.src
+
+GPLOBJ    := $(MAIN)gplobj/
+GPLBIN    := $(MAIN)bin/
+DEPDIR    := $(MAIN)deps/
+
+ifeq (Darwin,$(OSNAME))
+	L_FLAGS  := -lm -ldl -lcrypto
+	INSTROOT := /opt/qmsys
+	SONAME_OPT := -install_name
+else
+	L_FLAGS  := -Wl,--no-as-needed -lm -lcrypt -ldl -lcrypto
+	INSTROOT := /usr/qmsys
+	SONAME_OPT := -soname
+endif
+
+QMSRCS   := $(shell cat $(GPLDOTSRC))
+QMTEMP   := $(addsuffix .o,$(QMSRCS))
+QMOBJSD  := $(addprefix $(GPLOBJ),$(QMTEMP))
+
+SOURCES := $(filter-out gplsrc/qmclient.c, $(wildcard gplsrc/*.c))
+OBJECTS = $(patsubst gplsrc/%.c, gplobj/%.o, $(SOURCES))
+
+TARGETS = $(OBJECTS) $(GPLBIN)qmclilib.so $(GPLBIN)qmtic $(GPLBIN)qmfix $(GPLBIN)qmconv $(GPLBIN)qmidx $(GPLBIN)qmlnxd terminfo
+
+C_FLAGS = -Wall -Wformat=2 -Wno-format-nonliteral -DLINUX -D_FILE_OFFSET_BITS=64 -I$(GPLSRC) -DGPL -g $(ARCH) -fPIE -fPIC -MMD -MF $(DEPDIR)/$*.d
+
+qm: ARCH :=
+qm: $(TARGETS)
+	@echo "Linking qm."
+	@$(COMP) $(ARCH) $(L_FLAGS) $(QMOBJSD) -o $(GPLBIN)qm
+
+qm32: ARCH := -m32
+qm32: $(TARGETS)
+	@echo "Linking qm."
+	@$(COMP) $(ARCH) $(L_FLAGS) $(QMOBJSD) -o $(GPLBIN)qm
+
+$(GPLBIN)qmclilib.so: $(GPLOBJ)qmclilib.o
+	$(COMP) -shared -Wl,$(SONAME_OPT),qmclilib.so -lc $(ARCH) $(GPLOBJ)qmclilib.o -o $(GPLBIN)qmclilib.so
+	$(COMP) -shared -Wl,$(SONAME_OPT),libqmcli.so -lc $(ARCH) $(GPLOBJ)qmclilib.o -o $(GPLBIN)libqmcli.so
+
+$(GPLBIN)qmtic: $(GPLOBJ)qmtic.o $(GPLOBJ)inipath.o
+	$(COMP) $(C_FLAGS) -lc $(GPLOBJ)qmtic.o $(GPLOBJ)inipath.o -o $(GPLBIN)qmtic
+
+$(GPLBIN)qmfix: $(GPLOBJ)qmfix.o $(GPLOBJ)ctype.o $(GPLOBJ)linuxlb.o $(GPLOBJ)dh_hash.o $(GPLOBJ)inipath.o
+	$(COMP) $(C_FLAGS) -lc $(GPLOBJ)qmfix.o $(GPLOBJ)ctype.o $(GPLOBJ)linuxlb.o $(GPLOBJ)dh_hash.o $(GPLOBJ)inipath.o -o $(GPLBIN)qmfix
+
+$(GPLBIN)qmconv: $(GPLOBJ)qmconv.o $(GPLOBJ)ctype.o $(GPLOBJ)linuxlb.o $(GPLOBJ)dh_hash.o
+	$(COMP) $(C_FLAGS) -lc $(GPLOBJ)qmconv.o $(GPLOBJ)ctype.o $(GPLOBJ)linuxlb.o $(GPLOBJ)dh_hash.o -o $(GPLBIN)qmconv
+
+$(GPLBIN)qmidx: $(GPLOBJ)qmidx.o
+	$(COMP) $(C_FLAGS) -lc $(GPLOBJ)qmidx.o -o $(GPLBIN)qmidx
+
+$(GPLBIN)qmlnxd: $(GPLOBJ)qmlnxd.o $(GPLOBJ)qmsem.o
+	$(COMP) $(C_FLAGS) -lc $(GPLOBJ)qmlnxd.o $(GPLOBJ)qmsem.o -o $(GPLBIN)qmlnxd
+
+terminfo: $(GPLBIN)qmtic
+	@echo Compiling terminfo library
+	@test -d qmsys/terminfo || mkdir qmsys/terminfo
+	cd qmsys && $(GPLBIN)qmtic -pterminfo $(MAIN)utils/terminfo.src
+
+gplobj/%.o: gplsrc/%.c
+	@mkdir -p $(GPLBIN)
+	@mkdir -p $(GPLOBJ)
+	@mkdir -p $(DEPDIR)
+	$(COMP) $(C_FLAGS) -c $< -o $@
+
+-include $(DEPDIR)/*.d
+
+install:
+	... install ...
+
+clean:
+	... clean ...
+
+   The core part of this makefile is the qm target. This is the first and default target and we can see
+   that it relies on a few things. The most important parts are that it requires qmtic, qmfix, qmconv,
+   qmidx and qmlnxd. These are all binaries that we need to build in addition to the main binary that is
+   qm.
+
+   There is also more logic about the install and copying files to the right places but I'm going to
+   leave that stuff out for now. The goal of this post is to extend C with zig not fully replace the
+   build system.
+
+   Before we write the build.zig file we should try to compile the project with zig. This is an easy to
+   check to see what kind of issues we might run into when we go to replace the build system.
+
+   In the Makefile change COMP to use zig cc:
+COMP     := zig cc
+
+   Now we can run make:
+$> make -j4
+
+   Might as well use the extra cores!
+
+   Now this should build everything properly and give us a qm binary in the bin folder.
+
+   Let's test it out, make sure to use the binary that we created, not the one that is currently
+   installed.
+$> cd /usr/qmsys
+$> /path/to/ScarletDME/bin/qm
+
+   Wham!
+
+   This should have resulted in the following error:
+Fault type 4. PC = 0000019B (A5 64) in $LOGIN
+Errno : 00000000
+4 01EF0270: 00 00 00000000 00000000
+3 01EF0258: 00 00 00000000 00000000
+2 01EF0240: 00 00 00000000 00000000
+1 01EF0228: 00 00 01EF5A10 00000000
+0 01EF0210: 00 00 00000000 00000000
+Illegal instruction
+
+   I wish I could say why the error is being thrown but I can't. There is some undefined behavior that
+   needs to be dealt with but that is future me's problem. Possibly future you as well.
+
+   Now gcc compiled this perfectly fine, this is because zig by default has ubsan enabled and so this is
+   getting caught in some safety check.
+
+   Let's remove that safety check. Update the zig cc command to be the following:
+COMP     := zig cc -O2
+
+   You can also use --fno-sanitize=undefined instead of O2.
+
+   Then do:
+$> make clean
+$> make -j4
+
+   Now we can try our near binary:
+cd /usr/qmsys
+/path/to/ScarletDME/bin/qm
+
+   Voila! If everything went well, we should be sitting at the ScarletDME TCL. Once again you can type
+   OFF to exit the pick database environment.
+
+   Now this shows that we can compile ScarletDME with Zig! We can move ever forward.
+
+Switching the Build System to Zig
+   The current build system uses make. It works well and the Makefile is quite simple. I think in a
+   larger project or a more complex one it would make much more sense why you would want to have zig be
+   the build system. In my case, I want to use zig with ScarletDME so switching the build system is
+   going to help with that.
+
+   As I mentioned above, we are going to focus on just the creation of binaries. At some point I might
+   move over the entire build process to zig but for now just generating the binaries with zig is going
+   to be helpful.
+
+   Below is the build.zig file that describes the creation of all the binaries.
+
+   The core thing to note here is that we need to set the optimize option and pass that into each
+   binaries. This is what will let us specify the optimization level we want to generate binaries with.
+   This is needed because we need to disable some of the safety checks that we ran into when we ran just
+   zig cc.
+
+   Another major note here is that it looks like the build system for zig isn't stable yet and so
+   function names like standardOptimizeOption and addExecutable are changing. If the compiler throws
+   errors at you, go directly to the zig github and search for the functions. It's likely that
+   stackoverflow and forums aren't going to be much help for awhile.
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+
+	const target = b.standardTargetOptions(.{});
+	const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = std.builtin.OptimizeMode.ReleaseFast });
+
+	const cflags = [_][]const u8{
+		"-Wall",
+		"-Wformat=2",
+		"-Wno-format-nonliteral",
+		"-DLINUX",
+		"-D_FILE_OFFSET_BITS=64",
+		"-DGPL",
+		"-fPIE",
+		"-fPIC",
+		"--fno-sanitize=undefined",
+	};
+
+	const qmtic = b.addExecutable(.{ .name = "qmtic", .optimize = optimize,  });
+	qmtic.linkLibC();
+
+	qmtic.addCSourceFiles(&.{
+			"gplsrc/qmtic.c",
+			"gplsrc/inipath.c"
+			}, &cflags);
+
+	b.installArtifact(qmtic);
+
+	const qmfix = b.addExecutable(.{ .name = "qmfix", .optimize = optimize,  });
+	qmfix.linkLibC();
+
+	qmfix.addCSourceFiles(&.{
+			"gplsrc/qmfix.c",
+			"gplsrc/ctype.c",
+			"gplsrc/linuxlb.c",
+			"gplsrc/dh_hash.c",
+			"gplsrc/inipath.c"
+			}, &cflags);
+
+	b.installArtifact(qmfix);
+
+	const qmconv = b.addExecutable(.{ .name = "qmconv", .optimize = optimize,  });
+	qmconv.linkLibC();
+
+	qmconv.addCSourceFiles(&.{
+			"gplsrc/qmconv.c",
+			"gplsrc/ctype.c",
+			"gplsrc/linuxlb.c",
+			"gplsrc/dh_hash.c",
+			}, &cflags);
+
+	b.installArtifact(qmconv);
+
+	const qmidx = b.addExecutable(.{ .name = "qmidx", .optimize = optimize,  });
+	qmidx.linkLibC();
+
+	qmidx.addCSourceFiles(&.{
+			"gplsrc/qmidx.c",
+			}, &cflags);
+
+	b.installArtifact(qmidx);
+
+	const qmlnxd = b.addExecutable(.{ .name = "qmlnxd", .optimize = optimize,  });
+	qmlnxd.linkLibC();
+
+	qmlnxd.addCSourceFiles(&.{
+			"gplsrc/qmlnxd.c",
+			"gplsrc/qmsem.c",
+			}, &cflags);
+
+	b.installArtifact(qmlnxd);
+
+	const qm = b.addExecutable(.{ .name = "qm", .optimize = optimize, });
+
+	qm.linkLibC();
+	qm.linkSystemLibrary("m");
+	qm.linkSystemLibrary("crypt");
+	qm.linkSystemLibrary("dl");
+	qm.linkSystemLibrary("crypto");
+
+	qm.addCSourceFiles(&.{
+			... c files ...
+			}, &cflags);
+
+	b.installArtifact(qm);
+}
+
+   For the most part the build.zig file is a straight translation of the Makefile above. I did some work
+   simplifying it but I think zig is doing something quite well for everything to be this
+   straightforward.
+
+   Now at this point we can build ScarletDME with zig!
+$> zig build
+
+   This should take a hot second but everything should get generated. Zig will place the binaries in the
+   zig-out/bin folder. We will just be using the qm binaries from this folder to test things.
+
+   Like before we will cd to the qmsys directory and this time we will use the zig generated binary.
+$> cd /usr/qmsys
+$> /path/to/ScarletDME/zig-out/bin/qm
+
+   Boom!
+
+   We should see a familiar error:
+Fault type 4. PC = 0000019B (A5 64) in $LOGIN
+Errno : 00000000
+4 01EF0270: 00 00 00000000 00000000
+3 01EF0258: 00 00 00000000 00000000
+2 01EF0240: 00 00 00000000 00000000
+1 01EF0228: 00 00 01EF5A10 00000000
+0 01EF0210: 00 00 00000000 00000000
+Illegal instruction
+
+   When we run zig build it will default to the debug build for some reason.
+
+   We need to set the release option to true to get it to compile without the safety checks.
+$> zig build
+
+   This does seem silly as the preferred_optimize_mode is set to ReleaseFast. I'm probably doing
+   something wrong here.
+
+   Now we can try again:
+$> cd /usr/qmsys
+$> /path/to/ScarletDME/zig-out/bin/qm
+
+   This time we should be successful!
+
+   Now we have the build system switched out for zig. This finishes the groundwork that we needed to do
+   to start writing functions in zig.
+
+Extending ScarletDME with Zig
+   The main course! It is now time to write a very simple zig function and have ScarletDME call it.
+
+   Luckily I've already done work of wiring up some functions.
+
+   I added Big Integer functions to ScarletDME and I want to switch them from being in C to being in
+   Zig. This means that we can simply replace the op_sadd function that I wrote with a new one in Zig.
+
+   The first step is to create a folder called src. This is what will contain any future zig code.
+$> mkdir src
+
+   The next step is to update build.zig to include our new zig file.
+..
+
+const zmath = b.addStaticLibrary(.{
+	.name = "op_zmath",
+	.root_source_file = .{ .path = "src/op_zmath.zig" } ,
+	.optimize = optimize,
+	.target = target,
+});
+
+zmath.linkLibC();
+zmath.addIncludePath(.{ .path = "gplsrc" });
+zmath.addIncludePath(.{ .path = "src" });
+
+const qm = b.addExecutable(.{ .name = "qm", .optimize = optimize, });
+
+qm.linkLibC();
+qm.linkSystemLibrary("m");
+qm.linkSystemLibrary("crypt");
+qm.linkSystemLibrary("dl");
+qm.linkSystemLibrary("crypto");
+
+qm.addCSourceFiles(&.{
+	... c files ...
+}, &cflags);
+
+qm.linkLibrary(zmath);
+
+b.installArtifact(qm);
+
+   We have added a new file called op_zmath.zig and added it as a static library.
+
+   Before we actually create op_zmath.zig, we need to get change op_smath.c and remove the op_sadd
+   function. If we leave it in, we will get conflicting function names.
+
+   Open up gplsrc/op_smath.c and update the function name to:
+void op_saddC() {
+
+   Now we can use op_sadd in our zig file.
+
+   Create src/op_zmath.zig and add the following:
+const std = @import("std");
+
+const qm = @cImport({
+	@cInclude("qm.h");
+});
+
+export fn op_sadd() void {
+	const c_string = "3";
+
+	qm.process.status = 0;
+
+	qm.e_stack = qm.e_stack - 1;
+	qm.e_stack = qm.e_stack - 1;
+
+	qm.e_stack = qm.e_stack + 1;
+	qm.k_put_c_string(c_string, qm.e_stack);
+}
+
+   The code here isn't so important. The core thing is that we include qm.h and this is what gives us
+   access to everything we need. qm.h. qm.h is the main header file for the entire project and so it
+   includes all the other headers. This means that we can import in qm and get access to every header
+   that it is including as well.
+
+   Now we should be able to build ScarletDME, we'll need to make sure to build the release version or we
+   will get the illegal instruction error.
+$> zig build
+
+   This should fail.
+/cimport.zig:1555:10: error: opaque types have unknown size and therefore cannot be directly embedded in unions
+...
+cimport.zig:1547:27: note: opaque declared her
+
+   Zig generates a cimport.zig file for the header file that we imported in and so we can take a look at
+   that file to see what the issue might be. Luckily for this error it actually tells us what's going
+   on.
+
+   Line 1547:
+// /home/nivethan/bp/ScarletDME/gplsrc/descr.h:366:17: warning: struct demoted to opaque type - has bitfield
+const struct_unnamed_19 = opaque {};
+
+   The struct_unnamed_19 has bitfields and so zig immediately made it something we can't see into it.
+   This opaque struct is however being used inside a union. This isn't allowed for probably a good
+   reason but one that I don't know.
+
+   However! I do know I can get around it by making it into a pointer instead of embedding the struct
+   directly into the union. This is likely because zig doesn't know size of the opaque struct and so it
+   can't embed it directly. However a pointer can be embedded so let's do that.
+
+   Line 1555:
+dir: ?*struct_unnamed_19,
+
+   All these names and line numbers may not match your own so read the errors carefully. Zig definitely
+   has room to improve in the way errors are shown to the user.
+
+   Now we can run zig build again:
+$> zig build
+
+   This will also fail. This time however it will be a little bit better.
+src/op_zmath.zig:18:23: error: expected type '[*c]u8', found '*const [1:0]u8'
+
+   This error is a bit hard to understand. Especially since I still don't understand. I reached out on
+   irc and andrewrk told me that consting on the C side should help.
+
+   This means that we need to update k_put_c_string. It would be better to figure out what is going
+   wrong but for now hacking it to work is enough.
+
+gplsrc/qm.h
+void k_put_c_string(const char * s, DESCRIPTOR * descr)
+
+   We just need to add const in front of the char * and away we go.
+
+   We also need to update the k_funcs.c file, this contains the actual definition of k_put_c_string.
+
+gplsrc/k_funcs.c
+void k_put_c_string(const char* s, DESCRIPTOR* descr) {
+
+   Now we should be able to try our build again.
+$> zig build
+
+   We will now get the error from before about the opaque struct. We need to make the same change again.
+   The reason is because we have updated the C files and so the cache has refreshed with new items.
+
+   Once the union has the pointer to the opaque struct, we should be able to run zig build once more.
+$> zig build
+
+   Voila! This time we should have a fully built version of ScarletDME.
+
+   Now we can try our brand spanking new function. It won't do much but it will prove that everything is
+   working.
+$> cd /usr/qmsys
+$> /path/to/ScarletDME/zig-out/bin/qm
+
+   We should be at TCL now. We will need to write a very small Pick basic program. This will require
+   using the ED editor.
+$> ED BP TEST
+
+   This will put you in a file called TEST.
+
+   Type I to get into insert mode. Press Enter a few times to get out of insert mode.
+:ED BP TEST
+BP TEST
+New record
+----: I
+0001= PRINT SADD(3,2)
+0002= END
+0003=
+Bottom at line 2
+----: FI
+'TEST' filed in BP
+:
+
+   Enter the above exactly. On Line 3 I pressed enter to exit the editor. Then FI will file the record.
+
+   Now we can compile the program:
+:BASIC BP TEST
+Compiling BP TEST
+0 error(s)
+Compiled 1 program(s) with no errors
+
+   Now to run it:
+:RUN BP TEST
+3
+:
+
+   Our function doesn't do much besides returning 3 but it does show that ScarletDME is now calling our
+   zig function!
+
+   With that we come to a close. We have now taken a real C project and switched the build system for
+   zig and also extended it with a zig function.
+
+   Hopefully this will be helpful in extending other C programs :)
+
+
+---
+

@@ -1,0 +1,183 @@
+filename: rclone-managing-cloud-based-data-storage-20250620.txt
+https://towardsdatascience.com/managing-your-cloud-based-data-storage-with-rclone-32fff991e0b3/
+
+Managing Your Cloud-Based Data Storage with Rclone
+
+How to optimize data transfer across multiple object storage systems
+Nov 22, 2023
+
+As companies become more and more dependent on cloud-based storage solutions, it is imperative that they have
+the appropriate tools and techniques for effective management of their big data. In previous posts (e.g.,
+[here](https://towardsdatascience.com/training-from-cloud-storage-with-s5cmd-5c8fb5c06056) and here) we have
+explored several different methods for retrieving data from cloud storage and demonstrated their effectiveness
+at different types of tasks. We found that the most optimal tool can vary based on the specific task at hand
+(e.g., file format, size of data files, data access pattern) and the metrics that we wish to optimize (e.g.,
+latency, speed, or cost). In this post, we explore yet another popular tool for cloud-based storage management
+- sometimes referred to as "the Swiss army knife of cloud storage" - the rclone command-line utility.
+Supporting more than 70 storage service providers, rclone supports similar functionality to vendor-specific
+storage management applications such as AWS CLI (for Amazon S3) and gsutil (for Google Storage). But does it
+perform well enough to constitute a viable alternative? Are there situations in which rclone would be the tool
+of choice? In the following sections we will demonstrate rclone's usage, assess its performance, and highlight
+its value in a particular use-case - transferring data across different object storage systems.
+
+Disclaimers
+	This post is not, by any means, intended to replace the official rclone documentation. Nor is it intended
+	to be an endorsement of the use of rclone or any of the other tools we should mention. The best choice for
+	your cloud-based data management will greatly depend on the details of your project and should be made
+	following thorough, use-case specific testing. Please be sure to re-evaluate the statements we make
+	against the most up to date tools available at the time you are reading this.
+
+Data Retrieval from Cloud Storage with Rclone
+The following command line uses rclone sync in order to sync the contents of a cloud-based object-storage
+path with a local directory. This example demonstrates the use of the Amazon S3 storage service but
+could just as easily have used a different cloud storage service.
+
+$> rclone sync -P
+	--transfers 4
+	--multi-thread-streams 4
+	S3store:my-bucket/my_files ./my_files
+
+The rclone command has dozens of flags for programming its behavior.
+
+* The -P flag outputs the progressof the data transfer including the transfer rate and overall time. In the
+  command above we included two (of the many) controls that can impact rclone's runtime performance:
+
+* The --transfers flag determines the maximum number of files to download concurrently and
+
+* --multi-thread-streams determines the maximum number of threads to use to transfer a single file. Here we
+  have left both at their default values (4).
+
+Rclone's functionality relies on the appropriate definition of the rclone configuration file. Below
+we demonstrate the definition of the remote S3store object storage location used in the command line above.
+
+[S3store]
+	type = s3
+	provider = AWS
+	access_key_id = <id>
+	secret_access_key = <key>
+	region = us-east-1
+
+Now that we have seen rclone in action, the question that arises is whether it provides any value over the
+other cloud storage management tools that are out there such as the popular AWS CLI. In the next two sections
+we will evaluate the performance of rclone compared to some of its alternatives in two scenarios that we have
+explored in detail in our previous posts: 1) downloading a 2 GB file and 2) downloading hundreds of 1 MB
+files.
+
+Use Case 1: Downloading a Large File
+The command line below uses the AWS CLI to download a 2 GB file from Amazon S3. This is just one of the
+many of methods we evaluated in a previous post. We use the linux time command to measure the performance.
+
+$> time aws s3 cp s3://my-bucket/2GB.bin .
+
+The reported download time amounted to roughly 26 seconds (i.e., ~79 MB/s). Keep in mind that this value
+was calculated on our own local PC and can vary greatly from one runtime environment to another. The
+equivalent rclone copy command appears below:
+$> rclone sync -P S3store:my-bucket/2GB.bin .
+
+In our setup, we found the rclone download time to be more than two times slower than the standard AWS
+CLI. It is highly likely that this could be improved significantly through appropriate tuning of the
+rclone control flags.
+
+Use Case 2: Downloading a Large Number of Small Files
+In this use case we evaluate the runtime performance of downloading 800 relatively small files of size
+1 MB each. In a previous blog post we discussed this use case in the context of streaming data samples
+to a deep-learning training workload and demonstrated the superior performance of s5cmd beast mode. In
+beast mode we create a file with a list of object-file operations which s5cmd performs in using multiple
+parallel workers (256 by default). The s5cmd beast mode option is demonstrated below:
+$> time s5cmd --run cmds.txt
+
+The cmds.txt file contains a list of 800 lines of the form:
+$> cp s3://my-bucket/small_files/<i>.jpg <local_path>/<i>.jpg
+
+The s5cmd command took an average time of 9.3 seconds (averaged over ten trials).
+
+Rclone supports a functionality similar to s5cmd's beast mode with the files-from command line
+option. Below we run rclone copy on our 800 files with the transfers value set to 256 to match the
+default concurrency settings of s5cmd.
+
+$> rclone -P --transfers 256 --files-from files.txt S3store:my-bucket /my-local
+
+The files.txt file contains 800 lines of the form:
+small_files/<i>.jpg
+
+The rclone copy of our 800 files took an average of 8.5 seconds, slightly less than s5cmd (averaged over
+ten trials).
+
+We acknowledge that the results demonstrated thus far may not be enough to convince you to prefer rclone
+over your existing tools. In the next section we will describe a use case that highlights one of the
+potential advantages of rclone.
+
+Data Transfer Between Object Storage Systems
+These days it is not uncommon for development teams to maintain their data in more than one object
+store. The motivation behind this could be the need to protect against the possibility of a storage failure
+or the decision to use data-processing offerings from multiple cloud service providers. For example, your
+solution for AI development might rely on training your models in the AWS using data in Amazon S3 and
+running data analytics in Microsoft Azure using the same data stored in Azure Storage. Additionally, you
+may want to maintain a copy of your data in a local storage infrastructure such as FlashBlade, Cloudian,
+or VAST. These circumstances require the ability to transfer and synchronize your data between multiple
+object stores in a secure, reliable, and timely fashion.
+
+Some cloud service providers offer dedicated services for such purposes. However, these do not always address
+the precise needs of your project or may not enable you the level of control you desire. For example,
+Google Storage Transfer excels at speedy migration of all of the data within a specified storage folder,
+but does not (as of the time of this writing) support transferring a specific subset of files from within it.
+
+Another option we could consider would be to apply our existing data management towards this purpose. The
+problem with this is that tools such as AWS CLI and s5cmd do not (as of the time of this writing)
+support specifying different access settings and security-credentials for the source and target storage
+systems. Thus, migrating data between storage locations requires transferring it to an intermediate
+(temporary) location. In the command below we combine the use of s5cmd and AWS CLI to copy a file from
+Amazon S3 to Google Storage via system memory and using Linux piping:
+
+s5cmd cat s3://my-bucket/file
+      | aws s3 cp --endpoint-url https://storage.googleapis.com
+      --profile gcp - s3://gs-bucket/file
+
+While this is a legitimate, albeit clumsy way of transferring a single file, in practice, we may need
+the ability to transfer many millions of files. To support this, we would need to add an additional
+layer for spawning and managing multiple parallel workers/processors. Things could get ugly pretty quickly.
+
+Data Transfer with Rclone
+Contrary to tools like AWS CLI and s5cmd, rclone enables us to specify different access settings for the
+source and target. In the following rclone config file we add settings for Google Cloud Storage (GCS)
+access. (Here we treat GCS as an S3 provider. See here for other configuration options.)
+
+[S3store]
+    type = s3
+    provider = AWS
+    access_key_id = <id>
+    secret_access_key = <key>
+
+[GSstore]
+    type = s3
+    provider = GCS
+    access_key_id = <id>
+    secret_access_key = <key>
+    endpoint = https://storage.googleapis.com
+
+Transferring a single file between storage systems has the same format as copying it to a local directory:
+$> rclone copy -P S3store:my-bucket/file GSstore:gs-bucket/file
+
+However, the real power of rclone comes from combining this feature with the files-from option described
+above. Rather than having to orchestrate a custom solution for parallelizing the data migration, we can
+transfer a long list of files using a single command:
+
+rclone copy -P --transfers 256 --files-from files.txt S3store:my-bucket/file GSstore:gs-bucket/file
+
+In practice, we can further accelerate the data migration by parsing the list of object files into smaller
+lists (e.g., with 10,000 files each) and running each list on a separate compute resource. While the
+precise impact of this kind of solution will vary from project to project, it can provide a significant
+boost to the speed and efficiency of your development.
+
+Summary
+In this post we have explored cloud-based storage management using rclone and demonstrated its application to
+the challenge of maintaining and synchronizing data across multiple storage systems. There are undoubtedly
+many alternative solutions for data transfer. But there is no questioning the convenience and elegance
+of the rclone-based method.
+
+This is just one of many posts that we have written on the topic of maximizing the efficiency of
+cloud-based storage solutions. Be sure to check out some of our other posts on this important topic.
+
+
+---
+

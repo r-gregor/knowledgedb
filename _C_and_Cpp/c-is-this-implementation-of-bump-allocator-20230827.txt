@@ -1,0 +1,175 @@
+filename: c_is-this-implementation-of-bump-allocator_20230827.txt
+https://stackoverflow.com/questions/62076569/is-this-implementation-of-malloc-a-bump-allocator
+
+Is this implementation of malloc a bump allocator?
+
+   I recently wrote a small malloc and was wondering if it was a bump allocator. I wonder this because
+   (correct me if I am wrong) I believe the actual malloc (while using mmap instead of sbrk) uses the
+   same technique (sort of), but a bump allocator just increments the heap location. Here is my code:
+
+#include <cstdio>
+#include <cstddef>
+#include <unistd.h>
+
+#define word_size sizeof(intptr_t)
+#define align(n) ((n + word_size - 1) & ~(word_size - 1))
+
+void* my_malloc(size_t size) {
+	void* p = sbrk(0);
+	if (sbrk(align(size)) == (void*) -1)
+		return NULL; // failed
+	return p;
+}
+
+int main() {
+	int* foo = (int*) my_malloc(1);
+	*foo = 100;
+	printf("%d\n", *foo);
+}
+
+***
+     * I don't know that this is a bump allocator because I don't see where everything is freed up all
+       at once. I would imagine the first allocation would save the return from sbrk(0), which defines
+       the start of the quasi-arena, and the free operation would put that value back with brk(oldaddr).
+     * Mostly yes, I would think so, though the whole topic is new to me. The idea behind a bump
+       allocator seems to be that you just "bump" the end of memory forward to handle each request, but
+       you cannot free things up one item at a time - you free everything at once. I've seen a reference
+       that suggests you need to know how many requests have been made, but I don't see how that's
+       useful.
+
+***
+   So I had never heard the term "bump allocator" before, but the concept is straightforward.
+
+   It's a really naive allocator that can be very fast due to the tiny amount of housekeeping involved,
+   but you have to live with a pretty heavy constraint: there's no "free" operation for individual
+   request - you just destroy the whole thing.
+
+   In your case, you're calling sbrk(0) to get the first address at the end of the program's whole data
+   segment - this will be the return value - then "bump" the end of memory with sbrk(nbytes) after
+   suitably rounding it up.
+
+   This means that the program's data space just grows up for each request, and trying to free something
+   doesn't make any sense because you can't just put a hole in the address space (well, there's probably
+   some funky VM stuff that would work, but that gets complicated).
+
+static void *bump_arena_start = 0;
+
+void* my_malloc(size_t size) {
+	void* p = sbrk(0);
+
+	if (bump_arena_start == 0) bump_arena_start = p;
+
+	if (sbrk(align(size)) == (void*) -1)
+		return NULL; // failed
+	return p;
+}
+
+void destroy_bump_arena(void) {
+	if (bump_arena_start) brk(bump_arena_start);
+}
+
+   This would probably be a bump allocator, but it would be a terrible one for a bunch of reasons.
+
+   First: it assumes that nobody else is allocating memory, it would have to override all other
+   operations: malloc, C++ new, everything in the C runtime, etc.
+
+   Imagine what would happen if you're doing your own thing with the break, and then some other function
+   calls sbrk() to allocate some memory. Now they are in the middle of your arena but you mostly don't
+   know it. So far no problem, but as soon as you go to destroy your arena, it kills everything else.
+
+   The way you'd actually use such a thing is when you have a lot of tiny allocations that you don't
+   want to keep track of and can release all at once, so you might use the system allocator (malloc())
+   and ask for a large-enough chunk to handle your needs - let's call it 32kbytes - and stuff this into
+   some object representing this bump arena.
+
+   You allocate lots of little bits here and there, do whatever task you need to do, then destroy all of
+   it by freeing that initial 32-kbyte chunk.
+
+   The thing is: you have to be super careful that you don't let one of these pointers escape to other
+   parts of the system, because they aren't allowed to live beyond the lifetime of your arena.
+
+   This is just a really specialized use case that's probably not generally useful, and unless you're
+   doing embedded work (where you are essentially controlling your own runtime), you couldn't really do
+   one with the system break this way.
+
+   Side note: you can get into trouble with alignment if you have objects larger than the size of an
+   integer pointer. What if you did this?
+   int        *foo1 = my_malloc(sizeof(int));          // 8 bytes (usually)
+   __int128   *foo2 = my_malloc(sizeof(__int128));     // 16 bytes
+
+   The naive alignment would put the int on an 8-byte boundary, but so would the 128-bit value (which is
+   16 bytes), not aligned to its own size; on some platforms that's probably an error, and it's almost
+   always inefficient.
+
+   To do it right you'd query the current next-value via sbrk(0) and insure it was aligned properly for
+   the size, possibly bumping up the break a bit.
+
+   EDIT: I have looked into this a bit more, and it's pretty clear that your example doesn't quite count
+   as a bump allocator. Here's why.
+
+   The memory system not only keeps track of the "next" pointer, but how many allocations have been
+   performed, and it supports a pseudo-free operation that ignores the pointer value but just decrements
+   the allocation counter.
+
+   If the allocation counter ever reaches zero, this means nobody else has any of that memory, so it can
+   free everything by rewinding the break to the initial value, essentially starting over with a clean
+   slate.
+
+   To use this properly you'd have to really be careful about your deallocations, and a double-free
+   could be very painful.
+
+   Really useful reference: https://os.phil-opp.com/allocator-designs/
+
+   EDIT2 - a bit more about alignment per request.
+   You have to have at least some awareness of alignment no matter what platform you're on, because even
+   if the platform allows unaligned access to memory, it's almost always slower.
+
+   The super easy way to always get it right is to figure out the largest possible scalar object
+   supported on the platform, and use that as your alignment modulo, perhaps __int128. If you're always
+   rounding up to the nearest 16 bytes, you'll pretty much never run into an alignment issue (plus it's
+   easy).
+
+   But it's also space-inefficient: if you're allocating space for a two-byte short, it will waste the
+   14 bytes after it. That might be no big deal in your application, or it might be a thing.
+
+   I have never written a memory allocator myself, so I'm doing a lot of handwaving here, but anybody
+   using a bump allocator has some specialized requirements and is probably OK with making specialized
+   requests.
+
+   So: I could imagine an allocator that takes not just the size, but also the alignment required, and
+   it would take the sbrk(0) pointer and round that up the required alignment, save that as the return
+   value, then call sbrk(size) to bump the end marker.
+
+   Note that you're not aligning to the size of the allocation, but only the size of the low-level item:
+   asking for an array of 20 short values means you're asking for 40 bytes but with an alignment of 2,
+   and 100 bytes for a string means you just take the next 100 bytes w/o any alignment.
+
+void *my_malloc(size_t nbytes, size_t align = 8) {
+	void *p = sbrk(0);
+	p += round up but too hard to think on Friday
+	sbrk(nbytes);
+	num_allocations++;
+	return p;
+}
+
+   This way, if you don't give an alignment size, it makes the same safe assumption you did, but you
+   could always ask if you wanted to be special.
+
+   Again: I'm mostly just making this up, I've never had to think about it this way, but I do know that
+   if I'm working on a memory-constrained platform such as an Arduino with RAM measured in kilobytes,
+   you have to think about this.
+
+***
+	 * Just a small question before I mark as the correct answer: The aligning that I'm doing-- does it
+	   really help in this case? Btw, +1-- nice answer.
+	 * I've expanded on my post. Yes, you absolutely have to think about alignment, because most
+	   platforms do not let you access scalar values on non-aligned boundaries (say, reading an int
+	   stored at an odd address). Some platforms do allow it, but it incurs a lot of performance
+	   penalties.
+	 * So, if I understood correctly, my implementation does the alignment correctly?
+	 * I would say yes.
+
+
+
+---
+

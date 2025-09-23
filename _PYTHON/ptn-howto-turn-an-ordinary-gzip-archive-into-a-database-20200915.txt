@@ -1,0 +1,211 @@
+filename: How-to-turn-an-ordinary-gzip-archive-into-a-database_20200915.txt
+https://rushter.com/blog/gzip-indexing/
+
+How to turn an ordinary gzip archive into a database
+August 25, 2020
+
+   This article demonstrates how specially crafted but ordinary gzip archives can be used as a database
+   like storage. It also introduces a Python package and explains how it works.
+
+   gzip is a popular file compression format to store large amounts of raw data. It has a good data
+   compression ratio, but relatively slow compression/decompression speed.
+
+   Many companies use it in Big data applications when they need to store compressed CSV or JSON lines
+   files. Such file formats are row-oriented and usually processed line by line. gzip can save a lot of
+   space, especially when you have repetitive field names in JSON files.
+
+   Unfortunately, a compressed file can only be accessed in the streaming fashion. Even if you have a
+   sorted file and you know that you don't need the first half of the file - you can't jump to an
+   arbitrary point in a file without starting decompressing it from the start of the file.
+
+gzip format
+   A single gzip archive can only contain one file. Any gzip file starts with a magic number (1f 8b)
+   followed by a 10-byte header that contains metadata. After the header, it contains compressed data
+   followed by CRC32 checksum and the size of the original file.
+
+   The most interesting detail about the format is that gzip [7]RFC allows multiple compressed files to
+   be concatenated into a single file. Since gzip only allows to compress one file, multiple
+   concatenated archives will still produce one file when decompressing.
+
+   Here is how two concatenated gzip files look like:
+   
+   +--------------+
+   | magic number |
+   +--------------+
+   |  meta data   |
+   +--------------+
+   |  compressed  |
+   |     data     |
+   |              |
+   +--------------+
+   |   CRC32 and  |
+   |  input size  |
+   +--------------+
+          |
+          V
+   +--------------+
+   | magic number |
+   +--------------+
+   |  meta data   |
+   +--------------+
+   |  compressed  |
+   |     data     |
+   |              |
+   +--------------+
+   |   CRC32 and  |
+   |  input size  |
+   +--------------+
+
+
+   You can think of it as concatenating two txt files. The final file will have content from both files.
+   To combine multiple compressed files, you can use the cat command from GNU tools.
+$ echo '123' | gzip > 1.txt.gz
+$ echo '456' | gzip > 2.txt.gz
+$ cat 1.txt.gz 2.txt.gz > 3.txt.gz
+$ zcat 3.txt.gz
+123
+456
+
+   *** The zcat command is an alias to gunzip -c. ***
+
+Semi-random access
+   An ability to concatenate multiple archives is a very handy property. By exploiting this feature and
+   trading a little bit of speed and disk space, we can achieve semi-random access. By random access, I
+   mean the ability to read an arbitrary offset of data from a file without reading the whole file.
+
+   To implement semi-random access, we need to split our uncompressed input into small chunks and
+   compress them separately. We can chunk it by the number of lines. We can also chunk it by the number
+   of bytes rounded to the nearest line end.
+
+   Let's suppose we have 1TB of JSON lines data that contains 10M of HTML webpages from
+   [https://commoncrawl.org/]Common Crawl (CC).
+   
+   Since it takes a lot of space, we want to compress our data. When our dataset is compressed, it
+   only takes around 180GB, which is six times less than storing uncompressed data. HTML data have a lot
+   of repetitive tags, and they can be compressed pretty efficiently.
+
+   We also want to have random access to be able to sample smaller subsets of data without reading the
+   whole archive. To do so, we can chunk (partition) our input by 10-100 lines and make a gzip archive
+   from each chunk. We can do this on the go and append all the compressed chunks on the go to a single
+   file.
+
+   Since our gzip archive is now chunked, we can jump to a random position in a file and search for the
+   nearest gzip block. As we already know, each gzip file starts with a magic number and a specially
+   defined header, so it's possible to locate each chunk's start.
+
+   To be able to perform line-level random access, we can chunk our input by one line. That is, we can
+   make a separate archive from each line of our input. This gives us better random access but comes
+   with a cost.
+
+   An empty gzip archive takes 20 bytes of space. If your lines are very short, gzipping each line can
+   make a compressed file even bigger than the original input.
+
+gzip file as a database
+   If each row in your data has a unique key, you can index it for faster lookups. For example, each row
+   in our Common Crawl data has a domain name as a primary key. The primary key length is relatively
+   short compared to the content of the other fields (HTML and HTTP headers).
+
+   Since we already chunk our data, we can keep the start of the gzipped chunk for each of our primary
+   keys. Primary keys are usually short, and we can store such information in a separate uncompressed
+   txt file. This will be our index.
+
+   Gzipped files contain binary data. Thus, we need to keep the byte offset:
+domain_name|byte_offset_start
+
+   If the number of chunks is large, you can also store the line start (local character offset) inside
+   the gzipped archive. This allows us to jump a particular line quickly. For additional speed gains, we
+   can also keep offset size or offset end.
+domain_name|gzip_byte_offset_start|gzip_byte_offset_end|char_offset_start|char_offset_end
+
+   Every modern file-system supports random access and allows us to read an arbitrary offset of a file.
+   Given a row from our index file, we can first jump to our specific gzip chunk. After locating it, we
+   can decompress it on the go and skip first n characters until we hit the start of the line that we
+   need to retrieve.
+
+   Given the index line, we can retrieve any row in almost constant time. When using an SSD storage,
+   searching for a single line on 200GB of compressed Common Crawl data takes less than 0.1 seconds.
+
+   The plaintext index for 10 million domains takes around 500MB of disk space, which is nothing
+   compared to the size of HTML data.
+
+Binary search
+   Fast lookups sound very interesting, but searching for a specific key in the index file takes time
+   too. For the CC use case, we need an ability to quickly find an arbitrary domain name in our index
+   file.
+
+   The binary search algorithm can be very handy for this problem. All we need to do is to sort our
+   index file by the key. We don't need to load the index file in memory, because we can use random
+   access to jump to specific lines of the uncompressed file.
+
+   This article is already pretty long, so I won't get into details of how binary search works. It's a
+   very fast algorithm, and it takes around 20 jumps on average to find the domain name in 10M of rows.
+   If you haven't heard about it, you can have a look at a
+   [http://www.cs.armstrong.edu/liang/animation/web/BinarySearch.html]visualization.
+
+   The main idea of the algorithm is to split the available data in half on each iteration and check the
+   key in the middle. Since all data is sorted, we can quickly locate the primary key by knowing which
+   side to keep and split next.
+
+   When everything is combined, the complete search system takes less than 0.3 seconds to search in the
+   1TB of compressed data.
+
+   I came up with this idea with [https://github.com/mpenkov]Michael Penkov, and we use such an approach for
+   real tasks. We also wrote a [https://github.com/ProfoundNetworks/gzipi]Python package called gzipi, and the
+   [https://github.com/ProfoundNetworks/gzipi/blob/master/gzipi/lib.py]whole implementation takes less than
+   1k of lines when using GNU tools (such as cat, sort, and gzip). The code is easy to learn and understand.
+
+How to use gzipi
+   To start using gzipi, you need to have Python and pip installed on your system:
+$ python3 -m pip install gzipi
+
+   Please note that you also need GNU tools on your system. It works on Linux and macOS without any
+   problems.
+
+   After installation, you can repack your existing gzip file:
+$ gzipi repack -f websites.json.gz -i index.gzi -o websites_repacked.json.gz --format json --field domain
+
+   The field argument specifies primary key. The input format could be csv or json.
+
+   Now you can search for an arbitrary key:
+$ gzipi search --input-file websites_repacked.json.gz --index-file index.gzi --key google.com
+
+S3 support and cost savings
+   One of our requirements was to support S3 as a storage for our compressed files. Fortunately, S3
+   allows reading arbitrary offsets, so we don't need to store compressed files locally. Since binary
+   search takes most of the time, storing index files locally significantly speeds up the search.
+
+   If you have gzipped JSON lines files, [https://aws.amazon.com/athena/]Amazon athena provides a solution to
+   query them using SQL syntaxis. It's a very convenient solution, but Amazon charges $5 per TB of data scanned.
+   Using Amazon's solution would potentially cost us thousands of dollars per month, and our solution cost us
+   almost nothing because reading data from S3 from the same region is free.
+
+Possible improvements
+   There are many ways to improve the search even more. Them main benefit of our solution is that it
+   does not require a third-party database and takes very little RAM.
+
+   Instead of using the binary search algorithm, you can use B-tree or MARISA-trie structures. To use
+   them, you need to store the index file in memory.
+
+   Instead of storing keys (domain names) in a file, you can also use hash tables, but that requires
+   storing intermediate gzip files when compressing the data. When using hash tables, you don't need to
+   store domain names. The only thing that is required is the start of the gzip chunk for each bucket.
+
+Afterword
+   It took me a few days to implement an initial solution to our problem, and when I was writing it, we
+   didn't know that there are similar solutions to query billions of webpages. As it turned out later,
+   Common Crawl and Web Archive use pretty similar solutions. Common Crawl uses
+   [https://iipc.github.io/warc-specifications/specifications/warc-format/warc-1.0/]WARC files to store
+   HTTP responses, and each response is stored as a single gzip chunk. It also uses
+   [https://github.com/webrecorder/pywb]pywb library that provides an
+   [https://index.commoncrawl.org/CC-MAIN-2020-34]API and indexing capabilities.
+
+   Such an approach allows Common Crawl to query 2.45 billion web pages without using a database. Since
+   all CC data is on the S3, it also scales very well. Everyone that has access to S3 can query the data
+   without talking to a centralized server.
+
+   The main difference is that our approach is focused on JSON and CSV files that contain much smaller
+   sets of data (narrow data) on each row. Because of that, I use tens of thousands of rows per each
+   gzip chunk.
+
+
+---

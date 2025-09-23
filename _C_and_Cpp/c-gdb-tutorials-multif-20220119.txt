@@ -1,0 +1,1201 @@
+filename: gdb_tutorials-multif_20220119.txt
+https://developers.redhat.com/blog/2021/04/30/the-gdb-developers-gnu-debugger-tutorial-part-1-getting-started-with-the-debugger#starting_gdb
+
+The GDB developer's GNU Debugger tutorial, Part 1: Getting started with the debugger
+April 30, 2021
+
+   This article is the first in a series demonstrating how to use the GNU Debugger (GDB) effectively
+   to debug applications in C and C++. If you have limited or no experience using GDB, this series
+   will teach you how to debug your code more efficiently. If you are already a seasoned professional
+   using GDB, perhaps you will discover something you haven't seen before.
+
+   In addition to providing developer tips and tricks for many GDB commands, future articles will also
+   cover topics such as debugging optimized code, offline debugging (core files), and server-based
+   sessions (aka gdbserver, used in container debugging).
+
+Why another GDB tutorial?
+   The majority of GDB tutorials available on the web consist of little more than introductions to the
+   basic list, break, print, and run commands. New GDB users just might as well read (or sing) the
+   official GDB Song!
+
+   Instead of simply demonstrating a handful of useful commands, each article in this series will focus
+   on one aspect of using GDB from the perspective of someone who develops GDB. I use GDB daily, and
+   these tips and tricks are the ones that I (and many other advanced GDB users and developers) use to
+   streamline our debugging sessions.
+
+   Because this is the first article in the series, allow me to follow the recommendation of the GDB
+   Song and start at the very beginning: How to run GDB.
+
+Compiler options
+   Let me get the (all-too-often-not-so) obvious out of the way: For the best debugging experience,
+   build applications without optimization and with debugging information. That is trivial advice, but
+   GDB's public freenode.net IRC channel (#gdb) sees these issues often enough that they warrant
+   mentioning.
+
+   TL;DR: Don't debug applications with optimization if you can avoid it. Watch for a future article on
+   optimization.
+
+   Optimization can cause GDB to behave in surprising ways if you are not aware of what might be
+   happening "under the covers." I always use the C compiler option -O0 (that's the letter O followed by
+   the number zero) to build executables during the development cycle.
+
+   I also always have the toolchain emit debugging information. This is accomplished with the -g option.
+   Specifying the exact debug format is no longer necessary (or desirable); DWARF has been the default
+   debugging information format on GNU/Linux for many years. So ignore advice to use -ggdb or -gdwarf-2.
+
+   The one specific option worth adding is -g3, which tells the compiler to include debugging
+   information about the macros (#define FOO ...) used in your application. These macros may then be
+   used in GDB just like any other symbol in your program.
+
+   In short, for the best debugging experience, use -g3 -O0 when compiling your code. Some environments
+   (such as those using GNU autotools) set environment variables (CFLAGS and CXXFLAGS) that control the
+   compiler's output. Check these flags to make sure that your invocations of the compiler enable the
+   debugging environment you want.
+
+   For much more information about the impact of -g and -O on the debugging experience, see Alexander
+   Oliva's treatise GCC gOlogy: Studying the Impact of Optimizations on Debugging.
+
+Startup scripts
+   Before we look at actually using GDB, something must be said about how GDB starts up and what script
+   files it executes. Upon startup, GDB will execute the commands contained in a number of system and
+   user script files. The location and order of execution of these files are as follows:
+   1. /etc/gdbinit (not on FSF GNU GDB): In many GNU/Linux distributions, including Fedora and Red
+      Hat Enterprise Linux, GDB looks first for the system default initialization file and executes
+      commands contained therein. On Red Hat-based systems, this file executes any script files
+      (including Python scripts) installed in /etc/gdbinit.d.
+   2. $HOME/.gdbinit: GDB will then read the user's global initialization script from the home
+      directory, if this file exists.
+   3. ./.gdbinit: Finally, GDB will look for a startup script in the current directory. Think of this
+      as an application-specific customization file where you can add per-project user-defined
+      commands, pretty-printers, and other customizations.
+
+   All of these startup files contain GDB commands to execute, but they may also include Python scripts
+   as long as they are prefaced with the python command, e.g., python print('Hello from python!').
+
+   My .gdbinit is actually quite simple. Its most essential lines enable command history so that GDB
+   remembers a given number of commands that were executed from a previous session. This is analogous to
+   the shell's history mechanism and .bash_history. The entire file is:
+set pagination off
+set history save on
+set history expansion on
+
+   The first line turns off GDB's built-in paging. The next line enables saving the history (to
+   ~/.gdb_history by default), and the final line enables shell-style history expansion with the
+   exclamation point (!) character. This option is normally disabled because the exclamation point is
+   also a logical operator in C.
+
+   To prevent GDB from reading initialization files, give it the --nx command-line option.
+
+Getting help in GDB
+   There are several ways to get help using GDB, including extensive-if dry-documentation explaining
+   every little switch, knob, and feature.
+
+GDB community resources
+   The community offers help to users in two places:
+   * Via email: The GDB mailing list
+   * Via IRC: #gdb on libera.chat
+
+   However, because this article is about using GDB, the easiest way for users to get help with a
+   command is to use GDB's built-in help system, discussed next.
+
+Accessing the help system
+   Access GDB's built-in help system via the help and apropos commands. Don't know how to use the printf
+   command? Ask GDB:
+(gdb) help printf
+Formatted printing, like the C "printf" function.
+Usage: printf "format string", ARG1, ARG2, ARG3, ..., ARGN
+This supports most C printf format specifications, like %s, %d, etc.
+(gdb)
+
+   help accepts the name of any GDB command or option and outputs usage information for that command or
+   option.
+
+   Like all GDB commands, the help command supports tab completion. This is perhaps the most useful way
+   to figure out what types of arguments many commands accept. For instance, entering help show ar and
+   pressing the tab key will prompt you for a completion:
+(gdb) help show ar
+architecture   args            arm
+(gdb) help show ar
+
+   GDB leaves you at the command prompt ready to accept further refinement of the input. Adding g to the
+   command, followed by a tab, will complete to help show args:
+(gdb) help show args
+Show argument list to give program being debugged when it is started.
+Follow this command with any number of args, to be passed to the program.
+(gdb)
+
+   Don't know the exact name of the command you're looking for? Use the apropos command to search the
+   help system for specific terms. Think of it as grepping the built-in help.
+
+   Now that you know how and where to find help, we're ready to move on to starting GDB (finally).
+
+Starting GDB
+   Unsurprisingly, GDB accepts a large number of command-line options to change its behavior, but the
+   most basic way to start GDB is to pass the application's name to GDB on the command line:
+$ gdb myprogram
+GNU gdb (GDB) Red Hat Enterprise Linux 9.2-2.el8
+Copyright (C) 2020 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-pc-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+	<http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from /home/blog/myprogram...
+(gdb)
+
+   GDB starts up, prints out some version information (GCC Toolset 10 shown), loads the program and its
+   debug information, and displays copyright and help messages, ending with the command prompt, (gdb).
+   GDB is now ready to accept input.
+
+Avoiding messages: The -q or --quiet option
+   I've seen GDB's startup message thousands of times, so I suppress (or "quiet") it with the -q option:
+$ gdb -q myprogram
+Reading symbols from /home/blog/myprogram...
+(gdb)
+
+   That's much less to read. If you are really new to GDB, you might find the full startup messaging
+   useful or soothing, but after a while, you'll also alias gdb in your shell to gdb -q. If you do need
+   the suppressed information, use the -v command-line option or the show version command.
+
+Passing arguments: The --args option
+   Programs often require command-line arguments. GDB offers multiple ways to pass these to your program
+   (or "inferior," in GDB parlance). The two most useful ways are to pass application arguments via the
+   run command or at startup via the --args command-line option. If your application is normally started
+   with myprogram 1 2 3 4, simply preface this with gdb -q --args and GDB will remember how your
+   application should be run:
+$ gdb -q --args myprogram 1 2 3 4
+Reading symbols from /home/blog/myprogram...
+(gdb) show args
+Argument list to give program being debugged when it is started is "1 2 3 4".
+(gdb) run
+Starting program: /home/blog/myprogram 1 2 3 4
+[Inferior 1 (process 1596525) exited normally]
+$
+
+Attaching to a running process: The --pid option
+   If an application is already running and gets "stuck," you might want to look inside to find out why.
+   Just give GDB the process ID of your application with --pid:
+$ sleep 100000 &
+[1] 1591979
+$ gdb -q --pid 1591979
+Attaching to process 1591979
+Reading symbols from /usr/bin/sleep...
+Reading symbols from .gnu_debugdata for /usr/bin/sleep...
+(No debugging symbols found in .gnu_debugdata for /usr/bin/sleep)
+Reading symbols from /lib64/libc.so.6...
+Reading symbols from /usr/lib/debug/usr/lib64/libc-2.31.so.debug...
+Reading symbols from /lib64/ld-linux-x86-64.so.2...
+Reading symbols from /usr/lib/debug/usr/lib64/ld-2.31.so.debug...
+0x00007fc421d5ef98 in __GI___clock_nanosleep (requested_time=requested_time@entry=0, remaining=remaining@entry=0x0)
+    at ../sysdeps/unix/sysv/linux/clock_nanosleep.c:28
+28          return SYSCALL_CANCEL (nanosleep, requested_time, remaining)
+(gdb)
+
+   With this option, GDB automatically loads symbols for programs that have build ID information, such
+   as distribution-supplied packages, and interrupts the program so that you can interact with it. Look
+   for more on how and where GDB finds debug information in a future article.
+
+Following up on a failure: The --core option
+   If your process aborted and dumped core, use the --core option to tell GDB to load the core file. If
+   the core file contains the build ID of the aborted process, GDB automatically loads that binary and
+   its debugging information if it can. Most developers, however, need to pass an executable to GDB with
+   this option:
+$ ./abort-me
+Aborted (core dumped)
+$ gdb -q abort-me --core core.2127239
+Reading symbols from abort-me...
+[New LWP 2127239]
+Core was generated by `./abort-me'.
+Program terminated with signal SIGABRT, Aborted.
+#0    __GI_raise (sig=sig@entry=6) at ../sysdeps/unix/sysv/linux/raise.c:50
+50          return ret;
+(gdb)
+
+   Tip: Can't find a core file? On GNU/Linux systems using systemd, check ulimit -c to see whether the
+   shell is preventing programs from creating core files. If the value is unlimited, use coredumpctl to
+   find the core file. Alternatively, run sysctl -w kernel.core_pattern=core to configure systemd to
+   output core files named core.PID, as I have for the previous example.
+
+Expedited command execution: The --ex, --iex, --x, and --batch options
+   I often run GDB commands repeatedly from the shell to test for problems or run scripts. These
+   command-line options help facilitate that. Most users will use (multiple) --ex arguments to specify
+   commands to run at startup to recreate a debugging session, e.g., gdb -ex "break some_function if
+   arg1 == nullptr" -ex r myprogram.
+   * --ex CMD runs the GDB command CMD after the program (and debug information) is loaded. --iex does
+     the same, but executes CMD before the specified program is loaded.
+   * -x FILE executes GDB commands from FILE after the program is loaded and --ex commands execute. I
+     use this option most often if I need a lot of --ex arguments to reproduce a specific debugging
+     session.
+   * --batch causes GDB to exit immediately at the first command prompt; i.e., after all commands or
+     scripts have run. Note that --batch will silence even more output than -q to facilitate using GDB
+     in scripts:
+
+$ # All commands complete without error
+$ gdb -batch -x hello.gdb myprogram
+Reading symbols from myprogram...
+hello
+$ echo $?
+0
+$ # Command raises an exception
+$ gdb -batch -ex "set foo bar"
+No symbol "foo" in current context.
+$ echo $?
+1
+$ # Demonstrate the order of script execution
+$ gdb -x hello.gdb -iex 'echo before\n' -ex 'echo after\n' simple
+GNU gdb (GDB) Red Hat Enterprise Linux 9.2-2.el8
+Copyright (C) 2020 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-redhat-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+	<http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+before
+Reading symbols from simple...
+hello
+after
+(gdb)
+
+Next up
+   In this article, I've shared details about how GDB starts up, reads scripts (and when it reads
+   scripts), and several startup options commonly used by advanced GDB users.
+
+   The next article in the series will take a small detour to explain what debugging information is, how
+   to inspect it, where GDB looks for it, and how to install it in distribution-supplied packages.
+
+   Do you have a suggestion or tip related to GDB scripts or startup, or a suggestion for a future topic
+   about how to use GDB? Leave a comment on this article and share your idea with us.
+   Last updated: January 7, 2022
+
+
+
+---
+https://www.cs.toronto.edu/~krueger/csc209h/tut/gdb_tutorial.html
+
+GDB Tutorial
+
+   As programmers, we all make errors. Certainly, most of us at least have tried placing "printf"
+   statements in our code hoping to catch the errors, however, we need to know more than that. Debugger
+   is a good tool for tracing bugs. In this tutorial, we will show you how to use gdb -- a "GNU"
+   debugger.
+
+   Compiling programs to run with gdb:
+
+   Below is a not-so-well written program (crash.c) which reads a number n from standard input,
+   calculates the sum from 1 to n and prints out the result:
+   1	#include <stdio.h>
+   2	#include<string.h>
+   3	#include<stdlib.h>
+   4
+   5	char * buf;
+   6
+   7	int sum_to_n(int num)
+   8	{
+   9		int i,sum=0;
+   10		for(i=1;i<=num;i++)
+   11			sum+=i;
+   12		return sum;
+   13	}
+   14
+   15	void printSum()
+   16	{
+   17		char line[10];
+   18		printf("enter a number:\n");
+   19		fgets(line, 10, stdin);
+   20		if(line != null)
+   21			strtok(line, "\n");
+   22		sprintf(buf,"sum=%d",sum_to_n(atoi(line)));
+   23		printf("%s\n",buf);
+   24	}
+   25
+   26	int main()
+   27	{
+   28		printSum();
+   29		return 0;
+   30	}
+
+   In order to run crash.c with gdb, we must compile it with the -g option which tells the compiler to
+   embed debugging information for the debugger to use. So, we compile crash.c as follows:
+
+	gcc -g ocrash crash.c
+
+   Now, let's run the program.
+
+	./crash
+	enter a number:
+	5
+	Segmentation fault
+
+   Looks familiar? The infamous "Segmentation fault" means there is some kind of invalid memory access.
+   Unfortunately, that is all the compiler tells us. Now, let's see how we can use gdb to spot the
+   problem(s).
+
+   Starting gdb:
+   To start gdb for our crash.c, on the command prompt type "gdb crash". You'll see the following:
+           $gdb crash
+           GNU gdb Red Hat Linux (6.1post-1.20040607.52rh)
+           Copyright 2004 Free Software Foundation, Inc.
+           GDB is free software, covered by the GNU General Public License, and you are
+           welcome to change it and/or distribute copies of it under certain conditions.
+           Type "show copying" to see the conditions.
+           There is absolutely no warranty for GDB. Type "show warranty" for details.
+           This GDB was configured as "i386-redhat-linux-gnu"...Using host libthread_db library
+   "/lib/tls/libthread_db.so.1".
+           (gdb)
+
+   Good! We have successfully loaded gdb with crash. Let's run the program with command "run" to see
+   what kind of information we will get.
+
+   run
+
+   The "run" command starts the program. If we do not set up any "breakpoints" (we'll see how to use
+   this command later) the program will run until it terminates or core dumps.
+
+   (gdb) run
+   Starting program: /student/nguyen_h/csc408/contribuition/crash
+   enter a number:
+   10
+   Program received signal SIGSEGV, Segmentation fault.
+   0x0017fa24 in _IO_str_overflow_internal () from /lib/tls/libc.so.6
+
+   Ok, so it crashed. To get more information we use the "backtrace" command.
+
+   backtrace
+
+   The "backtrace" command tells gdb to list all the function calls (that leads to the crash) in the
+   stack frame.
+   (gdb) backtrace
+   #0 0x0017fa24 in _IO_str_overflow_internal () from /lib/tls/libc.so.6
+   #1 0x0017e4a8 in _IO_default_xsputn_internal () from /lib/tls/libc.so.6
+   #2 0x001554e7 in vfprintf () from /lib/tls/libc.so.6
+   #3 0x001733dc in vsprintf () from /lib/tls/libc.so.6
+   #4 0x0015e03d in sprintf () from /lib/tls/libc.so.6
+   #5 0x08048487 in printSum () at crash.c:22
+   #6 0x080484b7 in main () at crash.c:28
+   (gdb)
+
+   Let's now have a careful look at the messages. As we can see, main() called printSum() which in turn
+   called sprintf() which then went on to call a bunch of lower level functions which eventually led to
+   the crash. Anything from sprintf() down is not in our control, so let's carefully examine what we
+   passed to sprintf(). The output above tells us that we called sprintf() in line 20 inside function
+   printSum().
+   22        sprintf(buf,"sum=%d",sum_to_n(atoi(line)));
+
+   We now show how to use break points to examine the values of variables we are interested in at the
+   point we like to break.
+
+   Break Points
+
+   This sets a break point. Its basic functionality is to type break and a filename and line number. In
+   our case we want to stop in crash.c line 22, we could do the following in gdb:
+   (gdb) break crash.c:22
+   Breakpoint 1 at 0x804845b: file crash.c, line 22.
+   (gdb)
+
+   Ok, we've set the break point, now let's re-run the program.
+   (gdb) run
+   The program being debugged has been started already.
+   Start it from the beginning? (y or n) y
+   Starting program: /student/nguyen_h/csc408/contribuition/crash
+   enter a number:
+   10
+   Breakpoint 1, printSum () at crash.c:22
+   22 sprintf(buf,"sum=%d",sum_to_n(atoi(line)));
+
+   print
+
+   We now can retrieve the values of all variables we're interested in. To do this we use the "print"
+   command.
+   (gdb) print line
+   $1 = "10\000\000\000\000\000\000¨Á"
+   (gdb)
+
+   The line variable has the character values '1' followed by '0' and then a null terminator '\0', and
+   then junk. So, this seems ok. Now, let's move on and examine what buf holds.
+   (gdb) print buf
+   $2 = 0x0
+   (gdb)
+
+   By now the error should be obvious. We're trying to copy stuff into a buffer pointed to by buf which
+   hasn't been allocated resulting in a segmentation fault. Note that we were lucky in this case:
+   because buf is a global variable and was automatically initialized to 0 (null pointer). If it were
+   not, it might have contained an arbitrary value like 0xbffff580 then it would be no longer obvious
+   that the address points to in memory is invalid. Bugs like this are a real pain to track down.
+   Conditional break points:
+   Sometimes we wish to set a break point under some condition. For example, we may want to break at
+   line 10 of crash.c only when the value of num is 50:
+
+   (gdb) break crash.c:10
+   Breakpoint 1 at 0x8048441: file crash.c, line 10.
+   (gdb) condition 1 num==50
+   (gdb) run
+   Starting program: /student/nguyen_h/csc408/contribuition/crash
+   enter a number:
+   50
+   Breakpoint 1, sum_to_n (num=50) at crash.c:10
+   10 for(i=1;i<=num;i++)
+   (gdb) continue
+   Continuing.
+   Program received signal SIGSEGV, Segmentation fault.
+   0x00689a24 in _IO_str_overflow_internal () from /lib/tls/libc.so.6
+
+   Note that you we resume execution with the "continue" command.
+   Some basic commands (used with break points):
+   Once our program has reached a break point, we can see the the execution by using the following
+   commands:
+   n (for "next")
+		   This executes the current command, and moves to the next command in the program.
+   s (for "step")
+		   This steps through the next command. There are differences between step and next. If you are
+   at a function call, and you hit next,
+		   then the function will execute and return. But if you hit step, then you will go to the first
+   line of that function.
+   u (for "until")
+		   This is like n, except that if we are in a loop, u will continue execution until the loop is
+   exited.
+
+   (gdb) break crash.c:10
+   Breakpoint 1 at 0x8048441: file crash.c, line 10.
+   (gdb) condition 1 num==50
+   (gdb) run
+   Starting program: /student/nguyen_h/csc408/contribuition/crash
+   enter a number:
+   50
+   Breakpoint 1, sum_to_n (num=50) at crash.c:10
+   10 for(i=1;i<=num;i++)
+   (gdb) n
+   11 sum+=i;
+   (gdb) n
+   10 for(i=1;i<=num;i++)
+   (gdb) u
+   12 return sum;
+   (gdb)
+
+   Other commands (used with break points) of interest:
+   list [line#]
+		   Prints lines from the source code around line#.
+		   If we give it a function name as the argument function, it prints lines from the beginning of
+   that function.
+		   If we give it no argument, it prints lines around the break point
+   delete [n]
+		   With no argument, deletes all breakpoints that we have set.
+		   Deletes break point number n.
+   clear function_name
+		   Deletes the breakpoint set in that function.
+
+   print var
+		   Prints a variable located in the current scope.
+   x address
+		   Prints the content at address:
+		   (gdb) print &num
+		   $1 = (int *) 0xbffff580
+		   (gdb) x 0xbffff580
+		   0xbffff580: 0x00000064
+		   (gdb)
+
+
+
+---
+https://web.eecs.umich.edu/~sugih/pointers/summary.html
+
+GDB Tutorial
+
+   Gdb is a debugger for C (and C++). It allows you to do things like run the program up to a certain
+   point then stop and print out the values of certain variables at that point, or step through the
+   program one line at a time and print out the values of each variable after executing each line. It
+   uses a command line interface.
+
+   This is a brief description of some of the most commonly used features of gdb.
+
+Compiling
+   To prepare your program for debugging with gdb, you must compile it with the -g flag. So, if your
+   program is in a source file called memsim.c and you want to put the executable in the file memsim,
+   then you would compile with the following command:
+gcc -g -o memsim memsim.c
+
+Invoking and Quitting GDB
+   To start gdb, just type gdb at the unix prompt. Gdb will give you a prompt that looks like this:
+   (gdb). From that prompt you can run your program, look at variables, etc., using the commands listed
+   below (and others not listed). Or, you can start gdb and give it the name of the program executable
+   you want to debug by saying
+gdb executable
+
+   To exit the program just type quit at the (gdb) prompt (actually just typing q is good enough).
+
+Commands
+
+	help
+   Gdb provides online documentation. Just typing help will give you a list of topics. Then you can type
+   help topic to get information about that topic (or it will give you more specific terms that you can
+   ask for help about). Or you can just type help command and get information about any other command.
+
+	file
+   file executable specifies which program you want to debug.
+
+	run
+   run will start the program running under gdb. (The program that starts will be the one that you have
+   previously selected with the file command, or on the unix command line when you started gdb. You can
+   give command line arguments to your program on the gdb command line the same way you would on the
+   unix command line, except that you are saying run instead of the program name:
+run 2048 24 4
+
+   You can even do input/output redirection: run > outfile.txt.
+
+break
+   A ``breakpoint'' is a spot in your program where you would like to temporarily stop execution in
+   order to check the values of variables, or to try to find out where the program is crashing, etc. To
+   set a breakpoint you use the break command.
+
+   break function sets the breakpoint at the beginning of function. If your code is in multiple files,
+   you might need to specify filename:function.
+
+   break linenumber or break filename:linenumber sets the breakpoint to the given line number in the
+   source file. Execution will stop before that line has been executed.
+
+delete
+   delete will delete all breakpoints that you have set.
+
+   delete number will delete breakpoint numbered number. You can find out what number each breakpoint is
+   by doing info breakpoints. (The command info can also be used to find out a lot of other stuff. Do
+   help info for more information.)
+
+clear
+   filename:function, and filename:linenumber.
+
+continue
+   continue will set the program running again, after you have stopped it at a breakpoint.
+
+step
+   step will go ahead and execute the current source line, and then stop execution again before the next
+   source line.
+
+next
+   next will continue until the next source line in the current function (actually, the current
+   innermost stack frame, to be precise). This is similar to step, except that if the line about to be
+   executed is a function call, then that function call will be completely executed before execution
+   stops again, whereas with step execution will stop at the first line of the function that is called.
+
+until
+   until is like next, except that if you are at the end of a loop, until will continue execution until
+   the loop is exited, whereas next will just take you back up to the beginning of the loop. This is
+   convenient if you want to see what happens after the loop, but don't want to step through every
+   iteration.
+
+list
+   list linenumber will print out some lines from the source code around linenumber. If you give it the
+   argument function it will print out lines from the beginning of that function. Just list without any
+   arguments will print out the lines just after the lines that you printed out with the previous list
+   command.
+
+print
+   print expression will print out the value of the expression, which could be just a variable name. To
+   print out the first 25 (for example) values in an array called list, do
+print list[0]@25
+
+
+
+---
+https://www.cprogramming.com/gdb.html
+
+A GDB Tutorial with Examples
+
+A good debugger is one of the most important tools in a programmer's toolkit. On a UNIX or Linux system, GDB
+(the GNU debugger) is a powerful and popular debugging tool; it lets you do whatever you like with your program
+running under GDB.
+
+Should you read this?
+You should... if you can relate to two or more of the following:
+
+	You have a general idea of programming with C or C++.
+	You put a lot of cout or printf statements in the code if something goes wrong.
+	You have used a debugger with an IDE, and are curious about how the command line works.
+	You've just moved to a Unix-like operating system and would like to know about the toolchain better.
+
+A crash course on compiling with gcc (or g++)
+
+Gcc is the de facto compiler in Linux or any other *nix system. It also has Windows ports but on Windows,
+you'll probably find the debugger in Visual Studio 'easier'.
+
+Suppose you have a file called main.cpp containing your c++ code. You should compile it with the following
+command:
+
+$> g++ main.cpp -o main
+
+While this will work fine and produce an executable file called main, you also need to put a -g flag to tell
+the compiler that you may want to debug your program later.
+
+So the final command turns into:
+
+$> g++ main.cpp -g -Wall -Werror -o main
+
+(If you're wondering what -Wall and -Werror are, you may find this page on GCC a useful read.)
+
+Don't worry if it looks cumbersome, you'll get used to it! (If you've got multiple source files you should use
+a good build system like make or Scons.)
+
+The Basics of GDB
+Provided you've compiled your program with the debugging symbols enabled, you're ready to start debugging.
+Any time there is text you should replace, I've put it in <angle brackets>.
+
+Starting GDB
+To start GDB, in the terminal,
+
+$> gdb <executable name>
+
+For the above example with a program named main, the command becomes
+
+$> gdb main
+
+Setting Breakpoints
+You'll probably want you program to stop at some point so that you can review the condition of your program.
+The line at which you want the program to temporarily stop is called the breakpoint.
+
+	break <source code line number>
+
+Running your program
+To run your program, the command is, as you guessed,
+
+	run
+
+Looking at the code
+When the program is stopped, you can do a number of important things, but most importantly you need to see
+which part of the code you've stopped. The command for this purpose is "list".
+It shows you the neighbouring 10 lines of code
+
+Next and Step
+Just starting and stopping isn't much of a control. GDB also lets you to run the program line-by-line by the
+commands 'next' and 'step'. There is a little difference between the two, though. Next keeps the control strictly
+in the current scope whereas step follows the execution through function calls.
+
+Look at this example carefully;
+
+Suppose you have a line in the code like
+value=display();
+readinput();
+
+If you use the next command, the line (and the function, provided there aren't breakpoints in it) gets executed
+and the control advances to the next line, readinput(), where you can perhaps examine 'value' to get an idea of
+how display() worked.
+
+But if you use the step command, you get to follow what display() does directly, and the control advances to
+the first line of display(), wherever it is.
+
+Examining your Variables
+When you want to find the misbehaving portion of your program, it often helps to examine local variables to see if
+anything unexpected has occurred. To examine a variable, just use
+
+print <var name to print>
+
+Note: You can also modify variables' values by
+
+set <var> = <value>
+
+You can modify variables to see if an issue is resolved if the variable has another value or to force the
+program to follow a particular path to see if the reason for a bug was due to a variable having the wrong value.
+
+Setting Watchpoints
+Setting watchpoints is like asking the debugger to provide you with a running commentary of any changes that
+happen to the variables. Whenever a change occurs, the program pauses and provides you with the details of the change.
+
+The command to set a simple watchpoint (a write watchpoint, i.e you are notified when the value is written) is
+
+watch <var>
+
+Here's some example output when GDB pauses due to a change in <var>:
+
+Continuing.
+Hardware watchpoint 2: variable
+
+Old value = 0
+New value = 1
+0x08048754 at main.cpp:31
+31    variable=isalpha(ch)
+
+Note: You can only set watchpoints for a variable when it is in scope. So, to watch something within another
+function or a inner block, first set a breakpoint inside that scope and then when the program pauses there,
+set the watchpoint.
+
+Quit
+To stop your program, when it is paused, use kill and to quit GDB itself, use quit.
+An Example Debugging Session
+
+The given code computes the factorial of a number erroneously. The goal of the debugging session is to pinpoint
+the reason of the error.
+
+<code>
+#include<iostream>
+
+using namespace std;
+
+long factorial(int n);
+
+int main() {
+	int n(0);
+	cin>>n;
+	long val=factorial(n);
+	cout<<val;
+	cin.get();
+	return 0;
+}
+
+long factorial(int n) {
+	long result(1);
+
+	while(n--) {
+		result*=n;
+	}
+	return result;
+}
+</code>
+
+Into the Debugger
+Now follow the commands and the outputs carefully, especially the watchpoints. What I'm doing is basically:
+
+	Setting a breakpoint just in the line of the function call
+	Stepping into the function from that line
+	Setting watchpoints for both the result of the calculation and the input number as it changes.
+	Finally, analyzing the results from the watchpoints to find problematic behaviour
+
+1.  $ g++ main.cpp -g -Wall -o main
+2.  $ gdb main
+3.  GNU gdb (GDB) Fedora (7.3-41.fc15)
+4.  Copyright (C) 2011 Free Software Foundation, Inc.
+5.  This GDB was configured as "i686-redhat-linux-gnu".
+6.  For bug reporting instructions, please see:
+7.  <http://www.gnu.org/software/gdb/bugs/>...
+8.  Reading symbols from /home/manasij7479/Documents/main...done.
+9.  (gdb) break 11
+10. Breakpoint 1 at 0x80485f9: file main.cpp, line 11.
+11. (gdb) run
+12. Starting program: /home/manasij7479/Documents/main
+13. 3
+14.
+15. Breakpoint 1, main () at main.cpp:11
+16. 11          long val=factorial(n);
+17. (gdb) step
+18. factorial (n=3) at main.cpp:19
+19. 19          long result(1);
+20. (gdb) list
+21. 14          return 0;
+22. 15        }
+23. 16
+24. 17        long factorial(int n)
+25. 18        {
+26. 19          long result(1);
+27. 20          while(n--)
+28. 21          {
+29. 22            result*=n;
+30. 23          }
+31. (gdb) watch n
+32. Hardware watchpoint 2: n
+33. (gdb) watch result
+34. Hardware watchpoint 3: result
+35. (gdb) continue
+36. Continuing.
+37. Hardware watchpoint 3: result
+38.
+39. Old value = 0
+40. New value = 1
+
+Notice that result starts from 0 and is initialized to 1.
+
+41. factorial (n=3) at main.cpp:20
+42. 20          while(n--)
+43. (gdb)
+
+Notice that I didn't put in a command, I just hit <return>. It re-executes the last command.
+
+44. Continuing.
+45. Hardware watchpoint 2: n
+46.
+47. Old value = 3
+48. New value = 2
+
+Notice that n gets is immediately decremented from 3 to 2.
+
+49. 0x08048654 in factorial (n=2) at main.cpp:20
+50. 20          while(n--)
+51. (gdb)
+52. Continuing.
+53. Hardware watchpoint 3: result
+54. 
+55. Old value = 1
+56. New value = 2
+
+Now result becomes 2 (by multiplying result's earlier value with n's value). We've found the first bug! result
+is supposed to be evaluated by multiplying 3 * 2 * 1 but here the multiplication starts from 2. To correct it,
+we have to change the loop a bit, but before that, lets see if the rest of the calculation is correct.
+
+57. factorial (n=2) at main.cpp:20
+58. 20          while(n--)
+59. (gdb)
+60. Continuing.
+61. Hardware watchpoint 2: n
+62. 
+63. Old value = 2
+64. New value = 1
+
+n gets decremented from 2 to 1. Result doesn't change since n is 1.
+
+65. 0x08048654 in factorial (n=1) at main.cpp:20
+66. 20          while(n--)
+67. (gdb)
+68. Continuing.
+69. Hardware watchpoint 2: n
+70. 
+71. Old value = 1
+72. New value = 0
+
+n gets decremented from 1 to 0.
+
+73. 0x08048654 in factorial (n=0) at main.cpp:20
+74. 20          while(n--)
+75. (gdb)
+76. Continuing.
+77. Hardware watchpoint 3: result
+78. 
+79. Old value = 2
+80. New value = 0
+
+Now result becomes 0 (by multiplying result's earlier value with n's value, 0). Another bug! How can result
+hold the value of the factorial when it is multiplied by 0? The loop must be stopped before n reaches 0.
+
+81. factorial (n=0) at main.cpp:20
+82. 20          while(n--)
+83. (gdb)
+84. Continuing.
+85. Hardware watchpoint 2: n
+86. 
+87. Old value = 0
+88. New value = -1
+89. 0x08048654 in factorial (n=-1) at main.cpp:20
+90. 20          while(n--)
+91. (gdb)
+92. Continuing.
+
+Now n becomes -1 and the loop isn't permitted to run anymore because n-- returns 0, and the function returns
+result's current value 0. Let's see what happens when the function exits.
+
+93.
+94. Watchpoint 2 deleted because the program has left the block in
+95. which its expression is valid.
+96. 
+97. Watchpoint 3 deleted because the program has left the block in
+98. which its expression is valid.
+
+This is what happens to a watchpoint when the variable goes out of scope.
+
+99.  0x08048605 in main () at main.cpp:11
+100. 11          long val=factorial(n);
+101. (gdb) print val
+102. $1 = 1293357044
+
+print val shows a garbage value because gdb points to a line before it is executed, not after.
+
+103. (gdb) next
+104. 12          cout<<val;
+105. (gdb) continue
+106. Continuing.
+107. 0[Inferior 1 (process 2499) exited normally]
+108. (gdb) quit
+
+Here's what the fix should look like:
+
+while(n>0) //doesn't let n reach 0 {
+	result*=n;
+	n--;   //decrements only after the evaluation
+}
+
+GDB in Conclusion
+You have now seen enough to try GBD out on your own. Some important topics have not been touched upon here for
+the sake of simplicity, such as dealing with segmentation faults and other kinds of crashes or using tools like
+Valgrind to find memory leaks.
+
+Remember that GDB comes built in with an excellent help system. Just type help in the (gdb) prompt and you will
+be presented with options of what you could need help with. For details about a specific command, use the syntax
+
+help <command>
+
+Another important point to note is the use of shortcuts (like 'q' for 'quit'). GDB lets you use shortcuts for
+commands when it is not ambigious.
+
+After learning about GDB, you do not have to panic the next time your program goes crazy. You have an excellent
+weapon in your arsenal now.
+
+
+---
+https://www.cs.cmu.edu/~gilpin/tutorial/
+
+Debugging Under Unix: gdb Tutorial
+
+Introduction
+   This tutorial was originally written for CS 342 at Washington University. It is still
+   maintained by Andrew Gilpin.
+
+  Who should read this?
+   This tutorial is written to help a programmer who is new to the Unix environment to get started with
+   using the gdb debugger. This tutorial assumes you already know how to program in C++ and you can
+   compile and execute programs. It also sort of assumes that you basically know what debugging is and
+   that you have used a debugger on another system.
+
+  Source code
+   To help illustrate some of the debugging principles I will use a running example of a buggy program.
+   As you progress through this tutorial, you will use the debugger to locate and fix errors in the
+   code. The code can be downloaded here and a simple Makefile for the program can be downloaded
+   here.
+
+   The code is very simple and consists of two class definitions, a node and a linked list. There is
+   also a simple driver to test the list. All of the code was placed into a single file to make
+   illustrating the process of debugging a little easier.
+
+Preparations
+
+  Environment settings
+   gdb is in the gnu package on CEC machines. If you don't have this package loaded then type pkgadd gnu
+   at a shell prompt. If you can run g++, then you will be able to run gdb.
+
+  Debugging symbols
+   gdb can only use debugging symbols that are generated by g++. For Sun CC users, there is the dbx
+   debugger which is very similar to gdb.
+
+   gdb is most effective when it is debugging a program that has debugging symbols linked in to it. With
+   g++, this is accomplished using the -g command line argument. For even more information, the -ggdb
+   switch can be used which includes debugging symbols which are specific to gdb. The makefile for this
+   tutorial uses the -ggdb switch.
+
+Debugging
+
+  When to use a debugger
+   Debugging is something that can't be avoided. Every programmer will at one point in their programming
+   career have to debug a section of code. There are many ways to go about debugging, from printing out
+   messages to the screen, using a debugger, or just thinking about what the program is doing and making
+   an educated guess as to what the problem is.
+
+   Before a bug can be fixed, the source of the bug must be located. For example, with segmentation
+   faults, it is useful to know on which line of code the seg fault is occuring. Once the line of code
+   in question has been found, it is useful to know about the values in that method, who called the
+   method, and why (specifically) the error is occuring. Using a debugger makes finding all of this
+   information very simple.
+
+   Go ahead and make the program for this tutorial, and run the program. The program will print out some
+   messages, and then it will print that it has received a segmentation fault signal, resulting in a
+   program crash. Given the information on the screen at this point, it is near impossible to determine
+   why the program crashed, much less how to fix the problem. We will now begin to debug this program.
+
+  Loading a program
+   So you now have an executable file (in this case main) and you want to debug it. First you must
+   launch the debugger. The debugger is called gdb and you can tell it which file to debug at the shell
+   prompt. So to debug main we want to type gdb main. Here is what it looks like when I run it:
+agg1@sukhoi agg1/.www-docs/tutorial> gdb main
+GNU gdb 4.18
+Copyright 1998 Free Software Foundation, Inc.
+GDB is free software, covered by the GNU General Public License, and you are
+welcome to change it and/or distribute copies of it under certain conditions.
+Type "show copying" to see the conditions.
+There is absolutely no warranty for GDB.  Type "show warranty" for details.
+This GDB was configured as "sparc-sun-solaris2.7"...
+(gdb)
+
+   (Note: If you are using Emacs, you can run gdb from within Emacs by typing M-x gdb. Then Emacs will
+   split into two windows, where the second window will show the source code with a cursor at the
+   current instruction. I haven't actually used gdb this way, but I have been told by a very reliable
+   source that this will work. :)
+
+   gdb is now waitng for the user to type a command. We need to run the program so that the debugger can
+   help us see what happens when the program crashes. Type run at the (gdb) prompt. Here is what happens
+   when I run this command:
+(gdb) run
+Starting program: /home/cec/s/a/agg1/.www-docs/tutorial/main
+Creating Node, 1 are in existence right now
+Creating Node, 2 are in existence right now
+Creating Node, 3 are in existence right now
+Creating Node, 4 are in existence right now
+The fully created list is:
+4
+3
+2
+1
+
+Now removing elements:
+Creating Node, 5 are in existence right now
+Destroying Node, 4 are in existence right now
+4
+3
+2
+1
+
+
+Program received signal SIGSEGV, Segmentation fault.
+Node<int>::next (this=0x0) at main.cc:28
+28          Node<T>* next () const { return next_; }
+(gdb)
+
+   The program crashed so lets see what kind of information we can gather.
+
+  Inspecting crashes
+   So already we can see the that the program was at line 28 of main.cc, that this points to 0, and we
+   can see the line of code that was executed. But we also want to know who called this method and we
+   would like to be able to examine values in the calling methods. So at the gdb prompt, we type
+   backtrace which gives me the following output:
+(gdb) backtrace
+#0    Node<int>::next (this=0x0) at main.cc:28
+#1    0x2a16c in LinkedList<int>::remove (this=0x40160, item_to_remove=@0xffbef014) at main.cc:77
+#2    0x1ad10 in main (argc=1, argv=0xffbef0a4) at main.cc:111
+(gdb)
+
+   So in addition to what we knew about the current method and the local variables, we can now also see
+   what methods called us and what their parameters were. For example, we can see that we were called by
+   LinkedList<int>::remove () where the parameter item_to_remove is at address 0xffbef014. It may help
+   us to understand our bug if we know the value of item_to_remove, so we want to see the value at the
+   address of item_to_remove. This can be done using the x command using the address as a parameter.
+   ("x" can be thought of as being short for "examine".) Here is what happens when I run the command:
+(gdb) x 0xffbef014
+0xffbef014:        0x00000001
+(gdb)
+
+   So the program is crashing while trying to run LinkedList<int>::remove with a parameter of 1. We have
+   now narrowed the problem down to a specific function and a specific value for the parameter.
+
+  Conditional breakpoints
+   Now that we know where and when the segfault is occuring, we want to watch what the program is doing
+   right before it crashes. One way to do this is to step through, one at a time, every statement of the
+   program until we get to the point of execution where we want to see what is happening. This works,
+   but sometimes you may want to just run to a particular section of code and stop execution at that
+   point so you can examine data at that location.
+
+   If you have ever used a debugger you are probably familiar with the concept of breakpoints.
+   Basically, a breakpoint is a line in the source code where the debugger should break execution. In
+   our example, we want to look at the code in LinkedList<int>::remove () so we would want to set a
+   breakpoint at line 52 of main.cc. Since you may not know the exact line number, you can also tell the
+   debugger which function to break in. Here is what we want to type for our example:
+(gdb) break LinkedList<int>::remove
+Breakpoint 1 at 0x29fa0: file main.cc, line 52.
+(gdb)
+
+   So now Breakpoint 1 is set at main.cc, line 52 as desired. (The reason the breakpoint gets a number
+   is so we can refer to the breakpoint later, for example if we want to delete it.) So when the program
+   is run, it will return control to the debugger everytime it reaches line 52. This may not be
+   desirable if the method is called many times but only has problems with certain values that are
+   passed. Conditional breakpoints can help us here. For our example, we know that the program crashes
+   when LinkedList<int>::remove() is called with a value of 1. So we might want to tell the debugger to
+   only break at line 52 if item_to_remove is equal to 1. This can be done by issuing the following
+   command:
+(gdb) condition 1 item_to_remove==1
+(gdb)
+
+   This basically says "Only break at Breakpoint 1 if the value of item_to_remove is 1." Now we can run
+   the program and know that the debugger will only break here when the specified condition is true.
+
+  Stepping
+   Continuing with the example above, we have set a conditional breakpoint and now want to go through
+   this method one line at a time and see if we can locate the source of the error. This is accomplished
+   using the step command. gdb has the nice feature that when enter is pressed without typing a command,
+   the last command is automatically used. That way we can step through by simply tapping the enter key
+   after the first step has been entered. Here is what this looks like:
+(gdb) run
+The program being debugged has been started already.
+Start it from the beginning? (y or n) y
+
+Starting program: /home/cec/s/a/agg1/.www-docs/tutorial/main
+Creating Node, 1 are in existence right now
+Creating Node, 2 are in existence right now
+Creating Node, 3 are in existence right now
+Creating Node, 4 are in existence right now
+The fully created list is:
+4
+3
+2
+1
+
+Now removing elements:
+Creating Node, 5 are in existence right now
+Destroying Node, 4 are in existence right now
+4
+3
+2
+1
+
+
+Breakpoint 1, LinkedList<int>::remove (this=0x40160,
+    item_to_remove=@0xffbef014) at main.cc:52
+52            Node<T> *marker = head_;
+(gdb) step
+53            Node<T> *temp = 0;    // temp points to one behind as we iterate
+(gdb)
+55            while (marker != 0) {
+(gdb)
+56              if (marker->value() == item_to_remove) {
+(gdb)
+Node<int>::value (this=0x401b0) at main.cc:30
+30          const T& value () const { return value_; }
+(gdb)
+LinkedList<int>::remove (this=0x40160, item_to_remove=@0xffbef014)
+    at main.cc:75
+75              marker = 0;  // reset the marker
+(gdb)
+76              temp = marker;
+(gdb)
+77              marker = marker->next();
+(gdb)
+Node<int>::next (this=0x0) at main.cc:28
+28          Node<T>* next () const { return next_; }
+(gdb)
+
+Program received signal SIGSEGV, Segmentation fault.
+Node<int>::next (this=0x0) at main.cc:28
+28          Node<T>* next () const { return next_; }
+(gdb)
+
+   After typing run, gdb asks us if we want to restart the program, which we do. It then proceeds to run
+   and breaks at the desired location in the program. Then we type step and proceed to hit enter to step
+   through the program. Note that the debugger steps into functions that are called. If you don't want
+   to do this, you can use next instead of step which otherwise has the same behavior.
+
+   The error in the program is obvious. At line 75 marker is set to 0, but at line 77 a member of marker
+   is accessed. Since the program can't access memory location 0, the seg fault occurs. In this example,
+   nothing has to be done to marker and the error can be avoided by simply removing line 75 from
+   main.cc.
+
+   If you look at the output from running the program, you will see first of all that the program runs
+   without crashing, but there is a memory leak somewhere in the program. (Hint: It is in the
+   LinkedList<T>::remove() function. One of the cases for remove doesn't work properly.) It is left as
+   an exercise to the reader to use the debugger in locating and fixing this bug. (I've always wanted to
+   say that. ;)
+
+   gdb can be exited by typing quit.
+
+Further information
+   This document only covers the bare minimum number of commands necessary to get started using gdb. For
+   more information about gdb see the gdb man page or take a look at a very long description of gdb
+   here. Online help can be accessed by typing help while running gdb. Also, as always, feel free to
+   ask questions on the newsgroup or you can ask me during lab hours.
+
+Notes
+   * There is another bug in the source code for the linked list that is not mentioned in the above
+     code. The bug does not show up for the sequence of inserts and removes that are in the provided
+     driver code, but for other sequences the bug shows up. For example, inserting 1, 2, 3, and 4, and
+     then trying to remove 2 will show the error. Special thanks to Linda Gu and Xiaofeng Chen for
+     locating this bug. The bug fix is pretty simple and is left as an exercise.
+   * Special thanks to Ximmbo da Jazz for providing valuable fixes for some typos and erroneous
+     output.
+   * Special thanks to Raghuprasad Govindarao for discovering a broken link.
+
+
+---
+

@@ -1,0 +1,322 @@
+filename: c_mimicking-classes-with-structs_20230828.txt
+https://codereview.stackexchange.com/questions/183028/mimicking-classes-with-structs-in-c
+
+Mimicking classes with structs in C
+
+   I'm trying to mimic classes. Is there anything with this code that I should not do with C or any ways
+   that I can improve it at all, such as best practices or anything?
+
+   structs.h
+#ifndef PLAYER_H
+#define PLAYER_H
+
+typedef struct {
+	char name[30];
+	int damage;
+	int durability;
+} weapon;
+
+typedef struct {
+	int health;
+	int armor_level;
+	int currency;
+	weapon player_weap;
+} player;
+
+#endif
+
+   main.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "structs.h"
+
+player new_player();
+void print_player(player user);
+
+int main(void) {
+	player user = new_player();
+	print_player(user);
+
+	return 0;
+}
+
+player new_player() {
+	player new_player;
+	new_player.health = 100;
+	new_player.armor_level = 0;
+	new_player.currency = 0;
+	strcpy(new_player.player_weap.name, "Starter Sword");
+	new_player.player_weap.damage = 1;
+	new_player.player_weap.durability = 100;
+
+	return new_player;
+}
+
+void print_player(player user) {
+	printf("The players health is %d.\n", user.health);
+	printf("The players armor is %d.\n", user.armor_level);
+	printf("The players currency is %d.\n", user.currency);
+	printf("The players weapon is the %s.\n", user.player_weap.name);
+	printf("The players weapon does %d damage and has %d durability.\n", user.player_weap.damage, user.player_weap.durability);
+}
+
+
+***
+   It's pretty simple and readable as far as it goes, which is good. It doesn't do a whole lot but I
+   have some comments that you might consider.
+
+methods?
+   It's curious that you mention mimicking classes but there are no function pointers in the structs. In
+   C it's more difficult to get the constructor in there, but print could be a function pointer.
+
+typedef struct {
+	//...
+	void (*print)(struct player);
+	//...
+} player;
+
+player new_player() {
+	//...
+	new_player.print = print_player;
+	//...
+}
+
+int main(){
+	//...
+	user.print(user);
+	//...
+}
+
+Initializers
+   C does have a nice initializer syntax, esp. with C99's designators. Your constructor function could
+   be somewhat nicer by using the initializer.
+
+player new_player() {
+	player new_player = {
+	.health = 100,
+	.armor_level = 0,
+	.currency = 0,
+	.player_weap = {
+		.name = "Starter Sword",
+		.damage = 1,
+		.durability = 100
+		}
+	};
+	return new_player;
+}
+
+   Or even simpler with a compound literal.
+
+player new_player() {
+	return (player) {
+	.health = 100,
+	.armor_level = 0,
+	.currency = 0,
+	.player_weap = {
+		.name = "Starter Sword",
+		.damage = 1,
+		.durability = 100
+		}
+	};
+}
+
+***
+   This question stirred my curiosity about macro handling and the following horrible hack was born: a
+   series of macros for object like structures.
+
+   Each "class" is defined in its header file and methods are defined in the corresponding .c file. All
+   objects are passed to functions or returned from functions as pointers. In this way objects can be
+   static, automatic or allocated.
+
+   Let's start with weapon.h:
+
+#if !defined WEAPON_H
+#define WEAPON_H
+
+#include "objects.h"
+
+#define CLASS weapon
+MEMBERS
+	char name[30];
+	int damage;
+	int durability;
+METHODS
+	void METHOD(print);
+	int  METHOD(get_damage);
+	void METHOD(set_damage, int val);
+#undef CLASS
+
+#endif // WEAPON_H
+
+   Note that the class is defined, then members must follow, and later methods. This automatically
+   defines two functions weapon_constructor, weapon_destructor which are responsible to initialize and
+   release every resource of the class. Moreover it also creates new_weapon() which allocates and
+   constructs and delete_weapon() which destroys and frees.
+
+   The implementations in weapon.c is:
+
+#include "weapon.h"
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+#define CLASS weapon
+BEGIN_DEFINITIONS
+DEFINE_CONSTRUCTOR
+	strcpy(self->name, "Starter Sword");
+	self->damage = 1;
+	self->durability = 100;
+	return self;
+DEFINE_DESTRUCTOR
+END_DEFINITIONS
+
+void METHOD(print) {
+	printf("The weapon is the %s.\n", self->name);
+	printf("The weapon does %d damage and has %d durability.\n", self->damage, self->durability);
+}
+
+int METHOD(get_damage) {
+	return self->damage;
+}
+
+void METHOD(set_damage, int val) {
+	self->damage = val;
+}
+
+   Ok, what are all those macros? They are defined in objects.h:
+
+#if !defined OBJECTS_H
+#define OBJECTS_H
+
+//Stuff for macro handling (https://github.com/pfultz2/Cloak/wiki/C-Preprocessor-tricks,-tips,-and-idioms)
+#define CAT(a, ...) PRIMITIVE_CAT(a, __VA_ARGS__)
+#define PRIMITIVE_CAT(a, ...) a ## __VA_ARGS__
+// ------------------------------------------------
+
+// Requires a #define CLASS
+#define OPERATOR(name, ...) CAT(name,CAT(_,CLASS))(__VA_ARGS__)
+#define METHOD(name, ...) CAT(CLASS,_)##name(CLASS* self, __VA_ARGS__)
+#define CALL(self, method, ...) CAT(CLASS,_)##method(self, __VA_ARGS__)
+
+#define CONSTRUCTOR   CLASS* METHOD(constructor)
+#define DESTRUCTOR    CLASS* METHOD(destructor)
+#define NEW           CLASS* OPERATOR(new)
+#define DELETE        void OPERATOR(delete, CLASS* obj)
+
+#define MEMBERS typedef struct CLASS {
+
+#define METHODS \
+} CLASS;        \
+CONSTRUCTOR;    \
+DESTRUCTOR;     \
+NEW;            \
+DELETE;
+
+#define BEGIN_DEFINITIONS
+#define DEFINE_CONSTRUCTOR CONSTRUCTOR {
+#define DEFINE_DESTRUCTOR return self; } DESTRUCTOR {
+#define END_DEFINITIONS return self; }					 \
+NEW { return CALL(malloc(sizeof(CLASS)), constructor); } \
+DELETE { free(CALL(obj, destructor)); }
+
+// Remember to #undef CLASS
+
+#endif // OBJECTS_H
+
+   What about the player? It uses a weapon, so in the constructor it will construct its weapon and in
+   the destructor it will destruct it. player.h:
+
+#ifndef PLAYER_H
+#define PLAYER_H
+
+#include "objects.h"
+#include "weapon.h"
+
+#define CLASS player
+MEMBERS
+	int health;
+	int armor_level;
+	int currency;
+	weapon weap;
+METHODS
+	void METHOD(print);
+#undef CLASS
+
+#endif // PLAYER_H
+
+   And the corresponding player.c:
+#include "player.h"
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+#define CLASS player
+BEGIN_DEFINITIONS
+DEFINE_CONSTRUCTOR
+	self->health = 100;
+	self->armor_level = 0;
+	self->currency = 0;
+	weapon_constructor(&self->weap);
+DEFINE_DESTRUCTOR
+	weapon_destructor(&self->weap);
+END_DEFINITIONS
+
+void METHOD(print) {
+	printf("The player's health is %d.\n", self->health);
+	printf("The player's armor is %d.\n", self->armor_level);
+	printf("The player's currency is %d.\n", self->currency);
+	printf("Player's weapon: ");
+	weapon_print(&self->weap);
+}
+
+   Note that in the print method it calls the print method of weapon. All methods get the class name
+   before the method name. Their first parameter is a pointer to the object on which they should work,
+   called self a la Python.
+
+   A test case main.c:
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "player.h"
+
+// Example usage of objects on free store
+int main(void) {
+	player *user = new_player();
+
+	weapon_set_damage(&user->weap, 2);
+	int x = weapon_get_damage(&user->weap);
+
+	player_print(user);
+
+	delete_player(user);
+	return 0;
+}
+
+/*
+// Example usage of objects with automatic storage duration
+int main(void) {
+	player user;
+	player_constructor(&user);
+
+	weapon_set_damage(&user.weap, 2);
+	int x = weapon_get_damage(&user.weap);
+
+	player_print(&user);
+
+	player_destructor(&user);
+	return 0;
+}
+*/
+
+   This is a sample usage. You can follow on this horrible idea by subclassing a player in a simple way:
+   have the first element be an element of the super class. With a little cast you can pass the derived
+   object to the super class methods, without any problem. The problems begin when you start to need
+   polymorphism. In this case you will definitely need to look into function pointers.
+
+   Disclaimer: I'm not supporting this idea as clever or smart. It was just a nice way to spend some
+   time hacking C macros.
+
+---
+

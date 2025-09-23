@@ -1,0 +1,653 @@
+filename: c_bit-masking_02-multif_20241203.txt
+https://hackaday.com/2015/08/28/firmware-factory-bit-fields-vs-shift-and-mask/
+
+Firmware Factory: Bit Fields Vs Shift And Mask
+August 28, 2015
+
+   Working with embedded systems usually involves writing code which will interface with hardware. This
+   often means working on the register level. It doesn't matter if we're talking about a UART, an analog
+   to digital converter, an LCD controller, or some other gizmo. Sooner or later, you're going to have
+   to break out the datasheets and figure out how to talk to an external device. To succeed at this you
+   must become a master of bit manipulation.
+
+   Hardware designers don't like wasting space, so modes, settings and other small pieces of information
+   are often stored as packed bits. Our processors usually access things a byte (or a word) at a time,
+   so what is the best way to handle this? Like so many other topics in software engineering, there are
+   multiple ways to skin this cat. In C (and its derivatives) there are two major options: shift and
+   mask, and bit fields.
+
+   Consider this register from an Analog Devices ADAU1977, an Analog to Digital Converter (ADC).
+   There is a lot going on here. We've got 6 separate data elements to deal with. Bit 7, is a read only
+   bit, while the rest are read/write. The 3 least significant bits are handled as a single 3 bit value,
+   used to select the master clock for the ADC.
+
+Bit Fields
+   C's native interface for describing bitwise data is bit fields. Bit fields are defined just like
+   structures, which means they make for very easy to read code. The disadvantage to bit fields is that
+   they are non-portable. Using bit fields means placing a lot of trust that your compiler will do what
+   you expect it to.
+
+   In bit fields, we would describe the PLL control register as follows:
+struct {
+	unsigned char clockSelect:3;
+	unsigned char res2 :1;
+	unsigned char clkSource :1;
+	unsigned char res1 :1;
+	unsigned char pllMute :1;
+	unsigned char pllLock :1;
+} PllControlRegister;
+
+
+   accessing the bit fields is just like a structure:
+struct PllControlRegister myRegister;
+myRegister.pllMute = 0;
+
+   Easy right? Well, the devil is in the details. Bit fields are one of the gotchas of non-portable
+   code. Even the Linux kernel hackers have been bitten. If the project you're working on
+   is architecture (and compiler) specific, and you know how the compiler will work, you're golden!
+   However, if you have any future plans to re-use this code on a different system, you're asking for
+   trouble. Here's why: The C standard doesn't define how bit fields should be ordered. In fact, it
+   says: "The order of allocation of bit-fields within a unit (high-order to low-order or low-order
+   to high-order) is implementation-defined."
+
+   intcon Going by that, we have no way to know if pllLock will end up in the most significant bit like
+   we expect it to, or the least significant bit. Things get even more complicated when you throw in
+   larger bit fields on 32 or 64 bit machines, endianness, and padding for fields that cross storage
+   boundaries. If you're interested in portable code, you're better off with the other method, shift and
+   mask, which I describe below. For now though, let's talk about a real world case where bit fields are
+   the better bet.
+
+   Microchip's PIC line of processors use bit fields extensively in their own include files. For
+   example, the INTCON (interrupt control) register on the PIC16F1829 microcontroller is defined as
+   follows:
+struct {
+	unsigned IOCIF :1;
+	unsigned INTF :1;
+	unsigned TMR0IF :1;
+	unsigned IOCIE :1;
+	unsigned INTE :1;
+	unsigned TMR0IE :1;
+	unsigned PEIE :1;
+	unsigned GIE :1;
+} INTCONbits_t;
+
+   (the actual .h file has a union, but I've simplified things a bit here)
+
+   Microchip can use bit fields here because they know what the compiler will do - they wrote it! INTCON
+   is also an internal register on the PIC itself, so no worries about writing portable code. The added
+   bonus here is that PIC has bit set and clear opcodes that can operate over all of its RAM. The
+   compiler is smart enough to translate any bit field operation to the appropriate bsf and bcf opcodes,
+   which operate in a single cycle.
+
+Shift and Mask
+   The safer way to handle operations like this is shifting and masking. As the name implies, this uses
+   a shift operation to build up a mask, then we use that mask with a logical operator to set or clear a
+   specific bit. We don't want to perform all this work on the actual hardware, so the best bet is to
+   use a shadow of the register in RAM. First read the hardware register into RAM, then make
+   modifications on the RAM shadow, and finally write the RAM shadow back to the hardware register. This
+   is where the term Read-Modify-Write comes from. I know this all sounds complex, but after using it a
+   few times, shift and mask with a shadow register becomes second nature.
+
+   Looking back at the ADC register up at the top of the article, let's say we wanted to set pllMute,
+   which is bit 6. The logical OR operation can be used to set a bit. In this case you need to mask all
+   the bits you want to change with a 1.
+
+   For simplicity's sake, assume for these examples that PllControlRegister is a memory mapped I/O
+   location, called  "pllCtlReg".
+
+unsigned char pllShadow;
+unsigned char mask = 1;
+pllShadow = pllCtlReg;           //Read the current value of pllCtlReg
+                                 //now build the mask
+mask = mask &lt;&lt; 6;          //Shift to get 0x40, or b0100 0000
+pllShadow | = mask;              //Logical OR will SET the only bit 6 in our shadow
+pllCtlReg = pllShadow;           //write the shadow back to the hardware
+
+   If we want to clear a bit, a logical AND is the way to go, but this time you need to mask the bits
+   you want to change with 0s, all other bits will be set to 1.
+unsigned char pllShadow;
+unsigned char mask = 1;
+pllShadow = pllCtlReg;           //Read the current value of pllCtlReg
+                                 //now build the mask
+mask = mask &lt;&lt; 6;          //Shift to get 0x40, or b0100 0000
+mask = ~mask;                    //logical NOT gives us 0xBF, or b1011 1111
+pllCtrlReg &amp;= mask;          //Logical AND will clear only bit 6 in our shadow.
+pllCtlReg = pllShadow;           //write the shadow back to the hardware
+
+   If you need to toggle a bit, logical exclusive or (XOR, or the ^ operator) is the tool of choice. I'm
+   just showing one of the most basic ways to perform shift and mask. There are plenty of ways to
+   perform the same operations. You can use #defines, or preprocessor macros, or even functions to
+   perform these same tasks. It all depends on what is most important for your application: memory
+   space, or execution speed.
+
+
+
+---
+https://developerhelp.microchip.com/xwiki/bin/view/software-tools/c-programming/bit-fields/
+
+
+C Programming Bit Fields
+2023/11/09
+
+Bit Fields
+   Bit fields are unsigned int members of structures that occupy a specified number of adjacent
+   bits from one to sizeof(int). They may be used as an ordinary int variable in arithmetic and
+   logical operations.
+
+   Bit fields are ordinary members of a structure and have a specific bit width. They are often used in
+   conjunction with unions to provide bit access to a variable without masking operations.
+
+Creating a Bit Field
+
+Syntax
+
+struct structName {
+	unsigned int memberName1: bitWidth;
+	...
+	unsigned int memberNamen:bitWidth
+}
+
+Example
+
+typedef struct {
+	unsigned int bit0: 1;
+	unsigned int bit1to3: 3;
+	unsigned int bit4: 1;
+	unsigned int bit5: 1;
+	unsigned int bit6to7: 2;
+} byteBits;
+
+   A bit field struct may be declared normally or as a typedef
+
+Using a Bit Field
+
+Example
+
+            Byte in Data Memeory (RAM)
+       7    6    5    4    3    2    1    0
+   x [ 1 ][ 1 ][ 1 ][ 0 ][ 1 ][ 0 ][ 0 ][ 1 ]
+     \_____________/  |  \________/  |    |
+            |         |      |       |    |
+            e         d      c       b    a
+
+
+---
+https://www.reddit.com/r/C_Programming/comments/146tbnp/why_is_using_bitfields_in_high_performance/?rdt=53755
+
+Why is using bitfields in high performance embedded systems is discouraged?
+
+C really needs to fix its bitfields. The concept seems perfect for multiple aspects of systems programming.
+Registers are often split at the bit level. Network protocols pack bits in packet headers and the like.
+Bitfields seem to be perfect for this, but they're so poorly specified in the standard that common "best
+practice" is to avoid them.
+
+Though I break with that myself: if you're not worried about portability and have firm knowledge on your
+compiler and platform, bitfields might be acceptable.
+
+Nevertheless, this is one place where C needs to improve at the language level. Let me define a bitfield
+that's guaranteed to be packed, backed by a type of known size, with a specified field order within that type.
+Bonus points if I can specify the endianness and can use enums as fields.
+
+***
+Part of the issue we're seeing is simply a mismatch between what the C standard is designed for vs. actual
+practical use of C. The standard doesn't care about any of the stuff you mentioned because fundamentally the
+standard doesn't guarantee the bit representations of basically anything - by designing the standard in that
+way, conforming C code is very portable to even weird platforms, and ideally can still be performant on them.
+In practice though this is pretty limiting, and people don't typically care about their code being that
+portable, so they ignore it.
+
+The standard doesn't give you any tools to achieve what you're describing for even normal structs, it's all
+compiler extensions that allow you to dive deeper and guarantee exactly what you want (at the cost of
+portability). Fixing bitfields would also need to be done with compiler extensions, it's unlikely to get any
+better than that.
+
+***
+
+
+Most commenters aren't touching on the fact that you're using them for memory mapped registers.
+
+As mentioned elsewhere, bit fields are a problem for portability. If you assume every system uses the same ordering, you're going to have a problem. (Think ethernet, usb, or transferable files).
+
+Defining them for memory mapped peripheral registers is an excellent way to write legible drivers for embedded systems. The code you're writing is specific to the hardware it's written for. It's inherently not portable. The entire microchip product line comes with predefined bit fields for all registers, STM32 comes with hardware descriptor files that can be used to generate them, etc.
+
+Don't let concerns about portability limit your toolset when you're writing inherently non portable software.
+
+***
+One thing not mentioned here is that bitfields and concurrency do *not* go well together. If you have different threads or ISRs that manipulate adjacent bitfields, they have a high risk of becoming corrupted unless you make all accesses to all adjacent bitfields atomic. The reason for this is that the CPU cannot address individual bits, so it must load all the bits into a register, modify the appropriate bitfield, and then write back the whole register.
+
+
+***
+I could think of is that Bit-fields are interpreted differently by different compilers, which could lead
+to unwanted behavior.
+
+The following properties of bit-fields are unspecified:
+    - Alignment of the allocation unit that holds a bit-field
+
+The following properties of bit-fields are implementation-defined:
+    - Whether bit-fields of type int are treated as signed or unsigned
+    - Whether types other than int, signed int, unsigned int, and _Bool (since C99) are permitted
+    - Whether atomic types are permitted (since C11)
+    - Whether a bit-field can straddle an allocation unit boundary
+
+The order of bit-fields within an allocation unit (on some platforms, bit-fields are packed
+left-to-right, on others right-to-left)
+
+https://en.cppreference.com/w/c/language/bit_field#Notes
+
+***
+ If you have a 16-bit register and 5 bitfields of varying widths defined across it, the compiler doesn't know
+ that the register must be read and written in its entirety. To update a bit field contained within a single
+ byte it may read just that byte, update the bits necessary, and then write a single byte. By reading a
+ uint16_t, manually updating the bits, then writing a uint16_t, you avoid this bug.
+
+Edit: A demonstration
+
+In update_reg_bitfield, the final instruction is a movb, it's only storing a single byte. This will not work
+with many devices, you must write the entire register. The update_reg_data has a final instruction of movw,
+it's writing the entire word.
+
+#include <stdio.h>
+#include <inttypes.h>
+
+union {
+	struct {
+		unsigned a:3;
+		unsigned b:10;
+		unsigned c:3;
+	};
+	uint16_t data;
+} reg;
+
+void update_reg_bitfield(unsigned new_a) {
+	reg.a = new_a;
+}
+
+void update_reg_data(unsigned new_a) {
+	uint16_t data = reg.data;
+	data &= ~3;
+	data |= new_a & 3;
+	reg.data = data;
+}
+
+int main() {
+	unsigned i;
+	scanf("%u", &i);
+	update_reg_bitfield(i);
+	update_reg_data(i);
+}
+
+
+***
+Take the example:
+
+struct {
+	unsigned char a :  1;
+	unsigned char b : 15;
+	unsigned char c : 15;
+	unsigned char d :  1;
+} some_32bit_hardware_register;
+
+The c compiler does not guarantee that 'a' will be bit 0 and that 'd' will be bit 31. This is why portable
+code always uses Macros and Masking.
+
+See: https://www.opensourceforu.com/2015/03/be-cautious-while-using-bit-fields-for-programming/
+
+
+***
+Memory mapped registers and bitfields might not interact in a way you expect them to do. Lets say you have:
+
+struct reg {
+	int a : 8;
+	int b : 8;
+	int c : 8;
+	int d : 8;
+};
+struct reg* registers = (reg*)0x12345678;
+
+(I might be fucking up the syntax but you get the point)
+
+If you have code that's like registers->c = 0x42; it's not defined whether that does mov al,0x42; mov
+[0x1234567a],al; or mov eax,[0x12345678]; and eax,0xFFFF00FF; or eax, 0x00004200; mov [0x12345678],eax;. If
+you're just dealing with bytes in RAM, these are equivalent. If these are hardware control registers, they are
+VERY VERY VERY much not equivalent.
+
+It's also the sort of thing that is very likely to do one thing in a debug build and a different thing in a
+release build. Not fun times.
+
+
+---
+https://mark-story.com/posts/view/bitfields-are-a-trap
+
+Bitfields are a trap
+Nov 26 2023
+
+   I recently came across this video on Youtube and while the author makes some convincing arguments
+   for using bitfields. I'd like to share my experiences having worked with them in a few applications.
+   A long time ago, I also thought that bitfields were neat. However, in the intervening years, my
+   opinion has shifted. While the prospect of simplifying your schema and being able to pack multiple
+   values into a single column through seems attractive; the complexity cost isn't worth it.
+
+What are bitfields?
+   Bitfields are generally stored in integer columns. Inside the integer you use each bit of the field
+   to store status/flag values. For example, within a 32bit integer you can store 31 values. You
+   interact with the bits using bitwise operators to 'mask' each bit. For example you could store
+   multiple statuses for an article using 4 bits:
+   published needs_review comments_allowed promoted
+   1 (0001)  2 (0010)     4 (0100)         8 (1000)
+
+   When you filter or update records you use bitwise operators to filter and mutate values. If you'd
+   like to learn more about bitfields either my previous article or the youtube video I linked are great
+   resources.
+
+Harder to evolve over time
+   One of the attractive qualities of bitfields is that they simplify schema management as you don't
+   need to change your schema as often. Instead of having to add and remove columns, you can use new
+   bits as you add flags. Eventually, you'll stop using bits, or need to reuse a bit. Finding and
+   clearing unused bits requires a backfill operation across every record in a table to clear out stale
+   flags. If you don't clean up unused flags, you're faced with increased cognitive load from junk data.
+   Either way, your quick win turns into long term complexity.
+
+More complex to operate than boolean flags
+   Working with bitfields requires using the bit mask operators |, &, ^, and ~. While all of these
+   operators are well documented and consistently used in most programming languages, they are more
+   complex to read, understand, and operate over the alternatives. As a quick example, which bits are
+   set in 384 that are not set in 192? Even if you can figure that out, what do those bits mean in any
+   given context? I found that answering these questions required memorizing lookup tables, or having to
+   cross reference the bit values each time I needed to interact with a bitfield. Let's look at some
+   code and SQL to see the additional complexity in action.
+    1. $entity->status = Post::PUBLISHED | Post::COMMENTS_ALLOWED;
+
+   While this example is reasonably simple, it is more complex than manipulating boolean attributes:
+    1. $entity->published = true;
+    2. $entity->comments_allowed = true;
+
+   Turning on fields doesn't seem to rough, but turning fields off is harder:
+    1. $entity->status = $entity->status & ~Post::COMMENTS_ALLOWED;
+    2.
+    3. // vs
+    4. $entity->comments_allowed = false;
+
+   The additional complexity required for bitfields presents itself more in query logic. Lets filter
+   subscriptions where one of two flags is enabled. Compare using bitfields:
+    1. $query = <<<SQL
+    2. SELECT *
+    3. FROM subscriptions
+    4. WHERE
+    5. status_flags = (status_flags | %s)
+    6. OR status_flags = (status_flags | %s)
+    7. SQL;
+    8. $params = [Subscription::IS_INVOICED, Subsciption::EXTERNAL_BILLING];
+
+   And now with using boolean attributes:
+    1. $query = <<<SQL
+    2. SELECT *
+    3. FROM subscriptions
+    4. WHERE
+    5. is_invoiced = true OR external_billing =true
+    6. SQL;
+
+   Queries where you want to filter out records that have flags disabled are also more complex:
+    1. $query = <<<SQL
+    2. SELECT *
+    3. FROM subscriptions
+    4. WHERE
+    5. (status_flags & %s = 0) AND (status_flags & %s = 0)
+    6. SQL;
+    7. $params = [Subscription::CLOSED, Subsciption::PAST_DUE];
+
+   Compared with:
+    1. $query = <<<SQL
+    2. SELECT *
+    3. FROM subscriptions
+    4. WHERE
+    5. closed = false and past_due = false
+    6. SQL;
+
+   While we've only looked at basic SQL queries, the complexity in manipulating bits often spills out
+   into application logic as your ORM might not provide high-level abstractions for these operations.
+
+Difficult to query efficiently
+   As you get more flags in your bitfield, you're going to want to use them for filtering results. This
+   will work great for a while, however you cannot index individual bits in the field. The best you can
+   do is index the flags field, which won't always improve query performance. You're quite limited in
+   the options you have for making bitfields efficient. You'll always need to read the full index in
+   order to match any row. With boolean flags you can index your 'hot' column tuples. You can make as
+   many indexes as you have storage for and make all your queries fast.
+
+Training is harder
+
+   Finally, most folks that join your team in the future will be familiar with boolean values. The same
+   cannot be said of bitfield and bit masking. You'll need to teach each and every employee the ropes
+   about how bitfields work, what the landmines are and how to use the operators in the DSL your
+   framework or application exposes work costing your team time.
+
+   While 15 years ago, I thought bitfields were pretty neat, and clearly people still do. I think
+   bitfields are an attractive trap and hope that you avoid them. Having worked with bitfields for many
+   years, they are a trap. Instead, I recommend using discrete columns for boolean flags and string
+   enums for enums. While they consume a more in storage space, they make working with data in adhoc
+   query tools, application debuggers and tests much easier as you don't have to memorize as much.
+   Discrete columns are also easier to maintain, evolve and optimize as necessary.
+
+
+
+---
+https://users.cs.cf.ac.uk/dave/C/node13.html
+
+Low Level Operators and Bit Fields
+
+We have seen how pointers give us control over low level memory operations.
+
+Many programs (e.g. systems type applications) must actually operate at a low level where individual
+bytes must be operated on.
+
+NOTE: The combination of pointers and bit-level operators makes C useful for many low level
+applications and can almost replace assembly code. (Only about 10 % of UNIX is assembly code the rest
+is C!!.)
+
+Bitwise Operators
+The bitwise operators of C a summarised in the following table:
+
+CAPTION: Table: Bitwise operators
++------+-------------------+
+| &    | AND               |
+| |    | OR                |
+| ^    | XOR               |
+| ~    | One's Compliment  |
+|      | 0 --> 1           |
+|      | 1 --> 0           |
+| <<   | Left shift        |
+| >>   | Right Shift       |
++------+-------------------+
+
+DO NOT confuse & with &&: & is bitwise AND, && logical AND. Similarly for | and ||.
+
+~ is a unary operator -- it only operates on one argument to right of the operator.
+
+The shift operators perform appropriate shift by operator on the right to the operator on the left.
+The right operator must be positive. The vacated bits are filled with zero (i.e. There is NO wrap
+around).
+
+For example: x << 2 shifts the bits in x by 2 places to the left.
+So:
+if x = 00000010 (binary) or 2 (decimal)
+
+then:
+x >>= 2 ==> x = 00000000$ or 0 (decimal)
+
+Also: if x = 00000010 (binary) or 2 (decimal)
+$x <<= 2 ==> x = 00001000$ or 8 (decimal)
+
+Therefore a shift left is equivalent to a multiplication by 2.
+Similarly a shift right is equal to division by 2
+
+NOTE: Shifting is much faster than actual multiplication (*) or division (/) by 2. So if you want
+fast multiplications or division by 2 use shifts.
+
+To illustrate many points of bitwise operators let us write a function, Bitcount, that counts bits
+set to 1 in an 8 bit number (unsigned char) passed as an argument to the function.
+
+int bitcount(unsigned char x) {
+	int count;
+
+	for (count=0; x != 0; x>>=1)
+		if ( x & 01)
+			count++;
+	return count;
+}
+
+   This function illustrates many C program points:
+     * for loop not used for simple counting operation
+     * x >>=1 ==> x = x >> 1
+     * for loop will repeatedly shift right x until x becomes 0
+     * use expression evaluation of x & 01 to control if
+     * x & 01 masks of 1st bit of x if this is 1 then count++
+
+Bit Fields
+Bit Fields allow the packing of data in a structure. This is especially useful when memory or data
+storage is at a premium. Typical examples:
+
+* Packing several objects into a machine word. e.g. 1 bit flags can be compacted -- Symbol tables
+  in compilers.
+* Reading external file formats -- non-standard file formats could be read in. E.g. 9 bit integers.
+
+C lets us do this in a structure definition by putting :bit length after the variable. i.e.
+
+struct packed_struct {
+	unsigned int f1:1;
+	unsigned int f2:1;
+	unsigned int f3:1;
+	unsigned int f4:1;
+	unsigned int type:4;
+	unsigned int funny_int:9;
+} pack;
+
+Here the packed_struct contains 6 members: Four 1 bit flags f1..f3, a 4 bit type and a 9 bit
+funny_int.
+
+C automatically packs the above bit fields as compactly as possible, provided that the maximum length
+of the field is less than or equal to the integer word length of the computer. If this is not the
+case then some compilers may allow memory overlap for the fields whilst other would store the next
+field in the next word (see comments on bit fiels portability below).
+
+Access members as usual via:
+pack.type = 7;
+
+NOTE:
+  * Only n lower bits will be assigned to an n bit number. So type cannot take values larger than 15
+    (4 bits long).
+  * Bit fields are always converted to integer type for computation.
+  * You are allowed to mix "normal" types with bit fields.
+  * The unsigned definition is important - ensures that no bits are used as a +/- flag.
+
+Bit Fields: Practical Example
+   Frequently device controllers (e.g. disk drives) and the operating system need to communicate at a
+   low level. Device controllers contain several registers which may be packed together in one integer
+
+    +-- Ready   +-- Write protection
+    |          /
+    |         /    Error Code       Track             Sector       Command
+   [1][1][1][1][1][    8 bits     ][     9 bits     ][   5 bits  ][ 5 bits  ]
+       |  |     |
+       |  |     +-- Head Locked
+       |  +-- Disk Spinning
+       +-- Error
+
+   Fig. 12.1 Example Disk Controller Register We could define this register easily with bit fields:
+
+struct DISK_REGISTER  {
+	unsigned ready:1;
+	unsigned error_occured:1;
+	unsigned disk_spinning:1;
+	unsigned write_protect:1;
+	unsigned head_loaded:1;
+	unsigned error_code:8;
+	unsigned track:9;
+	unsigned sector:5;
+	unsigned command:5;
+};
+
+   To access values stored at a particular memory address, DISK_REGISTER_MEMORY we can assign a pointer
+   of the above structure to access the memory via:
+
+struct DISK_REGISTER *disk_reg = (struct DISK_REGISTER *) DISK_REGISTER_MEMORY;
+
+   The disk driver code to access this is now relatively straightforward:
+/* Define sector and track to start read */
+disk_reg->sector = new_sector;
+disk_reg->track = new_track;
+disk_reg->command = READ;
+
+/* wait until operation done, ready will be true */
+while ( ! disk_reg->ready ) ;
+
+/* check for errors */
+if (disk_reg->error_occured) {
+	/* interrogate disk_reg->error_code for error type */
+	switch (disk_reg->error_code)
+	......
+}
+
+A note of caution: Portability
+   Bit fields are a convenient way to express many difficult operations. However, bit fields do suffer
+   from a lack of portability between platforms:
+
+     * integers may be signed or unsigned
+     * Many compilers limit the maximum number of bits in the bit field to the size of an integer which
+       may be either 16-bit or 32-bit varieties.
+     * Some bit field members are stored left to right others are stored right to left in memory.
+     * If bit fields too large, next bit field may be stored consecutively in memory (overlapping the
+       boundary between memory locations) or in the next word of memory.
+
+   If portability of code is a premium you can use bit shifting and masking to achieve the same results
+   but not as easy to express or read. For example:
+
+unsigned int  *disk_reg = (unsigned int *) DISK_REGISTER_MEMORY;
+
+/* see if disk error occured */
+disk_error_occured = (disk_reg & 0x40000000) >> 31;
+
+Exercises
+
+   Exercise 12507
+    Write a function that prints out an 8-bit (unsigned char) number in binary format.
+
+   Exercise 12514
+   Write a function setbits(x,p,n,y) that returns x with the n bits that begin at position p set to the
+   rightmost n bits of an unsigned char variable y (leaving other bits unchanged).
+
+   E.g. if x = 10101010 (170 decimal) and y = 10100111 (167 decimal) and n = 3 and p = 6 say then you
+   need to strip off 3 bits of y (111) and put them in x at position 10xxx010 to get answer 10111010.
+
+   Your answer should print out the result in binary form (see Exercise 12.1 although input can be in
+   decimal form.
+
+   Your output should be like this:
+   x = 10101010 (binary)
+   y = 10100111 (binary)
+   setbits n = 3, p = 6 gives x = 10111010 (binary)
+
+   Exercise 12515
+   Write a function that inverts the bits of an unsigned char x and stores answer in y.
+
+   Your answer should print out the result in binary form (see Exercise 12.1 although input can be in
+   decimal form.
+
+   Your output should be like this:
+   x = 10101010 (binary)
+   x inverted = 01010101 (binary)
+
+   Exercise 12516
+   Write a function that rotates (NOT shifts) to the right by n bit positions the bits of an unsigned
+   char x.ie no bits are lost in this process.
+
+   Your answer should print out the result in binary form (see Exercise 12.1 although input can be
+   in decimal form.
+
+   Your output should be like this:
+   x = 10100111 (binary)
+   x rotated by 3 = 11110100 (binary)
+
+   Note: All the functions developed should be as concise as possible
+
+---
+

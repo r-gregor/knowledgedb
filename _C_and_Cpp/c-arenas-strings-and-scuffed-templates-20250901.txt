@@ -1,0 +1,445 @@
+filename: c-arenas-strings-and-scuffed-templates-20250901.txt
+https://michaelradu.substack.com/p/arenas-strings-and-scuffed-templates?utm_campaign=post&utm_medium=web
+
+Arenas, Strings and Scuffed Templates in C
+Aug 03, 2023
+
+   I recently watched a video by VoxelRifts where he makes development in C a lot easier and so I
+   decided to start incorporating his additions into my standard library and take some notes on them for
+   ease of use.
+
+   This article serves as a written handbook-like version of the original video where anyone can just
+   come and ctrl+f the topic they wish to recall and start writing code based on that. For some,
+   including myself, articles are easier to comprehend when trying to quickly recall a topic.
+
+   Let's get to it then.
+
+Linear Allocators (Arenas)
+   C is a language where we have to manage our own memory, hence its standard library provides us with
+   handy functions such as malloc and free, but we can do better.
+
+Issue with this approach:
+     * it accounts for allocation and deallocation at any point in time.
+     * it's highly general, for our use case specificity is highly beneficial.
+
+The Solution:
+   For such scenarios, the linear allocator also known as the arena allocator or the bump allocator
+   comes to the rescue.
+// Linear allocator struct
+void *base_memory;
+void *alloc_pos;
+
+    +---------------------------------------------------------+
+    |                                                         |
+    +---------------------------------------------------------+
+    ^
+    |
+    arena_pos
+
+Characteristics
+     * It uses a block of backing memory base_memory.
+     * It uses a pointer alloc_pos which points to the beginning of the memory.
+
+Allocating memory
+     Works just like malloc
+
+     * Ask for some sized memory by calling arena_alloc(size) -> it returns the current alloc_pos thus
+       moving the alloc_pos pointer ahead by whatever size you asked for.
+
+The catch
+   * You can't free memory allocated with this arena, you have to free the entire memory block.
+void *allocation = arena_alloc(arena, size);
+
+This is enforcing a good thing:
+     * When you allocate some data into an arena you're saying this allocation will live as long as the
+       arena does. This is the definition of lifetime.
+
+Example 1
+
+    [   int a   ] [   int b   ] [   int c   ]
+              DoneWithUsingLibrary()
+
+   We're using a library that needs access to 3 separate integers at all times until we call
+   DoneWithUsingLibrary().
+
+   With the malloc API, we allocate/deallocate them separately and store them as pointers.
+
+int *a = malloc(sizeof(int));
+int *b = malloc(sizeof(int));
+int *c = malloc(sizeof(int));
+
+// Use a,b and c
+RegisterMyPointers(a, b, c);
+DoStuff();
+
+DoneWithUsingLibrary();
+free(c);
+free(b);
+free(a);
+
+   With arenas, we allocate them on the same block of memory and free the entire arena at the end.
+Arena arena = arena_make();
+int *a = arena_alloc(&arena, sizeof(int));
+int *b = arena_alloc(&arena, sizeof(int));
+int *c = arena_alloc(&arena, sizeof(int));
+
+// Use a, b and c
+RegisterMyPointers(a, b, c);
+DoStuff();
+
+DoneWithUsingLibrary();
+arena_free(&arena);
+
+   By itself, this doesn't seem too important, but it is.
+
+   Imagine the initialization and freeing are 2 separate functions, as this pattern is common while
+   working with C
+
+void InitLibrary() {
+	int *a = malloc(sizeof(int));
+	int *b = malloc(sizeof(int));
+	int *c = malloc(sizeof(int));
+
+	// Use a, b and c
+	RegisterMyPointers(a, b, c);
+}
+
+void DoStuffWithLibrary() {
+	DoStuff();
+}
+
+void FreeLibrary() {
+	DoneWithUsingLibrary();
+	free(c);
+	free(b);
+	free(a);
+}
+
+Disadvantages:
+   With malloc and free we need to necessarily store the pointers somewhere even though we are not using
+   them. So we need to pass in some state and manage it.
+
+typedef struct MyLibState {
+	int *a;
+	int *b;
+	int *c;
+} MyLibState;
+
+void InitLibrary(MyLibState *state) {
+	state->a = malloc(sizeof(int));
+	state->b = malloc(sizeof(int));
+	state->c = malloc(sizeof(int));
+
+	// Use a, b and c
+	RegisterMyPointers(state->a, state->b, state->c);
+}
+
+void DoStuffWithLibrary() {
+	DoStuff();
+}
+
+void FreeLibrary(MyLibState *state) {
+	DoneWithUsingLibrary();
+	free(state->c);
+	free(state->b);
+	free(state->a);
+}
+
+   Yikes... This looks like a pain to manage. Let's try it with the Arena.
+
+typedef struct MyLibState {
+	Arena arena;
+} MyLibState;
+
+void InitLibrary(MyLibState *state) {
+	state->arena = arena_make();
+	int *a = arena_alloc(&state->arena, sizeof(int));
+	int *b = arena_alloc(&state->arena, sizeof(int));
+	int *c = arena_alloc(&state->arena, sizeof(int));
+
+	// Use a, b and c
+	RegisterMyPointers(a, b, c);
+}
+
+void DoStuffWithLibrary() {
+	DoStuff();
+}
+
+void FreeLibrary(MyLibState *state) {
+	DoneWithUsingLibrary();
+	arena_free(&state->arena);
+}
+
+Arena Benefits:
+     * We never use the pointers ourselves -> we never have to store them.
+     * We are 100% sure the allocations are right next to each other -> Cache efficiency is achieved.
+
+void FunctionA(Arena *arena, ...); // Does allocate memory for you
+void FunctionB(...);               // Doesn't allocate memory
+     * Ability to check whether a function does or not make allocations based on whether it takes in an
+       Arena or not.
+
+Example 2
+   We want to manipulate our incoming string, but we don't want to pollute the arena with intermediary
+   nonsense.
+
+string U_FixFilepath(M_Arena *arena, string filepath) {
+	M_Arena scratch = arena_make();
+
+	string fixed = filepath;
+	fixed = str_replace_all(&scratch, fixed, str_lit("\\"), str_lit("/"));
+	fixed = str_replace_all(&scratch, fixed, str_lit("/./"), str_lit("/"));
+
+	while (true) {
+		u64 dotdot = str_find_first(fixed, str_lit(".."), 0);
+		if (dotdot == fixed.size) break;
+
+		u64 range = (dotdot + 3) - last_slash;
+		string old = fixed;
+		fixed = str_alloc(&scratch, fixed.size - range);
+		memcpy(fixed.str, old.str, last_slash);
+		memcpy(fixed.str + last_slash, old.str + dotdot + 3, old.size - range - last_slash + 1);
+	}
+	fixed = str_copy(arena, fixed);
+	arena_free(&scratch);
+
+	return fixed;
+}
+
+Purpose:
+     * Reduce path to its simplest form
+     * Remove ./ patterns
+     * Remove ../ patterns and one folder name before the last /
+
+Solution:
+     * Initialize a small scratch arena for quick use
+     * Build the fixed string on the scratch arena
+     * Copy the fixed string onto the final arena
+     * Free the scratch arena
+
+Strings
+   In C, strings are represented as a pointer to the first character. The end of the string is marked by
+   the null terminator \0 special character.
+     * Strings specified using double quotes will automatically have the \0 character added to them.
+     * char* is the data type used by strings.
+
+     "TestingAB" = [T][e][s][t][i][n][g][A][B][\0]
+                    ^
+                    |
+                    char *myString
+
+   There are a few disadvantages with this approach.
+
+Example 1
+   We have a file name stored somewhere in memory that looks like this.
+
+     [H][E][L][L][O][.][T][X][T][\0]
+      ^
+      |
+      char *file
+
+   Let's say we want a string that stores only the extension of this file. We can initialize a new
+   pointer that points to the first T in txt, reusing the \0 character for both strings.
+
+     [H][E][L][L][O][.][T][X][T][\0]
+      ^                 ^
+      |                 |
+      char *file        char *extension
+
+   But now... what happens if we only want the filename without the extension?
+
+   Simple, pain and suffering.
+
+Common approaches and their issues:
+     * Initialize a new pointer pointing to the first character -> we need to manually check for the end
+       of the filename.
+
+      char *name
+      |
+      v
+     [H][E][L][L][O][.][T][X][T][\0]
+      ^                 ^
+      |                 |
+      char *file        char *extension
+
+     * Replace the . with a \0 -> we break the original string.
+
+      char *name
+      |
+      v
+     [H][E][L][L][O][\0][T][X][T][\0]
+      ^                  ^
+      |                  |
+      char *file         char *extension
+
+     * Create an entirely new allocation for the file name string -> Do we really need to do that?
+
+     [H][E][L][L][O][.][T][X][T][\0]
+      ^                 ^
+      |                 |
+      char *file        char *extension
+
+
+              char *name
+              |
+              v
+             [H][E][L][L][O][\0]
+
+
+The Solution:
+   Give up on null terminator strings and instead use count based strings.
+
+// string struct
+char *str;
+u64 size;
+
+Characteristics
+     * It uses a char* for the string.
+     * It uses a u64, also known as a 64bit unsigned int for the size.
+     * It's a combination of std::string and std::string_view
+
+      size = 5
+      char *name
+      |
+      v
+     [H][E][L][L][O][.][T][X][T][\0]
+      ^                 ^
+      |                 |
+      char *file        char *extension
+      size = 9          size = 3
+
+
+The catch:
+     * We can't tell at a glance whether a string has actually been allocated or if it is just a view,
+       which is important for freeing the memory.
+
+But this isn't a problem:
+     * The arena in which the string is allocated won't care about this and will free the memory
+       anyways.
+
+Benefits:
+     * We can use the allocated strings and view strings in the same functions.
+
+string str_concat(Arena *arena, string a, string b);
+string str_replace_all(Arena *arena, string needle, string replacement);
+// etc
+
+     * Getting string size is trivial. Null terminated strings require a loop, with our string struct,
+       the size is immediately available.
+
+Scuffed Templates
+   C's standard library lacks implementations for common data structures such as dynamic arrays, stacks,
+   linked lists, hash tables, etc. The language also doesn't have templates.
+
+The Solution:
+   Let's use the preprocessor. We can define macros that act as templates: we define macros for the code
+   that goes in the header files, such as struct definitions and function prototypes and a different
+   macro for the code that goes in the implementation C files.
+
+#define MyTemplatePrototype(arg1)          \
+	typedef struct arg1##datastructure {   \
+		int a;                             \
+		arg1 *b;                           \
+	} arg1##_datastructure;                \
+\
+arg1##datastructure_do_something(arg##1_datastructure *ds);
+
+#define MyTemplate_Impl(arg1)                                      \
+	arg1##_datastructure_do_something(arg1##_datastructure *ds) {  \
+		// do stuff!                                               \
+	}
+
+Example 1
+
+   Here's a simple template translation of a slice structure, which is essentially a pointer + length
+   pair.
+
+#define Slice_Prototype(type)          \
+	typedef struct type##_slice {      \
+		type *ptr;                     \
+		u32 length;                    \
+	} type##_slice;                    \
+\
+void type##_slice_subslice(type##_slice *slice, u32 start, u32 end);   \
+type type##_slice_index(type##_slice *slice, i32 idx);                 \
+#define Slice_Impl(type)                                               \
+void type##_slice_subslice(type##_slice *slice, u32 start, u32 end) {  \
+	return (type##_slice) { slice->ptr + start, end - start };         \
+}\
+type type##_slice_index(type##_slice *slice, i32 idx) { \
+	if (idx < 0 || idx >= slice->length) {              \
+		ERROR("Slice Index Out of bounds");             \
+		return (type##_slice) {0};                      \
+	}\
+	return slice->ptr[idx];                             \
+}
+
+   Now we can expose some common interface for all slices in the form of some more macros, which all
+   take type arguments.
+
+#define slice(type) type##_slice
+
+#define slice_subslice(type, slice, start, end) \
+	type##_slice_subslice(slice, start, end)
+
+#define slice_index(type, slice, idx) \
+	type##_slice_subslice(slice, idx)
+
+Disadvantages:
+     * If your program seg faults in a macro, fixing the errors you make is pure pain.
+     * Your debugger doesn't have the actual tokens corresponding to the seg fault, so it'll break at
+       the macro call.
+
+Remedies:
+     * Expand the macro using the -E (GCC/Clang) | /P (MSVC) flag and replace your implementation macro
+       with the code that is generated.
+
+       Slice_Impl(u32);
+            \
+             \              void u32_slice_subslice(u32_slice *slice, u32 start, u32 end) {
+              \                 return (u32_slice) {slice->ptr + start, end - start};
+               \            }
+                \           type u32_slice_index(u32_slice *slice, i32 idx) {
+                 `------>      if (idx < 0 || idx == slice->length) {
+                                   ERROR("Slice Index Out of bounds");
+                                   return (u32_slice) {0};
+                               }
+                               return slice->ptr[idx];
+                            }
+
+     * Once the error is fixed, you can go back to using the implementation macro.
+
+   Considering this is a write once, use forever approach, I don't consider this to be a bad trade-off.
+
+Meta Programming
+   Another way of doing code instantiation that involves more work is Meta Programming.
+   This is beyond the scope of this article but in essence, we generate code from a meta file:
+
+   metafile.md -> generated.c/h
+
+   Commonly used software for this approach is metadesk.
+
+   Ryan Fleury has a great article about this approach, which I've linked alongside some other note
+   worthy reads.
+
+Worthwhile reads
+   These are extra resources that I found to be extremely useful. It's possible that I'll try to write
+   some articles based off of them by mentioning only the key points so they serve as reminders or
+   introductions rather than fully fledged lectures, much like this one.
+
+   [https://www.rfleury.com/p/table-driven-code-generation?utm_source=substack&utm_campaign=post_embed&utm_medium=web]
+   Table-Driven Code Generation
+   Anyone who has written C has been in the situation-you write an enum, and sooner or later, you'd like
+   to associate values of that enum with strings. You might want to log a value to plaintext in a
+   human-readable form, or you might want to display the value in a user interface...
+
+   [https://www.rfleury.com/p/untangling-lifetimes-the-arena-allocator?utm_source=substack&utm_campaign=post_embed&utm_medium=web]
+   Untangling Lifetimes: The Arena Allocator
+   In every instance when I've said that I prefer to write my software in C, the response
+   is-normally-raised eyebrows. Several dominant memes in the programming world make my position
+   unpopular, and thus uncommon to find. I regularly hear, "why would you write new code in an unsafe
+   systems language?", "performance isn't everything!", and perhaps the most c...
+
+
+---
+

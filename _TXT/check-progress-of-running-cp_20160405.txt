@@ -1,0 +1,207 @@
+filename: check-progress-of-running-cp_20160405.txt
+http://unix.stackexchange.com/questions/66795/how-to-check-progress-of-running-cp
+
+[29]How to check progress of running cp?
+
+   Is it possible to check the progress of running cp process? Some processes respond to various KILL
+   signals so that you can check what is their status. I know that I can run cp with parameter -v but
+   what if forgot to do that, cp is running for a very long time and I want to know which file is being
+   copied, or how many were already copied.
+
+***
+     I don't know if it's a duplicate, linked question is about parameters for cp, while my question is
+     regarding cp that was already started, with no parameters – [39]Petr Mar 4 '13 at 15:26
+   add a comment |
+
+11 Answers 11
+
+***
+   Yes, by running stat on target file and local file, and get a file size,
+
+   i.e stat -c "%s" /bin/ls
+
+   And you get the percentage of data copied by comparing the two value, that's it
+
+   In a very basic implementation that will look like this:
+
+function cpstat()
+{
+  local pid="${1:-$(pgrep -xn cp)}" src dst
+  [[ "$pid" ]] || return
+  while [[ -f "/proc/$pid/fd/3" ]]; do
+    read src dst < <(stat -L --printf '%s ' "/proc/$pid/fd/"{3,4})
+    (( src )) || break
+    printf 'cp %d%%\r' $((dst*100/src))
+    sleep 1
+  done
+  echo
+}
+
+
+***
+     not intended to post a duplicate of your suggestion, so I added the code here. Hope you not mind.
+     – [48]manatwork Mar 4 '13 at 11:13
+
+***
+     @manatwork ah thanks, I was just being lazy in giving a complete example :-) – [49]warl0ck Mar 4 '13
+     at 12:03
+
+***
+     Excellent, this is going in my toolbox on all servers! Thanks! – [50]ACK_stoverflow Jun 3 '13 at
+     22:55
+
+***
+   On recent versions of Mac OS X you can just hit CTRL+T to see progress. From the [51]OSX 10.6 man
+   page for cp(1):
+ "If cp receives a SIGINFO (see the status argument for stty(1)) signal,
+ the current input and output file and the percentage complete will be
+ written to the standard output."
+
+   Hitting CTRL+T is equivalent to signaling the current process with SIGINFO on BSD-ish machines,
+   including OSX.
+
+   This works for [52]dd(1) as well.
+
+   I don't think Linux has this SIGINFO mechanism, and don't see anything in the [53]GNU man page for
+   cp(1) about signals that can be used to report progress.
+
+***
+   When you're copying a lot of files, du -s /path/to/destination or find /path/to/destination | wc -l
+   gives you an idea of how much has already been done.
+
+   You can find out which file is being copied with lsof -p1234 where 1234 is the process ID of cp.
+   Under many systems, pgrep -x cp reports the process IDs of all running processes named cp. This may
+   not be very useful as the order in which the files inside a given directory are copied is essentially
+   unpredictable (in a large directory under Linux, ls --sort=none will tell you; with a directory tree,
+   try find).
+
+   lsof -p1234 also tells you how many bytes cp has already read and written for the current file, in
+   the OFFSET column.
+
+   Under Linux, there are IO usage statistics in /proc/$pid/io (again, use the PID of the cp process for
+   $pidf). The rchar value is the total number of bytes that the process has read, and wchar is the
+   number of bytes that the process has written. This includes not only data in files but also metadata
+   in directories. You can compare that figure with the approximate figure obtained with du
+   /path/to/source (which only counts file data). read_bytes and write_bytes only include what has been
+   read or written from storage, i.e. it excludes terminal diagnostics and data already in cache or
+   still in buffers.
+
+***
+     for real time: watch lsof -p1234 – [62]mchid Oct 31 '14 at 14:09
+
+***
+     Or all in one go: watch lsof -p`pgrep -x cp` – [63]Mike Nov 10 '14 at 21:11
+   add a comment |
+
+***
+   One of my favorite tricks for this (under Linux) is to find out the PID of the cp process (using ps |
+   grep cp or similar), and then to look in /proc/$PID/fd/ and /proc/$PID/fdinfo/.
+$ cp -r y z
+^Z
+$ ls -l /proc/8614/fd
+lrwx------ 1 jander jander 64 Aug  2 15:21 0 -> /dev/pts/4
+lrwx------ 1 jander jander 64 Aug  2 15:21 1 -> /dev/pts/4
+lrwx------ 1 jander jander 64 Aug  2 15:20 2 -> /dev/pts/4
+lr-x------ 1 jander jander 64 Aug  2 15:21 3 -> /home/jander/y/foo.tgz
+l-wx------ 1 jander jander 64 Aug  2 15:21 4 -> /home/jander/z/foo.tgz
+
+   This will show you what files the process has open. If you want to see how far into the file the
+   process is...
+$ cat /proc/8614/fdinfo/3
+pos:    105381888
+flags:  0500000
+
+   the pos parameter is the position of the read (or write) pointer, in bytes.
+
+***
+   A relatively new tool that does exactly that is [67]cv (coreutils viewer).
+
+   What it is?
+
+     This tool can be described as a Tiny Dirty Linux Only* C command that looks for coreutils basic
+     commands (cp, mv, dd, tar, gzip/gunzip, cat, ...) currently running on your system and displays
+     the percentage of copied data
+
+   How it does it?
+
+     It simply scans /proc for interesting commands, and then use fd/ and fdinfo/ directories to find
+     opened files and seek position, and reports status for the biggest file.
+
+
+***
+   This util is now called progress: [71]github.com/Xfennec/progress – [72]Taavi Ilves Oct 4 '15 at
+   18:45
+
+***
+   There are a few things you can do. You could attach strace to it to see what it's doing (output may
+   be copious!):
+strace -p [pid of cp]
+
+   or you could get lsof to tell you which files it currently has open:
+lsof -p [pid of cp]
+
+   If you're running a big recursive cp, you could use pwdx to get the current working directory, which
+   may give you some idea of how it's doing:
+pwdx [pid of cp]
+
+
+***
+   What you can do is check the files at destination.
+
+   If your cp commands is something like cp -a <my_source> <my_dest_folder> I would check which files
+   are already copied in <my_dest_folder> and each file size, so I can see the progress. If the
+   <my_source> is a bit complex (several layers of directories) then a small script would be able to
+   check the status. Although such a script could consume a bit of I/O that would then not be used by
+   the cp process.
+
+***
+   This tool is a Linux utility command that looks for coreutils basic commands (cp, mv, dd, tar,
+   gzip/gunzip, cat, etc.) currently running on your system and displays the percentage of copied data:
+
+   [79]https://github.com/Xfennec/cv
+
+***
+   While the OP has specifically mentioned the ability to see how the "cp" command is progressing, it
+   must be said that other utilities are better for this particular issue.
+
+   For example:
+rsync -avP FROM TO
+
+   will show the progress of copying the FROM file/folder to the TO file/FOLDER.
+     ________________________________________________________________________________________________
+
+# rsync -avP Video.mp4  /run/media/user1/3.8G/
+
+sending incremental file list
+Video.mp4
+    565,170,046 100%   51.23MB/s    0:00:10 (xfr#1, to-chk=0/1)
+
+sent 565,308,115 bytes  received 134 bytes  5,210,214.28 bytes/sec
+total size is 565,170,046  speedup is 1.00
+     ________________________________________________________________________________________________
+
+   And rsync will tell you how much it's copied (and the transfer rate) along the way. It works for
+   single files or folder both on the same machine or across the network.
+
+***
+     You're answering the wrong question. The question you are looking for is:
+     [88]unix.stackexchange.com/questions/2577/…, which already has an answer mentioning rsync. – [89]muru
+     Nov 12 '15 at 15:57
+
+***
+                         You may also use [90]pipeviewer.
+                      for f in *; do
+                        pv $f > destination/$f
+                      done
+
+
+***
+   You can send a signal to the process:
+kill -SIGUSR1 pid
+
+   It is even more useful to create a script that polls until you press Ctrl-C or the process finished:
+while [ : ] ; do kill -SIGUSR1 $1 && sleep 1m || exit ; done
+
+   Works for dd. Doesn't work for cp. Maybe you have to use another signal. I once tried SIGINFO, but it
+   doesn't seem to exist any more on the Intel platform.
+

@@ -1,0 +1,1558 @@
+filename: c_gcc-rpath-option-multif_20240515.txt
+https://stackoverflow.com/questions/6562403/i-dont-understand-wl-rpath-wl
+
+I don't understand -Wl,-rpath -Wl,
+
+   For convenience I added the relevant manpages below.
+
+   My (mis)understanding first: If I need to separate options with ,, that means that the second -Wl is
+   not another option because it comes before , which means it is an argument to the -rpath option.
+
+   I don't understand how -rpath can have a -Wl,. argument!
+
+   What would make sense in my mind would be this:
+-Wl,-rpath .
+
+   This should invoke -rpath linker option with the current directory argument.
+
+   man gcc:
+     -Wl,option
+
+     Pass option as an option to the linker. If option contains commas, it is split into multiple
+     options at the commas. You can use this syntax to pass an argument to the option. For example,
+     -Wl,-Map,output.map passes -Map output.map to the linker. When using the GNU linker, you can also
+     get the same effect with `-Wl,-Map=output.map'.
+
+   man ld:
+     -rpath=dir
+
+     Add a directory to the runtime library search path. This is used when linking an ELF executable
+     with shared objects. All -rpath arguments are concatenated and passed to the runtime linker, which
+     uses them to locate shared objects at runtime. The -rpath option is also used when locating shared
+     objects which are needed by shared objects explicitly included in the link;
+
+***
+   The -Wl,xxx option for gcc passes a comma-separated list of tokens as a space-separated list of
+   arguments to the linker. So
+gcc -Wl,aaa,bbb,ccc
+
+   eventually becomes a linker call
+ld aaa bbb ccc
+
+   In your case, you want to say "ld -rpath .", so you pass this to gcc as -Wl,-rpath,. Alternatively,
+   you can specify repeat instances of -Wl:
+gcc -Wl,aaa -Wl,bbb -Wl,ccc
+
+   Note that there is no comma between aaa and the second -Wl.
+
+   Or, in your case, -Wl,-rpath -Wl,..
+
+       Oh I understand now, there is no discrimination between option or argument while passing stuff to
+       the linker, it's just a string. So the second -Wl is redundant! Thanks :)
+     * It's not redundant! It's an alternative form, you either say -Wl,-rpath,. or you say
+       -Wl,-rpath -Wl,.. Precisely one of the two, you cannot omit anything.
+     * Yes, or -Wl,-rpath,dir1,-rpath,dir2, or -Wl,-rpath=dir1,-rpath=dir2.
+     * Just in case anyone else wastes several minutes figuring this out - like I just did - the
+       character after -W is a lowercase 'L', not the digit 'one'! Doh!
+     * those mean differennt things: $ORIGIN refers to the location of the executable, .
+       is the current working directory. $ORIGIN is useful for shipping a set of libraries next to an
+       executable. . is a major security hazard.
+
+***
+   You could also write
+-Wl,-rpath=.
+
+   To get rid of that pesky space. It's arguably more readable than adding extra commas (it's exactly
+   what gets passed to ld).
+
+     * From gcc.gnu.org/onlinedocs/gcc/Link-Options.html#Link-Options under -Wl,option: "When using
+       the GNU linker, you can also get the same effect with -Wl,-Map=output.map." To me, that seems to
+       indicate that if you use a linker other than the GNU linker, the = syntax may not be supported.
+     * You saved my day. Every other suggestion I saw said to use -rpath='$ORIGIN', but this never
+       worked for me, whereas -rpath=. worked perfectly.
+
+***
+   One other thing. You may need to specify the -L option as well - eg
+-Wl,-rpath,/path/to/foo -L/path/to/foo -lbaz
+
+   or you may end up with an error like
+ld: cannot find -lbaz
+
+***
+   The man page makes it pretty clear. If you want to pass two arguments (-rpath and .) to the linker
+   you can write
+-Wl,-rpath,.
+
+   or alternatively
+-Wl,-rpath -Wl,.
+
+   The arguments -Wl,-rpath . you suggested do NOT make sense to my mind. How is gcc supposed to know
+   that your second argument (.) is supposed to be passed to the linker instead of being interpreted
+   normally? The only way it would be able to know that is if it had insider knowledge of all possible
+   linker arguments so it knew that -rpath required an argument after it.
+
+**
+   I could solve this problem with this, change line and flag:
+   LDFLAGS = -Wl,--export-dynamic
+   LIBDIR = -L insert lib dir
+
+
+
+---
+https://gcc.gnu.org/legacy-ml/gcc-help/2005-12/msg00017.html
+
+Re: linking with -Wl,-rpath and $(prefix)
+Fri, 2 Dec 2005
+
+The -L option supplies a colon-separated library path that is to be
+searched at LINK TIME for libraries. Thus
+$> cc -o foo foo.c -L/usr/local/lib -lfoo
+
+means that either libfoo.a or libfoo.so should be found in either
+/usr/local/lib, or elsewhere in the default search patch (in
+GNU/Linux, the directories can be listed in /etc/ld.so.conf, and the
+cache updated by running /etc/ldconfig).
+
+Whether the .a or .so form of the library is needed is platform
+dependent (e.g., IBM AIX uses only the .a form), and also dependent on
+compiler options to select dynamic or static linking.  The default is
+normally dynamic linking to save disk space and waste CPU time.
+
+However, this means while that the executable foo may have been
+successfully linked against a shared library, at RUN TIME, the
+run-time loader looks for it in the default search path, possibly
+prefixed by a colon-separated list of libraries supplied by the
+LD_LIBRARY_PATH variable.
+
+If, in our example, /usr/local/lib is not part of the default path,
+then the run-time loader will not be able to find the shared library,
+EVEN THOUGH LINKING SUCCEEDED (because of the -L/usr/local/lib
+option).
+
+You can check whether shared libraries can be found by running
+$> env -i ldd foo
+
+(the "env -i" says to ignore any existing environment variables, such
+as LD_LIBRARY_PATH).
+
+For example, on one of my systems, I find
+
+       $> env -i ldd /usr/local/bin/emacs
+                libXaw3d.so.5 =>         (file not found)
+                libXmu.so.4 =>   /usr/lib/libXmu.so.4
+                libXt.so.4 =>    /usr/lib/libXt.so.4
+                ...
+
+Notice the "(file not found") line.  That library is actually present
+on that system in /usr/local/lib, and I can make it succeed like this:
+
+       $> env -i LD_LIBRARY_PATH=/usr/local/lib ldd /usr/local/bin/emacs
+                libXaw3d.so.5 =>         /usr/local/lib/libXaw3d.so.5
+                libXmu.so.4 =>   /usr/lib/libXmu.so.4
+                ...
+
+Thus, when shared libraries are present in nondefault directories, you
+need to supply an additional linker option, usually -R or -Wl,-rpath=,
+with a run-time library path.  Our example above becomes for gcc
+$> gcc -o foo foo.c -L/usr/local/lib -lfoo -Wl,-rpath=/usr/local/lib
+
+In a Makefile, I would write this as
+	gcc -o foo foo.c -L$(prefix)/lib -lfoo -Wl,-rpath=$(prefix)/lib
+
+so that the same library path is used at link time as at run time, and
+so that the executable file, foo, records that path.  With GNU
+autoconf, the normal condition is that prefix is the root of the file
+tree into which you install software locally, so the above command is
+fairly typical.  Unfortunately, software developers who have
+nondefault library search paths often forget to supply the -Wl,-rpath
+or -R options in their Makefiles, with the result that the code builds
+and runs at their sites, but not at end user sites.
+
+>From notes that I keep:
+
+>> ...
+>> Unfortunately, there are at least three incompatible kinds of
+>> command-line options that tell the compiler to instruct the linker to
+>> save library paths in the executable:
+>>
+>>      -Wl,-rpath,/path/to/dir         gcc, g++, FreeBSD, SGI, Sun compilers
+>>      -rpath /path/to/dir             Compaq/DEC, SGI compilers
+>>      -Rdir:dir:dir                   Portland Group, Sun compilers
+>>
+>> Notice that SGI and Sun support two such flavors.
+>> ...
+
+In my view, there is clearly brain damage here: (1) compiler writers
+should have standardized on the same option name for recording the
+run-time library path (I'd vote for -R), and (2) the linker should
+really record the run-time library path by default, so that -R would
+almost never be needed.
+
+-------------------------------------------------------------------------------
+- Nelson H. F. Beebe                    Tel: +1 801 581 5254                  -
+- University of Utah                    FAX: +1 801 581 4148                  -
+- Department of Mathematics, 110 LCB    Internet e-mail: beebe@math.utah.edu  -
+- 155 S 1400 E RM 233                       beebe@acm.org  beebe@computer.org -
+- Salt Lake City, UT 84112-0090, USA    URL: http://www.math.utah.edu/~beebe  -
+-------------------------------------------------------------------------------
+
+
+
+---
+https://www.bourguet.org/v2/cpplang/gcc-rpath
+GCC and RPATH
+
+A well known issue1 with GCC is that it links with dynamic libraries it provides (libgcc_s.so.1 and
+libstdc++.so.6 for C++). Finding the right version of those libraries has to be arranged by the programmer
+or the user of the program. Obviously, Linux distributions arrange that for the version of GCC they provide,
+but if you are using a self-compiled GCC, the distribution provided library may or may not be compatible
+with your version of GCC, and even if it is that is not really useful if your goal is to test how your code
+behaves with that version of GCC.
+
+One solution is to use the LD_LIBRARY_PATH variable. That is not always convenient, and may be error-prone
+when working with several versions of GCC.
+
+Another way is to record the path where to search dynamic libraries in the executable. That called RPATH or
+RUNPATH (the two are slightly different, see below). You can do that again in two ways: by specifying the
+arguments to GCC so that it does the registering or by modifying GCC's specs file so that the argument are
+used automatically.
+
+Passing explicitly argument to set the RPATH
+$> g++ -Wl,-rpath=/path/to/correct/lib/dir -o prog obj1.o obj2.o ...
+
+GCC Spec for RPATH
+It is possible to have the argument be passed automatically by modifying the specs file.
+
+    First find the place where the specs file should be put by using:
+$> gcc -print-search-dirs
+
+    Use the install one.
+
+    Change to that directory and dump the default content:
+$> gcc -dumpspecs > specs
+
+    Edit the specs file to add
+     %{!static:%{!static-pie:-rpath=/path/to/the/libraries/lib/%M}}
+
+    at the start of the line following the one containing
+     *link_gcc_c_sequence:
+
+    With a recent GCC that'll look like this:
+     *link_gcc_c_sequence:
+     %{!static:%{!static-pie:-rpath=/usr/local/gcc-12.2/lib/%M}} %{static|static-pie:--start-group} %G \
+     %{!nolibc:%L}    %{static|static-pie:--end-group}%{!static:%{!static-pie:%G}}
+
+Difference between RPATH and RUNPATH
+The ld.so man page gives the full detail on how dynamic libraries are found. The major difference between
+RPATH and RUNPATH is that the RPATH is searched before the directories given by LD_LIBRARY_PATH while the
+RUNPATH is searched after. Note that you can't easily give both using GNU ld, and that if you succeed in
+another way, the RPATH is ignored.
+
+RUNPATH is specified in the same way as RPATH (thus with the -rpath option to ld, so using -Wl,-rpath with gcc)
+but with an additional argument --enable-new-dtags which indicates that RUNPATH should be used instead
+(I don't know what other effect it may have, I never saw any). There is a way to disable that settings if it
+is the default with --disable-new-dtags (I've never noticed a ld so configured, but I've stopped to look for
+them and the difference between RPATH and RUNPATH is subtle enough that I may not have noticed).
+
+References
+  - GCC FAQ Entry
+  - libstdc++ Manual Entry
+  - ld man page
+  - ld.so man page
+
+
+
+---
+https://medium.com/obscure-system/rpath-vs-runpath-883029b17c45
+
+rpath vs runpath
+May 26, 2019
+
+   Before we understand the difference between rpath and runpath, we need to understand where they are
+   used. Both rpath and runpath are used to specify directories to search for shared libraries (dynamic
+   libraries). If you are not sure what shared libraries is, I have a story written on Static vs
+   Dynamic libraries.
+
+   Shared libraries are libraries which are not bundles along with the executable. They are loaded at
+   the run time. How does the executable know where the libraries are present? Every executable follows
+   a sequence of directories search to search for libraries.
+
+   Let's understand this with a small experiment. We will build a shared library and try linking it with
+   the executable.
+
+test_shared.h
+#include <stdio.h>
+void printHelloWorld();
+
+test_shared.c
+#include "test_shared.h"
+
+void printHelloWorld() {
+	printf("Hello World!\n");
+}
+
+$> gcc -c test_shared.c -o test_shared.o
+$> gcc --shared test_shared.o -o libtest_shared.so
+
+   We can now use the library in sample executable.
+
+use_shared.c
+#include "test_shared.h"
+
+void main() {
+	printHelloWorld();
+}
+
+
+$> gcc -o use_shared use_shared.c -L./ -ltest_shared
+$> ./use_shared
+./use_shared: error while loading shared libraries: libtest_shared.so: cannot open shared object file: No such
+ file or directory
+
+   The executable cannot find the library. Let's debug to to see the paths the library is searched for.
+$> LD_DEBUG=libs ./use_shared
+     10781: find library=libtest_shared.so [0]; searching
+     10781:  search cache=/etc/ld.so.cache
+     10781:  search path=/usr/lib/x86_64:/usr/lib  (system search path)
+     10781:   trying file=/usr/lib/x86_64/libtest_shared.so
+     10781:   trying file=/usr/lib/libtest_shared.so
+     10781:
+./use_shared: error while loading shared libraries: libtest_shared.so: cannot open shared object file: No such
+ file or directory
+
+   Now let's try to use one of the methodology LD_LIBRARY_PATH to specify the path of the library.
+   LD_LIBRARY_PATH specifies the search path for the executable. Let's see the the debug output
+$> LD_DEBUG=libs LD_LIBRARY_PATH=./ ./use_shared
+     10853: find library=libtest_shared.so [0]; searching
+     10853:  search path=./x86_64:.  (LD_LIBRARY_PATH)
+     10853:   trying file=./x86_64/libtest_shared.so
+  ** 10853:   trying file=./libtest_shared.so **
+     10853:
+     10853: find library=libc.so.6 [0]; searching
+     10853:  search path=./x86_64:.  (LD_LIBRARY_PATH)
+     10853:   trying file=./x86_64/libc.so.6
+     10853:   trying file=./libc.so.6
+     10853:  search cache=/etc/ld.so.cache
+     10853:   trying file=/lib/x86_64-linux-gnu/libc.so.6
+     10853:
+     10853:
+     10853: calling init: /lib/x86_64-linux-gnu/libc.so.6
+     10853:
+     10853:
+     10853: calling init: ./libtest_shared.so
+     10853:
+     10853:
+     10853: initialize program: ./use_shared
+     10853:
+     10853:
+     10853: transferring control: ./use_shared
+     10853:
+Hello World!
+     10853:
+     10853: calling fini: ./use_shared [0]
+     10853:
+     10853:
+     10853: calling fini: ./libtest_shared.so [0]
+     10853:
+
+   Now you can see that "." is added to the search path and we were able to find the library and the
+   program executed successfully. Let's delete the library and try the same.
+$> rm libuse_shared.so
+$> LD_DEBUG=libs LD_LIBRARY_PATH=./ ./use_shared
+     11330: find library=libtest_shared.so [0]; searching
+     11330:  search path=./x86_64:.  (LD_LIBRARY_PATH)
+     11330:   trying file=./x86_64/libtest_shared.so
+     11330:   trying file=./libtest_shared.so
+     11330:  search cache=/etc/ld.so.cache
+     11330:  search path=/usr/lib/x86_64:/usr/lib  (system search path)
+     11330:   trying file=/usr/lib/x86_64/libtest_shared.so
+     11330:   trying file=/usr/lib/libtest_shared.so
+     11330:
+./use_shared: error while loading shared libraries: libtest_shared.so: cannot open shared object file: No such
+ file or directory
+
+   As we can see after it uses the LD_LIBRARY_PATH for search it uses the system path as it cannot find
+   the library in the LD_LIBRARY_PATH paths.
+
+   Hope by now you should have a understanding of runtime paths. We used LD_LIBRARY_PATH to specify
+   runtime path. Similarly rpath and runpath are used the specify the runtime paths to find libraries.
+   The difference is the order in which they are searched. We will understand the order by experiments
+   that follow.
+
+rpath
+   We are using the same test programs as before.
+
+test_shared.h
+#include <stdio.h>
+void printHelloWorld();
+
+test_shared.c
+#include "test_shared.h"
+
+void printHelloWorld() {
+	printf("Hello World!\n");
+}
+
+
+$> gcc -c test_shared.c -o test_shared.o
+$> gcc --shared test_shared.o -o libtest_shared.so
+
+
+use_shared.c
+#include "test_shared.h"
+
+void main() {
+	printHelloWorld();
+}
+
+
+$> gcc -o use_shared use_shared.c -L./ -ltest_shared -Wl,-rpath,./
+$> readelf -d use_shared | grep PATH
+   ** 0x0000000f (RPATH)  Library rpath: [./] **
+$> ./use_shared
+      Hello World!
+
+   Looking at the compile step above we include the rpath options to provide the current path. We use
+   the "readelf" to check the path set. The output prints as expected.
+
+   Now let's create a another similar library which displays another message, buts let's create it
+   another folder named overrided_library inside the current folder.
+$> mkdir overrided_library
+$> cd overrided_library
+
+test_shared.h
+#include <stdio.h>
+void printHelloWorld();
+
+test_shared.c
+#include "test_shared.h"
+
+void printHelloWorld() {
+	printf("Hello World from overrided library!\n");
+}
+
+
+$> gcc -c test_shared.c -o test_shared.o
+$> gcc --shared test_shared.o -o libtest_shared.so
+
+   Now we will be conducting the rest of the experiments in the parent folder.
+$> cd ..
+
+   Lets execute the already created the use_shared executable but also providing the LD_LIBRARY_PATH to
+   the library in the overrided_library path
+$> LD_LIBRARY_PATH=./overrided_library/ ./use_shared
+./Hello World!
+
+   Let's see the debug output of the executable load steps
+$> LD_DEBUG=libs LD_LIBRARY_PATH=./overriding_library/ ./use_shared
+      9168: find library=libtest_shared.so [0]; searching
+      9168:  search path=./tls/i686/sse2/cmov:./tls/i686/sse2:./tls/i686/cmov:./tls/i686:./tls/sse2/cmov:\
+      ./tls/sse2:./tls/cmov:./tls:./i686/sse2/cmov:./i686/sse2:./i686/cmov:./i686:./sse2/cmov:./sse2:\
+   ** ./cmov:.  (RPATH from file ./use_shared) **
+      9168:   trying file=./tls/i686/sse2/cmov/libtest_shared.so
+      9168:   trying file=./tls/i686/sse2/libtest_shared.so
+      ...
+      9168:   trying file=./sse2/libtest_shared.so
+      9168:   trying file=./cmov/libtest_shared.so
+   ** 9168:   trying file=./libtest_shared.so **
+      9168:
+      9168:
+      9168: calling init: /lib/i386-linux-gnu/libc.so.6
+      9168:
+      9168:
+      9168: calling init: ./libtest_shared.so
+      9168:
+      9168:
+      9168: initialize program: ./use_shared
+      9168:
+      9168:
+      9168: transferring control: ./use_shared
+      9168:
+Hello World!
+      9168:
+      9168: calling fini: ./use_shared [0]
+      9168:
+      9168:
+      9168: calling fini: ./libtest_shared.so [0]
+      9168:
+
+   The library we search for was available in the folder provided in the rpath. So it does not bother to
+   search in the path specified from the LD_LIBRARY_PATH.
+
+   Let's continue the example by deleting the shared library in the current path(not the one in
+   overrided_library folder)
+$> rm libtest_shared.so
+$> LD_LIBRARY_PATH=./overrided_library/ ./use_shared
+Hello World from overrided library!
+
+   There we go, we have the message printed from the library in the overrided_library. Let's see the
+   debug message for the same
+$> LD_DEBUG=libs LD_LIBRARY_PATH=./overrided_library/ ./use_shared
+     11512: find library=libtest_shared.so [0]; searching
+     11512:  search path=./tls/i686/sse2/cmov:./tls/i686/sse2:./tls/i686/cmov:./tls/i686:./tls/sse2/cmov:\
+     ./tls/sse2:./tls/cmov:./tls:./i686/sse2/cmov:./i686/sse2:./i686/cmov:./i686:./sse2/cmov:./sse2:\
+  ** ./cmov:.  (RPATH from file ./use_shared) **
+     11512:   trying file=./tls/i686/sse2/cmov/libtest_shared.so
+     11512:   trying file=./tls/i686/sse2/libtest_shared.so
+     ...
+     11512:   trying file=./cmov/libtest_shared.so
+     11512:   trying file=./libtest_shared.so
+     11512:  search path=./overrided_library/tls/i686/sse2/cmov:./overrided_library/tls/i686/sse2:\
+     ./overrided_library/tls/i686/cmov:./overrided_library/tls/i686:./overrided_library/tls/sse2/cmov:\
+     ./overrided_library/tls/sse2:./overrided_library/tls/cmov:./overrided_library/tls:\
+     ./overrided_library/i686/sse2/cmov:./over/i686/sse2:./overrided_library/i686/cmov:\
+     ./overrided_library/i686:./overrided_library/sse2/cmov:./overrided_library/sse2:./over/cmov:\
+  ** ./overrided_library  (LD_LIBRARY_PATH) **
+     11512:   trying file=./overrided_library/tls/i686/sse2/cmov/libtest_shared.so
+     11512:   trying file=./overrided_library/tls/i686/sse2/libtest_shared.so
+     ...
+     11512:   trying file=./overrided_library/sse2/libtest_shared.so
+     11512:   trying file=./overrided_library/cmov/libtest_shared.so
+  ** 11512:   trying file=./overrided_library/libtest_shared.so **
+     11512:
+     11512: calling init: ./overrided_library/libtest_shared.so
+     11512:
+     11512:
+     11512: initialize program: ./use_shared
+     11512:
+     11512:
+     11512: transferring control: ./use_shared
+     11512:
+Hello World from overrided library!
+     11512:
+     11512: calling fini: ./use_shared [0]
+     11512:
+     11512:
+     11512: calling fini:./overrided_library/libtest_shared.so [0]
+     11512:
+
+   Here we see that first rpath is searched and since the library was not available so next it searched
+   in the LD_LIBRARY_PATH.
+
+   So rpath is first searched and next LD_LIBRARY_PATH.
+
+runpath
+   For this experiment we are going to use the same programs and folder structure we had for the
+   previous experiment.
+
+   Let's compile the executable with runpath set rather than rpath. For this we need to use "enable-new-dtags" flag.
+$> gcc -o use_shared use_shared.c -L./ -ltest_shared -Wl,-rpath,./
+$> readelf -d use_shared | grep PATH
+  ** 0x0000001d (RUNPATH)                    Library runpath: [./] **
+$> LD_LIBRARY_PATH=./overrided_library/ ./use_shared
+     Hello World from overrided library!
+
+   Here we see that the message from the library in the overrided_library folder is printed. The reason
+   is runpath comes lower in precedence to the LD_LIBRARY_PATH. Let's see this with the debug info
+$> LD_DEBUG=libs LD_LIBRARY_PATH=./overrided_library/ ./use_shared
+     25981: find library=libtest_shared.so [0]; searching
+     25981:  search path=./overrided_library/tls/i686/sse2/cmov:./overrided_library/tls/i686/sse2:\
+     ./overrided_library/tls/i686/cmov:./overrided_library/tls/i686:./overrided_library/tls/sse2/cmov:\
+     ./overrided_library/tls/sse2:./overrided_library/tls/cmov:./overrided_library/tls:\
+     ./overrided_library/i686/sse2/cmov:./overrided_library/i686/sse2:./overrided_library/i686/cmov:\
+     ./overrided_library/i686:./overrided_library/sse2/cmov:./overrided_library/sse2:\
+  ** ./overrided_library/cmov:./overrided_library  (LD_LIBRARY_PATH) **
+     25981:   trying file=./overrided_library/tls/i686/sse2/cmov/libtest_shared.so
+     25981:   trying file=./overrided_library/tls/i686/sse2/libtest_shared.so
+    ...
+     25981:   trying file=./overrided_library/sse2/libtest_shared.so
+     25981:   trying file=./overrided_library/cmov/libtest_shared.so
+  ** 25981:   trying file=./overrided_library/libtest_shared.so **
+     25981: calling init: ./overrided_library/libtest_shared.so
+     25981:
+     25981:
+     25981: initialize program: ./use_shared
+     25981:
+     25981:
+     25981: transferring control: ./use_shared
+     25981:
+Hello World from overrided library!
+     25981:
+     25981: calling fini: ./use_shared [0]
+     25981:
+     25981:
+     25981: calling fini: ./overrided_library/libtest_shared.so [0]
+     25981:
+
+   We can see that the LD_LIBRARY_PATH is searched and the library is found and the runpath is not
+   searched. Now let's delete the library in the overrided_library folder.
+$> rm overrided_library/libtest_shared.so
+$> LD_LIBRARY_PATH=./overrided_library/ ./use_shared
+Hello World!
+
+   We can see from the above output that the library from the runpath was executed. The reason is it did
+   not find the library in the LD_LIBRARY_PATH. Let's prove this using the debug info.
+$> LD_DEBUG=libs LD_LIBRARY_PATH=./overrided_library/ ./use_shared
+     26712: find library=libtest_shared.so [0]; searching
+     26712:  search path=./overrided_library/tls/i686/sse2/cmov:./overrided_library/tls/i686/sse2:\
+     ./overrided_library/tls/i686/cmov:./overrided_library/tls/i686:./overrided_library/tls/sse2/cmov:\
+     ./overrided_library/tls/sse2:./overrided_library/tls/cmov:./overrided_library/tls:\
+     ./overrided_library/i686/sse2/cmov:./overrided_library/i686/sse2:./overrided_library/i686/cmov:\
+     ./overrided_library/i686:./overrided_library/sse2/cmov:./overrided_library/sse2:./overrided_library/cmov:\
+  ** ./overrided_library  (LD_LIBRARY_PATH) **
+     26712:   trying file=./overrided_library/tls/i686/sse2/cmov/libtest_shared.so
+     26712:   trying file=./overrided_library/tls/i686/sse2/libtest_shared.so
+     ...
+     26712:   trying file=./overrided_library/sse2/libtest_shared.so
+     26712:   trying file=./overrided_library/cmov/libtest_shared.so
+  ** 26712:   trying file=./overrided_library/libtest_shared.so **
+     26712:  search path=./tls/i686/sse2/cmov:./tls/i686/sse2:./tls/i686/cmov:./tls/i686:./tls/sse2/cmov:\
+     ./tls/sse2:./tls/cmov:./tls:./i686/sse2/cmov:./i686/sse2:./i686/cmov:./i686:./sse2/cmov:./sse2:\
+  ** ./cmov:.  (RUNPATH from file ./use_shared) **
+     26712:   trying file=./tls/i686/sse2/cmov/libtest_shared.so
+     26712:   trying file=./tls/i686/sse2/libtest_shared.so
+     ...
+     26712:   trying file=./cmov/libtest_shared.so
+  ** 26712:   trying file=./libtest_shared.so **
+     26712:
+     26712: calling init: /lib/i386-linux-gnu/libc.so.6
+     26712:
+     26712:
+     26712: calling init: ./libtest_shared.so
+     26712:
+     26712:
+     26712: initialize program: ./use_shared
+     26712:
+     26712:
+     26712: transferring control: ./use_shared
+     26712:
+Hello World!
+     26712:
+     26712: calling fini: ./use_shared [0]
+     26712:
+     26712:
+     26712: calling fini: ./libtest_shared.so [0]
+     26712:
+
+   From this we can udestand that runpath has lower precedence than LD_LIBRARY_PATH. The order of
+   precedence for search paths are
+    1. rpath
+    2. LD_LIBRARY_PATH
+    3. runpath
+
+   But why do we need two flags here rpath and runpath. Cant we live with one.
+
+Conclusion
+   at the build time) we cannot override it during execution since LD_LIBRARY_PATH has lower precedence.
+   We need to rebuild the executable everytime we need to test it with a different library which was
+   quite annoying. That is when runpath was introduced where we could override the libraries with
+   LD_LIBRARY_PATH which makes it easy to test accross different libraries without rebuilding it
+   everytime.
+
+
+---
+https://www.baeldung.com/linux/rpath-change-in-binary
+Changing rpath in an Already Compiled Binary
+March 18, 2024
+
+1. Overview
+While running an executable in Linux, the dynamic linker, ld.so, resolves shared library dependencies. If
+the path of a dependency isn't absolute, the dynamic linker tries to find the dependency in some
+directories in a specific order. Directories defined in rpath are among the directories used for resolving
+the dependent shared libraries.
+
+In this tutorial, we'll discuss what rpath is and how to change rpath in an already compiled binary.
+2. Brief Information About rpath
+
+Sometimes, we may need to install an application together with the shared libraries it uses. For example,
+we may need to build an application with a specific version of the C++ Standard Library, which may be
+different from the one available in the system. Installing these accompanying shared libraries in one
+of the standard directories or updating the LD_LIBRARY_PATH environment variable may not be possible as
+these solutions affect the whole system. Therefore, we need to install these libraries in a directory
+that only the application knows.
+
+rpath might be a solution in these cases. It's an option of the dynamic linker, ld.so. It adds a
+hard-coded library search path to the binary to be used during run-time. The dynamic linker searches for
+shared libraries in an order and the paths in rpath take precedence over the paths in LD_LIBRARY_PATH
+and other alternatives.
+3. An Example of Changing rpath
+
+In this section, we'll discuss the source code files we'll use and how to build and run them.
+
+3.1. Example Setup
+We have a C source file, main.c, and two subdirectories, foo1 and foo2, in our working directory:
+
+$> ls -l
+total 12
+drwxr-xr-x 2 alice alice 4096 Jun  5 16:59 foo1
+drwxr-xr-x 2 alice alice 4096 Jun  5 16:59 foo2
+-rw-r--r-- 1 alice alice   70 Jun  5 16:59 main.c
+
+Let's see the contents of the foo1 and foo2 subdirectories:
+$> ls -l foo1
+-rw-r--r--  1 alice alice   71 Jun  5 16:59 foo.c
+-rw-r--r--  1 alice alice   53 Jun  5 16:59 foo.h
+
+$> ls -l foo2
+-rw-r--r--  1 alice alice   71 Jun  5 16:59 foo.c
+-rw-r--r--  1 alice alice   53 Jun  5 16:59 foo.h
+
+The header files, foo1/foo.h and foo2/foo.h, are the same - they have the declaration of a function foo():
+
+#ifndef _FOO_H_
+#define _FOO_H_
+
+void foo();
+
+#endif
+
+The foo() function in foo1/foo.c just prints foo1:
+
+#include <stdio.h>
+#include "foo.h"
+
+void foo() {
+	printf("foo1\n");
+}
+
+The source code in foo2/foo.c is like foo1/foo.c. It just prints foo2:
+
+#include <stdio.h>
+#include "foo.h"
+
+void foo() {
+	printf("foo2\n");
+}
+
+Finally, let's check the content of main.c:
+
+#include "foo1.h"
+
+int main(int ac, char **av) {
+	foo();
+	return 0;
+
+}
+
+This program calls the function foo() and then exits.
+
+3.2. Building the Binaries
+Now, we'll build the source code. Firstly, let's build the source code in the foo1 subdirectory to
+generate a shared library:
+$> cd foo1
+$> gcc -fPIC -c foo.c
+$> gcc -shared -o libfoo.so
+$> ls
+foo.c  foo.h  foo.o  libfoo.so
+
+After changing the directory to foo1, we compiled foo.c and generated the object file foo.o using
+the command gcc -fPIC -c foo.c. The -c option of gcc is for specifying the source code that will be
+compiled. The -fPIC option, on the other hand, is for generating position-independent code, which is
+necessary for using the generated code in a shared library.
+
+Then, we built the shared library, libfoo.so, using the command gcc -shared -o libfoo.so.
+
+Building the shared library libfoo.so in the foo2 subdirectory is the same:
+$> cd ../foo2
+$> gcc -fPIC -c foo.c
+$> gcc -shared -o libfoo.so
+$> ls
+foo.c  foo.h  foo.o  libfoo.so
+
+Having built the shared libraries in the foo1 and foo2 subdirectories, it's time to build main.c:
+$> cd ..
+$> gcc -o main main.c -I./foo1 -L./foo1 lfoo -Wl,-rpath,./foo1
+$> ls
+foo1  foo2  main  main.c
+
+As the output of the ls command shows, we were successful in building the binary main. The -I./foo1
+option of gcc is necessary for locating the header file ./foo1/foo.h. Similarly, the -L./foo1 option is
+necessary for the linker to find the library ./foo1/libfoo.so. We specify the library to be linked with
+main using lfoo.
+
+The last option we pass to gcc, namely -Wl,-rpath,./foo1, is for specifying the rpath. The -Wl option
+lets us pass options to the linker. In our example, we pass the -rpath option to the linker, and its
+value is ./foo1. We can also specify it as -Wl,-rpath=./foo1.
+
+3.3. Running the Program
+Having built the binary main, we'll now run it. However, let's check its shared library dependencies
+using ldd before running it:
+
+$> ldd main
+       linux-vdso.so.1 (0x00007ffc3ebcd000)
+       libfoo.so => ./foo1/libfoo.so (0x00007ff38fe19000)
+       libc.so.6 => /lib64/libc.so.6 (0x00007ff38fa54000)
+       /lib64/ld-linux-x86.64.so.2 (0x00007ff39001b000)
+
+It shows that main uses ./foo1/libfoo.so. Generally, we use the LD_LIBRARY_PATH environment variable to
+load the necessary shared libraries. However, it isn't defined in our environment:
+$> echo $LD_LIBRARY_PATH
+
+Therefore, the runtime linker, ld.so, locates the library libfoo.so thanks to the rpath option.
+
+Now, let's run the program:
+$> ./main
+foo1
+
+The program runs as expected. It calls the foo() function defined in foo1/foo.c.
+
+4. Changing rpath Using chrpath
+Now, we'll try to use the foo() function defined in foo2/foo.c, which prints foo2 instead of foo1. It's
+in the library foo2/libfoo.so.
+
+Firstly, let's check the rpath in the binary main. We'll use the chrpath command:
+$> chrpath -l main
+main: RPATH=./foo1
+
+The -l option lists the current rpath in a binary. As is apparent from the output of chrpath -l main
+command, the rpath defined in main is ./foo1 as expected.
+
+We can change the rpath defined in a binary using the -r option of chrpath:
+$> chrpath -r ./foo2 main
+main: RPATH=./foo1
+main: new RPATH=./foo2
+
+We pass the new value for rpath after the -r option, which is ./foo2 in our case. Then, we specify the
+binary name, main. As the output shows, we're successful in changing the already existing rpath in
+main. Let's verify it again using chrpath:
+$> chrpath -l main
+main: RPATH=./foo2
+
+Additionally, let's check the shared library dependencies of main using ldd:
+$> ldd main
+       linux-vdso.so.1 (0x00007ffc04dda000)
+       libfoo.so => ./foo2/libfoo.so (0x00007ffa29c4d000)
+       libc.so.6 => /lib64/libc.so.6 (0x00007ffa29888000)
+       /lib64/ld-linux-x86.64.so.2 (0x00007ffa29e4f000)
+
+After changing the rpath, main uses ./foo2/libfoo.so. Let's run the program once more:
+$> ./main
+foo2
+
+This time, the program uses the foo() function defined in foo2/foo.c. We were successful in changing
+the library used by a binary by changing the rpath defined in the binary.
+
+One caveat about changing rpath is that the length of the new path cannot be larger than the old one:
+$> chrpath -r ./foo22 main
+main: RPATH=./foo2
+new rpath './foo22' too large; maximum length 6
+
+As the length of the previous string, ./foo2, and the new string, ./foo22, are six and seven, respectively,
+chrpath doesn't allow rpath to be changed.
+
+5. Changing rpath Using patchelf
+We can also use the patchelf command for changing the rpath in an already compiled binary:
+$> chrpath -l main
+main: RPATH=./foo2
+
+$> patchelf --force-rpath --set-rpath ./foo1 main
+$> chrpath -l main
+main: RPATH=./foo1
+
+The rpath in main is ./foo2 as the output of the first chrpath -l main command shows. The -set-rpath
+option of patchelf changes the rpath in a binary to the given rpath. We must also supply the -force-rpath
+option, otherwise it changes another dynamic symbol named runpath. This is similar to rpath, but the
+dynamic linker uses LD_LIBRARY_PATH before runpath for locating shared libraries.
+
+The output of the second chrpath -l main command shows that we're successful in setting the
+rpath. Let's verify it by running main:
+$> ./main
+foo1
+
+The program runs as expected.
+
+6. Changing rpath Including $ORIGIN
+Our examples up to this point specified rpath as a relative path to the executable main. This is fine
+as far as we run main in the current directory. Let's check what happens when we run main from another
+directory, for example /tmp:
+$> pwd
+/home/alice/work/chrpath_example
+
+$> ls
+foo1  foo2  main  main.c
+
+$> cd /tmp
+$> /home/alice/work/chrpath_example/main
+/home/alice/work/chrpath_example/main: error while loading shared libraries: libfoo.so: cannot open
+shared object file: No such file or directory
+
+We weren't successful this time as the dynamic linker looks for libfoo.so in the non-existing /tmp/foo1
+directory because of the relative path in rpath.
+
+We can use a special string, $ORIGIN, in this case. $ORIGIN has the meaning of "the directory containing
+the application" for the dynamic linker.
+
+Let's rebuild main using $ORIGIN:
+$> cd /home/alice/work/chrpath_example
+$> rm main
+$> gcc -o main main.c -I./foo1 -L./foo1 lfoo -Wl,-rpath,'$ORIGIN'/foo1
+$> chrpath -l main
+main: RPATH=$ORIGIN/foo1
+
+This time, we specify rpath using the option -Wl,-rpath,'$ORIGIN'/foo1. The single quotes around
+$ORIGIN are necessary to prevent $ORIGIN as is without environment variable expansion.  Let's run main
+again from /tmp again:
+$> cd /tmp
+$> /home/alice/work/chrpath_example/main
+foo1
+
+We were successful in running main this time from /tmp. Now, let's change rpath using chrpath to use
+foo2/libfoo.so, and then run main:
+$> chrpath -r '$ORIGIN'/foo2 /home/alice/work/chrpath_example/main
+/home/alice/work/chrpath_example/main: RPATH=$ORIGIN/foo1
+/home/alice/work/chrpath_example/main: new RPATH=$ORIGIN/foo2
+
+$> /home/alice/work/chrpath_example/main
+foo2
+
+Therefore, we're successful in changing rpath having $ORIGIN in its specification.
+
+We can use $ORIGIN with patchelf in the same manner:
+$> patchelf --force-rpath --set-rpath '$ORIGIN'/foo1 main
+$> chrpath -l main
+main: RPATH=$ORIGIN/foo1
+
+7. Conclusion
+In this article, we discussed how to change rpath in an already compiled binary.
+
+Firstly, we learned what rpath is - it's an alternative to using LD_LIBRARY_PATH. Then, we understood
+that we can use chrpath for both checking and setting the rpath in a binary. We saw that patchelf is
+another alternative of chrpath. Finally, we discussed how to set rpath including $ORIGIN string.
+
+Comments are open for 30 days after publishing a post. For any issues past this date, use the Contact
+form on the site.
+
+
+
+---
+https://users.informatik.haw-hamburg.de/~krabat/FH-Labor/gnupro/5_GNUPro_Utilities/c_Using_LD/ldCommand_Line_Options.html
+
+Ld - Command Line Options
+
+   The following example shows the options you can use on the ld command line. Following the example is
+   a discussion of the options.
+
+   ld [ -o output ] objfile : ::
+   aaa[ -Aarchitecture ][ -b input-format ]
+   aaa[ -Bstatic ] [ -Bdynamic ] [ -Bsymbolic ]
+   aaa[ -c MRI-commandfile ] [ -d | -dc | -dp ]
+   aaa[ -defsym symbol=expression ]
+   aaa[ -dynamic-linker file ] [ -embedded-relocs ]
+   aaa[ -e entry ] [ -F ] [ -F format ]
+   aaa[ -format input-format ] [ -g ] [ -G size ]
+   aaa[ -help ] [ -i ] [ -l archive ] [-Lsearchdir ]
+   aaa[ -M ] [ -Map mapfile ][-m emulation ]
+   aaa[ -N | -n ] [ -noinhibit-exec ] [ -no-keep-memory ]
+   aaa[ -oformat output-format ][-R filename ]
+   aaa[ -relax ] [ -retain-symbols-file filename ]
+   aaa[ -r | -Ur ] [ -rpath dir ] [ -rpath-link dir ]
+   aaa[ -S ] [ -s ] [ -soname name ] [ -shared ]
+   aaa[ -sort-common ] [ -stats ] [ -T commandfile ]
+   aaa[ -Ttext org ] [ -Tdata org ]
+   aaa[ -Tbss org ] [ -t ] [ -traditional-format ]
+   aaa[ -u symbol] [ -V] [ -v] [ -verbose] [ -version ]
+   aaa[ -warn-common ] [ -warn-constructors] [ -warn-once ]
+   aaa[ -y symbol ] [ -X ] [-x ]
+   aaa[ -( [ archives ] -) ]
+   aaa[ --start-group [ archives ] --end-group ]
+   aaa[ -split-by-reloc count ] [ -split-by-file ]
+   aaa[ --whole-archive ]
+
+   This plethora of command-line options may seem intimidating, but in actual practice few of them are
+   used in any particular context. For instance, a frequent use of ld is to link standard Unix object
+   files on a standard, supported Unix system. On such a system, to link a file hello.o, use the
+   following example.
+
+$> ld -o output /lib/crt0.o hello.o -lc
+
+   This tells ld to produce a file called output as the result of linking the file /lib/crt0.o with
+   hello.o and the library libc.a, which will come from the standard search directories. (See the
+   discussion of search directories with the -L option .)
+
+   The command-line options to
+   ld may be specified in any order, and may be repeated at will. Repeating most options with a
+   different argument will either have ffb no further effect, or override prior occurrences (those
+   further to the left on the command line) of that specific option.
+
+   The exceptionswhich may meaningfully be used more than onceare the following:
+   -A, -b (or its synonym, -format), -defsym, -L, -l, -R, -u, and -( (or its synonym, --start-group).
+
+   The list of object files to be linked together, shown as
+   objfile..., may follow, precede, or be mixed in with command-line options, except that an objfile
+   argument may not be placed between an option and its argument.
+
+   Usually the linker is invoked with at least one object file, but you can specify other forms of
+   binary input files using -l, -R, and the script command language. If no binary input files at all are
+   specified, the linker does not produce any output, and issues the message No input files.
+
+   If the linker can not recognize the format of an object file, it will assume that it is a linker
+   script. A script specified in this way augments the main linker script used for the link (either the
+   default linker script or the one specified by using -T). This feature permits the linker to link against
+   a file which appears to be an object or an archive, but actually merely defines some symbol values, or
+   uses INPUT or GROUP to load other objects.
+
+   For options whose names are a single letter, option arguments must either follow the option letter
+   without intervening whitespace, or be given as separate arguments immediately following the option
+   that requires them.
+
+   For options whose names are multiple letters, either one dash or two can precede the option name; for
+   example, --oformat and -oformat are equivalent. Arguments to multiple-letter options must either be separated
+   from the option name by an equals sign, or be given as separate arguments immediately following the
+   option that requires them. For example, --oformat srec and --oformat=srec are equivalent. Unique
+   abbreviations of the names of multiple-letter options are accepted.
+
+   -Aarchitecture
+   In the current release of ld, this option is useful only for the Intel 960 family of architectures.
+   In that ld configuration, the architecture argument identifies the particular architecture in the 960
+   family, enabling some safeguards and modifying the archive-library search path. See ld and the
+   Intel 960 family for details.
+
+   Future releases of
+   ld may support similar functionality for other architecture families.
+
+   -b input-format
+   ld may be configured to support more than one kind of object file. If your ld is configured this way,
+   you can use the -b option to specify the binary format for input object files that follow this
+   option on the command line. Even when ld is configured to support alternative object formats, you
+   dont usually need to specify this, as ld should be configured to expect as a default input format
+   the most usual for-mat on each machine. input-format is a text string, the name of a particular
+   format supported by the BFD libraries. (You can list the available binary formats with objdump -i.)
+   -format input-format has the same effect, as does the script command TARGET.
+
+   You may want to use this option if you are linking files with an unusual binary format. You can also
+   use 
+   -b to switch formats explicitly (when linking object files of different formats), by including -b
+   input-format before each group of object files in a particular format.
+
+   The default format is taken from the environment variable
+   GNUTARGET. See Environmental Variables. You can also define the input format from a script, using
+   the command TARGET; see Option Commands.
+
+   -Bstatic
+   Do not link against shared libraries. This is only meaningful on platforms for which shared libraries
+   are supported.
+
+   -Bdynamic
+   Link against dynamic libraries. This is only meaningful on platforms for which shared libraries are
+   supported. This option is normally the default on such platforms.
+
+   -Bsymbolic
+   When creating a shared library, bind references to global symbols to the definition within the shared
+   library, if any. Normally, it is possible for a program linked against a shared library to override
+   the definition within the shared library. This option is only meaningful on ELF platforms which
+   support shared libraries.
+
+   -c MRI-commandfile
+   For compatibility with linkers produced by MRI, ld accepts script files written in an alternate,
+   restricted command language, described in MRI Compatible Script Files. Introduce MRI script files
+   with the option -c; use the -T option to run linker scripts written in the general-purpose ld
+   scripting language. If MRI-cmdfile does not exist, ld looks for it in the directories specified by
+   any -L options.
+
+   -d
+   -dc
+   -dp
+   These three options are equivalent; multiple forms are sup-ported for compatibility with other
+   linkers. They assign space to common symbols even if a relocatable output file is specified (with
+   -r). The script command, FORCE_COMMON_ ALLOCATION, has the same effect. See Option Commands.
+
+   -defsym symbol=expression
+   Create a global symbol in the output file, containing the absolute address given by expression. You
+   may use this option as many times as necessary to define multiple symbols in the command line. A
+   limited form of arithmetic is supported for the expression in this context: you may give a
+   hexadecimal constant or the name of an existing symbol, or use + and - to add or subtract hexadecimal
+   constants or symbols. If you need more elaborate expressions, consider using the linker command
+   language from a script (see Assignment: Defining Symbols).
+
+   Note:
+   There should be no white space between
+   symbol, the equals sign (=), and expression.
+
+   -dynamic-linker file
+   Set the name of the dynamic linker. This is only meaningful when generating dynamically linked ELF
+   executables. The default dynamic linker is normally correct; dont use this unless you know what you
+   are doing.
+
+   -embedded-relocs
+   This option is only meaningful when linking MIPS embedded PIC code, generated by the -membedded-pic
+   option to the GNU compiler and assembler. It causes the linker to create a table which may be used at
+   runtime to relocate any data which was statically initialized to pointer values. See the code in
+   testsuite/ld-empic for details.
+
+   -e entry
+   Use entry as the explicit symbol for beginning execution of your program, rather than the default
+   entry point. See The Entry Point for a discussion of defaults and other ways of specifying the
+   entry point.
+
+   -F
+   -F format
+   Ignored. Some older linkers used this option throughout a compilation toolchain for specifying
+   object-file format for both input and output object files.
+
+   The mechanisms
+   ld uses for this purpose (the -b or -format options for input files, -oformat option or the
+   TARGET command in linker scripts for output files, the GNUTARGET environment variable) are more
+   flexible, but ld accepts the -F option for compatibility with scripts written to call the old
+   linker.
+
+   -format input-format
+   Synonym for -b input-format.
+
+   -g
+   Ignored. Provided fo ffb r compatibility with other tools.
+
+   -Gvalue
+   -G value
+   Set the maximum size of objects to be optimized using the GP register to size under MIPS ECOFF.
+   Ignored for other object file formats.
+
+   -help
+   Print a summary of the command-line options on the standard output and exit.
+
+   -I
+   Perform an incremental link (same as option -r).
+
+   -lar
+   Add archive file archive to the list of files to link. This option may be used any number of times.
+   ld will search its path-list for occurrences of libar.a for every archive specified.
+
+   -Lsearchdir
+   -L searchdir
+   Add path searchdir to the list of paths that ld will search for archive libraries and ld control
+   scripts. You may use this option any number of times. The directories are searched in the order in
+   which they are specified on the command line. Directories specified on the command line are searched
+   before the default directories. All -L options apply to all -l options, regardless of the order in
+   which the options appear. The default set of paths searched (without being specified with -L) depends
+   on which emulation mode ld is using, and in some cases also on how it was configured. See
+   Environmental Variables. The paths can also be specified in a link script with the SEARCH_DIR
+   command. Directories specified this way are searched at the point in which the linker script appears
+   in the command line.
+
+   -M
+   Print (to the standard output) a link mapdiagnostic information about where symbols are mapped by
+   ld, and information on global common storage allocation.
+
+   -Map mapfile
+   Print to the file mapfile < ffb /FONT>a link mapdiagnostic information about where symbols are
+   mapped by ld, and information on global common storage allocation.
+
+   -memulation
+   -m emulation
+   Emulate the emulation linker. You can list the available emulations with the --verbose or -V options.
+   The default depends on lds configuration.
+
+   -N
+   Set the text and data sections to be readable and writable. Also, do not page-align the data segment.
+   If the output format supports Unix style magic numbers, mark the output as OMAGIC.
+
+   -n
+   Set the text segment to be read only, and mark the output as NMAGIC if possible.
+
+   -noinhibit-exec
+   Retain the executable output file whenever it is still usable. Normally, the linker will not produce
+   an output file if it encounters errors during the link process; it exits without writing an output
+   file when it issues any error whatsoever.
+
+   -no-keep-memory
+   ld normally optimizes for speed over memory usage by caching the symbol tables of input files in
+   memory. This option tells ld to instead optimize for memory usage, by rereading the symbol tables as
+   necessary. This may be required if ld runs out of memory space while linking a large executable.
+
+   -o output
+   Use output as the name for the program produced by ld; if this option is not specified, the name
+   a.out is used by default. The script command OUTPUT can also specify the output file name.
+
+   -oformat output-format
+   ld may be configured to support more than one kind of object file. If your ld is configured this way,
+   you can use the -oformat option to specify the binary format for the output object file. Even when
+   ld is configured to support alternative object formats, you dont usually need to specify this, as ld
+   should ffb be configured to produce as a default output format the most usual format on each machine.
+   output-format is a text string, the name of a particular format supported by the BFD libraries. (You
+   can list the available binary formats with objdump -i.) The script command OUTPUT_FORMAT can also
+   specify the output format, but this option overrides it. See BFD.
+
+   -R filename
+   Read symbol names and their addresses from filename, but do not relocate it or include it in the
+   output. This allows your output file to refer symbolically to absolute locations of memory defined in
+   other programs.
+
+   -relax
+   An option with machine dependent effects. Currently this option is only supported on the H8/300 and
+   the Intel 960. See ld and the H8/300 and ld and the Intel 960 family.
+
+   On some platforms, the 
+   -relax option performs global optimizations that become possible when the linker resolves addressing
+   in the program, such as relaxing address modes and synthesizing new instructions in the output object
+   file.
+
+   On platforms where this is not supported, 
+   -relax is accepted, but ignored.
+
+   -retain-symbols-file filename
+   Retain only the symbols listed in the file filename, discarding all others. filename is simply a flat
+   file, with one symbol name per line. This option is especially useful in environments (such as
+   VxWorks) where a large global symbol table is accumulated gradually, to conserve runtime memory.
+
+   
+   -retain-symbols-file does not discard undefined symbols, or symbols needed for relocations.
+
+   You may only specify
+   -retain-symbols-file once in the command line. It overrides -s and -S.
+
+   -rpath dir
+   Add a directory to the runtime library search path. This is used when linking an ELF executable with
+   shared objects. All -rpath arguments are concatenated and passed to the runtime linker, which uses
+   them to locate shared objects at runtime.
+
+   The -rpath option is also used when locating shared objects which are needed by shared objects explicitly
+   included in the link; see the description of the -rpath-link option. If -rpath is not used when
+   linking an ELF executable, the contents of the environment variable LD_RUN_ PATH will be used if it
+   is defined.
+
+   The -rpath option may also be used on SunOS. By default, on SunOS, the linker will form a runtime search
+   patch out of all the -L options it is given. If a -rpath option is used, the runtime search path will
+   be formed exclusively using the -rpath options, ignoring the -L options. This can be useful when
+   using gcc, which adds many -L options which may be on NFS mounted filesystems.
+
+   -rpath-link DIR
+   When using ELF or SunOS, one shared library may require another. This happens when an ld -shared link
+   includes a shared library as one of the input files. When the linker encounters such a dependency
+   when doing a non-shared, non-relocateable link, it will automatically try to locate the required
+   shared library and include it in the link, if it is not included explicitly. In such a case, the
+   -rpath-link option specifies the first set of directories to search. The -rpath- link option may
+   specify a sequence of directory names either by specifying a list of names separated by colons, or by
+   appearing multiple times. The linker uses the following search paths to locate required shared
+   libraries.
+
+   Any directories specified by
+   -rpath-link options.
+
+   Any directories specified by
+   -rpath options. The difference between -rpath and -rpath-link is that directories specified by
+   -rpath are included in the executable to use at runtime, whereas the -rpath-link is only effective at
+   link time.
+
+   On an ELF system, if the
+   -rpath and rpath-link options were not used, search the contents of the environment variable
+   LD_RUN_PATH.
+
+   On SunOS, if the
+   -rpath option was not used, search any directories specified using -L options.
+
+   For a native linker, the contents of the environment variable
+   LD_LIBRARY_PATH.
+
+   The default directories, normally 
+   /lib and /usr/lib.
+
+   If the required shared library is not found, the linker will issue a warning and continue with the
+   link.
+
+   -r
+   Generate relocatable outputi.e., generate an output file that can in turn serve as input to ld. This
+   is often called partial linking. As a side effect, in environments that support standard Unix magic
+   numbers, this option also sets the output files magic number to OMAGIC. If this option is not
+   specified, an absolute file is produced. When linking C++ programs, this option will not resolve
+   references to constructors; to do that, use -Ur.
+
+   This option does the same thing as 
+   -i.
+
+   -S
+   Omit debugger symbol information (but not all symbols) from the output file.
+
+   -s
+   Omit all symbol information from the output file.
+
+   -soname name
+   When creating an ELF shared object, set the internal DT SONAME field to the specified name. When an
+   executable is linked with a shared object which has a DT SONAME field, then when the executable is
+   run the dynamic linker will attempt to load the shared object specified by the DT SONAME field rather
+   than the using the file name given to the linker.
+
+   -shared
+   Create a shared library. This is currently only supported on ELF and SunOS platforms. On SunOS, the
+   linker will automatically create a shared library if the -e option is not used and there are
+   undefined symbols in the link.
+
+   -sort-common
+   Normally, when ld places the global common symbols in the appropriate output sections, it sorts them
+   by size. First come all the one byte symbols, then all the two bytes, then all the four ffb bytes,
+   and then everything else. This is to prevent gaps between symbols due to alignment constraints. This
+   option disables that sorting.
+
+   -split-by-reloc count
+   Tries to creates extra sections in the output file so that no single output section in the file
+   contains more than count relocations. This is useful when generating huge relocatable for downloading
+   into certain real time kernels with the COFF object file format; since COFF cannot represent more
+   than 65535 relocations in a single section. Note that this will fail to work with object file formats
+   which do not support arbitrary sections. The linker will not split up individual input sections for
+   redistribution, so if a single input section contains more than count relocations one output section
+   will contain that many relocations.
+
+   -split-by-file
+   Similar to -split-by-reloc but creates a new output section for each input file.
+
+   -stats
+   Compute and display statistics about the operation of the linker, such as execution time and memory
+   usage.
+
+   -Tbss org
+   -Tdata org
+   -Ttext org
+   Use org as the starting address forrespectivelythe bss, data, or the text segment of the output
+   file. org must be a single hexadecimal integer; for compatibility with other linkers, you may omit
+   the leading 0x usually associated with hexadecimal values.
+
+   -T commandfile
+   Read link commands from the file commandfile. These com-mands replace lds default link script
+   (rather than adding to it), so commandfile must specify everything necessary to describe the target
+   format. See Command Language. If commandfiledoes not exist, ld looks for it in the directories
+   specified by any preceding -L options. Multiple -T options accumulate.
+
+   -t
+   Print the names of the input files as ld processes them.
+
+   -traditional-format
+   For some targets, the output of ld is different in some ways from the output of some existing linker.
+   This switch requests ld to use the traditional format instead. For example, on SunOS, ld combines
+   duplicate entries in the symbol string table. This can reduce the size of an output file with full
+   debugging information by over 30 percent. Unfortunately, the SunOS dbx program can not read the
+   resulting program (gdb has no trouble). The -traditional-format switch tells ld to not combine
+   duplicate entries.
+
+   -u symbol
+   Force symbol to be entered in the output file as an undefined symbol. Doing this may, for example,
+   trigger linking of additional modules from standard libraries. -u may be repeated with different
+   option arguments to enter additional undefined symbols.
+
+   -Ur
+   For anything other than C++ programs, this option is equivalent to -r: it generates relocatable
+   outputi.e., an output file that can in turn serve as input to ld. When linking C++ programs, -Ur
+   does resolve references to constructors, unlike -r. It does not work to use -Ur on files that
+   were themselves linked with -Ur; once the constructor table has been built, it cannot be added to.
+   Use -Ur only for the last partial link, and -r for the others.
+
+   --verbose
+   Display the version number for ld and list the linker emulations supported. Display which input files
+   can and cannot be opened.
+
+   -v
+   -V
+   Display the version number for ld. The -V option also lists the supported emulations.
+
+   -version
+   Display the version nu ffb mber for ld and exit.
+
+   -warn-common
+   Warn when a common symbol is combined with another common symbol or with a symbol definition. Unix
+   linkers allow this somewhat sloppy practice, but linkers on some other operating systems do not. This
+   option allows you to find potential problems from combining global symbols. Unfortunately, some C
+   libraries use this practice, so you may get some warnings about symbols in the libraries as well as
+   in your programs.
+
+   There are three kinds of global symbols, illustrated here by C examples:
+
+   
+   int i = 1;
+   A definition, which goes in the initialized data section of the output file.
+
+   
+   extern int i;
+   An undefined reference, which does not allocate space. There must be either a definition or a common
+   symbol for the variable somewhere.
+
+   
+   int i;
+   A common symbol. If there are only (one or more) common symbols for a variable, it goes in the
+   uninitialized data area of the output file. The linker merges multiple common symbols for the same
+   variable into a single symbol. If they are of different sizes, it picks the largest size. The linker
+   turns a common symbol into a declaration, if there is a definition of the same variable.
+
+   The 
+   -warn-common option can produce the following five kinds of warnings. Each warning consists of a
+   pair of lines: the first describes the symbol just encountered, and the second describes the previous
+   symbol encountered with the same name. One or both of the two symbols will be a common symbol.
+
+   Turning a common symbol into a reference, because there is already a definition for
+   the symbol.
+
+   file( section): warning: common of  symbol
+   overridden by definition
+   file( section): warning: defined here
+
+   Turning a common symbol into a reference, because a later definition for the symbol is encountered.
+   This is the same as the previous case, except that the symbols are encountered in a different order.
+
+   file( section): warning: definition of  symbol
+   overriding common
+   file( section): warning: common is here
+
+   Merging a common symbol with a previous same-sized common symbol.
+
+   file( section): warning: multiple common
+   of  symbol
+   file( f8d section): warning: previous common is here
+
+   Merging a common symbol with a previous larger common symbol.
+
+   file( section): warning: common of  symbol
+   overridden by larger common
+   file( section): warning: larger common is here
+
+   Merging a common symbol with a previous smaller common symbol. The following is the same as the
+   previous case, except that the symbols are encountered in a different order.
+
+   file( section): warning: common of  symbol
+   overriding smaller common
+   file( section): warning: smaller common is here
+
+   -warn-constructors
+   Warn if any global constructors are used. This is only useful for a few object file formats. For
+   formats like COFF or ELF, the linker can not detect the use of global constructors.
+
+   -warn-once
+   Only warn once for each undefined symbol, rather than once per module which refers to it.
+
+   For each archive mentioned on the command line, include every object file in the archive in the link,
+   rather than searching the archive for the required object files. This is normally used to turn an
+   archive file into a shared library, forcing every object to be included in the resulting shared
+   library.
+
+   -X
+   Delete all temporary local symbols. For most targets, this is all local symbols whose names begin
+   with L.
+
+   -x
+   Delete all local symbols.
+
+   -y symbol
+   Print the name of each linked file in which symbol appears. This option may be given any number of
+   times. On many systems it is necessary to prepend an underscore. This option is useful when you have
+   an undefined symbol in your link but dont know where the reference is coming from.
+
+   -(archives-)
+   --start-group archives--end-group
+   The archives should be a list of archive files. They may be either explicit file names, or -l
+   options.
+
+   The specified archives are searched repeatedly until no new undefined references are created.
+   Normally, an archive is searched only once in the order that it is specified on the command line. If
+   a symbol in that archive is needed to resolve an undefined symbol referred to by an object in an
+   archive that appears later on the command line, the linker would not be able to resolve that
+   reference. By grouping the archives, they all be searched repeatedly until all possible references
+   are resolved.
+
+   Using this option has a significant performance cost. Use it only when there are unavoidable circular
+   references between two or more archives.
+
+
+
+---
+https://unix.stackexchange.com/questions/479421/how-to-link-to-a-shared-library-with-a-relative-path
+
+How to link to a shared library with a relative path?
+
+     When resolving library dependencies, the dynamic linker first inspects each dependency string to
+     see if it contains a slash (this can occur if a library pathname containing slashes was specified
+     at link time). If a slash is found, then the dependency string is interpreted as a (relative or
+     absolute) pathname, and the library is loaded using that pathname.
+
+   How can gcc link against a library with a path with a slash? I have tried with -l but that seems to
+   work only with a library name which it uses to search various paths, not with a path argument itself.
+
+   One follow-on question: when linking to a relative path in this way, what is the path relative to
+   (e.g. the directory containing the binary or the working directory at runtime)?
+
+   All of the linking guides I find when searching discuss using RPATH, LD_LIBRARY_PATH, and RUNPATH.
+   RPATH is deprecated and most discussions discourage using LD_LIBRARY_PATH. RUNPATH with a path
+   starting with $ORIGIN allows for a link to a relative path, but it is a little fragile because it can
+   be overridden by LD_LIBRARY_PATH. I wanted to know if a relative path would be more robust (since I
+   can't find anything discussing this I am guessing not, likely because the path is relative to the
+   runtime directory).
+
+***
+   If we (for the moment) ignore the gcc or linking portion of the question and instead modify a binary
+   with patchelf on a linux system
+$> ldd hello
+        linux-vdso.so.1 =>  (0x00007ffd35584000)
+        libhello.so.1 => not found
+        libc.so.6 => /lib64/libc.so.6 (0x00007f02e4f6f000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007f02e533c000)
+$> patchelf --remove-needed libhello.so.1 hello
+$> patchelf --add-needed ./libhello.so.1 hello
+$> ldd hello
+        linux-vdso.so.1 =>  (0x00007ffdb74fc000)
+        ./libhello.so.1 => not found
+        libc.so.6 => /lib64/libc.so.6 (0x00007f2ad5c28000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007f2ad5ff5000)
+
+   We now have a binary with a relative path library, which if there exist suitable directories with
+   libhello.so.1 files present in them
+$> cd english/
+$> ../hello
+hello, world
+$> cd ../lojban/
+$> ../hello
+coi rodo
+
+   we find that the path is relative to the working directory of the process, which opens up all sorts
+   of problems, especially security problems. There might be some productive use for this,
+   testing different versions of a library, perhaps. It would likely be simpler to compile two different
+   binaries, or patchelf in the necessary library without the complication of a relative working
+   directory.
+
+compile steps
+
+   libhello only has a helloworld call
+$> cat libhello.c
+#include <stdio.h>
+void helloworld(void) {
+	printf("coi rodo\n");
+}
+
+   and was compiled via
+CFLAGS="-fPIC" make libhello.o
+gcc -shared -fPIC -Wl,-soname,libhello.so.1 -o libhello.so.1.0.0 libhello.o -lc
+ln -s libhello.so.1.0.0 libhello.so.1
+ln -s libhello.so.1.0.0 libhello.so
+
+   and the hello that makes the helloworld call was compiled via
+$> cat hello.c
+int main(void) {
+	helloworld();
+	return 0;
+}
+
+$> CFLAGS="-lhello -L`pwd`/english" make hello
+
+without patchelf
+
+   In hindsight, modify the gcc command to use a relative directory path:
+$> gcc -shared -fPIC -Wl,-soname,./libhello.so.1 -o libhello.so.1.0.0 libhello.o -lc
+$> cd ..
+$> rm hello
+$> CFLAGS="-lhello -L`pwd`/lojban" make hello
+$> ldd hello | grep hello
+        ./libhello.so.1 => not found
+$> english
+$> ../hello
+hello, world
+
+   It's probably more sensible to compile the library in a normal fashion and then fiddle around with
+   any binaries as necessary using patchelf.
+
+***
+   You would do this by passing options to the linker. For instance, to run test-programs from ncurses'
+   build-directory (which rely upon libraries not installed), I use an option like this (in the gcc
+   command-line):
+-Wl,-rpath,../lib
+
+   which embeds a relative pathname. The same option can embed an absolute pathname:
+-Wl,-rpath,../lib:/usr/local/ncurses6/lib
+
+   Doing that is useful for local testing, but not for installing on the system for a variety of
+   reasons. Debian has a policy against it, dating back to the 1990s, though coherent discussion is rare
+   (see for example RPATH issue which collects some of the information).
+
+***
+   If you use gcc to compile simply, you just need to do like this:
+$> gcc -o prog main.c ./liblib.so
+
+   After compile, the program has the same behavior as the thrig's answer. I think this command should
+   be only used in testing environment.
+
+
+
+---
+

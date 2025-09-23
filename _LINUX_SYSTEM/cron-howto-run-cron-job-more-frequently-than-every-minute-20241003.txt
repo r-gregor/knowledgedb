@@ -1,0 +1,153 @@
+filename: cron_howto_run-cron-job-more-frequently-than-every-minute_20241003.txt
+https://serverfault.com/questions/49082/can-i-run-a-cron-job-more-frequently-than-every-minute
+
+Is it possible to run a cron job every 30 seconds without a sleep command?
+Apr, 2022
+
+***
+   If your task needs to run that frequently, cron is the wrong tool. Aside from the fact that it simply
+   won't launch jobs that frequently, you also risk some serious problems if the job takes longer to run
+   than the interval between launches. Rewrite your task to daemonize and run persistently, then launch
+   it from cron if necessary (while making sure that it won't relaunch if it's already running).
+
+***
+   Candidate for the most creative misuse of a Linux command:
+nohup watch -n 30 --precise yourprog >/dev/null &
+
+   If yourprog consists of:
+date +%M.%S.%N >> yourprog.out
+
+   then yourprog.out might look like:
+50.51.857291267
+51.21.840818353
+51.51.840910204
+52.21.840513307
+52.51.842455224
+53.21.841195858
+53.51.841407587
+54.21.840629676
+
+   indicating a pretty good level of precision.
+
+   Here is an explanation of the parts of the command:
+     * nohup - This keeps the command that follows it, watch in this case, from exiting when the
+       terminal exits.
+     * watch - This program runs a command repeatedly. Normally the first screenful of output from
+       the command is displayed each time watch runs the command.
+     * -n 30 - The interval at which to run the command. In this case it's every thirty seconds.
+     * --precise - Without this option, watch runs the command after interval seconds. With it, each
+       start of the command begins on the interval if possible. If this option were not specified in the
+       example, the times would get later and later by more than 30 seconds each time due to the time it
+       takes to launch and execute the command (yourprog).
+     * yourprog - The program or command line for watch to execute. If the command line contains
+       characters special to the shell (e.g. space or semicolon) it will need to be quoted.
+     * >/dev/null - The greater-than redirects the output of the command being run by watch to a file,
+       /dev/null. That file discards any data written to it. This prevents the output from being written
+       to the screen or, since nohup is being used, it prevents output from being sent to a file called
+       nohup.out.
+     * & - The watch command is run in the background and control is returned to the terminal or parent
+       process.
+
+   Note that nohup, the redirection of output and the & background control operator are not specific to
+   watch.
+
+   Here is an explanation of the example yourprog script:
+     * date - Outputs the current date and/or time. It can also set them.
+     * +%M.%S.%N - This specifies the output format for date to use. %M is the current minute, %S is the
+       current second and %N is the current nanosecond.
+     * >> yourprog.out - This redirects the output of the date command to a file called yourprog.out.
+       The double greater-than causes the output to be appended to the file on each invocation rather
+       than the previous contents being overwritten.
+
+   Edit:
+   Possibly another thing that could be abused (or perhaps it's a legitimate use) is systemd timers.
+
+   See [https://wiki.archlinux.org/index.php/Systemd/Timers#As_a_cron_replacement]systemd/Timers as a cron
+   replacement and [https://unix.stackexchange.com/questions/278564/cron-vs-systemd-timers]Cron vs systemd timers.
+
+***
+Another answer:
+
+* * * * * /path/to/program
+* * * * * sleep 30; /path/to/program
+
+   Don't forget to write something into your program so that it exits if a previous instance is already
+   running.
+
+<code>
+#!/bin/sh
+
+if ln -s "pid=$$" /var/pid/myscript.pid; then
+	trap "rm /var/pid/myscript.pid" 0 1 2 3 15
+else
+	echo "Already running, or stale lockfile." >&2
+	exit 1
+fi
+</code>
+
+   Of course, this still leaves a very small opportunity for failure, so search google for a better
+   solution applicable to your environment.
+
+***
+my simplest and favorite solution for this task:
+
+   cron entry:
+   * * * * * flock -w0 /path/to/script /path/to/script
+
+   script:
+   while true; do echo doing something; sleep 10s; done
+
+lazy alternative: :)
+* * * * * flock -w0 /path/to/log watch -n 10 echo doing >> /path/to/log
+
+   or
+* * * * * flock -w0 /path/to/log watch -n 10 /path/to/script
+
+pros
+     * use of flock command avoids running the script by multiple instances in the same time. It can be
+       very important in the most cases.
+     * flock and watch commands is available on most Linux installs
+
+cons
+     * stopping of this kind of "Service" needs two to steps
+          + comment out the cron entry
+          + kill the script or the watch command
+
+***
+   Not an exact answer to your question, but I think it could be useful to some people anyway. If you
+   want to run a command every second, you could do it like this. Each minute, it loops through the 60
+   seconds, runs a script in a sub-shell and sleeps for 1 second. You need to make sure, that you create
+   a locking file (or a similar mechanism) and abort the script.pl accordingly (if you don't want to run
+   it multiple times in parallel).
+
+* * * * * for((i=0; i<60; i++)); do /usr/bin/perl script.pl & sleep 1; done;
+
+***
+   One simple strategy for Linux OSes is to make a SystemD service, e.g.
+   /etc/systemd/system/myservice.service:
+[Install]
+WantedBy=multi-user.target
+
+[Unit]
+Description=Bmon
+StartLimitIntervalSec=30
+StartLimitBurst=2
+
+[Service]
+ExecStart=/usr/bin/bash /home/janie/myservice.sh
+Restart=always
+
+   Then in myservice.sh:
+#!/usr/bin/bash
+while true; do
+	/home/janie/run_every_10_sec
+	sleep 10
+done
+
+   This will accomplish running the command /home/janie/run_every_10_sec every 10 seconds.
+
+   To enable myservice.service, run sudo systemctl enable myservice.
+
+
+---
+

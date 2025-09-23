@@ -1,0 +1,485 @@
+filename: arena_storage_pool_20230816.txt
+https://rosettacode.org/wiki/Arena_storage_pool
+
+Arena storage pool
+
+Dynamically allocated objects take their memory from a heap.
+   The memory for an object is provided by an allocator which maintains the storage pool used for the
+   heap.
+
+   Often a call to allocator is denoted as
+P := new T
+
+   where T is the type of an allocated object, and P is a reference to the object.
+
+   The storage pool chosen by the allocator can be determined by either:
+     * the object type      T
+     * the type of pointer  P
+
+   In the former case objects can be allocated only in one storage pool.
+   In the latter case objects of the type can be allocated in any storage pool or on the stack.
+
+   Task
+   The task is to show how allocators and user-defined storage pools are supported by the language.
+
+   In particular:
+	1. define an arena storage pool. An arena is a pool in which objects are allocated individually,
+	   but freed by groups.
+	2. allocate some objects (e.g., integers) in the pool.
+
+   Explain what controls the storage pool choice in the language.
+
+---
+C
+   For C, dynamic memory is often used for structures and for arrays when the size of the array is
+   unknown in advance. 'Objects' in C are pretty much structures, with the structure sometimes including
+   a pointer to a virtual dispatch table.
+
+   To use dynamic memory, the header for the standard library must be included in the module.
+#include <stdlib.h>
+
+   Uninitialized memory is allocated using the malloc function. To obtain the amount of memory that
+   needs to be allocated, sizeof is used. Sizeof is not a normal C function, it is evaluated by the
+   compiler to obtain the amount of memory needed.
+int *var = malloc(n*sizeof(int));
+Typename *var = malloc(sizeof(Typename));
+Typename *var = malloc(sizeof var[0]);
+
+   Since pointers to structures are needed so frequently, often a typedef will define a type as being a
+   pointer to the associated structure. Once one gets used to the notation, programs are actually easier
+   to read, as the variable declarations don't include all the '*'s.
+typedef struct mytypeStruct { .... } sMyType, *MyType;
+
+MyType var = malloc(sizeof(sMyType));
+
+   The calloc() function initializes all allocated memory to zero. It is also often used for allocating
+   memory for arrays of some type.
+/* allocate an array of n MyTypes */
+MyType var = calloc(n, sizeof(sMyType));
+
+MyType third = var+3;       /* a reference to the 3rd item allocated */
+MyType fourth = &var[4];    /* another way, getting the fourth item */
+
+   Freeing memory dynamically allocated from the heap is done by calling free().
+free(var);
+
+   One can allocate space on the stack using the alloca() function. You do not free memory that's been
+   allocated with alloca
+Typename *var = alloca(sizeof(Typename));
+
+   An object oriented approach will define a function for creating a new object of a class. In these
+   systems, the size of the memory that needs to be allocated for an instance of the class will often be
+   included in the 'class' record. See http://rosettacode.org/wiki/Polymorphic%20copy#C
+
+   Without using the standard malloc, things get a bit more complicated. For example, here is some code
+   that implements something like it using the mmap system call (for Linux):
+#include <sys/mman.h>
+#include <unistd.h>
+#include <stdio.h>
+
+// VERY rudimentary C memory management independent of C library's malloc.
+
+// Linked list (yes, this is inefficient)
+struct __ALLOCC_ENTRY__ {
+	void * allocatedAddr;
+	size_t size;
+	struct __ALLOCC_ENTRY__ * next;
+};
+typedef struct __ALLOCC_ENTRY__ __ALLOCC_ENTRY__;
+
+// Keeps track of allocated memory and metadata
+__ALLOCC_ENTRY__ * __ALLOCC_ROOT__ = NULL;
+__ALLOCC_ENTRY__ * __ALLOCC_TAIL__ = NULL;
+
+// Add new metadata to the table
+void _add_mem_entry(void * location, size_t size) {
+
+	__ALLOCC_ENTRY__ * newEntry = (__ALLOCC_ENTRY__ *) mmap(NULL, sizeof(__ALLOCC_ENTRY__), PROT_READ | \
+	PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+	if (__ALLOCC_TAIL__ != NULL) {
+		__ALLOCC_TAIL__ -> next = newEntry;
+		__ALLOCC_TAIL__ = __ALLOCC_TAIL__ -> next;
+	} else {
+		// Create new table
+		__ALLOCC_ROOT__ = newEntry;
+		__ALLOCC_TAIL__ = newEntry;
+	}
+
+	__ALLOCC_ENTRY__ * tail = __ALLOCC_TAIL__;
+	tail -> allocatedAddr = location;
+	tail -> size = size;
+	tail -> next = NULL;
+	__ALLOCC_TAIL__ = tail;
+}
+
+// Remove metadata from the table given pointer
+size_t _remove_mem_entry(void * location) {
+	__ALLOCC_ENTRY__ * curNode = __ALLOCC_ROOT__;
+
+	// Nothing to do
+	if (curNode == NULL) {
+		return 0;
+	}
+
+	// First entry matches
+	if (curNode -> allocatedAddr == location) {
+		__ALLOCC_ROOT__ = curNode -> next;
+		size_t chunkSize = curNode -> size;
+
+		// No nodes left
+		if (__ALLOCC_ROOT__ == NULL) {
+			__ALLOCC_TAIL__ = NULL;
+		}
+		munmap(curNode, sizeof(__ALLOCC_ENTRY__));
+
+		return chunkSize;
+	}
+
+	// If next node is null, remove it
+	while (curNode -> next != NULL) {
+		__ALLOCC_ENTRY__ * nextNode = curNode -> next;
+
+		if (nextNode -> allocatedAddr == location) {
+			size_t chunkSize = nextNode -> size;
+
+			if(curNode -> next == __ALLOCC_TAIL__) {
+				__ALLOCC_TAIL__ = curNode;
+			}
+			curNode -> next = nextNode -> next;
+			munmap(nextNode, sizeof(__ALLOCC_ENTRY__));
+
+			return chunkSize;
+		}
+		curNode = nextNode;
+	}
+
+	// Nothing was found
+	return 0;
+}
+
+// Allocate a block of memory with size
+// When customMalloc an already mapped location, causes undefined behavior
+void * customMalloc(size_t size) {
+	// Now we can use 0 as our error state
+	if (size == 0) {
+		return NULL;
+	}
+
+	void * mapped = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+	// Store metadata
+	_add_mem_entry(mapped, size);
+
+	return mapped;
+}
+
+// Free a block of memory that has been customMalloc'ed
+void customFree(void * addr) {
+	size_t size = _remove_mem_entry(addr);
+	munmap(addr, size);
+}
+
+int main(int argc, char const *argv[]) {
+	int *p1 = customMalloc(4*sizeof(int));    // allocates enough for an array of 4 int
+	int *p2 = customMalloc(sizeof(int[4]));   // same, naming the type directly
+	int *p3 = customMalloc(4*sizeof *p3);     // same, without repeating the type name
+
+	if(p1) {
+		for(int n=0; n<4; ++n) // populate the array
+			p1[n] = n*n;
+		for(int n=0; n<4; ++n) // print it back out
+			printf("p1[%d] == %d\n", n, p1[n]);
+	}
+
+	customFree(p1);
+	customFree(p2);
+	customFree(p3);
+
+	return 0;
+}
+
+   This is not how the real malloc is implemented on Linux. For one, memory leaks cannot be caught by
+   Valgrind, and using a linked list to keep track of allocated blocks is very inefficient.
+
+---
+Go
+
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+)
+
+// New to Go 1.3 are sync.Pools, basically goroutine-safe free lists.
+// There is overhead in the goroutine-safety and if you do not need this
+// you might do better by implementing your own free list.
+
+func main() {
+	// Task 1: Define a pool (of ints). Just as the task says, a sync.Pool
+	// allocates individually and can free as a group.
+	p := sync.Pool{New: func() interface{} {
+		fmt.Println("pool empty")
+		return new(int)
+	}}
+	// Task 2: Allocate some ints.
+	i := new(int)
+	j := new(int)
+	// Show that they're usable.
+	*i = 1
+	*j = 2
+	fmt.Println(*i + *j) // prints 3
+	// Task 2 continued: Put allocated ints in pool p.
+	// Task explanation: Variable p has a pool as its value. Another pool
+	// could be be created and assigned to a different variable. You choose
+	// a pool simply by using the appropriate variable, p here.
+	p.Put(i)
+	p.Put(j)
+	// Drop references to i and j. This allows them to be garbage collected;
+	// that is, freed as a group.
+	i = nil
+	j = nil
+	// Get ints for i and j again, this time from the pool. P.Get may reuse
+	// an object allocated above as long as objects haven't been garbage
+	// collected yet; otherwise p.Get will allocate a new object.
+	i = p.Get().(*int)
+	j = p.Get().(*int)
+	*i = 4
+	*j = 5
+	fmt.Println(*i + *j) // prints 9
+	// One more test, this time forcing a garbage collection.
+	p.Put(i)
+	p.Put(j)
+	i = nil
+	j = nil
+	runtime.GC()
+	i = p.Get().(*int)
+	j = p.Get().(*int)
+	*i = 7
+	*j = 8
+	fmt.Println(*i + *j) // prints 15
+}
+
+   Output:
+
+3
+9
+pool empty
+pool empty
+15
+
+---
+Kotlin
+
+   The Kotlin JVM programmer does not generally need to worry about memory management as the JVM
+   automatically takes care of memory allocation for new objects and the freeing of that memory when an
+   object is no longer needed. The latter is accomplished using a garbage collector which runs in the
+   background at intervals determined by the JVM though the programmer can force a collection using the
+   System.gc() function.
+
+   Similarly, the Kotlin Native runtime takes care of memory allocation for new Kotlin objects and
+   cleans them up when there are no longer any references to them. Currently, the latter is accomplished
+   using 'automatic reference counting' together with a collector for cyclic references though, in
+   principle, other systems could be plugged in.
+
+   However, where interoperation with C is required, it is often necessary to allocate memory on the
+   native heap so that a pointer to it can be passed to a C function. It is the responsibility of the
+   Kotlin Native programmer to allocate this memory and free it when no longer needed to avoid memory
+   leaks.
+
+   In general native memory is allocated via the NativePlacement interface together with the alloc() or
+   allocArray() functions. Currently, placement normally takes place using the nativeHeap object (which
+   calls malloc() and free() in the background) though other placement objects (such as the stack) are
+   possible in principle.
+
+   To make life easier for the programmer when a number of allocations are required, it is possible for
+   these to take place under the auspices of a MemScope object (an 'arena') which implements
+   NativePlacement and automatically frees up the memory for these objects when they are no longer in
+   scope. The process is automated by the memScoped function which takes a block as a parameter whose
+   receiver is an implicit MemScope object. Here's a very simple example:
+
+// Kotlin Native v0.5
+
+import kotlinx.cinterop.*
+
+fun main(args: Array<String>) {
+	memScoped {
+		val intVar1 = alloc<IntVar>()
+		intVar1.value = 1
+		val intVar2 = alloc<IntVar>()
+		intVar2.value = 2
+		println("${intVar1.value} + ${intVar2.value} = ${intVar1.value + intVar2.value}")
+	}
+	// native memory used by intVar1 & intVar2 is automatically freed when memScoped block ends
+}
+
+   Output:
+
+1 + 2 = 3
+
+---
+Nim
+
+   Nim proposes two ways to manage memory. In the first one, objects are allocated on the heap using
+   "new" and their deallocation is managed by the compiler and the runtime. In this case, objects are
+   accessed via references ("ref").
+
+   The second method to allocate objects on the heap consists to do this the C way, using procedures
+   "alloc" or "alloc0" to get blocks of memory. The deallocation is managed by the user who must call
+   "dealloc" to free the memory. Using this method, objects are accessed via pointers ("ptr").
+
+   The preferred way is of course to use references which are safe. To allow a better fit to user needs,
+   Nim proposes several options for automatic memory management. By specifying "--gc:refc" in the
+   command line to launch the compilation, a garbage collector using reference counting is used. This is
+   currently the default. Others options are "markAndSweep", "boehm" and "go" to use a different GC,
+   each one having its pros and cons. "--gc:none" allows to deactivate totally automatic memory
+   management which limits considerably the available functionnalities.
+
+   Since version 1.2, two more options are proposed. The first one, "--gc:arc" allows to choose the
+   "arc" memory management which, in fact, is not a garbage collector. This is the most efficient option
+   but it cannot free data structures containing cycles. The second option, "--gc:orc", allows to choose
+   the "orc" memory management which is in fact "arc" with a cycle detection mechanism. It will probably
+   become the default option in a future version.
+
+   In some cases, especially when a lot of similar objects must be allocated, it is a good idea to use a
+   pool. It allows to allocate by blocks and to free globally.
+
+   Nim doesn't propose any mechanism to manage such pools. There is an option "regions" which may be
+   useful for this purpose but it is experimental and not documented. So, we will ignore it for now.
+
+   One way to manage pools consists to allocate blocks of memory and use some pointer arithmetic to
+   return pointers to objects. The blocks may be allocated using "new" (and in this case will be freed
+   automatically) or using "alloc" or "alloc0" and the deallocation must be required explicitely.
+
+   We provide here an example using blocks allocated by "new".
+####################################################################################################
+# Pool management.
+
+# Pool of objects.
+type
+	Block[Size: static Positive, T] = ref array[Size, T]
+	Pool[BlockSize: static Positive, T] = ref object
+		blocks: seq[Block[BlockSize, T]]        # List of blocks.
+		lastindex: int                          # Last object index in the last block.
+
+#---------------------------------------------------------------------------------------------------
+
+proc newPool(S: static Positive; T: typedesc): Pool[S, T] =
+	## Create a pool with blocks of "S" type "T" objects.
+
+	new(result)
+	result.blocks = @[new(Block[S, T])]
+	result.lastindex = -1
+
+#---------------------------------------------------------------------------------------------------
+
+proc getItem(pool: Pool): ptr pool.T =
+	## Return a pointer on a node from the pool.
+
+	inc pool.lastindex
+	if pool.lastindex == pool.BlockSize:
+		# Allocate a new block. It is initialized with zeroes.
+		pool.blocks.add(new(Block[pool.BlockSize, pool.T]))
+		pool.lastindex = 0
+	result = cast[ptr pool.T](addr(pool.blocks[^1][pool.lastindex]))
+
+
+####################################################################################################
+# Example: use the pool to allocate nodes.
+
+type
+
+# Node description.
+	NodePtr = ptr Node
+	Node = object
+		value: int
+		prev: NodePtr
+		next: NodePtr
+
+type NodePool = Pool[5000, Node]
+
+proc newNode(pool: NodePool; value: int): NodePtr =
+	## Create a new node.
+
+	result = pool.getItem()
+	result.value = value
+    result.prev = nil        # Not needed, allocated memory being initialized to 0.
+	result.next = nil
+
+proc test() =
+	## Build a circular list of nodes managed in a pool.
+
+	let pool = newPool(NodePool.BlockSize, Node)
+	var head = pool.newNode(0)
+	var prev = head
+	for i in 1..11999:
+		let node = pool.newNode(i)
+		node.prev = prev
+		prev.next = node
+	# Display information about the pool state.
+	echo "Number of allocated blocks: ", pool.blocks.len
+	echo "Number of nodes in the last block: ", pool.lastindex + 1
+
+test()
+
+# No need to free the pool. This is done automatically as it has been allocated by "new".
+
+   Output:
+
+Number of allocated blocks: 3
+Number of nodes in the last block: 2000
+
+---
+Python
+
+   In Python:
+	 * Everything is an object.
+	 * Objects are dynamically allocated.
+	 * Unused objects are garbage collected.
+
+   Where objects appear from, or disappear to, is treated as an implementation detail.
+
+   Statements, such as assignments, class and function definitions, and import statements can create
+   objects and assign names to them which can be seen as assigning a reference to objects. Objects can
+   also be referred to from other objects e.g. in collections such as lists.
+   When names go out of scope, or objects are explicitly destroyed, references to objects are
+   diminished. Python's implementation keeps track of references to objects and marks objects that have
+   no remaining references so that they become candidates for 'garbage collection' at a later time.
+
+---
+Rust
+
+#![feature(rustc_private)]
+
+extern crate arena;
+
+use arena::TypedArena;
+
+fn main() {
+	// Memory is allocated using the default allocator (currently jemalloc). The memory is
+	// allocated in chunks, and when one chunk is full another is allocated. This ensures that
+	// references to an arena don't become invalid when the original chunk runs out of space. The
+	// chunk size is configurable as an argument to TypedArena::with_capacity if necessary.
+	let arena = TypedArena::new();
+
+	// The arena crate contains two types of arenas: TypedArena and Arena. Arena is
+	// reflection-basd and slower, but can allocate objects of any type. TypedArena is faster, and
+	// can allocate only objects of one type. The type is determined by type inference--if you try
+	// to allocate an integer, then Rust's compiler knows it is an integer arena.
+	let v1 = arena.alloc(1i32);
+
+	// TypedArena returns a mutable reference
+	let v2 = arena.alloc(3);
+	*v2 += 38;
+	println!("{}", *v1 + *v2);
+
+	// The arena's destructor is called as it goes out of scope, at which point it deallocates
+	// everything stored within it at once.
+}
+
+
+
+---
+

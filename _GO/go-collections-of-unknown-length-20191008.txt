@@ -1,0 +1,563 @@
+filename: go_collections-of-unknown-length_20191008.txt
+https://www.ardanlabs.com/blog/2013/08/collections-of-unknown-length-in-go.html
+
+Collections Of Unknown Length in Go
+August 26, 2013
+
+   If you are coming to Go after using a programming language like C# or Java, the first thing you will
+   discover is that there are no traditional collection types like List and Dictionary. That really
+   threw me off for months. I found a package called container/list and gravitated to using it for
+   almost everything.
+   
+   Something in the back of my head kept nagging me. It didn't make any sense that the language
+   designers would not directly support managing a collection of unknown length. Everyone talks about
+   how slices are widely used in the language and here I am only using them when I have a well defined
+   capacity or they are returned to me by some function. Something is wrong!!
+   
+   So I wrote an article earlier in the month that took the covers off of slices in a hope that I would
+   find some magic that I was missing. I now know how slices work but at the end of the day, I still had
+   an array that would have to grow. I was taught in school that linked lists were more efficient and
+   gave you a better way to store large collections of data. Especially when the number of items you
+   need to collect is unknown. It made sense to me.
+   When I thought about using an empty slice, I had this very WRONG picture in my head:
+   
+   [ slice ]--->[  obj  ][  obj  ]
+                    |        |
+                   copy     copy
+                    |        |
+                    V        V
+   [ slice ]--->[  obj  ][  obj  ][  obj  ]
+                    |        |        |  
+                   copy     copy     copy
+                    |        |        |  
+                    V        V        V  
+   [ slice ]--->[  obj  ][  obj  ][  obj  ][  obj  ]
+
+   
+   I kept thinking how Go would be creating a lot of new slice values and lots of other memory
+   allocations for the underlying array with values constantly being copied. Then the garbage collector
+   would be overworked because of all these little values being created and discarded.
+   I could not imagine having to do this potentially thousands of times. There had to be a better way or
+   efficiencies that I was not aware of.
+   
+   After researching and asking a lot of questions, I came to the conclusion that in most practical
+   cases using a slice is better than using a linked list. This is why the language designers have spent
+   the time making slices work as efficiently as possible and didn't introduce collection types into the
+   language.
+   
+   We can talk about edge cases and performance numbers all day long but Go wants you to use slices and
+   therefore it should be our first choice until the code tells us otherwise. Understand that slices are
+   like the game of chess, easy to learn but takes a lifetime to master. There are gotchas and things
+   you need to be aware of, because the underlying array can be shared.
+   
+   Now is a good time to read my post, [***]Understanding Slices in Go Programming, before continuing.
+   The rest of this post will explain how to use a slice when dealing with an unknown capacity and what
+   is happening underneath.
+   Here is an example of how to use an empty slice to manage a collection of unknown length:
+   
+package main
+import (
+    "fmt"
+    "math/rand"
+    "time"
+)
+   
+   type Record struct {
+       ID int
+       Name string
+       Color string
+   }
+   
+func main() {
+    // Let's keep things unknown
+    random := rand.New(rand.NewSource(time.Now().Unix()))
+    
+    // Create a large slice pretending we retrieved data
+    // from a database
+    data := make([]Record, 1000)
+    
+    // Create the data set
+    for record := 0; record < 1000; record++ {
+        pick := random.Intn(10)
+        color := "Red"
+        if pick == 2 {
+            color = "Blue"
+        }
+        
+        data[record] = Record{
+            ID: record,
+            Name: fmt.Sprintf("Rec: %d", record),
+            Color: color,
+        }
+    }
+    
+    // Split the records by color
+    var red []Record
+    var blue []Record
+    for _, record := range data {
+        if record.Color == "Red" {
+            red = append(red, record)
+        } else {
+            blue = append(blue, record)
+        }
+    }
+    
+    // Display the counts
+    fmt.Printf("Red[%d] Blue[%d]\n", len(red), len(blue))
+}
+   
+   When we run this program we will get different counts for the red and blue slices thanks to the
+   randomizer. We don't know what capacity we need for the red or blue slices ahead of time. This is a
+   typical situation for me.
+   
+   Let's break down the more important pieces of the code:
+   These two lines of code create a nil slice.
+   var red []Record
+   var blue []Record
+   
+   A nil slice has a length and capacity of 0 with no existing underlying array. To add items to the
+   slice we use the built in function called append:
+   red = append(red, record)
+   blue = append(blue, record)
+   
+   The append function is really cool and does a bunch of stuff for us.
+   Kevin Gillette wrote this in the group discussion I started:
+   [https://groups.google.com/forum/#!topic/golang-nuts/nXYuMX55b6c]
+   
+   In terms of Go specifics, append doubles capacity each reallocation for the first few thousand
+   elements, and then progresses at a rate of ~1.25 capacity growth after that.
+   
+   I am not an academic but I see the use of tilde (~) quite a bit. For those of you who don't know what
+   that means, it means approximately. So the append function will increase the capacity of the
+   underlying array to make room for future growth. Eventually append will grow capacity approximately
+   by a factor of 1.25 or 25%.
+   
+   Let's prove that append is growing capacity to make things more efficient:
+package main
+import (
+    "fmt"
+    "reflect"
+    "unsafe"
+)
+
+func main() {
+    var data []string
+    for record := 0; record < 1050; record++ {
+        data = append(data, fmt.Sprintf("Rec: %d", record))
+        if record < 10 || record == 256 || record == 512 || record == 1024 {
+            sliceHeader := (*reflect.SliceHeader)((unsafe.Pointer(&data)))
+            fmt.Printf("Index[%d] Len[%d] Cap[%d]\n",
+                record,
+                sliceHeader.Len,
+                sliceHeader.Cap)
+        }
+    }
+}
+    
+    Here is the output:
+   Index[0] Len[1]  Cap[1]
+   Index[1] Len[2]  Cap[2]
+   Index[2] Len[3]  Cap[4]          - Ran Out Of Room, Double Capacity
+   Index[3] Len[4]  Cap[4]
+   Index[4] Len[5]  Cap[8]          - Ran Out Of Room, Double Capacity
+   Index[5] Len[6]  Cap[8]
+   Index[6] Len[7]  Cap[8]
+   Index[7] Len[8]  Cap[8]
+   Index[8] Len[9]  Cap[16]         - Ran Out Of Room, Double Capacity
+   Index[9] Len[10] Cap[16]
+   Index[256] Len[257] Cap[512]     - Ran Out Of Room, Double Capacity
+   Index[512] Len[513] Cap[1024]    - Ran Out Of Room, Double Capacity
+   Index[1024] Len[1025] Cap[1280]  - Ran Out Of Room, Grow by a factor of 1.25
+   
+   If we look at the capacity values we can see that Kevin is absolutely correct. The capacity is
+   growing exactly as he stated. Within the first 1k of elements, capacity is doubled. Then capacity is
+   being grown by a factor of 1.25 or 25%. This means that using a slice in this way will yield the
+   performance we need for most situations and memory won't be an issue.
+   
+   Originally I thought that a new slice value would be created for each call to append but this isn't
+   the case. A copy of red is being copied on the stack when we make the call to append. Then when
+   append returns, another copy is made using the existing memory we already had.
+   red = append(red, record)
+   
+   In this case the garbage collector is not involved so we have no issues with performance or memory at
+   all. My C# and reference type mentality strikes me down again.
+   
+   Hold on to your seat because there are changes coming to slices in the next release.
+   Dominik Honnef has started a blog that explains, in plain english (Thank You), what is being
+   worked on in Go tip. These are things coming in the next release. Here is a link to his awesome blog
+   and the section on slices. Read it, it is really awesome.
+   http://dominik.honnef.co/go-tip/
+   http://dominik.honnef.co/go-tip/2013-08-23/#slicing
+   
+   There is so much more you can do with slices. So much so that you could write an entire book on the
+   subject. Like I said earlier, slices are like chess, easy to learn but takes a lifetime to master. If
+   you are coming from other languages like C# and Java then embrace the slice and use it. It is the Go
+   way.
+
+
+---
+[***]
+https://www.ardanlabs.com/blog/2013/08/understanding-slices-in-go-programming.html
+
+Understanding Slices in Go Programming
+August 15, 2013
+
+   Since I started programming in Go the concept and use of slices has been confusing. This is something
+   completely new to me. They look like an array, and feel like an array, but they are much more than an
+   array. I am constantly reading how slices are used quite a bit by Go programmers and I think it is
+   finally time for me to understand what slices are all about.
+
+   There is a great blog post written by Andrew Gerrand about slices:
+   http://blog.golang.org/go-slices-usage-and-internals
+   
+   There is no reason to repeat everything Andrew has written so please read his post before continuing.
+   Let's just cover the internals of a slice.
+   
+                         +-------+
+                         |   ptr |
+                         | *Elem |
+                         +-------+
+                         |   len |
+                         | int   |
+                         +-------+
+                         |   cap |
+                         | int   |
+                         +-------+
+
+                [   ]-+
+         []byte [ 5 ]  \
+                [ 5 ]   \
+                         \
+                 [5]byte [byte ][     ][     ][     ][     ]
+                
+                
+                
+   The picture above represents the internal structure of a slice. When you allocate a slice this data
+   structure along with an underlying array is created. The value of your slice variable will be this
+   data structure. When you pass a slice to a function, a copy of this data structure is created on the
+   stack.
+   We can create a slice in two ways:
+   Here we use the keyword make, passing the type of data we are storing, the initial length of the
+   slice and the capacity of the underlying array.
+   mySlice := make([]string, 5, 8)
+   mySlice[0] = "Apple"
+   mySlice[1] = "Orange"
+   mySlice[2] = "Banana"
+   mySlice[3] = "Grape"
+   mySlice[4] = "Plum"
+   // You don't need to include the capacity. Length and Capacity will be the same
+   mySlice := make([]string, 5)
+   
+   You can also use a slice literal. In this case the length and capacity will be the same. Notice no
+   value is provided inside the hard brackets []. If you add a value you will have an array. If you
+   don't add a value you will have a slice.
+   
+   mySlice := []string{"Apple", "Orange", "Banana", "Grape", "Plum"}
+   
+   You can't extend the capacity of a slice once it is created. The only way to change the capacity is
+   to create a new slice and perform a copy. Andrew provides a great sample function that shows an
+   efficient way to check the remaining capacity for room and only if necessary, perform a copy.
+   The length of a slice identifies the number of elements of the underlying array we are using from the
+   starting index position. The capacity identifies the number of elements we have available for use.
+   We can create a new slice from the original slice:
+   newSlice := mySlice[2:4]
+   
+                [   ]-----------------+
+         []byte [ 2 ]                  \
+                [ 3 ]                   \
+                                         \
+                 [5]byte [byte ][     ][     ][     ][     ]
+                                        -----  -----
+   
+   
+   The value of the new slice's pointer variable is associated with index positions 2 and 3 of the
+   initial underlying array. As far as this new slice is concerned, we now have a underlying array of 3
+   elements and we are only using 2 of those 3 elements. This new slice has no knowledge of the first
+   two elements from the initial underlying array and never will.
+   When performing a slice operation the first parameter specifies the starting index from the slices
+   pointer variable position. In our case we said index 2 which is 3 elements inside the initial
+   underlying array we are taking the slice from. The second parameter is the last index position plus
+   one (+1). In our case we said index 4 which will include all indexes between index 2 (the starting
+   position) and index 3 (the final position).
+   We don't always need to include a starting or ending index position when performing a slice
+   operation:
+   newSlice2 = newSlice[:cap(newSlice)]
+   
+   
+                [   ]-----------------+
+         []byte [ 3 ]                  \
+                [ 3 ]                   \
+                                         \
+                 [5]byte [byte ][     ][     ][     ][     ]
+                                        -----  -----  -----
+   
+   
+   In this example we use the new slice we created before to create a third slice. We don't provide a
+   starting index position but we do specify the last index position. Our latest slice has the same
+   starting position and capacity but the length has changed. By specifying the last index position as
+   the capacity size, this length of this slice uses all remaining elements from the underlying array.
+   Now let's run some code to prove this data structure actually exists and slices work as advertised.
+   I have created a function that will inspect the memory associated with any slice:
+func InspectSlice(slice []string) {
+    // Capture the address to the slice structure
+    address := unsafe.Pointer(&slice)
+    addrSize := unsafe.Sizeof(address)
+    
+    // Capture the address where the length and cap size is stored
+    lenAddr := uintptr(address) + addrSize
+    capAddr := uintptr(address) + (addrSize * 2)
+    
+    // Create pointers to the length and cap size
+    lenPtr := (*int)(unsafe.Pointer(lenAddr))
+    capPtr := (*int)(unsafe.Pointer(capAddr))
+    
+    // Create a pointer to the underlying array
+    addPtr := (*[8]string)(unsafe.Pointer(*(*uintptr)(address)))
+    fmt.Printf("Slice Addr[%p] Len Addr[0x%x] Cap Addr[0x%x]\n",
+        address,
+        lenAddr,
+        capAddr)
+    fmt.Printf("Slice Length[%d] Cap[%d]\n",
+        *lenPtr,
+        *capPtr)
+    for index := 0; index < *lenPtr; index++ {
+         fmt.Printf("[%d] %p %s\n",
+            index,
+            &(*addPtr)[index],
+            (*addPtr)[index])
+    }
+    fmt.Printf("\n\n")
+}
+   
+   This function is performing a bunch of pointer manipulations so we can inspect the memory and values
+   of a slice's data structure and underlying array.
+   We will break it down, but first let's create a slice and run it through the inspect function:
+package main
+import (
+    "fmt"
+    "unsafe"
+)
+
+func main() {
+    orgSlice := make([]string, 5, 8)
+    orgSlice[0] = "Apple"
+    orgSlice[1] = "Orange"
+    orgSlice[2] = "Banana"
+    orgSlice[3] = "Grape"
+    orgSlice[4] = "Plum"
+    InspectSlice(orgSlice)
+}
+   
+   Here is the output of the program:
+   Slice Addr[0x2101be000] Len Addr[0x2101be008] Cap Addr[0x2101be010]
+   Slice Length[5] Cap[8]
+   [0] 0x2101bd000 Apple
+   [1] 0x2101bd010 Orange
+   [2] 0x2101bd020 Banana
+   [3] 0x2101bd030 Grape
+   [4] 0x2101bd040 Plum
+   
+   It appears the slice's data structure really does exist as described by Andrew.
+   The InspectSlice function first displays the address of the slice's data structure and the address
+   positions where the length and capacity values should be. Then by creating int pointers using those
+   addresses, we display the values for length and capacity. Last we create a pointer to the underlying
+   array. Using the pointer, we iterate through the underlying array displaying the index position, the
+   starting address of the element and the value.
+   Let's break down the InspectSlice function to understand how it works:
+   // Capture the address to the slice structure
+   address := unsafe.Pointer(&slice)
+   addrSize := unsafe.Sizeof(address)
+   
+   // Capture the address where the length and cap size is stored
+   lenAddr := uintptr(address) + addrSize
+   capAddr := uintptr(address) + (addrSize * 2)
+   
+   unsafe.Pointer is a special type that is mapped to an uintptr type. Because we need to perform
+   pointer arithmetic, we need to work with generic pointers. The first line of code casts the address
+   of the slice's data structure to an unsafe.Pointer. Then we get the size of an address for the
+   architecutre the coding is running on. With the address size now know, we create two generic pointers
+   that point address size and twice the address size bytes into the slice's data structure
+   respectively.
+   The following diagram shows each pointer variable, the value of the variable and the value that the
+   pointer points to:
+
+     address        lenAddr         capAddr
+   0x2101be000      0x2101be008     0x2101be010
+   0x2101bd000      5               8
+   
+   
+   With our pointers in hand, we can now create properly typed pointers so we can display the values.
+   Here we create two integer pointers that can be used to display the length and capacity values from
+   the slice's data structure.
+   // Create pointers to the length and cap size
+   lenPtr := (*int)(unsafe.Pointer(lenAddr))
+   capPtr := (*int)(unsafe.Pointer(capAddr))
+   
+   We now need a pointer of type [8]string, which is the type of underlying array.
+   // Create a pointer to the underlying array
+   addPtr := (*[8]string)(unsafe.Pointer(*(*uintptr)(address)))
+   
+   There is a lot going on in this one statement so let's break it down:
+   
+   (*uintptr)(address) : 0x2101be000
+   This code takes the starting address of the slice's data structure and casts it as a generic pointer.
+   
+   * (*uintptr)(address) : 0x2101bd000
+   Then we get the value that the pointer is pointing to, which is the starting address of the
+   underlying array.
+   
+   unsafe.Pointer(*(*uintptr)(address))
+   Then we cast the starting address of the underlying array to an unsafe.Pointer type. We need a
+   pointer of this type to perform the final cast.
+   
+   (*[8]string)(unsafe.Pointer(*(*uintptr)(address)))
+   Finally we cast the unsafe.Pointer to a pointer of the proper type.
+
+   The remaining code uses the proper pointers to display the output:
+   fmt.Printf("Slice Addr[%p] Len Addr[0x%x] Cap Addr[0x%x]\n",
+       address,
+       lenAddr,
+       capAddr)
+   fmt.Printf("Slice Length[%d] Cap[%d]\n",
+       *lenPtr,
+       *capPtr)
+   for index := 0; index < *lenPtr; index++ {
+       fmt.Printf("[%d] %p %s\n",
+           index,
+           &(*addPtr)[index],
+           (*addPtr)[index])
+   }
+   
+   Now let's put the entire program together and create some slices. We will inspect each slice and make
+   sure everything we know about slices is true:
+package main
+import (
+    "fmt"
+    "unsafe"
+)
+
+func main() {
+    orgSlice := make([]string, 5, 8)
+    orgSlice[0] = "Apple"
+    orgSlice[1] = "Orange"
+    orgSlice[2] = "Banana"
+    orgSlice[3] = "Grape"
+    orgSlice[4] = "Plum"
+    InspectSlice(orgSlice)
+    slice2 := orgSlice[2:4]
+    InspectSlice(slice2)
+    slice3 := slice2[1:cap(slice2)]
+    InspectSlice(slice3)
+    slice3[0] = "CHANGED"
+    InspectSlice(slice3)
+    InspectSlice(slice2)
+}
+    
+func InspectSlice(slice []string) {
+    // Capture the address to the slice structure
+    address := unsafe.Pointer(&slice)
+    addrSize := unsafe.Sizeof(address)
+    // Capture the address where the length and cap size is stored
+    lenAddr := uintptr(address) + addrSize
+    capAddr := uintptr(address) + (addrSize * 2)
+    // Create pointers to the length and cap size
+    lenPtr := (*int)(unsafe.Pointer(lenAddr))
+    capPtr := (*int)(unsafe.Pointer(capAddr))
+    // Create a pointer to the underlying array
+    addPtr := (*[8]string)(unsafe.Pointer(*(*uintptr)(address)))
+    fmt.Printf("Slice Addr[%p] Len Addr[0x%x] Cap Addr[0x%x]\n",
+        address,
+        lenAddr,
+        capAddr)
+    fmt.Printf("Slice Length[%d] Cap[%d]\n",
+        *lenPtr,
+        *capPtr)
+    for index := 0; index < *lenPtr; index++ {
+        fmt.Printf("[%d] %p %s\n",
+            index,
+            &(*addPtr)[index],
+            (*addPtr)[index])
+    }
+    
+    fmt.Printf("\n\n")
+}
+    
+   Here is the code and output for each slice:
+   Here we create the initial slice with a length of 5 elements and a capacity of 8 elements.
+   Code:
+   orgSlice := make([]string, 5, 8)
+   orgSlice[0] = "Apple"
+   orgSlice[1] = "Orange"
+   orgSlice[2] = "Banana"
+   orgSlice[3] = "Grape"
+   orgSlice[4] = "Plum"
+   
+   Output:
+   Slice Addr[0x2101be000] Len Addr[0x2101be008] Cap Addr[0x2101be010]
+   Slice Length[5] Cap[8]
+   [0] 0x2101bd000 Apple
+   [1] 0x2101bd010 Orange
+   [2] 0x2101bd020 Banana
+   [3] 0x2101bd030 Grape
+   [4] 0x2101bd040 Plum
+   
+   The output is as expected. A length of 5, capacity of 8 and the underlying array contains our values.
+   Next we take a slice from the original slice. We ask for 2 elements between indexes 2 and 3.
+   Code:
+   slice2 := orgSlice[2:4]
+   InspectSlice(slice2)
+   
+   Output:
+   Slice Addr[0x2101be060] Len Addr[0x2101be068] Cap Addr[0x2101be070]
+   Slice Length[2] Cap[6]
+   [0] 0x2101bd020 Banana
+   [1] 0x2101bd030 Grape
+   
+   In the output you can see we have a slice with a length of 2 and a capacity of 6. Because this new
+   slice is starting 3 elements into the underlying array for the original slice, there is a capacity of
+   6 elements. The capacity includes all possible elements that can be accessed by the new slice. Index
+   0 of the new slice maps to index 2 of the original slice. They both have the same address of
+   0x2101bd020.
+   This time we ask for a slice starting from index position 1 up to the last element of slice2.
+   Code:
+   slice3 := slice2[1:cap(slice2)]
+   InspectSlice(slice3)
+   
+   Output:
+   Slice Addr[0x2101be0a0] Len Addr[0x2101be0a8] Cap Addr[0x2101be0b0]
+   Slice Length[5] Cap[5]
+   [0] 0x2101bd030 Grape
+   [1] 0x2101bd040 Plum
+   [2] 0x2101bd050
+   [3] 0x2101bd060
+   [4] 0x2101bd070
+   
+   As expected the length and the capacity are both 5. When we display all the values of the slice you
+   see the last three elements don't have a value. The slice initialized all the elements when the
+   underlying array was created. Also index 0 of this slice maps to index 1 of slice 2 and index 3 of
+   the original slice. They all have the same address of 0x2101bd030.
+   The final code changes the value of the first element, index 0 in slice3 to the value CHANGED. Then
+   we display the values for slice3 and slice2.
+   slice3[0] = "CHANGED"
+   InspectSlice(slice3)
+   InspectSlice(slice2)
+   Slice Addr[0x2101be0e0] Len Addr[0x2101be0e8] Cap Addr[0x2101be0f0]
+   Slice Length[5] Cap[5]
+   [0] 0x2101bd030 CHANGED
+   [1] 0x2101bd040 Plum
+   [2] 0x2101bd050
+   [3] 0x2101bd060
+   [4] 0x2101bd070
+   Slice Addr[0x2101be120] Len Addr[0x2101be128] Cap Addr[0x2101be130]
+   Slice Length[2] Cap[6]
+   [0] 0x2101bd020 Banana
+   [1] 0x2101bd030 CHANGED
+   
+   Notice that both slices show the changed value in their respect indexes. This proves all the slices
+   are using the same underlying array.
+   The InspectSlice function proves that each slice contains its own data structure with a pointer to an
+   underlying array, a length for the slice and a capacity. Take some time to create more slices and use
+   the InspectSlice function to validate your assumptions.
+
+
+---

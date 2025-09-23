@@ -1,0 +1,134 @@
+filename: dd_mount-sd-card-image-created-using-dd_20150520.txt
+http://askubuntu.com/questions/445979/mount-sd-card-image-created-using-dd
+
+[42]Mount sd-card image (created using dd)
+
+   I have created an image of my Raspberry Pi SD-card using dd:
+sudo dd if=/dev/sdf of=/home/myusername/raspberry-backup-2014-04-10.img
+
+   The SD-card includes two partitions (one vfat, one ext4) which are automatically mounted when I plug
+   the card in.
+
+   My question: How can I mount these partitions from the .img file?
+
+   More details:
+$ fdisk -l raspberry-backup-2014-04-10.img
+
+Disk raspberry-backup-2014-04-10.img: 3974 MB, 3974103040 bytes
+255 heads, 63 sectors/track, 483 cylinders, total 7761920 sectors
+Units = sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x000981cb
+
+                          Device Boot      Start         End      Blocks   Id  System
+raspberry-backup-2014-04-10.img1            8192      122879       57344    c  W95 FAT32 (LBA)
+raspberry-backup-2014-04-10.img2          122880     7761919     3819520   83  Linux
+
+   [44]mount [45]sd-card [46]dd
+   [47]share|[48]improve this question
+        [49]edited Apr 10 '14 at 13:53
+   asked Apr 10 '14 at 13:46
+   [50]DL6ER
+   218210
+
+   You want to mount the image without writing it to de SD card? –  [51]OrangeTux Apr 10 '14 at 14:08
+
+   Yes, I want to have full access to the filesystem stored in the .img file so that I can
+   copy/modify/delete/etc. files without having a SD card –  [52]DL6ER Apr 10 '14 at 14:12
+
+   Maybe [53]this question helps you. –  [54]OrangeTux Apr 10 '14 at 14:22
+
+   Unfortunately this doesn't work, tried both attempts. The first one didn't create the /dev/loop0p1
+   device. The second one (I have calculated the starting point accordingly) throws a wrong fs type, bad
+   option, bad superblock on /dev/loop0, missing codepage or helper program, or other error problem –
+   [55]DL6ER Apr 10 '14 at 14:30
+
+   In addition, sudo fdisk -l /dev/loop0 claims: Disk /dev/loop0 doesn't contain a valid partition
+   table. –  [56]DL6ER Apr 10 '14 at 14:36
+   add a comment |
+
+3 Answers 3
+
+   [57]active [58]oldest [59]votes
+   up vote 5 down vote accepted
+
+   After some additonal testing I found the solution myself: kpartx
+sudo kpartx -a raspberry-backup-2014-04-10.img
+
+   This command created /dev/mapper/loop0p1 and /dev/mapper/loop0p2. Afterwards these partitions can be
+   mounted straight forward:
+sudo mount -o rw -t ext4 /dev/mapper/loop0p2 mount_target/
+
+   [60]share|[61]improve this answer
+   answered Apr 10 '14 at 14:57
+   [62]DL6ER
+   218210
+   add a comment |
+   up vote 2 down vote
+
+   To avoid the need to create separate images for each partition as well as installing a utility like
+   kpartx you can mount each partition individually by specifying an offset in the mount command.
+
+   First examine the partitions in the image file and determine the offset by using fdisk:
+$ fdisk -u -l rpi_image280914
+
+Disk rpi_image280914: 16.0 GB, 16012804096 bytes
+255 heads, 63 sectors/track, 1946 cylinders, total 31275008 sectors
+Units = sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x000cdac7
+
+           Device Boot      Start         End      Blocks   Id  System
+rpi_image280914p1   *        2048      514047      256000    c  W95 FAT32 (LBA)
+rpi_image280914p2          540672    31242239    15350784   83  Linux
+
+   Take the Start sector of the partition you are interested in and multiply that value by the Units
+   size. So if your interested in the second partition you'll get 540672 * 512 = 276824064
+
+   Now create a folder and mount the partition:
+mkdir rpi_partition
+sudo mount -o loop,offset=276824064 rpi_image280914 rpi_partition/
+
+   Once you are done doing what you want with the partition data:
+sudo umount rpi_partition/
+rm -r rpi_partition/
+
+   [63]share|[64]improve this answer
+   answered Oct 19 '14 at 11:53
+   [65]Forage
+   298210
+   add a comment |
+   up vote 0 down vote
+
+   Dealing with an image of a whole disk with multiple partitions is [66]quite tricky. Linux was not
+   designed to read a partition table out of a regular file, even when attached to a loopback device, so
+   you must carefully identify the offsets of the partitions and pass them in to the mount command.
+
+   The preferable way would be to create separate images of each partition:
+sudo dd if=/dev/sdf1 of=/home/myusername/raspberry-backup-sdf1-2014-04-10.img
+sudo dd if=/dev/sdf2 of=/home/myusername/raspberry-backup-sdf2-2014-04-10.img
+
+   Now you can easily treat these files as if they were individual partitions on a disk, mounting them
+   as you normally would a real disk partition, by mapping them to a [67]loop device. A loop device, or
+   loopback device, is a virtual device that provides a translation layer for Linux to treat a file as a
+   block device (like a disk or partition).
+
+   The loop devices are typically /dev/loop0 through /dev/loop8. Identify an unused loop device with the
+   losetup command:
+$ sudo losetup /dev/loop0
+loop: can't get info on device /dev/loop0: No such device or address
+
+   This response indicates an unassigned loop device. Now we can assign the loop device to one of our
+   image files:
+$ sudo losetup /dev/loop0 /home/myusername/raspberry-backup-sdf1-2014-04-10.img
+
+   Absence of output from this command indicates success. Now /dev/loop0 is for most purposes
+   functionally equivalent to /dev/sdf1 of your SD card, and you can mount it as you normally would:
+sudo mount -t vfat /dev/loop0 /media/sdimage-1
+
+   Repeat the process using another loop device to mount the other partition. When you're done, unmount
+   the filesystems and unassign the loop devices:
+sudo umount /dev/loop0
+sudo losetup -d /dev/loop0

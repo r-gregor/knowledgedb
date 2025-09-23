@@ -1,0 +1,105 @@
+filename: ip-address-of-network-interface-20250724.txt
+https://michael.kjorling.se/blog/2025/ip-address-of-network-interface-linux/
+
+Getting the IP address of a network interface, on Linux
+21 July 2025
+
+   If you are like me, there have been times when you have wanted to get the IP address (maybe IPv4,
+   maybe IPv6, maybe both or either) of a network interface programmatically from something like a shell
+   script or cron job.
+
+   To have it said up front: if you are behind NAT (including CGNAT, which is usually but not
+   necessarily IPv4 100.64/10 on the customer WAN side) then the address on the interface will not match
+   the externally visible address for outbound traffic. Depending on what you plan to use the address
+   for, this may or may not be a consideration.
+
+   Too many places on the Web suggest to do kludgy, possibly locale-dependent, not necessarily
+   guaranteed by any contract in any way whatsoever, parsing of the output of ip (or even, oh the
+   horrors, ifconfig) using awk, cut, grep or sed shenanigans seemingly reasoning along the lines of "it
+   works for me now, so it's good".
+
+   Don't!
+
+   The modern tool ip (which you should be using) supports JSON output (turned on by -j or -json), and
+   jq can be used to pretty-print parts of or all of any arbitrary valid JSON. For example:
+
+$> ip -j address list $if | jq .
+[
+	"ifname": "$if",
+	...,
+	{
+		"addr_info": [
+			{
+				"family": "inet",
+				"local": "192.0.2.100",
+				...
+			},
+			{
+				"family": "inet6",
+				"local": "fe80::42",
+				...
+			},
+			{
+				"family": "inet6",
+				"local": "2001:db8::47",
+				...
+			},
+			...
+		]
+	}
+]
+$> 
+
+   If you are not interested in the physical interface details, you can add -o to ip to elide those;
+   though judging by the man page, which documents -o as turning on single-line output mode, that may be
+   an unintended side effect. Note that passing -o also moves the interface identifier from ifname near
+   the top to dev in each addr_info entry, but in this particular case the output interface identifier
+   is not used for anything so that change is inconsequential this once.
+
+   address list can be abbreviated all the way to a l if you are byte-constrained or are typing on an
+   ASR-33.
+
+   To get only the addresses without any fancy JSON formatting at all, replace the jq part of the pipe
+   with:
+$> jq -r '. [] .addr_info [] .local'
+
+   Example output of the latter:
+$> ip -j address list $if | jq -r '. [] .addr_info [] .local'
+192.0.2.100
+fe80::42
+2001:db8::47
+$> 
+
+   If you are only interested in IPv4 (address family inet) or IPv6 (family inet6) addresses
+   respectively, don't try anything fancy in jq or regular expression magic to exclude or list either;
+   just ask ip for what you want in the end by passing -4 or -6 to it. (This is a common pattern for
+   network-related commands where you want to force use of IPv4 or IPv6.) For example, ip -4 -j address
+   list $if to get only the IPv4 addresses on the named interface and print the output in JSON format
+   for easy programmatic parsing later in the processing chain.
+
+   If you also want the network CIDR prefix length, jq can help out there, too. The prefix length is
+   available in the prefixlen field of the addr_info dictionary in the output from ip -j, and it is
+   possible to use string interpolation to produce a string describing both the IP address and
+   subnet in the typical slash-separated notation:
+
+$> ip -j address list $if | jq -r '. [] .addr_info [] | "\(.local)/\(.prefixlen)"'
+192.0.2.100/27
+fe80::42/64
+2001:db8::47/60
+$> 
+
+   If you are somehow stuck in the Dark Ages (possibly together with that ASR-33) without ip or jq, then
+   ifdata (on Debian packaged as part of moreutils), if available, can give you the IPv4 (but not
+   IPv6, in this day and age?) "address" (no telling what it does if there are several) of an interface
+   with its -pa parameter:
+
+$> ifdata -pa $if
+192.0.2.100
+$> 
+
+   though I would only resort to that if I really cannot have ip and jq. The latter may be more verbose,
+   but provide far better guarantees about and more control over the output.
+
+
+---
+

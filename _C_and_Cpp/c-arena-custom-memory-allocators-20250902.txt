@@ -1,0 +1,282 @@
+filename: c-arena-custom-memory-allocators-20250902.txt
+https://www.bytesbeneath.com/p/the-arena-custom-memory-allocators
+
+The Arena - Custom Memory Allocators in C
+Feb 09, 2024
+
+The Memory Management Problem
+   Memory management is typically taught in ways that cause many issues. Let's go over the 4 most common
+   issues: Fragmentation, Allocation Speed, Lack of Control, and Lifetimes.
+
+Fragmentation
+   Using malloc and free for individual objects inevitably cause fragmentation of the heap.
+
+   The locality of similar objects is not guaranteed when different types are allocated in an
+   unpredictable order.
+
+   The general purpose memory allocator provided by the language (the thing behind the malloc call) does
+   it's best to make sure there are not too many gaps. But, it doesn't know anything about the usage and
+   lifetimes of your objects.
+
+   As a result, you can easily end up with bad performance by jumping around in the heap.
+
+Performance
+   There's a common idea that memory allocation on a per-frame basis is a quick way to slow down your
+   application. I focus on games and real-time applications, so I'll use "frames", but you could replace
+   this with any high frequency loop.
+
+   The idea is that malloc and free are either too slow or too unpredictable to be able to be used in
+   high-frequency code paths.
+
+   The common remedy is to malloc and free before and after these code paths are executed. To ensure the
+   program does not crash, one of two things must occur. Either a fine-tuning of the memory footprint,
+   or an over-allocation at the outset.
+
+   If the data changes, and the code paths are not updated to fit the new data, crashes may occur.
+
+Lack of Control
+   malloc does not allow you to control the memory allocation strategy. You don't know where you are
+   getting memory from or how it's doing it. It's a black box. Need memory? Call malloc . That's it.
+
+Lifetimes
+   The cognitive overhead of trying to manage object lifetimes in the programmer's head is a cause of
+   many bugs. When the common wisdom is to dynamically allocate each instance of an object and release
+   the memory individually, there is a large surface area for mistakes.
+
+   For example, when individually allocating a bunch of nodes for a tree, performing some data
+   transformations, then walking the tree again to release each node. It could easily be the case that
+   some of the nodes have been detached during the transformation and are no longer accessible.
+
+   You can get around this issue by pre-allocating an array of nodes and grabbing from the pool of them
+   - then releasing the node array all together. This is a custom memory allocator - called a Pool
+   Allocator.
+
+   Today, however, we'll be talking about a more versatile allocator - the Arena.
+
+The Arena
+   The Arena Allocator is quite simple, and extremely useful. Since using Arenas, I have rarely needed
+   to think about memory management at all. I have written about them before, but I wasn't satisfied
+   with that article's definition as it misses some important implementation details.
+
+   Arenas work by allocating a large buffer of memory up-front and then handing out pieces of the
+   buffer. The amount of used memory is usually tracked with an offset number.
+
+   For example, the Arena is 4096 bytes (in reality they are usually much larger) and the program
+   allocates 2 1024 byte chunks - now the offset will be 2048. The calculated available space is the
+   offset - size. Actually, it's a bit more complicated due to memory alignment, but for the sake of
+   explaining the concept, this will do. We get into the nitty gritty later on.
+
+Performance and Lifetimes
+   Let's say we are working on a game. We know there's a bunch of allocations that need to happen at
+   startup. Things like copying files into buffers (shaders, images) to upload them to the GPU and then
+   throw them away.
+
+   In the main loop, there may be things that need to be allocated each frame and then thrown away, too
+   - debug strings, collision data, the possibilities are endless.
+
+   Rather than creating set pools for all of these things, or trying to guess how many we need and using
+   arrays, we can create a single Transient Arena Allocator.
+
+// Start up code:
+String my_shader_code = io_read_entire_file("my_shader.glsl", &transient_allocator);
+// Link the shader
+// We don't care about it after this, so do nothing
+
+// Main loop:
+{
+	// Some entity loop or something:
+	{
+		Hit hit = physics_hit(e, target, &transient_allocator);
+		if (hit.did_hit) {
+			// do something with hit
+		}
+	}
+
+	// Reset the Arena each frame
+	arena_free_all(transient_allocator.context);
+}
+
+   With this transient allocator, we have chosen to clear it at the end of each frame.
+   The cost of freeing the memory? Two assignment operations:
+
+arena_free_all(Arena *a) {
+	a->offset = 0;
+	a->committed = 0;
+}
+
+   What about the cost of allocating all this memory on each frame?
+
+   It's a little more expensive, but not by much. Certainly much less expensive than malloc . It's
+   basically a couple of add and compare instructions - see more in the implementation below.
+
+   The simplicity of these allocation and deallocation calls means that we don't have to fear allocating
+   and freeing memory during frames.
+
+   It's so cheap that we can do it whenever we want.
+
+Fragmentation and Lack of Control
+   Another side-effect of using an Arena is eliminating or greatly reducing fragmentation.
+
+   If we know that we need to both dynamically allocate and use together a few different types of
+   objects - we can put them into a separate Arena.
+
+   Say we have a bunch of Hits and a bunch of Particles, but we are unsure how many we need (if any) per
+   frame, but we are sure that we'll use data from the Hit for each Particle.
+
+   We could create another Arena Allocator called hit_allocator that just stores Hits and Particles.
+   Granted, this is probably not necessary and the transient_allocator would more than suffice, but for
+   the sake of example - we'll say we have so many Hits and Particles that we really want them to be
+   memory local.
+
+// Main loop:
+{
+	// Some entity loop or something:
+	{
+		Hit *hit = physics_hit(e, target, &hit_allocator);
+		if (hit->did_hit) {
+			// do something with hit
+			Particle *p = particle_spawn(hit.position, &hit_allocator);
+		}
+	}
+
+	// Reset the Arenas each frame
+	arena_free_all(transient_allocator.context);
+	arena_free_all(hit_allocator.context);
+}
+
+   Something you have probably noticed is that we are now thinking about collections of objects and
+   their lifetimes, rather than individual objects. This is a big mental switch and extremely powerful
+   if you are used to malloc and free -ing objects one at a time.
+
+   Since all our Hits and Particles are in the same Arena, we know they are probably somewhere pretty
+   close in memory. It's not 100% optimal, but we don't need a 100% optimal solution to get a 300x
+   speed-up. We just need our data to be in the L1, L2, or L3 caches and avoid going back to main
+   memory.
+
+   Using different Arenas for objects that have the same lifetime reduces cognitive overhead, freeing up
+   your mind for the multitude of other problems that need solving when developing complex software.
+
+Who Actually Uses Arenas?
+   The concept of Arenas is so useful that it's a built-in feature in new programming languages like
+   Odin and Jai.
+
+   I first heard about them during a stream in which Casey Muratori and Jonathan Blow were speaking
+   about game architecture. Jonathan said, in an off-handed way, "just put them in an Arena and you're
+   done". The conversation moved on, but I was now very curious. What is this "Arena" that they are
+   speaking of as if every programmer just knows what it is?
+
+   Soon, I found a great resource by the creator of the Odin language and started messing around with my
+   own implementations.
+
+   After a short time, I was hooked. My programs (which were all game prototypes) were much easier to
+   reason about - I haven't seen the word "segfault" show up in my terminal since.
+
+Implementation
+   I like to wrap my Arenas in an Allocator interface so that all my functions that require memory
+   allocation can take any type of Allocator.
+
+typedef struct {
+	void *(*alloc)(size_t size, void *context);
+	void (*free)(size_t size, void *ptr, void *context);
+	void *context;
+} Allocator;
+
+   For convenience, I like to define a couple of macros:
+
+#define make(T, n, a) ((T *)((a).alloc(sizeof(T) * n, (a).context)))
+#define release(s, p, a) ((a).free(s, p, (a).context))
+
+   The Arena code is fully outlined below:
+
+#define DEFAULT_ALIGNMENT (2 * sizeof(void *))
+
+typedef struct {
+	void *base;
+	size_t size;
+	size_t offset;
+	size_t committed;
+} Arena;
+
+#define arena_alloc_init(a) (Allocator){arena_alloc, arena_free, a}
+#define is_power_of_two(x) ((x != 0) && ((x & (x - 1)) == 0))
+
+uintptr_t align_forward(uintptr_t ptr, size_t alignment) {
+	uintptr_t p, a, modulo;
+	if (!is_power_of_two(alignment)) {
+		return 0;
+	}
+
+	p = ptr;
+	a = (uintptr_t)alignment;
+	modulo = p & (a - 1);
+
+	if (modulo) {
+		p += a - modulo;
+	}
+
+	return p;
+}
+
+void *arena_alloc_aligned(Arena *a, size_t size, size_t alignment) {
+	uintptr_t curr_ptr = (uintptr_t)a->base + (uintptr_t)a->offset;
+	uintptr_t offset = align_forward(curr_ptr, alignment);
+	offset -= (uintptr_t)a->base;
+
+	if (offset + size > a->size) {
+		return 0;
+	}
+
+	a->committed += size;
+	void *ptr = (uint8_t *)a->base + offset;
+	a->offset = offset + size;
+
+	return ptr;
+}
+
+void *arena_alloc(size_t size, void *context) {
+	if (!size) {
+		return 0;
+	}
+	return arena_alloc_aligned((Arena *)context, size, DEFAULT_ALIGNMENT);
+}
+
+// Does nothing.
+void arena_free(size_t size, void *ptr, void *context) {
+	(void)ptr; (void)size; (void)context;
+}
+
+void arena_free_all(void *context) {
+	Arena *a = context;
+	a->offset = 0;
+	a->committed = 0;
+}
+
+Arena arena_init(void *buffer, size_t size) {
+	return (Arena){.base = buffer, .size = size};
+}
+
+   Given this sample code below, we can inspect the memory of the program and see how our data ends up:
+
+size_t size = 1024 * 1024 * 64;
+void *buffer = malloc(size);
+Arena arena = arena_init(buffer, size);
+Allocator allocator = arena_alloc_init(&arena);
+
+int *x = make(int, 420, allocator);
+size_t *y = make(size_t, 23, allocator);
+char *z = make(char, 69, allocator);
+
+for (int i = 0; i < 420; i += 1) x[i] = i;
+for (int i = 0; i < 23; i += 1)  y[i] = (size_t)i;
+for (int i = 0; i < 69; i += 1)  z[i] = (char)i + '!';
+
+   As you can see, our data is nicely located in a predictable way - good for the CPU and good for us.
+
+   Note: I am in the process of experimenting with adding realloc to my Allocator interface. It seems
+   like it could be a pretty handy thing to have.
+   If you decide to or already do use Arenas in your projects, I'd love to hear about it.
+   If you think my implementation can be improved, please leave a comment below!
+
+
+---
+

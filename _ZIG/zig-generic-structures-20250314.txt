@@ -1,0 +1,289 @@
+filename: zig_generic-structures_20250314.txt
+ihttps://ziglang.org/documentation/0.14.0/#Generic-Data-Structures
+
+Generic Data Structures
+
+Zig uses comptime capabilities to implement generic data structures without introducing any special-case
+syntax.
+
+Here is an example of a generic List data structure.
+
+[generic_data_structure.zig]
+
+<code>
+fn List(comptime T: type) type {
+	return struct {
+		items: []T,
+		len: usize,
+	};
+}
+
+// The generic List data structure can be instantiated by passing in a type:
+var buffer: [10]i32 = undefined;
+var list = List(i32){
+	.items = &buffer,
+	.len = 0,
+};
+</code>
+
+That's it. It's a function that returns an anonymous struct. For the purposes of error messages and debugging,
+Zig infers the name "List(i32)" from the function name and parameters invoked when creating the anonymous
+struct.
+
+To explicitly give a type a name, we assign it to a constant.
+
+[anonymous_struct_name.zig]
+
+<code>
+const Node = struct {
+	next: ?*Node,
+	name: []const u8,
+};
+
+var node_a = Node{
+	.next = null,
+	.name = "Node A",
+};
+
+var node_b = Node{
+	.next = &node_a,
+	.name = "Node B",
+};
+</code>
+
+In this example, the Node struct refers to itself. This works because all top level declarations are
+order-independent. As long as the compiler can determine the size of the struct, it is free to refer to
+itself. In this case, Node refers to itself as a pointer, which has a well-defined size at compile time, so it
+works fine.
+
+Case Study: print in Zig
+Putting all of this together, let's see how print works in Zig.
+
+[print.zig]
+
+<code>
+const print = @import("std").debug.print;
+
+const a_number: i32 = 1234;
+const a_string = "foobar";
+
+pub fn main() void {
+	print("here is a string: '{s}' here is a number: {}\n", .{ a_string, a_number });
+}
+</code>
+
+Shell
+
+$> zig build-exe print.zig
+$> ./print
+here is a string: 'foobar' here is a number: 1234
+
+Let's crack open the implementation of this and see how it works:
+
+[poc_print_fn.zig]
+
+<code>
+const Writer = struct {
+	/// Calls print and then flushes the buffer.
+	pub fn print(self: *Writer, comptime format: []const u8, args: anytype) anyerror!void {
+		const State = enum {
+			start,
+			open_brace,
+			close_brace,
+		};
+
+		comptime var start_index: usize = 0;
+		comptime var state = State.start;
+		comptime var next_arg: usize = 0;
+
+		inline for (format, 0..) |c, i| {
+			switch (state) {
+				State.start => switch (c) {
+					'{' => {
+						if (start_index < i) try self.write(format[start_index..i]);
+						state = State.open_brace;
+					},
+					'}' => {
+						if (start_index < i) try self.write(format[start_index..i]);
+						state = State.close_brace;
+					},
+					else => {},
+				},
+				State.open_brace => switch (c) {
+					'{' => {
+						state = State.start;
+						start_index = i;
+					},
+					'}' => {
+						try self.printValue(args[next_arg]);
+						next_arg += 1;
+						state = State.start;
+						start_index = i + 1;
+					},
+					's' => {
+						continue;
+					},
+					else => @compileError("Unknown format character: " ++ [1]u8{c}),
+				},
+				State.close_brace => switch (c) {
+					'}' => {
+						state = State.start;
+						start_index = i;
+					},
+					else => @compileError("Single '}' encountered in format string"),
+				},
+			}
+		}
+		comptime {
+			if (args.len != next_arg) {
+				@compileError("Unused arguments");
+			}
+			if (state != State.start) {
+				@compileError("Incomplete format string: " ++ format);
+			}
+		}
+		if (start_index < format.len) {
+			try self.write(format[start_index..format.len]);
+		}
+		try self.flush();
+	}
+
+	fn write(self: *Writer, value: []const u8) !void {
+		_ = self;
+		_ = value;
+	}
+	pub fn printValue(self: *Writer, value: anytype) !void {
+		_ = self;
+		_ = value;
+	}
+	fn flush(self: *Writer) !void {
+		_ = self;
+	}
+};
+</code>
+
+This is a proof of concept implementation; the actual function in the standard library has more formatting
+capabilities.
+
+Note that this is not hard-coded into the Zig compiler; this is userland code in the standard library.
+
+When this function is analyzed from our example code above, Zig partially evaluates the function and emits a
+function that actually looks like this:
+
+Emitted print Function
+
+<code>
+pub fn print(self: *Writer, arg0: []const u8, arg1: i32) !void {
+	try self.write("here is a string: '");
+	try self.printValue(arg0);
+	try self.write("' here is a number: ");
+	try self.printValue(arg1);
+	try self.write("\n");
+	try self.flush();
+}
+</code>
+
+printValue is a function that takes a parameter of any type, and does different things depending on the type:
+
+[poc_printValue_fn.zig]
+
+<code>
+const Writer = struct {
+	pub fn printValue(self: *Writer, value: anytype) !void {
+		switch (@typeInfo(@TypeOf(value))) {
+			.int => {
+				return self.writeInt(value);
+			},
+			.float => {
+				return self.writeFloat(value);
+			},
+			.pointer => {
+				return self.write(value);
+			},
+			else => {
+				@compileError("Unable to print type '" ++ @typeName(@TypeOf(value)) ++ "'");
+			},
+		}
+	}
+
+	fn write(self: *Writer, value: []const u8) !void {
+		_ = self;
+		_ = value;
+	}
+	fn writeInt(self: *Writer, value: anytype) !void {
+		_ = self;
+		_ = value;
+	}
+	fn writeFloat(self: *Writer, value: anytype) !void {
+		_ = self;
+		_ = value;
+	}
+};
+</code>
+
+And now, what happens if we give too many arguments to print?
+
+[test_print_too_many_args.zig]
+
+<code>
+const print = @import("std").debug.print;
+
+const a_number: i32 = 1234;
+const a_string = "foobar";
+
+test "print too many arguments" {
+	print("here is a string: '{s}' here is a number: {}\n", .{
+		a_string,
+		a_number,
+		a_number,
+	});
+}
+</code>
+
+Shell
+
+$> zig test test_print_too_many_args.zig
+lib/std/fmt.zig:211:18: error: unused argument in 'here is a string: '{s}' here is a number: {}
+                               '
+            1 => @compileError("unused argument in '" ++ fmt ++ "'"),
+                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Zig gives programmers the tools needed to protect themselves against their own mistakes.
+
+Zig doesn't care whether the format argument is a string literal, only that it is a compile-time known value
+that can be coerced to a []const u8:
+
+[print_comptime-known_format.zig]
+
+<code>
+const print = @import("std").debug.print;
+
+const a_number: i32 = 1234;
+const a_string = "foobar";
+const fmt = "here is a string: '{s}' here is a number: {}\n";
+
+pub fn main() void {
+	print(fmt, .{ a_string, a_number });
+}
+</code>
+
+Shell
+
+$> zig build-exe print_comptime-known_format.zig
+$> ./print_comptime-known_format
+here is a string: 'foobar' here is a number: 1234
+
+This works fine.
+
+Zig does not special case string formatting in the compiler and instead exposes enough power to accomplish
+this task in userland. It does so without introducing another language on top of Zig, such as a macro language
+or a preprocessor language. It's Zig all the way down.
+
+See also:
+
+	[https://ziglang.org/documentation/0.14.0/#inline-while]inline while
+	[https://ziglang.org/documentation/0.14.0/#inline-for]inline for
+
+
+---
+

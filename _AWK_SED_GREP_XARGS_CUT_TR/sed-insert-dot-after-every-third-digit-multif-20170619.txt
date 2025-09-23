@@ -1,0 +1,229 @@
+filename: sed_insert-dot-after-every-third-digit-multif_20170619.txt
+http://shallowsky.com/blog/linux/cmdline/sed-insert-commas.html
+
+Inserting commas into numbers with sed (Shallow Thoughts)
+Sun, 07 Jul 2013
+
+Inserting commas into numbers with sed
+
+   Carla Schroder's recent article, [ *** ] More Great Linux Awk, Sed, and Bash Tips and Tricks, had a nifty
+   sed command I hadn't seen before to take a long number and insert commas appropriately:
+sed -i ':a;s/\B[0-9]\{3\}\gt;/,&/;ta' numbers.txt
+
+   . Or, if you don't have a numbers.txt file, you can do something like
+echo 20130607215015 | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta'
+
+   (I dropped the -i since that's for doing in-place edits of a file).
+
+   Nice! But why does it work? It would be easy enough to insert commas after every third number, but
+   that doesn't work unless the number of digits is a multiple of three. In other words, you don't want
+   20130607215015 to become 201,306,072,150,15 (note how the last group only has two digits); it has to
+   count in threes from the right if you want to end up with 20,130,607,215,015.
+
+   Carla's article didn't explain it, and neither did any of the other sites I found that mentioned this
+   trick.
+
+   So, with some help from regexp wizard Dana Jansens (of [4]OpenBox fame), I've broken it down into
+   more easily understood bits.
+
+Labels and loops
+   The first thing to understand is that this is actually several sed commands. I was familiar with
+   sed's basic substitute command, s/from/to/. But what's the rest of it? The semicolons separate the
+   commands, so the whole sed script is:
+:a
+s/\B[0-9]\{3\}\>/,&/
+ta
+
+   What this does is set up a label called a. It tries to do the substitute command, and if the
+   substitute succeeds (if something was changed), then ta tells it to loop back around to label a, the
+   beginning of the script.
+
+   So let's look at that substitute command.
+
+The substitute
+   Sed's s/from/to/ (like the equivalent command in vim and many other programs) looks for the first
+   instance of the from pattern and replaces it with the to pattern. So we're searching for
+   \B[0-9]\{3\}\> and replacing it with ,&/
+
+   Clear as mud, right? Well, the to pattern is easy: & matches whatever we just substituted (from), so
+   this just sticks a comma in front of ... something.
+
+   The from pattern, \B[0-9]\{3\}\>, is a bit more challenging. Let's break down the various groups:
+
+   \B
+          Matches anything that is not a word boundary.
+
+   [0-9]
+          Matches any digit.
+
+   \{3\}
+          Matches three repetitions of whatever precedes it (in this case, a digit).
+
+   \>
+          Matches a word boundary at the end of a word. This was the hardest part to figure out, because
+          no sed documentation anywhere bothers to mention this pattern. But Dana knew it as a vim
+          pattern, and it turns out it does the same thing in sed even though the docs don't say so.
+
+   Okay, put them together, and the whole pattern matches any three digits that are not preceded by a
+   word boundary but which are at the end of a word (i.e. they're followed by a word boundary).
+
+   Cool! So in our test number, 20130607215015, this matches the last three digits, 015. It doesn't
+   match any of the other digits because they're not followed by a word end boundary.
+
+   So the substitute will insert a comma before the last three numbers. Let's test that:
+$ echo 20130607215015 | sed 's/\B[0-9]\{3\}\>/,&/'
+20130607215,015
+
+   Sure enough!
+
+How the loop works
+   So the substitution pattern just adds the last comma. Once the comma is inserted, the ta tells sed to
+   go back to the beginning (label :a) and do it again.
+
+   The second time, the comma that was just inserted is now a word boundary, so the pattern matches the
+   three digits before the comma, 215, and inserts another comma before them. Let's make sure:
+$ echo 20130607215,015 | sed 's/\B[0-9]\{3\}\>/,&/'
+20130607,215,015
+
+   So that's how the pattern manages to match triplets from right to left.
+
+   Dana later commented that this wasn't really the best solution -- what if the string of digits is
+   attached to other characters and isn't really a number? I'll cover that in a separate article in a
+   few days. Update: Here's the smarter pattern, [5]Sed: insert commas into numbers, but in a smarter
+   way.
+
+
+---
+http://shallowsky.com/blog/linux/cmdline/sed-improve-comma-insertion.html
+
+Sed: insert commas into numbers, but in a smarter way (Shallow Thoughts)
+Tue, 09 Jul 2013
+
+Sed: insert commas into numbers, but in a smarter way
+
+   A few days ago I wrote about a nifty sed script to insert commas into numbers that I dissected
+   with the help of Dana Jansens.
+
+   Once we'd figured it out, though, Dana thought this wasn't really the best solution. For instance,
+   what if you have a file that has some numbers in it, but also has some digits mixed up with letters?
+   Do you really want to insert commas into every string of digits? What if you have some license
+   plates, like abc1234? Maybe it would be better to restrict the change to digits that stand by
+   themselves and are obviously meant to be numbers. How much harder would that be?
+
+   More regexp fun! We kicked it around a bit, and came up with a solution:
+$ echo abc20130607215015 | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta'
+abc20,130,607,215,015
+$ echo abc20130607215015 | sed ':a;s/\b\([0-9]\+\)\([0-9]\{3\}\)\b/\1,\2/;ta'
+abc20130607215015
+$ echo 20130607215015 | sed ':a;s/\b\([0-9]\+\)\([0-9]\{3\}\)\b/\1,\2/;ta'
+20,130,607,215,015
+
+   Breaking that down: \b is any word boundary -- you could also use \< to indicate that it's the start
+   of a word, much like \> was the end of a word.
+
+   \([0-9]\+\) is any string of one or more digits, taken as a group. The \( \) part marks it as a group
+   so we'll be able to use it later.
+
+   \([0-9]\{3\}\) is a string of exactly three digits: again, we're using \( \) to mark it as our second
+   numbered group.
+
+   \b is another word boundary (we could use \>), to indicate that the group of three digits must come
+   at the end of a word, with only whitespace or punctuation following it.
+
+   /\1,\2/: once we've matched the pattern -- a word break, one or more digits, three digits and another
+   word break -- we'll replace it with this. \1 matches the first group we found -- that was the string
+   of one or more digits. \2 matches the second group, the final trio of digits. And there's a comma in
+   between. We use the same :a; ;ta trick as in the first example to loop around until there are no more
+   triplets to match.
+
+   The hardest part of this was figuring out what needed to be escaped with backslashes. The one that
+   really surprised me was the \+. Although * works in sed the same way it does in other programs,
+   matching zero or more repetitions of the preceding pattern, sed uses \+ rather than + for one or more
+   repetitions. It took us some fiddling to find all the places we needed backslashes.
+
+
+---
+[ *** ]
+https://www.linux.com/learn/more-great-linux-awk-sed-and-bash-tips-and-tricks
+June 28, 2013
+
+More Great Linux Awk, Sed, and Bash Tips and Tricks
+
+   Awk and Sed are powerful text processors that run circles around bloaty word processors. We're going
+   to use them to customize the Bash prompt, add and remove line numbers, insert commas in long numbers,
+   and perform all manner of experiments without endangering our source files.
+
+   Awk and Sed are brilliant text processors, and as you learn more ways to use them the less you're
+   going to find yourself using a word processor. Word processors, in my sometimes-humble opinion, are
+   great lumbering things all full of buttons and menus, and good luck finding what you want -- or if it
+   even exists. They're much too "helpful", to the point that I yell mean things at them and order them
+   to get out of my way. As they don't understand voice commands it's not very effective. The simplest
+   use of Awk is sorting words and numbers that are separated in some way, by spaces, line breaks,
+   commas, and other punctuation-- anything that can be used as a delimiter. Awk's boon companion, Sed
+   (stream editor) operates on individual characters. Sed even has a sense of humor-- this example
+   changes your good Linux prompt to a DOS prompt:
+$ export PS1="C:\$( pwd | sed 's:/:\\\\\\:g' )\\>
+C:\home\carla\>
+
+   This is not permanent, and will go away when you close your terminal. While we're messing with Bash
+   prompts, let's fix it so that when we log into a remote PC the prompt turns red and says
+   "ssh-session" so we know for sure it's a remote session. Add these lines to your ~/.bashrc on the
+   remote machine:
+if [ -n "$SSH_CLIENT" ]; then text=" ssh-session"
+fi
+export PS1='\[\e[0;31m\]\u@\h:\w${text}$\[\e[m\] '
+
+   Log in from a remote machine to test it, and you'll see something like figure 1. (The Bash prompt is
+   extremely customizable with all kinds of colors and information; see the [40]Bash Prompt HOWTO to
+   learn all the color and customization codes.)
+
+   red-ssh copy
+
+   Suppose you're writing a code example and you want to insert printable line numbers. Some editors do
+   this, some don't. This is how Awk does it:
+$  awk '{ print FNR " "":"" " $0 }' /bin/cgroups-mount
+[...]
+7 :# For simplicity this script provides no flexibility
+8 :
+9 :# If /sys/fs/cgroup is mounted, we don't run again
+10 :if [ -n "`grep /sys/fs/cgroup /proc/mounts`" ]; then
+11 :    exit 0
+
+   I threw in some nice spaces and colons for prettiness. You can also display line numbers with the
+   less command:
+$ less -N /etc/ardour/ardour.menu
+[...]
+      7  <menuitem action='New'/>
+      8  <menuitem action='Open'/>
+      9  <menuitem action='Recent'/>
+     10  <menuitem action='Close'/>
+     11    <separator/><
+
+   I use this when I have to wade through XML files, which to my eyes are giant undigestible snarls,
+   even with color syntax highlighting. Now suppose you have some example code copied from somewhere
+   with line numbers, and you need to get rid of the line numbers; Sed is perfect for this task:
+$ sed "s/^ *[0-9]* //g" filename
+
+   These examples print the results to stdout and do not change the source files, which is a nice safety
+   mechanism. You can create a new file containing your changes with a simple redirect, like this:
+$ awk '{ print FNR " " $0 }' /bin/cgroups-mount > newfile
+
+   Sed can edit files in place with the -i, so if you're really really sure you can edit your source
+   file directly. This example inserts commas into a file full of columns of long numbers:
+$ sed -i ':a;s/\B[0-9]\{3\}\>/,&/;ta' numbers.txt
+
+   So this:
+20130607215015
+607220701
+992171
+
+   Becomes this:
+20,130,607,215,015
+607,220,701
+992,171
+
+   A good learning tool is to look up the command options in the man pages. To learn more about these
+   wonderful commands try the "Definitive Guide to sed: Tutorial and Reference" by Daniel A. Goldman,
+   which is the first new Sed & Awk book in years, and it's very good. A good companion book is
+   "Introducing Regular Expressions" by Michael Fitzgerald, because regular expressions are essential to
+   pretty much everything in scripting, programming, and many Linux commands.

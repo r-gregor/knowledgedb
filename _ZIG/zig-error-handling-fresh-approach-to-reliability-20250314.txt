@@ -1,0 +1,209 @@
+filename: zig_error-handling-fresh-approach-to-reliability_20250314.txt
+https://dev.to/chrischtel/error-handling-in-zig-a-fresh-approach-to-reliability-19o2
+
+Error Handling in Zig: A Fresh Approach to Reliability
+
+Error handling in Zig is one of its most distinctive features. Unlike other languages that use exceptions or
+result types, Zig takes a unique approach that combines compile-time clarity with runtime efficiency. Let's
+dive into how it works!
+
+The Basics: Error Sets
+In Zig, errors are values, not exceptions. They're defined using error sets:
+
+const FileError = error{
+	NotFound,
+	PermissionDenied,
+	InvalidPath,
+};
+
+This creates a type that can only hold these specific error values. It's like an enum, but specifically for
+errors.
+
+Error Unions: The Heart of Error Handling
+Zig uses error unions to combine errors with regular values. The syntax is !T or error{...}!T:
+
+fn readNumber(str: []const u8) !u32 {
+	if (str.len == 0) return error.EmptyString;
+	return std.fmt.parseInt(u32, str, 10);
+}
+
+pub fn main() !void {
+	const num = try readNumber("123");
+	std.debug.print("The number is: {}\n", .{num});
+
+	// This will return an error
+	const bad_num = readNumber("abc") catch |err| {
+		std.debug.print("Error: {}\n", .{err});
+		return err;
+	};
+}
+
+The try and catch Keywords
+Zig provides elegant ways to handle errors:
+
+fn processFile() !void {
+	// 'try' is like 'catch |err| return err'
+	const file = try std.fs.cwd().openFile("data.txt", .{});
+	defer file.close();
+
+	// Different ways to handle errors
+	const data = readData() catch |err| switch(err) {
+		error.OutOfMemory => return error.CannotProcess,
+		error.InvalidData => return error.BadFormat,
+		else => return err,
+	};
+}
+
+Error Traces Without Overhead
+One of Zig's coolest features is error return traces. They help debug errors in release builds with zero
+runtime overhead when not used:
+
+fn deepFunction() !void {
+	return error.SomethingWentWrong;
+}
+
+fn middleFunction() !void {
+	try deepFunction();
+}
+
+pub fn main() void {
+	middleFunction() catch |err| {
+		// This prints the full error trace!
+		std.debug.print("Error: {}\n", .{err});
+		return;
+	};
+}
+
+Best Practices
+	Be Specific: Define custom error sets for your functions to make error handling more precise.
+
+const DatabaseError = error{
+	ConnectionFailed,
+	QueryFailed,
+	InvalidData,
+};
+
+fn queryDatabase() DatabaseError!Data {
+	// Your implementation
+}
+
+    * Use Meaningful Names: Make your error names descriptive and action-oriented.
+    * Handle All Cases: Zig's compiler ensures you handle all possible errors, making your code more reliable.
+
+Error Handling vs Exceptions
+Why is Zig's approach better than exceptions? Here are the key benefits:
+    * No hidden control flow
+    * Compile-time error checking
+    * Zero runtime overhead
+    * Clear error propagation
+    * No need for try-catch blocks everywhere
+
+Real-World Example
+Here's a more complex example showing error handling in a file processing scenario:
+
+const std = @import("std");
+
+// Expand our error set to include all possible file-related errors
+const ProcessError = error{
+	FileNotFound,
+	InvalidFormat,
+	ProcessingFailed,
+	AccessDenied,
+	SystemResources,
+	IsDir,
+	NoSpaceLeft,
+	InputOutput,
+	OperationAborted,
+	BrokenPipe,
+	ConnectionResetByPeer,
+	ConnectionTimedOut,
+	NotOpenForReading,
+} || std.fs.File.OpenError || std.fs.File.ReadError;
+
+fn processDocument(path: []const u8) ProcessError!void {
+	// Open the file
+	const file = try std.fs.cwd().openFile(path, .{});
+	defer file.close();
+
+	// Read content
+	var buffer: [1024]u8 = undefined;
+	const size = try file.readAll(&buffer);
+
+	// Process content
+	if (size < 10) return ProcessError.InvalidFormat;
+
+	// Do something with the content...
+	std.debug.print("Successfully processed {} bytes\n", .{size});
+}
+
+pub fn main() !void {
+	// Get an allocator
+	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+	defer _ = gpa.deinit();
+	const allocator = gpa.allocator();
+
+	// Create an array of files to process
+	const files = [_][]const u8{
+		"document1.txt",
+		"missing.txt",
+		"small.txt",
+		"document2.txt",
+	};
+
+	// Process each file and handle errors appropriately
+	for (files) |file_path| {
+		processDocument(file_path) catch |err| switch (err) {
+			error.FileNotFound => {
+				std.debug.print("Warning: File not found: {s}\n", .{file_path});
+				continue;
+			},
+			error.InvalidFormat => {
+				std.debug.print("Error: Invalid format in file: {s}\n", .{file_path});
+				continue;
+			},
+			error.AccessDenied => {
+				std.debug.print("Error: Access denied for file: {s}\n", .{file_path});
+				continue;
+			},
+			error.IsDir => {
+				std.debug.print("Error: Path is a directory: {s}\n", .{file_path});
+				continue;
+			},
+			// Handle other specific errors as needed
+			else => {
+				std.debug.print("Unexpected error while processing {s}: {}\n", .{ file_path, err });
+				continue;
+			},
+		};
+
+		std.debug.print("Successfully processed file: {s}\n", .{file_path});
+	}
+
+	// Create a log of processed files
+	const log_file = try std.fs.cwd().createFile(
+		"processing_log.txt",
+		.{ .read = true },
+	);
+	defer log_file.close();
+
+	// Write some statistics
+	const timestamp = std.time.timestamp();
+	const log_message = try std.fmt.allocPrint(
+		allocator,
+		"Processing completed at: {d}\n",
+		.{timestamp},
+	);
+	defer allocator.free(log_message);
+
+	_ = try log_file.writeAll(log_message);
+}
+
+Conclusion
+
+Zig's error handling system is a breath of fresh air in systems programming. It combines the safety of Rust's
+Result type with the simplicity of Go's error returns, while adding its own unique features like comptime
+error sets and zero-cost error traces.
+
+
+---
+

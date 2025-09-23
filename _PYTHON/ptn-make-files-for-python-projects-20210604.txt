@@ -1,0 +1,129 @@
+filename: ptn_make-files-for-python-projects_20210604.txt
+https://venthur.de/2021-03-31-python-makefiles.html
+
+Writing Makefiles for Python Projects
+2021-03-31.
+
+   I'm a big fan of Makefiles. Almost all my side projects are using them, and I've been
+   advocating their usage at work too.
+
+   Makefiles give your contributors an entry point on how to do certain things like, building, testing,
+   deploying. And if done correctly, they can massively simplify your CI/CD pipeline scripts as they can
+   often just stupidly call the respective make targets. Most importantly, they are a very convenient
+   shortcut for you as a developer as well.
+
+   For Python projects, where I'm almost always using virtual environments, I've been using two
+   different strategies for Makefiles:
+	1. assuming that make is executed inside the virtual environment
+	2. wrapping all virtual environment calls inside make
+
+   Both strategies have their pros and cons.
+
+Assuming make is executed inside the venv
+
+   Let's have a look at a very simple Makefile that allows for building, testing and releasing a Python
+   project:
+<code>
+.PHONY: test
+test:
+	pytest
+
+.PHONY: lint
+lint:
+	flake8
+
+.PHONY: release
+release:
+	python3 setup.py sdist bdist_wheel upload
+
+clean:
+	find . -type f -name *.pyc -delete
+	find . -type d -name __pycache__ -delete
+</code>
+
+   This is straightforward and a potential contributor immediately knows the entry points to your
+   project.
+
+   Assuming there is a venv installed already, you have to activate it first and run the make commands
+   afterwards:
+
+$> . venv/bin/activate
+$> make test
+
+   The downside is of course, that you have to activate the venv for every new shell. Which can get a
+   bit annoying when you spawn a new terminal in tmux or put vim into the background to run make.
+
+   Activating the venv inside make will not work, as each recipe runs in its own shell, moreover each
+   command in each recipe runs in its own shell too. There are workarounds for the latter, i.e. using
+   the .ONESHELL flag, but that does not solve the issue of a new shell in each recipe.
+
+Wrapping the venv calls inside make
+   The second approach mitigates for the issue of activating the venv altogether. I've borrowed this
+   idea mostly from makefile.venv and simplified it a lot for my needs.
+<code>
+# system python interpreter. used only to create virtual environment
+PY = python3
+VENV = venv
+BIN=$(VENV)/bin
+
+# make it work on windows too
+ifeq ($(OS), Windows_NT)
+	BIN=$(VENV)/Scripts
+	PY=python
+endif
+
+all: lint test
+
+$(VENV): requirements.txt requirements-dev.txt setup.py
+	$(PY) -m venv $(VENV)
+	$(BIN)/pip install --upgrade -r requirements.txt
+	$(BIN)/pip install --upgrade -r requirements-dev.txt
+	$(BIN)/pip install -e .
+	touch $(VENV)
+
+.PHONY: test
+test: $(VENV)
+	$(BIN)/pytest
+
+.PHONY: lint
+lint: $(VENV)
+	$(BIN)/flake8
+
+.PHONY: release
+release: $(VENV)
+	$(BIN)/python setup.py sdist bdist_wheel upload
+
+clean:
+	rm -rf $(VENV)
+	find . -type f -name *.pyc -delete
+	find . -type d -name __pycache__ -delete
+</code>
+
+   The equivalent Makefile now looks immediately more complicated. So let's break it down.
+
+   Instead of calling just calling pytest, flake8 and python assuming the venv is already activated or
+   all dependencies are installed on the system directly, we explicitly call the ones from the venv by
+   prefixing the command with the path to the venv's bin directory. To ensure the venv exists, each of
+   the recipes is depending on the $(VENV) target, which ensures we always have an up-to-date venv
+   installed.
+
+   This works, because the . venv/bin/activate-script basically just does the same: it puts the venv
+   before anything else in your PATH, therefore each call to python, etc. will find the one installed in
+   the venv first.
+
+   While the Makefile is a bit more complicated, we now can just call
+$> make test
+
+   and don't deal with venvs directly any more (well, for those simple cases at least...). If you don't
+   need to support Windows, you can remove the appropriate block and the Makefile looks relatively tame,
+   even for people that don't use make very often.
+
+Which one is better?
+   I think the second approach is more convenient. I've used the first approach happily for years and
+   only learned quite recently about the second one. I haven't really noticed any downsides yet, but I
+   do realize that almost all Python projects with Makefiles I've checked out, seem to prefer the first
+   approach. I wonder why that is?
+
+
+---
+

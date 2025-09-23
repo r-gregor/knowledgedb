@@ -1,0 +1,123 @@
+filename: go_taking-go-modules-for-a-spin_20191024.txt
+https://dave.cheney.net/2018/07/14/taking-go-modules-for-a-spin
+
+Taking Go modules for a spin
+
+   Update: Since this post was written, Go 1.11beta2 has been released. I've updated the setup section
+   to reflect this. Russ Cox kindly wrote to me to explain the reasoning behind storing the Go module
+   cache in $GOPATH. I've included his response inline.
+
+   This weekend I wanted to play with Ubuntu 18.04 on a spare machine. This gave me a perfect excuse to
+   try out the modules feature recently merged into the Go 1.11 development branch.
+
+   TL;DR: When Go 1.11 ships you'll be able to download the tarball and unpack it anywhere you like.
+   When Go 1.11 ships you'll be able to write Go modules anywhere you like.
+
+Setup
+   The recently released Go 1.11beta2 has support for Go modules.
+$> curl https://dl.google.com/go/go1.11beta2.linux-amd64.tar.gz | \
+         tar xz --transform=s/^go/go1.11/g
+% Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                  Dload  Upload   Total   Spent    Left  Speed
+100  169M  100  169M    0     0  23.6M      0  0:00:07  0:00:07 --:--:-- 21.2M
+$> go1.11/bin/go version go version go1.11beta2 linux/amd64
+
+   That's all you need to do to install Go 1.11beta2. Out of shot, I've added $HOME/go1.11/bin to my
+   $PATH.
+
+Kicking the tires
+   Now we have a version of Go with module support installed, I wanted to try to use it to manage the
+   dependencies for httpstat, a clone of the Python tool of the same name that many collaborators
+   swarmed on to build in late 2016.
+
+   To show that Go 1.11 won't need you to declare a $GOPATH or use a specific directly layout for the
+   location of your project, I'm going to use my favourite directory for source code, ~/devel.
+% git clone https://github.com/davecheney/httpstat devel/httpstat
+Cloning into 'devel/httpstat'...
+remote: Counting objects: 2326, done.
+remote: Total 2326 (delta 0), reused 0 (delta 0), pack-reused 2326
+Receiving objects: 100% (2326/2326), 8.73 MiB | 830.00 KiB/s, done.
+Resolving deltas: 100% (673/673), done.
+Checking out files: 100% (1361/1361), done.
+$> cd devel/httpstat
+$> go mod -init -module github.com/davecheney/httpstat
+go: creating new go.mod: module github.com/davecheney/httpstat
+go: copying requirements from Gopkg.lock
+
+   Nice, go mod -init translated my existing Gopkg.lock file into its own go.mod format.
+% cat go.mod
+module github.com/davecheney/httpstat
+require (
+        github.com/fatih/color v1.5.0
+        github.com/mattn/go-colorable v0.0.9
+        github.com/mattn/go-isatty v0.0.3
+        golang.org/x/net v0.0.0-20170922011244-0744d001aa84
+        golang.org/x/sys v0.0.0-20170922123423-429f518978ab
+        golang.org/x/text v0.0.0-20170915090833-1cbadb444a80
+)
+
+   Let's give it a try
+$> go build
+go: finding golang.org/x/net v0.0.0-20170922011244-0744d001aa84
+go: finding github.com/mattn/go-colorable v0.0.9
+go: finding github.com/mattn/go-isatty v0.0.3
+go: finding golang.org/x/sys v0.0.0-20170922123423-429f518978ab
+go: finding github.com/fatih/color v1.5.0
+go: finding golang.org/x/text v0.0.0-20170915090833-1cbadb444a80
+go: downloading github.com/fatih/color v1.5.0
+go: downloading github.com/mattn/go-isatty v0.0.3
+go: downloading golang.org/x/net v0.0.0-20170922011244-0744d001aa84
+go: downloading github.com/mattn/go-colorable v0.0.9
+go: downloading golang.org/x/text v0.0.0-20170915090833-1cbadb444a80
+
+   Very nice, go build ignored the vendor/ folder in this repository (because we're outside $GOPATH) and
+   fetched the revisions it needed. Let's try out the binary and make sure it works.
+   
+$> ./httpstat golang.org
+Connected to 216.58.196.145:443
+HTTP/2.0 200 OK
+Server: Google Frontend
+Alt-Svc: quic=":443"; ma=2592000; v="44,43,39,35"
+Cache-Control: private
+Content-Type: text/html; charset=utf-8
+Date: Sat, 14 Jul 2018 08:20:43 GMT Strict-Transport-Security: max-age=31536000; preload
+Vary: Accept-Encoding
+X-Cloud-Trace-Context: 323cd59570cc084fed506f7e85d79d9f
+Body discarded
+
+Go module source cache
+   In the previous version of this article I included a footnote mentioning that go get in module mode
+   stored its downloaded source in $GOPATH/src/mod not the cache added in Go 1.10. Russ Cox kindly wrote
+   to me to explain the rational behind this choice and also copied this to a recent thread on
+   golang-dev. For completeness, here is his response:
+
+     The build cache ($GOCACHE, defaulting to $HOME/.cache/go-build) is for storing recent compilation
+     results, so that if you need to do that exact compilation again, you can just reuse the file. The
+     build cache holds entries that are like "if you run this exact compiler on these exact inputs.
+     this is the output you'd get." If the answer is not in the cache, your build uses a little more
+     CPU to run the compiler nstead of reusing the output. But you are guaranteed to be able to run the
+     compiler instead, since you have the exact inputs and the compiler binary (or else you couldn't
+     even look up the answer in the cache).
+
+     The module cache ($GOPATH/src/mod, defaulting to $HOME/go/src/mod) is for storing downloaded
+     source code, so that every build does not redownload the same code and does not require the
+     network or the original code to be available. The module cache holds entries that are like "if you
+     need to download mymodule@v1.2.3, here are the files you'd get." If the answer is not in the
+     cache, you have to go out to the network. Maybe you don't have a network right now. Maybe the code
+     has been deleted. It's not anywhere near guaranteed that you can redownload the sources and also
+     get the same result. Hopefully you can, but it's not an absolute certainty like for the build
+     cache. (The go.sum file will detect if you get a different answer on re-download, but knowing you
+     got the wrong bits doesn't help you make progress on actually building your code. Also these paths
+     end up in file-line information in binaries, so they show up in stack traces, and the like and
+     feed into tools like text editors or debuggers that don't necessarily know how to trigger the
+     right cache refresh.)
+
+Wrap up
+   You can build Go 1.11 from source right now anywhere you like. You don't need to set an environment
+   variable or follow a predefined location.
+
+   With Go 1.11 and modules you can write your Go modules anywhere you like. You're no longer forced
+   into having one copy of a project checked out in a specific sub directory of your $GOPATH.
+
+
+---

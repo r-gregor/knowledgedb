@@ -1,0 +1,158 @@
+filename: tmpfs_convert_h-264-AC3_mkv_to_h-264-AAC_mp4_20151222.txt
+http://forums.fedoraforum.org/showthread.php?t=290195
+
+[Howtp] Convert h.264/AC3 .mkv to h.264/AAC .mp4
+
+If you are familiar with using BitTorrent to obtain certain ethically grey area high-def video files,
+you are probably familiar with the Matroska Media Container, though you may only know it by the extension
+.mkv at the end of the file.
+
+Matroska Media Container can contain many different video/audio encodings, in fact the WebM standard
+being pushed by Google for HTML5 video is actually a Matroska Media Container using VP8 stream for video
+and Vorbis stream for audio.
+
+Anyway, for certain video content commonly shared by BitTorrent, the video stream is h.264 and the audio
+stream is Dolby 5.1 AC3.
+
+There is nothing inherently wrong with that, that may be fine for you. Many media players can play
+it. However, I like to repackage the .mkv into an MPEG-4 container, keeping the h.264 stream for video
+but transcoding the Dolby stream to stereo encoded with AAC.
+
+* My software media player of choice does not decode Dolby 5.1.
+* The audio volume level seems to rarely be consistent. Transcoding gives me an opportunity to normalize
+the audio so that I don't have to adjust the volume switch between media files.
+* I can serve the media file over my LAN using html5 video
+* My Bluray player on my TV usually plays the .mkv files just fine but sometimes complains they are
+corrupt, my guess is sometimes the .mkv files break the standard in a way the Bluray player doesn't
+compensate for. Repackaged as .mp4 it is never an issue.
+* I never invested in surround sound, so I don't give a ***** about losing that.
+* I'm paranoid that a software update to my bluray player will start checking checksum of media files
+with a list known ethically grey area files and refuse to play if there's a match. Repackaging it means
+a checksum match is highly unlikely.
+
+The following shell script is what I have been using for years to turn .mkv files into .mp4 files. It
+does assume the video stream is h.264 and the audio is Dolby AC3. That's not always the case and I should
+fix it, but the torrent tracker I use, that is always the case.
+
+Only "gotcha" is that it requires ffmpeg linked against libfaac and that can be hard to find pre-compiled,
+you may have to build it from source. All other binaries used should be readily available for most
+Linux distributions.
+
+For Fedora 18, the rpmfusion repos have everything except ffmpeg linked against libfaac. But the src.rpm
+will do it if you set a macro telling it to when you rebuild it.
+
+Anyway, if turning .mkv into .mp4 is something that interests you (doesn't interest most), enjoy.
+
+Code:
+#!/bin/bash
+
+base=`echo $1 |sed -e s?"\.mkv$"?""?`
+CWD=`pwd`
+TMP=`mktemp -d --tmpdir=/tmp`
+
+### This is fragile and can be done better ###
+n=`mkvinfo ${base}.mkv |grep "Track type" |grep -n "video" |cut -d":" -f1`
+vidTrack=`echo "${n} - 1" |bc`
+n=`mkvinfo ${base}.mkv |grep "Track type" |grep -n "audio" |cut -d":" -f1`
+audTrack=`echo "${n} - 1" |bc`
+### End Fragile ###
+
+mkvextract tracks ${base}.mkv ${vidTrack}:${TMP}/${base}.h264
+mkvextract tracks ${base}.mkv ${audTrack}:${TMP}/${base}.ac3
+
+pushd ${TMP}
+a52dec -o wavdolby ${base}.ac3 > tmp.wav
+rm -f ${base}.ac3
+# normalize the audio
+sox --norm tmp.wav -b 16 ${base}.wav rate 48000 dither
+rm -f tmp.wav
+# package in mpeg-4
+ffmpeg -i ${base}.h264 -i ${base}.wav -map 0:0 -map 1:0 \
+  -vcodec copy -acodec libfaac -ab 128k -y -f mp4 ${base}.mp4
+# fiv the MOOV atom for streaming and copy to original directory
+qt-faststart ${base}.mp4 ${CWD}/${base}.mp4
+popd
+rm -rf ${TMP}
+I call it mkv2mp4.sh and keep it in ~/bin/
+
+Use it like this:
+
+Code:
+[user@host ~]$ mkv2mp4.sh Game.of.Thrones.S03E01.REPACK.720p.HDTV.x264-EVOLVE.mkv
+End result will be identical filename but ending in .mp4 instead of .mkv
+
+If /tmp is tmpfs - it is really fast.
+Reply With Quote
+  #2
+Old 2nd April 2013, 07:32 PM
+Skull One Offline
+Registered User
+
+Join Date: Jun 2010
+Location: Lost...
+Posts: 1,300
+linuxredhatmozilla
+Re: [Howtp] Convert h.264/AC3 .mkv to h.264/AAC .mp4
+WAV files are usually big, and you use two of them.
+I guess you can improve your script using pipes.
+I do not have a sample to test, but maybe something like this is fine:
+Code:
+# ! ! ! ! ! ! ! ! !
+#  - draft code -
+# ! ! ! ! ! ! ! ! !
+
+# use a fifo for ffmpeg input
+mkfifo fifo.wav
+ffmpeg -i ${base}.h264 -i fifo.wav -map 0:0 -map 1:0 \
+  -vcodec copy -acodec libfaac -ab 128k -y -f mp4 ${base}.mp4 &
+
+# do we need a sleep?
+# sleep 1
+# decode and normalise audio
+a52dec -o wavdolby ${base}.ac3 | sox --norm - -b 16 fifo.wav rate 48000 dither
+
+rm -f fifo.wav
+__________________
+:confused:
+Reply With Quote
+  #3
+Old 2nd April 2013, 08:28 PM
+FunkyRes Offline
+Registered User
+
+Join Date: Nov 2004
+Posts: 238
+windows_7chrome
+Re: [Howtp] Convert h.264/AC3 .mkv to h.264/AAC .mp4
+Wav files are big but I do it in /tmp and delete them when done.
+piping the output of a52dec to sox though is a good idea.
+
+I'm not sure why a sleep would be necessary, I run /tmp as tmpfs though so maybe there is a race condition
+with one of the commands exiting before a disc arm has finished writing the file? I didn't ever see that
+even when I ran /tmp on same platter drive as /
+Reply With Quote
+  #4
+Old 3rd April 2013, 08:01 AM
+Skull One Offline
+Registered User
+
+Join Date: Jun 2010
+Location: Lost...
+Posts: 1,300
+linuxredhatmozilla
+Re: [Howtp] Convert h.264/AC3 .mkv to h.264/AAC .mp4
+
+Quote:
+Originally Posted by FunkyRes  View Post
+Wav files are big but I do it in /tmp and delete them when done.
+piping the output of a52dec to sox though is a good idea.
+
+I'm not sure why a sleep would be necessary, I run /tmp as tmpfs though so maybe there is a race condition
+with one of the commands exiting before a disc arm has finished writing the file? I didn't ever see that
+even when I ran /tmp on same platter drive as /
+The file is a named pipe, so actually nothing is written in /tmp.
+Since the first command is run in background, I think that the sleep is here to make sure that ffmpeg
+is ready
+and listening to the fifo when we start sending data.
+__________________
+:confused:

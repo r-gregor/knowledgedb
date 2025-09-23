@@ -1,0 +1,247 @@
+filename: ubuntu-beaver-slow-boot_20180622.txt
+https://www.dedoimedo.com/computers/ubuntu-beaver-slow-boot.html
+
+   Upgraded Ubuntu 18.04 suddenly boots slowly? Read this.
+Updated: June 20, 2018
+
+   After I let the fires of bad QA settle following the official release of [41]Ubuntu roughly a month
+   back, I decided to pick up the smoldering baton and continue the race. Hence, I upgraded my two
+   Kubuntu 17.10 instances to the LTS release. The two machines in question are my Lenovo G50 laptop and
+   HP Pavilion laptops, with Intel and Nvidia graphics, respectively, quite a bit of difference in age
+   and use and complexity of their multi-boot configurations. After the [42]successful upgrade, I
+   noticed a super-slow boot on the Lenovo system.
+
+   The time to reach the desktop went from an okay 60-seconds to a horrendous 4-minute mark, making
+   short work of any fun associated with the adventure. I realized I had to debug this, especially if
+   and when one day I choose to commit my production systems to the new LTS. So let's elaborate on the
+   problem and then figure out what we need to do to resolve it.
+
+Problem in more detail
+   What happens is as follows: the system takes a long time to boot. That's the easy part. This slowness
+   comes in two parts. The splash screen (with the flashing word Kubuntu) remains there for a long time,
+   and it looks like the desktop might be stuck. And then, it takes a while loading the Plasma
+   environment, too. In the logged-in system, there's also some initial laggery in the first few seconds
+   of the use. This did not manifest previously, whatever system you may have upgraded from (16.04,
+   17.10, etc).
+
+   I will show you the fix while working on Kubuntu Beaver, but it applies equally well across the
+   entire family of this LTS. We will examine the system messages, the kernel log, systemd logs, and
+   more. I will first show you the quick solution. Then, the longer version. Slowly, we will sanitize
+   the noise and errors and finally nail down the issue. Please also read the rest, so you actually
+   understand how to troubleshoot future issues of this nature.
+
+Solution, short version
+   We need to analyze the system boot process. As I've shown you in my [43]systemd blame tutorial,
+   similar to Bootchart that we used with init systems, you can use systemd to profile your boot
+   process, get an accurate reading on total boot time as well as individual time for each service,
+   including dependencies and the critical part in the boot chain (which means nothing else will run
+   until a certain service has loaded).
+
+   To get the boot time, just run systemd-analyze:
+
+   systemd-analyze
+   Startup finished in 5.991s (firmware) + 12.188s (loader) + 6.329s (kernel) + 3min 4.235s (userspace)
+   = 3min 28.744s
+   graphical.target reached after 1min 54.721s in userspace
+
+   This will tell you the time needed to load the system firmware, the bootloader, the kernel, and
+   finally the user-space portion, which includes all the different services (hidden behind the flashing
+   distro logo). The boot sequence is quiet, and you don't see the verbose output. Sometimes, this can
+   be useful, but we don't really need that.
+
+   You can also check the critical part with systemd-analyze critical-chain:
+   Critical chain
+   
+   We can see from the screenshot that there's a gap of about 70-80 seconds between the apparmor service
+   and the sysinit reaching its target. Then, if we check the system logs (/var/log/syslog), we get
+   something quite similar:
+
+   [   31.868934] audit: type=1400 audit(1527175083.864:11): apparmor="STATUS" operation="profile_load"
+   profile="unconfined" name="/usr/sbin/cups-browsed" pid=927 comm="apparmor_parser"
+   [   88.220894] usb 2-1: USB disconnect, device number 2
+
+   So for whatever reason - the system is waiting for something to happen. This also gives us more
+   information on what to search for online, among other things. Indeed, the bulk of my "long"
+   troubleshooting was getting my Kubuntu box into a "clean" enough state so I would not be trying to
+   fix bogus issues based on spurious and random system errors. There are a LOT of those.
+
+   Then, if we reference another system log, /var/log/boot.log, there's this:
+
+   A start job is running for dev-disk-by\x2duuid- ... device (1min 30s)
+   Timed out waiting for device dev-disk-by\x2duuid- ... device
+   Dependency failed for /dev/disk/by-uuid/<uuid>
+
+   Well, there aren't too many options - root, /boot/efi and swap. The first two would not let the
+   system boot at all if they were declared incorrectly. I decided to compare the swap partition
+   declared in /etc/fstab and my list of devices by UUID using the blkid command. Lo and behold, the
+   swap device written there did NOT exist. For some unknown reason, the Ubuntu installer must have
+   enumerated the devices one way before and after the installation. This is ironic, because UUID is
+   meant to prevent things like this from happening - where using /dev/sdXY, devices might be show in
+   wrong order.
+
+   I changed it BACK to /dev/sda10 - which is my swap and HOW I DEFINED it a long time ago, and once
+   this step was done, I was back to normal boot times!
+
+   # swap was on /dev/sda10 during installation
+   UUID=8140c8d0-1e33-42c1-8c3c-828449adfe08 none swap swap 0 0
+
+   I also checked online - to see if there's anything interesting. Indeed, if you now search for
+   something like "gap in boot times" or "system hangs" or "swap slow boot" or "timed out waiting for
+   device", you will get much closer to the issue at hand. There's an [44]ANCIENT reference from Ubuntu
+   15.04 on the swap partition being wrongly labeled and used, causing the issue. And more recently,
+   lots of similar questions and threads all over the boards. And the boot times are now as follows:
+
+   systemd-analyze
+   Startup finished in 5.984s (firmware) + 3.409s (loader) + 6.522s (kernel) + 39.492s (userspace) =
+   55.408s
+   graphical.target reached after 39.484s in userspace
+
+Solution, long version
+   Now, let me tell you a few others things I investigated, to see if they have any impact on the boot
+   sequence. Hint, they don't, but it's useful to see all these little tricks, because that will also
+   show you the variety of noise you get, and how to systematically work through errors.
+
+   I noticed that the udisks2/dev-sda14 (root partition) and systemd-journal-flush services take quite a
+   bit of time doing their work. Now, the reasons could be many, so I decided to troubleshoot this a
+   little more.
+
+   systemd-analyze blame
+       21.704s udisks2.service
+       17.276s mpd.service
+       17.230s systemd-journal-flush.service
+       12.721s dev-sda14.device
+       11.581s networkd-dispatcher.service
+
+   First, I verified the disk speed was all right (of course it is, other distros boot fine), but it's
+   good to work in a methodical fashion and rule out issues systematically:
+
+   /dev/sda:
+   Timing cached reads: 8336 MB in 1.99 seconds = 4179.59 MB/sec
+   Timing buffered disk reads: 326 MB in 3.00 seconds = 108.60 MB/sec
+
+   In other to understand this better, I did several other little changes and inspections, including
+   playing with drivers. This necessitated updating the initramfs files, but then I got a fresh new pile
+   of nonsense (related and similar to the /etc/fstab issue):
+
+   sudo update-initramfs -c -k `uname -r`
+   update-initramfs: Generating /boot/initrd.img-4.15.0-22-generic
+   W: initramfs-tools configuration sets RESUME=UUID=388a79ac-27b7-42f5-ac13-0de1263748ae
+   W: but no matching swap device is available.
+
+   So, there's a WRONG UUID specified in the resume file, which might also possibly cause some
+   shenanigans:
+
+   cat /etc/initramfs-tools/conf.d/resume
+   RESUME=UUID=388a79ac-27b7-42f5-ac13-...
+
+   I changed this to RESUME=none (no hibernation) and then updated the initramfs file successfully. You
+   can also do:
+   sudo update-initramfs -u
+
+   I decided to try to disable several other services, including both VMware Player and VirtualBox,
+   snapd, and a few others, all and any which showed up in the critical-chain report, and/or the
+   dependency graph. I also disabled IPv6, as there were some small errors in the /var/log/syslog, and I
+   thought, maybe this could speed things a second or three.
+
+   Cleaning logs was my next task. Systemd is not a friendly thing - in fact, it makes system
+   troubleshooting much [46]more difficult than it should be, because it's a tool designed by someone
+   who doesn't really do system troubleshooting. It's a dev thing. Classic, [47]overcomplicated
+   nonsense. Like weapons designed by bureaucrats.
+
+   sudo journalctl --vacuum-time=5d
+
+   For instance, cleanup is referred to as vacuuming. Why? Why not use the old naming convention, like
+   log rotation? Perhaps these words sound nerdy and cool, but they are not meaningful in any sense. And
+   then you have things like unit files and targets. What? Why? Just a small example of a much bigger,
+   worrying phenomenon.
+
+   This didn't make much difference time-wise - but the logs were finally clean enough to narrow down
+   the issue and implement the solution as I've already outlined above. Under all this noise and mayhem,
+   I could finally focus on the issue at hand.
+
+Post-boot activity
+   The one thing remaining is to solve the flurry of activity immediately after the boot. This manifests
+   in a laggy desktop, and if you check the system usage - the load is something like 7-10, which is
+   more than it should be. Again, system logs (syslog not systemd, right) yield a wealth of useful
+   detail:
+
+   readahead: ureadahead:devices: Ignored relative path ...
+
+   There were a bazillion messages like the above, clobbering the system logs. 'Tis a bug, of
+   course. From 2016. The fact it shows up again in 18.04 is a sign of extreme attention to system
+   validation and quality assurance. Not. The sad cycle of repetitious nonsense in Linux. If only there
+   was a way to make some sort of automated tool that could somehow check old bugs don't recur ...
+
+   There are two solutions to the issue - disable the ureadahead service, which might impact boot times,
+   or quieten its output. In both cases, you need to make changes to the Systemd configuration. First,
+   you can disable the service:
+
+   sudo systemctl disable ureadahead.service
+   Removed /etc/systemd/system/default.target.wants/ureadahead.service.
+
+   Alternatively, edit the ureadahead configuration file
+   /etc/systemd/system/ureadahead.service.d/quiet.conf and add the following lines:
+
+   [Service]
+   ExecStart=
+   ExecStart=/sbin/ureadahead -q
+
+   You can now reboot and see what gives. Either way, the immediate post-boot noise should go away.
+
+Tidying up
+   There weren't any other cardinal issues. But I was flying, so I did some more housekeeping. I also
+   noticed a spurious one-time error with Intel graphics, even though I had the needed fix in place.
+   So maybe another regression was introduced somewhere. I did not remove the firmware, and neither was
+   there any fresh update available.
+
+   May 20 17:24:45 tester kernel: [ 1589.042495] [drm:intel_pipe_update_end [i915]] *ERROR* Atomic
+   update failure on pipe A (start=95839 end=95840) time 363 us, min 763, max 767, scanline start 752,
+   end 770
+
+   Another bunch of nonsense was:
+
+   May 24 14:35:43 tester sddm[1168]: Authentication error: "Process crashed"
+   May 24 14:35:43 tester sddm[1168]: Auth: sddm-helper crashed (exit code 15)
+   May 24 14:35:43 tester sddm[1168]: Authentication error: "Process crashed"
+   May 24 14:35:43 tester sddm[1168]: Auth: sddm-helper exited with 15
+   May 24 14:35:43 tester org.kde.KScreen[1590]: The X11 connection broke (error 1). Did the X11 server
+   die?
+
+   May 24 14:56:24 tester org.kde.KScreen[1557]: The X11 connection broke (error 1). Did the X11 server
+   die?
+   May 24 14:56:24 tester org.kde.kuiserver[1557]: kuiserver: Fatal IO error: client killed
+   May 24 14:56:24 tester org.kde.kwalletd5[1557]: The X11 connection broke (error 1). Did the X11
+   server die?
+
+   For some reason, SDDM was flaking out. There's a lot on this online, but the problem didn't quite
+   manifest the same was as the Arch forum discussion or the KDE bug report state. I didn't have
+   multiple login screens, delays or any inability to login. Weird. For the sake of it, I did remove the
+   SDDM cache files, and the error did not recur.
+
+   rm -rf /var/lib/sddm/.cache
+   rm -rf ~/.cache
+
+Things still remaining to be done ...
+   There are still some odd errors here and there - the initialization of the disk and keyboard remain a
+   bit slow, and the Bluetooth device can and should also be faster. The former is most likely blocking,
+   and the latter most likely is not. But then, that's just perks. Nothing too dramatic. This is more of
+   a fascination with why Linux systems take an eternity to boot now when they worked so beautifully and
+   elegantly under init. The magic of complexity and pointless development. When you think about it,
+   it's quite sad really.
+
+Conclusion
+   I hope you found this article useful. We started with an Ubuntu system that suddenly boots slowly
+   after an upgrade, and the system logs are drenched in errors. We worked slowly and methodically to
+   isolate the issue. We checked our disk, disabled unnecessary services, cleaned logs, and finally
+   realized the problem was caused by a non-existent swap device with the wrong UUID, which was ADDED by
+   the Ubuntu installer, as I was using the standard /dev/sdXY notation. We learned a few other tricks
+   along the way.
+
+   After the boot, we also handled the slow system responsiveness due to ureadahead service message
+   noise, and handled a couple of one-time errors with the desktop manager and the graphics. I don't
+   have too much to share on the last two. Very neatly, the system settled back into its reliable pace
+   once I had scrubbed and tidied up everything. I can't say I'm pleased, even though the upgrade was
+   successful. Because none of these issues belong in an LTS. That's food for thought. But I believe you
+   have a sprightly and fast box now. See you.
+
+   Cheers.

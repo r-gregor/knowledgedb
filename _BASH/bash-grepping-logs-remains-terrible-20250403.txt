@@ -1,0 +1,245 @@
+filename: bash_grepping-logs-remains-terrible_20250403.txt
+https://chronicles.mad-scientist.club/tales/grepping-logs-remains-terrible/
+
+Grepping logs remains terrible - Chronicae Novis Rebus
+
+   It has been a moment since I last wrote about logging, and save a month and a bit, almost a decade
+   since I publicly stated my opinion that grepping logs is terrible (and two days later, it was
+   still bad). But that was then, a decade ago, surely it can't be that bad today, in the age of many
+   gigabytes of memory, SSDs, surely we can just grep stuff and be on our merry way!
+
+Lets play a game
+
+   Lets set the stage!
+   In one corner, we have Quickbeam, a late-2014 Mac Mini sitting on a shelf in my home office, sporting
+   4GiB of RAM, 4 CPU cores, and a rusty HDD. In the other corner, Telchar, my desktop, with 32GiB RAM,
+   16 CPU cores, and an M.2 SSD. For the sake of fairness, throughout this experiment, I will be using
+   my desktop for grepping, and Quickbeam to run queries against VictoriaLogs, with the following little
+   script (as bin/lg):
+
+#! /bin/sh
+eval curl -s http://10.69.0.4:9428/select/logsql/query -d "'query=$@'"
+
+   The data? 4.4 million lines of JSON (about 4.4GiB on disk), of this structure (except in compat, one
+   line per log format, not pretty printed like here):
+
+{
+	"_time": "2025-03-28T01:17:02.929147525Z",
+	"_stream_id": "000000000000000000a9cae4dcdfa68cdb7dc1ab243797c4",
+	"_stream": "{request.host=\"cellar.madhouse-project.org\",service=\"caddy\"}",
+	"_msg": "[GPTBot; bad-visitor] - Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; \
+		GPTBot/1.2;+https://openai.com/gptbot)",
+	"classification.sketchy_agent": "false",
+	"classification.user_agent": "GPTBot",
+	"classification.visit": "bad-visitor",
+	"request.host": "cellar.madhouse-project.org",
+	"request.method": "GET",
+	"request.user_agent": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; \
+		+https://openai.com/gptbot)",
+	"response.content_type": "text/html; charset=utf-8",
+	"response.status": "200",
+	"service": "caddy",
+	"request.remote_ip": "4.227.36.52",
+	"request.uri": "/robots.txt",
+	"response.size": "2828"
+}
+
+   We'll run a few simple - and not so simple - queries, for fun! We'll compare the results, and see how
+   many circles grepping on the desktop runs around the decade old poor Mini! Hold on to your pants,
+   this is going to be a wild ride!
+
+How many logs do we have?
+   Lets start with something simple and baseline: how many logs do we have at all?
+
+telchar> time wc -l logs.json
+4464935 logs.json
+
+real    0m0.763s
+user    0m0.070s
+sys     0m0.690s
+
+quickbeam> time bin/lg '* | count()'
+{"count(*)":"4464935"}
+
+real    0m0.022s
+user    0m0.009s
+sys     0m0.005s
+
+   Uncomfortable silence...
+
+How much data did we serve?
+   Fine, okay, the database has it easy here, because it likely caches how many entries there are to
+   begin with, it cheats! Lets do something it can't precalculate and store: the calculated sum of
+   response sizes.
+
+telchar> f() {
+	jq -s '[.[]."response.size" | tonumber] | add' logs.json;
+}
+telchar> time f
+19032774024
+
+real    0m59.487s
+user    0m50.497s
+sys     0m16.228s
+
+   Ooof, see?! This is complicated and expensive, and we even used jq to slurp it all into memory first!
+
+quickbeam> time bin/lg '* | stats sum(response.size) outgoing_data'
+{"outgoing_data":"19032774024"}
+
+real    0m0.546s
+user    0m0.010s
+sys     0m0.006s
+
+   Uncomfortable silence...
+
+   I suppose it is jq's fault: all that JSON parsing, and temporary objects and everything must take a
+   lot of effort! We should be able to just... sed out what we need, and bc the sizes together. Without
+   the JSON parsing, we'll be a lot faster!
+
+telchar> f() {
+	cat logs.json  \
+		| sed -e 's,.*"response.size":"\([0-9]*\)".*,\1,' \
+		| paste -sd+ \
+		| bc -q;
+}
+telchar> time f
+19032774024
+
+real    8m0.508s
+user    7m57.614s
+sys     0m9.228s
+
+   Uncomfortable silence...
+
+But you said grep is terrible! WHERE IS THE GREP?!
+
+   Okay, okay, lets count how many requests git.madhouse-project.org received! We're not restructuring
+   data, we're not parsing anything, we're just grepping for a string.
+
+telchar> f() {
+	fgrep -c '"request.host":"git.madhouse-project.org"' logs.json
+}
+telchar> time f
+1036467
+
+real    0m2.060s
+user    0m0.646s
+sys     0m1.066s
+
+   That's not too bad, we're finally getting somewhere! Go, grep, go! Try beating that, Mini.
+
+quickbeam> time bin/lg 'request.host:git.madhouse-project.org | count()'
+{"count(*)":"1036467"}
+
+real    0m0.029s
+user    0m0.011s
+sys     0m0.005s
+
+   Uncomfortable silence...
+
+Surely the database is slower when there's a regexp!
+
+quickbeam> time bin/lg 'request.host:~madhouse-project.org | count()'
+{"count(*)":"1619872"}
+
+real    0m0.036s
+user    0m0.009s
+sys     0m0.007s
+
+   Well, it is slower, indeed, by about 0.007s.
+
+telchar> f() {
+	grep -c '"request.host":"[^"]*madhouse-project.org"' logs.json
+}
+telchar> time f
+1619872
+
+real    0m12.119s
+user    0m11.380s
+sys     0m0.676s
+
+   Uncomfortable silence...
+
+You're making me sad...
+
+   Fine, for such simple queries, the database wins. But what if we want to aggregate things? Show how
+   many hits each unique host had! Hmm? Can your database beat this:
+
+telchar> f() {
+	cat logs.json \
+		| jq -r -s '.[]."request.host"' \
+		| fgrep "madhouse-project.org" \
+		| sort \
+		| uniq -c
+}
+telchar> time f
+  18366 ap.forgejo.madhouse-project.org
+  74580 cellar.madhouse-project.org
+1036467 git.madhouse-project.org
+   1757 git.madhouse-project.org:443
+  68881 iocaine.madhouse-project.org
+ 421578 poison.madhouse-project.org
+
+real    0m58.843s
+user    0m50.235s
+sys     0m17.230s
+
+quickbeam> time bin/lg 'request.host:~"madhouse-project.org" | uniq by(request.host) hits'
+{"request.host":"git.madhouse-project.org:443","hits":"1757"}
+{"request.host":"poison.madhouse-project.org","hits":"421578"}
+{"request.host":"iocaine.madhouse-project.org","hits":"68881"}
+{"request.host":"cellar.madhouse-project.org","hits":"74580"}
+{"request.host":"git.madhouse-project.org","hits":"1036467"}
+{"request.host":"ap.forgejo.madhouse-project.org","hits":"18366"}
+
+real    0m0.065s
+user    0m0.009s
+sys     0m0.006s
+
+   Please stop.
+
+Please explain what's happening here...
+   What we saw here is that a computer with much more RAM, and computing power, and faster storage got
+   absolutely obliterated by an overloaded Mac Mini that is ten years its senior. And not only in speed,
+   but resource use too: I haven't shown it, but working with raw text used a lot more CPU time, disk
+   IO, and memory; meanwhile the Mac Mini barely blinked.
+
+   And not because it was all cached in memory! These are all cold queries. Cached queries are much,
+   much faster. But how can it be that such an underpowered device runs circles around a powerful
+   desktop?
+
+   Purpose-built software, dear reader. Purpose built software.
+   On the Mini, I'm running VictoriaLogs, a high performance log database. It's not your average
+   generic indexer like ElasticSearch and its ilk, nor is it anything like a traditional relational
+   database. It shows some resemblance to document stores, but only on the surface. It is specifically
+   built for logs. Structured data is indexed and tokenized. Due to tokenization, the on-disk (and thus,
+   in-memory) data is a lot smaller, and many queries are considerably cheaper, even if performing a
+   full scan: rather than comparing arbitrary long strings, it will compare much smaller, bounded
+   integer tokens in most cases. Feel free to read about how VictoriaLogs works, it's a very
+   educational read!
+
+   When there's less data to scan, things are faster. When comparison is cheaper, things are faster. Who
+   would have thought! Databases were invented for a reason: because scanning through raw data over and
+   over again was inefficient, and did not scale. This applies to logs just as much as to any other kind
+   of data. Once you're past the scale of a few hundred megabytes, if you want to do ad-hoc queries
+   against a text log, you're going to have a bad time.
+
+   Databases are good. Even for logs. Even more so if the database is specifically built for storing and
+   querying logs. My greps above might not be the most efficient ones, but even if I make them an order
+   of magnitude faster, the database on the decade old Mac Mini will still beat them without breaking a
+   sweat.
+
+   Don't grep your logs. Shove them in a log-ready database and query that. Not only will it require
+   considerably less disk space, it will require less computing power, less RAM, and as a result, less
+   time to perform the queries. And if that's not enough, you can give the logs structure! You no longer
+   need to remember the order of fields in a httpd's Common Log Format, you can query against a named
+   field instead. You can run aggregations, computations, build stats, correlate, join, and do all kinds
+   of other database-y stuff. Not only does it perform better, you can do more, and do so more
+   conveniently.
+
+   Plain text is a poor database, and grepping a poor database remains terrible.
+
+
+---
+

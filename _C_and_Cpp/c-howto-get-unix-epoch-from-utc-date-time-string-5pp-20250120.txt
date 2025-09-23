@@ -1,0 +1,294 @@
+filename: c_howto-get-unix-epoch-from-utc-date-time-string_5pp_20250120.txt
+https://berthub.eu/articles/posts/how-to-get-a-unix-epoch-from-a-utc-date-time-string/
+
+The surprising struggle to get a UNIX Epoch time from a UTC string in C or C++
+Jan 19 2025
+
+   So how hard could it be. As input we have something like Fri, 17 Jan 2025 06:07:07 in UTC, and we'd
+   like to turn this into 1737094027, the notional (but not actual) number of seconds that have passed
+   since 1970-01-01 00:00:00 UTC.
+
+   Trying to figure this out led me to discover many 'surprise features' and otherwise unexpected
+   behaviour of POSIX time handling functions as implemented in various C libraries & the languages that
+   build on them. There are many good things in the world of C and UNIX, but time handling is not one of
+   them.
+
+   There is a narrow path of useful behaviour however. But first some context.
+
+     The tl;dr: as long as you never call setlocale(), you can use strptime() to parse a UTC time
+     string. Do not use %z or %Z. Pass the struct tm calculated by strptime() to the pre-standard
+     function timegm() (mkgmtime() on Windows) to get the correct UNIX epoch timestamp for your UTC
+     time string. Do read on for solutions for if you do use locales. C++ has better support, which
+     could also help you from C.
+
+Points in time
+   Time is difficult enough by itself, even if we ignore leap seconds and general relativity. When we
+   add human behaviour and politics, it all becomes exceptionally challenging. Timestamps as used by
+   human beings range from impossible to imprecise.
+
+   For example in Amsterdam, "the 30th of March 2025, 02:20" does not exist as a time:
+$> TZ=Europe/Amsterdam date -d '20250330 01:59:59'
+Sun Mar 30 01:59:59 AM CET 2025
+
+$> TZ=Europe/Amsterdam date -d '20250330 02:30:00'
+date: invalid date '20250330 02:30:00'
+
+   This at least is clear. Because of daylight saving time we go straight from 01:59:59 to 03:00:00. Our
+   tooling rightfully refuses to parse "02:30:00" since that timestamp never exists in Amsterdam on that
+   day.
+
+   But "the 27th of October 2024, 02:30" is harder to interpret. The second after 02:59:59, it is
+   02:00:00 again. This means we have two points in time locals would call '02:00'. And here already we
+   can see our tooling starting to make arbitrary choices:
+$> TZ=Europe/Amsterdam date -d '20241027 01:59:59' +"%Y-%m-%d %H:%M:%S %s %z"
+2024-10-27 01:59:59 1729987199 +0200
+
+$> TZ=Europe/Amsterdam date -d '20241027 02:00:00' +"%Y-%m-%d %H:%M:%S %s %z"
+2024-10-27 02:00:00 1729990800 +0100
+
+   Apparently, when asked to interpret 02:00:00, my copy of GNU date picks the second time this happens.
+   As far as I can tell, this is because I'm running the command in January. In April it would likely
+   have picked the first 02:00:00 instance. Wild eh?
+
+POSIX concepts of time
+   The only useful way anyone should ever be specifying a point of time is of course as a number of
+   seconds after or before a known 'epoch'. For POSIX/Unix this is 1970-01-01 00:00:00 UTC, for GPS this
+   is 1980-01-06 00:00:00 UTC, for Galileo ('EU GPS') 21st of August 1999, 23:59:47 UTC, for BeiDou
+   2006-01-01 00:00:00 UTC. GPS, Galileo and BeiDou wisely ignore leap seconds, leaving these as things
+   for human beings to worry about.
+
+   But, our preference for the POSIX/Unix "time_t" is well founded. There is never any ambiguity, except
+   during leap seconds, which might never happen again.
+
+   However, human beings have a hard time parsing 1737214750, so we do need to convert to and from
+   timestamps that include messy things like 'months'. To this end, UNIX offered us struct tm, holding
+   the 'broken-down time':
+struct tm {
+	int  tm_sec;    /* Seconds          [0, 60] */
+	int  tm_min;    /* Minutes          [0, 59] */
+	int  tm_hour;   /* Hour             [0, 23] */
+	int  tm_mday;   /* Day of the month [1, 31] */
+	int  tm_mon;    /* Month            [0, 11]  (January = 0) */
+	int  tm_year;   /* Year minus 1900 */
+	int  tm_wday;   /* Day of the week  [0, 6]   (Sunday = 0) */
+	int  tm_yday;   /* Day of the year  [0, 365] (Jan/01 = 0) */
+	int  tm_isdst;  /* Daylight savings flag */
+	long tm_gmtoff; /* Seconds East of UTC */
+	const char *tm_zone;   /* Timezone abbreviation */
+};
+
+   The standards say that struct tm contains at least these fields. There could be more. Now, this
+   struct is of course wildly overdetermined. Day of the week and day of the year follow from the rest,
+   for example. The meanings of tm_gmtoff, tm_zone and tm_isdst are badly specified and also badly
+   understood, and vary based on how the struct is used.
+
+     Interestingly, the Soviet GLONASS satellite navigation system is not based on an epoch timestamp.
+     They took the struct tm approach based on 'Moscow wall clock time', including leap seconds. This
+     reportedly causes lots of problems. And they deserve them.
+
+   One major role of struct tm is as input to mktime(), which as part of its work turns a 'broken-down
+   time according to your local TZ' into a UNIX epoch timestamp. However, it also does many other
+   things!
+
+     Note that at least the Linux glibc manpage for mktime() is pretty vague. The IEEE Std
+     1003.1-2024 specification offers a lot more (discouraging) words.
+
+   It is important to understand that mktime() does absolutely nothing with tm_gmtoff or tm_zone. Its
+   inputs are defined to exclusively be: tm_year, tm_mon, tm_mday, tm_hour, tm_min, tm_sec, and
+   tm_isdst. tm_isdst can be negative, which means that mktime() should figure out if daylight saving
+   time is active at the specified time.
+
+   As noted, time is difficult. If you for example want to adjust a date by a week, you could add 604800
+   seconds to a time_t timestamp. However, if that adjustment crosses a daylight savings time boundary,
+   your 2PM appointment might suddenly turn into a 1PM or 3PM appointment next week. Humans do not
+   expect this.
+
+   mktime() not only returns a time_t, it also normalizes the struct tm you passed it. And, at least as
+   of 2024 there are rules for how it should do so. This means that to get the date that a human
+   being would identify as "the same time next week" you can take the current time, add 7 to tm.tm_mday,
+   and call mktime() again. Although you just created a date like 'March 35', mktime() will fix that up
+   for you.
+
+   Now, if we do this, we find that it doesn't work:
+struct tm tm = {.tm_hour=14, .tm_mday = 28,
+                .tm_mon = 2, .tm_year = 2025 - 1900,
+                .tm_isdst = -1};  // <- NOTE the -1
+
+time_t t = mktime(&tm);
+cout << "original:         "<< ctime(&t);
+
+tm.tm_mday += 7;
+t = mktime(&tm);
+
+cout << "mktime adjusted:  "<< ctime(&t);
+
+   Here in the Europe/Amsterdam timezone this prints:
+original:        Fri Mar 28 14:00:00 2025
+mktime adjusted: Fri Apr  4 15:00:00 2025
+
+   What happened, why did our appointment shift by an hour? tm.tm_isdst is what happened. mktime() may
+   not be perfect, but it does force you to make up your mind. Is the time it is looking at daylight
+   savings time or not? Or, at your choice, do you want mktime() to take a stab at figuring that out for
+   you? The latter option is what we initially chose by setting tm.tm_isdst to -1.
+
+   When we then ran mktime(), it discovered we were initially not in daylight saving time, so it set
+   tm_isdst to 0. When we ran mktime() for the second time, this DST setting remained in place, even
+   though the new intended time does happen in DST. The fix is to reset tm_isdst to -1 before the second
+   call.
+
+Parsing UTC time
+   Now, mktime() will interpret whatever you pass it as "local time". This in means you should set your
+   timezone to UTC before calling mktime() to process a UTC time. Changing the timezone for your whole
+   application however might have side effects if you have other threads running. But, you could do that
+   if you have no other threads.
+
+   UPDATE: It has been pointed out that multi-threaded programs can't change their environment
+   variables anyhow. So much for that idea.
+
+   There is a non-standard/pre-standard function that is very widely available that makes the UTC
+   situation a lot better. From IEEE Std 1003.1-2024: "A future version of this standard is expected to
+   add a timegm() function that is similar to mktime(), except that the tm structure pointed to by
+   timeptr contains a broken-down time in Coordinated Universal Time".
+
+   To parse a broken-down time in UTC, I can much recommend using timegm() instead of messing with the
+   TZ environment variable. On Windows, timegm() is available as mkgmtime(). And if you are on AIX,
+   the lone platform without timegm(), you can find a standalone implementation here.
+
+   Summarising:
+    1. When using mktime() on local times, set tm_isdst to -1, which is almost always what 'human
+       beings' expect. There is a chance you randomly get back one of two instances of '02:30' (or
+       equivalent) during DST fall back.
+    2. Make sure to zero the rest of struct tm before filling it out, just to be sure.
+    3. Be aware that mktime() does surgery on your struct tm, and that this may have side effects. At
+       least reset tm_isdst before reuse.
+    4. No matter what you do with tm_gmtoffset or tm_zone, mktime() will use your current timezone. If
+       you want it to interpret your struct tm as UTC, you actually need to set the TZ environment
+       variable to UTC. This will however mess with any other threads doing time operations.
+    5. Just use timegm() or mkgmtime() instead
+
+   But, how do we get our time string into a struct tm?
+
+Parsing time strings
+   Now, it would be lovely if we could feed Fri, 17 Jan 2025 06:07:07 GMT into strptime() and get a
+   sensible struct tm in return. The Linux glibc strptime() manpage has some airy words about how
+   the %z and %Z timezone format specifiers might or likely might not do something. You just can't tell:
+
+     "For reasons of symmetry, glibc tries to support for strptime() the same format characters as for
+     strftime(3). (In most cases, the corresponding fields are parsed, but no field in tm is changed.)
+
+   Now, our goal is to convert a UTC time string into a UNIX epoch timestamp. Many people justifiably
+   harbor some expectations that strptime() with %Z (to parse 'GMT') followed by mktime() could make
+   that happen.
+
+   Above we learned however that mktime() does not look at the tm_gmtoffset or tm_zone fields at all, so
+   there really is nothing that strptime() can achieve there, even if it did the right thing. Oh, and it
+   also does not do the right thing.
+
+   As of 2024, there is a decent specification of strptime() courtesy of the Open Group, in which we
+   can read all kinds of sad news on what implementations out there actually do. Or don't do.
+
+   Because of this strptime() has no more specified behaviour for '%z', which was one day supposed to do
+   something with "+0200" style offset identifiers, which would have been lovely. But you can't count on
+   '%z' doing anything useful. Nasal demons might ensue.
+
+   There is however some wording on %Z, but it is very limited. If your locale is known to have a DST
+   timezone identifier ('CEST') that is different from the regular time zone ('CET'), and if '%Z' sees
+   any of these two, it will set tm_isdst to the right value for you. Except possibly if you live in
+   Ireland. In general, it is also not useful to try to parse a string like 'EST', as it has no well
+   defined meaning anyhow, except perhaps locally.
+
+   Luckily, because we discovered gmtime() above, we can just ignore %z and %Z as we don't need them
+   anyhow.
+
+The strptime locale situation
+   Very often, we want to parse date strings with English day and month names. We'd like to be sure that
+   strptime() will then also do that. The IEEE/Open Group standard for strptime() however is quite
+   clear, "The conversions are determined using the LC_TIME category of the current locale". Oops.
+
+   Now, what I didn't know is that unless they specifically ask for it, C and C++ programs will stick to
+   the "C" locale, which effectively is American English. This means that out of the box all LC_TIME etc
+   environment variables are ignored. For our purposes of parsing time strings found in data, this is
+   usually great, since these are almost exclusively in English.
+
+   However, if you are in a C or C++ program that does call setlocale(), thus asking for a possibly
+   non-C locale, suddenly your program might only work for Dutch time strings. And these are quite rare.
+
+   Now, you might ponder changing the locale to "C" before calling strptime() and then changing it back,
+   but sadly setlocale() is not safe to call in multithreaded programs (except before launching
+   threads). Also you might confuse the output of other threads even if this was safe.
+
+   So in general, if you need to parse specific time strings and you want to use strptime(), do make
+   sure your program is on the locale you expect it to be. And although strftime_l() exists, in which
+   you can specify the locale to use for formatting time, the equivalent strptime_l() is not officially
+   available.
+
+     The OpenBSD strptime() implementation decided to just ignore the locale anyhow, and only
+     support C.
+
+   Alternatively, it is not that hard to parse a string like 17 Jan 2025 06:07:07 and fill out a struct
+   tm and then let mktime() do the actual hard work of calculating a UNIX epoch timestamp.
+
+Using plain C++ to get around the locale problem
+   C++ iostreams are not much loved, but they did have a better think about locales than C/POSIX did. In C++
+   you can set the locale per iostream. [https://github.com/berthubert/utchelper]Here is a C++ helper that you
+   can call from C if you want to parse arbitrary UTC time strings in programs that do set the locale:
+
+extern "C"
+int utcstr2epoch(const char* timestr, const char* fmtstr, struct tm* output) {
+	std::tm t = {}; // tm_isdst = 0, don't think about it please, this is UTC
+	std::istringstream ss(timestr);
+	ss.imbue(std::locale()); // "LANG=C", but local
+
+	ss >> std::get_time(&t, fmtstr);
+	if (ss.fail())
+		return -1;
+	// now fix up the day of week, day of year etc
+	t.tm_isdst = 0; // no thinking!
+	t.tm_wday = -1;
+	if(mktime(&t) == -1 && t.tm_wday == -1) // "real error"
+		return -1;
+
+	*output = t;
+	return 0;
+}
+
+   This incidentally also shows how to do error handling for mktime(), which will helpfully return -1,
+   its error code, if you ask it to look at 31st of December 1969 23:59. The trick is to employ tm_wday
+   as a sentinel to see if anything was processed or not. This tells you there was no error.
+
+   There is also a small C-based demo of this code that parses English UTC timestamps and prints
+   them using the calling environment locale:
+$> LC_TIME="nl_NL.utf-8" ./utcparse "1 Jan 1970 00:00:00" "%d %b %Y %H:%M:%S"
+UTC Time: donderdag,  1 januari 1970 00:00:00, day of year 001
+time_t:   0
+
+C++20 and some true luxury
+   C++20 and beyond contain a luxurious timezone database. This is not yet available on all compilers,
+   but luckily the pre-standardized version is available for standalone use. Sometimes we get lucky
+   because someone sacrifices a few years of their life to give us some truly excellent code that we
+   really don't deserve, and Howard Hinnant clearly delivered.
+
+   Here is a glorious example:
+auto meet_nyc = make_zoned("America/New_York",
+        date::local_days{Monday[1]/May/2016} + 9h);
+auto meet_lon = make_zoned("Europe/London",    meet_nyc);
+auto meet_syd = make_zoned("Australia/Sydney", meet_nyc);
+cout << "The New York meeting is " << meet_nyc << '\n';
+cout << "The London   meeting is " << meet_lon << '\n';
+cout << "The Sydney   meeting is " << meet_syd << '\n';
+
+   This picks "the first Monday of May 2016, 9AM local time in New York", and then seamlessly converts
+   this to two other timezones:
+The New York meeting is 2016-05-02 09:00:00 EDT
+The London   meeting is 2016-05-02 14:00:00 BST
+The Sydney   meeting is 2016-05-02 23:00:00 AEST
+
+   Being truly luxurious, the tz library supports using not just your operating system's time zone
+   databases, which might lack crucial leap second detail, but can also source the IANA tzdb directly.
+   This allows you to faithfully calculate the actual duration of a plane flight in 1978 that not only
+   passed through a DST change, but also an actual leap second. I don't swoon easily, but I'm
+   swooning.
+
+
+---
+

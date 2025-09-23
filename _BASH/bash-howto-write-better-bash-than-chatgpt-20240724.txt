@@ -1,0 +1,271 @@
+filename: bash_howto-write-better-bash-than-chatgpt_20240724.txt
+https://www.simplermachines.com/how-to-write-better-bash-than-chatgpt/
+Jul 23, 2024
+
+   A few days ago, someone commented on Hacker News that ChatGPT writes "very high quality Bash scripts"
+   with "best practices and comments," which reminded me that I've been meaning to write about Bash,
+   because I think that ChatGPT's Bash is somewhere between "pretty bad" and "passable." It absolutely
+   does not conform to "best practices."
+
+   I like Bash but it's pretty hard to learn to do it well - almost everything I know about Bash I
+   learned from pairing, and pairing on kinds of work that many people consider "not good for pairing,"
+   like setting up CI systems. So here's an attempt to write down most of what I know about Bash.
+
+   Note that I develop on a Mac, so this is mostly going to assume that you're using OS X (and brew.) It
+   should mostly apply to Linux but remember that Darwin is based on BSD, not Linux - I've mostly
+   encountered this in the form of small differences between the arguments for ps.
+
+   This article assume assumes a relatively high level of Bash knowledge - in particular, that you
+   already know how pipes work, and that the command line is a "lathe for text." If that statement
+   doesn't immediately parse but you'd like to know more let me know.
+
+tl;dr Use Shellcheck
+   You can improve your Bash immediately by running all scripts you write through shellcheck, a Bash
+   linter, either on the command line or on shellcheck.net. Many of the examples I'll give in this
+   article would be caught by shellcheck.
+
+   If you have a lot of shell scripts, or load bearing shell scripts, it's handy to run shellcheck on
+   all your scripts in CI. If you do this, you'll want to be familiar with the directors for
+   ignoring errors. Occasionally you will actually want to do something that shellcheck dislikes -
+   so it has a mechanism for using comments to ignore specific errors from specific lines.
+
+Simplify ChatGPT's scripts with set -e
+   Let's take this simple example: a script that runs tests, suitable to be used as a pre-commit git
+   hook.
+
+   Prompt
+     Write a git hook file that runs the tests for an Elixir application and confirms that it complies
+     with no warnings before committing
+
+   Output
+#!/bin/bash
+
+# Run the tests
+mix test
+if [ $? -ne 0 ]; then
+	echo "Tests failed. Aborting commit."
+	exit 1
+fi
+
+# Check for compiler warnings
+warnings=$(mix compile --warnings-as-errors 2>&1 | grep "warning:")
+
+if [ -n "$warnings" ]; then
+	echo "Commit aborted due to warnings:"
+	echo "$warnings"
+	exit 1
+fi
+
+exit 0
+
+   What's wrong with this script?
+     * Unnecessary if statements
+     * Unnecessary equality tests
+     * Unnecessary sub shell
+     * Unnecessary variables
+
+   In order to function correctly as a pre-commit hook, this script needs to exit with a non-zero exit
+   code. It's capturing the output of mix test and mix compile respectively and then determining its
+   exit code based on that output. (It's also doing this in an excessively complicated and fragile way
+   for mix compile - it should just check the exit code with $? like it does for mix test.)
+
+   Overall it's about twice as long as it needs to be - and it's using a lot of confusing features of
+   Bash. if statements in Bash are strictly a necessary evil - very few people can read Bash equality
+   statements comfortably.
+
+   We can improve this script a lot by adding one sentence to the prompt.
+
+Start the script with set -e
+   This produces a zippy 4 lines.
+#!/bin/sh
+set -e
+
+# Run tests
+mix test
+
+# Check for warnings
+mix compile --warnings-as-errors
+
+# All checks passed
+echo "All tests passed and no warnings detected. Proceeding with commit."
+
+   set -e causes the script to exit immediately if a command returns a non-zero status, and returns the
+   non-zero status of the last executed command. It allows us to dispense entirely with all of that
+   output capture - if mix test fails, the whole script just exits with an error code.
+
+   set -e should be at the top of most scripts that you write. It makes Bash behave much more like a
+   "typical" programming language, and prevents a lot of surprising behavior.
+
+Use set -x instead of echo
+   ChatGPT also has a habit of including a lot of echo statements in its scripts to announce what it's
+   doing. This is kind of a style thing - there are (kind of obviously, given ChatGPT's habits) a lot of
+   people who like to use a lot of echo in their scripts - but I also think it's unnecessary - and
+   ChatGPT stops if you add another directive to the set command.
+
+Start the script with set -ex
+
+#!/bin/bash
+set -ex
+
+# Run Elixir tests
+mix test
+
+# Compile the Elixir application and check for warnings
+mix compile --warnings-as-errors
+
+# If any of the above commands fail, the commit will be aborted
+
+   The -x directive causes scripts to print the output of the commands running inside them. I don't
+   usually include it in finished versions of scripts, but it's useful for debugging, and it sometimes
+   it's handy for replacing echo commands.
+
+Shell is not Bash
+   There's another subtle problem in this set of scripts we've generated so far. Note the shell
+   directive at the top - one of them is #!/bin/bash and another is #!/bin/sh. This "shebang" directive
+   controls what interpreter gets used to run the file. By default if you call a script as an
+   executable, without specifying the interpreter at the command line, it will use whatever shell ran
+   the command, but with a shebang, the specified interpreter will get used instead.
+
+   Sh and Bash are not interchangeable. They are different programs with different behavior. Most of the
+   differences are features that Bash adds, but some of the differences are pretty subtle - string
+   comparison, for instance, works slightly differently. Worse, on some systems /bin/sh will point to
+   /bin/bash - but not on others. By randomly choosing /bin/sh sometimes and /bin/bash other times
+   you're setting yourself up for confusion when you use a Bash-only feature and it gets executed in sh.
+
+   So you should tell ChatGPT which one you want to use explicitly.
+
+     Start the script with
+     #!/bin/bash
+     set -ex
+
+   This is also an area where shellcheck gets really handy. Occasionally you will need to write a script
+   that must use only use shell capabilities. Shellcheck will pick up the interpreter from the shebang
+   and let you know if you use something that shell doesn't have.
+
+Avoid surprises by quoting strings and variables
+   One thing that ChatGPT does do well pretty consistently is quote strings. This prevents shell
+   expansion surprises, like Bash treating a string with a space in it as two separate arguments. For
+   example, if you have the following directory
+
+test_directory $> ll
+total 0
+drwxr-xr-x@  5 nat  staff  160 Jul 22 13:43 .
+drwxr-xr-x@ 21 nat  staff  672 Jul 22 13:42 ..
+drwxr-xr-x@  2 nat  staff   64 Jul 22 13:43 directory
+drwxr-xr-x@  2 nat  staff   64 Jul 22 13:42 some
+drwxr-xr-x@  2 nat  staff   64 Jul 22 13:42 some directory
+
+   And then you run
+$> rm -rf some directory
+
+   You will get a totally different result than if you had typed
+$> rm -rf "some directory"
+
+   The first directive will pass "some" and "directory" as separate arguments and delete "some" and
+   "directory" respectively, leaving "some directory" alone.
+
+   So, always quote your strings.
+
+   It's also a good habit to put braces around variables, like this
+$> echo "${prefix}_${suffix}"
+
+   Especially when you're doing string concatenation, without the {} you can end up accidentally
+   specifying different variable names than you think you did.
+
+prefix="horse"
+suffix="sense"
+
+echo "${prefix}_${suffix}"
+echo "$prefix_$suffix"
+
+   produces this output
+horse_sense
+nonsense
+
+   because without the {}, Bash reads the variable name in the second echo as $prefix_
+
+   You can make this kind of thing easier to catch with another set directive.
+set -u
+
+prefix="horse"
+suffix="sense"
+
+echo "${prefix}_${suffix}"
+echo "$prefix_$suffix"
+
+   Now this script outputs
+horse_sense
+./prefix: line 7: prefix_: unbound variable
+
+   -u makes Bash stop and error when it encounters an unbound variable - instead of treating it as ""
+
+Pipefail
+   Another good standard set directive is
+set -o pipefail
+
+   I don't have this one burned into my brain the way that I do the others, but it also prevents hidden
+   errors from producing unexpected nonsense. It's sort of like set -e but for directives in pipelines.
+   Without it, commands that fail will continue into the next step of the pipeline, and you'll get the
+   result of the final command in the pipeline.
+
+The full prompt
+   My custom ChatGPT prompt includes this section
+When I ask for a script, produce a Bash or a Mix script.
+
+Start Bash scripts with
+
+#!/bin/bash
+set -euo pipefail
+
+Always quote Bash strings, and surround variables with {} like this "${variable}"
+
+Write Bash that can pass shellcheck
+   GPT still writes Bash with unnecessary variables and uses more comments than I would but this
+   improves its output.
+
+A few more Bash tricks
+   A few things that aren't directly related to scripting but are handy when working on the command
+   line.
+
+   pbcopy and pbpaste are Mac commands that move text in and out of the clipboard. You pipe content into
+   pbcopy and out of pbpaste.
+
+   "Up arrow" to get the most recent command in your history. Ctrl-r to search history.
+
+   Command-A to move the cursor to the beginning of the line. Command-E to move it to the end. Command-K
+   to clear the line after your cursor.
+
+What does this tell us about ChatGPT?
+   I do like using ChatGPT for Bash. I use it a lot for data manipulation-type things that I know are
+   technically possible with e.g. sed but that I don't remember exactly how to do. The nice thing about
+   Bash is that it's very fast to check whether a script does what I meant, which means that it's very
+   fast to check for ChatGPT errors.
+
+   Some of the problems in ChatGPT's Bash aren't functional errors, though - they're just verbose,
+   obscure, or could cause problems under rare circumstances.
+
+   I think it's striking that there's such a gap between my impression of ChatGPT's Bash ("mediocre at
+   best") and the assessment of someone who doesn't seem to be as experienced writing Bash ("excellent,
+   best practices.") I notice there's also a big gap between my assessment of it's writing (also
+   something like "very good at writing extremely medium-quality paragraphs") and the reactions I've
+   seen from people who struggle with writing. I'm not sure that I'm willing to call myself an expert at
+   either of these things but I suspect this pattern holds across a lot of domains with LLMs - beginners
+   think its output is excellent, while experts see it as mediocre.
+
+   This makes sense to me given what the model is - a distillation of a very large dataset, much of
+   which must, by the nature of large datasets, be mediocre. ChatGPT's Bash is bad in the ways that I
+   expect people who haven't delved deep into the bash-lore to be bad at Bash, and that likely describes
+   most of the people who wrote most of the Bash that its drawing from. It can't be better than its
+   dataset.
+
+   The thing that GPT is very good at, though, is convincing people that it's good at things - at
+   generating plausible output. This combination - deeply mediocre output that can have a surface
+   appearance of excellence - has been making me very cautious about using it for professional work -
+   even to the point that I've been considering cancelling my ChatGPT and Copilot subscriptions. I do
+   find it useful for quickly generating text that I more or less already know how to generate, but I'm
+   increasingly skeptical that this is worth the risk of being profoundly misled in areas that are
+   outside my direct expertise.
+
+
+---
+

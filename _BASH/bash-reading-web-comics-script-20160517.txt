@@ -1,0 +1,195 @@
+filename: bash_reading-web-comics-script_20160517.txt
+http://www.linuxjournal.com/content/reading-web-comics-bash-script
+
+Reading Web Comics via Bash Script
+
+   I follow several Web comics. I used to open my Web browser and check out each comic's Web site. That
+   method was fine when I read only a few Web comics, but it became a pain to stay current when I
+   followed more than about ten comics. These days, I read around 20 Web comics. It takes a lot of time
+   to open each Web site separately just to read a Web comic. I could bookmark the Web comics, but I
+   figured there had to be a better way—a simpler way for me to read all of my Web comics at once.
+
+   So, I've written a Bash script that I point at any of my favorite Web comics. The script is pretty
+   straightforward: it downloads the Web comic's Web page, then looks at every image on the page and
+   tries to figure out which one is the comic.
+
+   Let me first tell you about three important tools I use in this script:
+    1. You already may be familiar with the first one: wget will download files from the Web, using http
+       or https.
+    2. The second tool is ImageMagick. It's really a set of command-line tools that manipulate images.
+       You can do a lot with ImageMagick, but in this script, I focus on two key features: identify to
+       get attributes about an image and convert to transform an image from one format to another.
+    3. The other tool was new to me: xmllint. Part of the [7]Libxml project, you can use xmllint to
+       query an XML or HTML document and retrieve data from it. I could write a lot about xmllint. Like
+       any useful tool, you can leverage xmllint to do a bunch of different things. Programmers might
+       use xmllint to parse an XML document for a particular value, such as a success value in a Web
+       services system. But in this Bash script, I use xmllint to print specific tags from an HTML
+       document. Your system already should have xmllint installed; it's a standard package in just
+       about every Linux distribution.
+
+   I'm assuming you already are familiar with standard UNIX command-line tools, including head and awk.
+
+   With these tools, you can build a Bash script to fetch a Web comic from a Web page and save it to
+   view later. The process involves five simple steps:
+    1. Download the Web comic's Web page and convert relative links to absolute links (wget).
+    2. Find every image referenced in the Web page (xmllint).
+    3. Download those images (wget).
+    4. Find the largest image (identify).
+    5. Convert that image for later viewing (convert).
+
+   The core assumption is the Web comic will be the largest image (by dimension) on the Web page. This
+   is usually true. When you account for the Web site's logo, icons for social media and other
+   decorations, the Web comic is usually the largest image on the page. But sometimes artists will share
+   other media on their Web sites, such as conference photos or fan artwork. Those secondary images
+   might be larger than the Web comic. In this case, the Bash script will fetch one of the secondary
+   images instead of the Web comic, so your mileage may vary, depending on the Web site. But in most
+   cases, this assumption works fine.
+
+   One problem in automating this process is you never know how the Web site will be coded. Image tags
+   might use double-quotes or single-quotes. Or images might use src= and alt= in a different order.
+   Some Web sites might use spaces or other odd characters in the image filenames. Fortunately, all of
+   this is made easier using xmllint. No matter the input, xmllint will return data using double-quotes
+   and with spaces escaped via HTML. This is a default feature of xmllint; you don't need to call any
+   command-line options to sanitize xmllint's output.
+
+   Let's go through the process step by step:
+
+   The first step, downloading the Web page and converting links to absolute links, is easily done using
+   wget. There's a handy command-line option to convert links automatically:
+
+wget --convert-links -O /tmp/index.html http://www.example.com/comic/
+
+   This fetches the Web page and saves it as /tmp/index.html. After the download is complete, wget
+   converts links, so an image referenced as /images/comic.png will be converted to something like
+   http://www.example.com/images/comic.png.
+
+   Once you have a local copy of the Web page, you can use the power of xmllint to pull only the images
+   from the document. There are many ways to use xmllint. The key is to specify an Xpath expression. An
+   Xpath is the standard syntax to interact with an XML or HTML document, using expressions to identify
+   only the parts of the document that you want. In this case, you're interested in the images
+   referenced in the document. Remember that the standard syntax for an image tag in an HTML document
+   looks like this:
+
+<img src="/images/comic.png" alt="Today's comic" />
+
+   The image tag can appear anywhere in the HTML document, and the Xpath to pull any <img> tag no matter
+   its location is with the //img expression:
+
+xmllint --html --xpath '//img' /tmp/index.html
+
+   But specifically, you want the src= part of the image tag. You can do this very easily by extending
+   the Xpath expression. In an Xpath, @ selects an attribute. So to fetch the src= attributes for all
+   <img> tags in the document, you modify the Xpath expression in your xmllint command:
+xmllint --html --xpath '//img/@src' /tmp/index.html
+
+   Ideally, I'd fetch only the values of the src= attributes, but I don't know of a way to do that via a
+   single Xpath expression. The output of this xmllint command is a single line, listing every src=
+   attribute for every image referenced in the HTML page. So you'll get something like this:
+src="http://www.example.com/logo.png"
+ ↪src="http://www.example.com/i/comic.png"
+
+   Conveniently, the image links always will be absolute links, because that's how wget converted the
+   Web page. The key in the output is the use of double-quotes around each image src= reference.
+   Remember that xmllint always returns data using double-quotes, even if the input used single-quotes.
+   With this assumption, the fix is easy. A quick pass through awk returns a list of images: use the
+   double-quote as a field separator and look at every other field.
+xmllint --html --xpath '//img/@src' /tmp/index.html |
+ ↪awk -F\" '{for (i=2; i<NF; i+=2) {print $i}}'
+
+   From there, it's a matter of fetching each image in turn and figuring out how large each image is.
+   The identify command from ImageMagick helps here. You can instruct ImageMagick to print the image
+   dimensions in a format that Bash can evaluate as an arithmetic expression:
+identify -format '%W * %H\n' /tmp/comic.png
+
+   The output from identify prints the width and height, which you can ask Bash to calculate (1024 * 539
+   evaluates to 551,936, for example). For a list of images, you calculate the size of each and use sort
+   to find the largest one. The core assumption is the Web comic will be the largest image (by
+   dimension) on the Web page, so that's the one you copy for later use.
+
+   With these parts, you can assemble the final Bash script to fetch Web comics. The command line for
+   this script provides the URL and the name of the local copy of the Web comic file, which is saved in
+   JPEG format:
+   
+<code>
+#!/bin/bash
+
+# Usage: fetch-comic.sh URL Name
+
+if [ $# -ne 2 ] ; then
+        echo 'Usage: fetch-comic.sh URL Name'
+        exit 1
+fi
+
+URL=$1
+NAME=$2
+
+TMPDIR=$HOME/tmp
+TMPFILE=$TMPDIR/index.tmp
+CACHEDIR=/var/www/html/comics
+USERAGENT='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36
+ ↪(KHTML, like Gecko) Chrome/49.0.2623.112 Safari/537.36'
+
+# fetch web page
+
+wget --timeout=60 --user-agent="$USERAGENT" --convert-links --quiet -O $TMPFILE $URL
+
+# list images
+
+# Since xmllint is (surprise!) a linter, it will squawk
+# about the inevitable garbage in your html stream.
+# We direct the stderr to /dev/null in the usual way:
+
+images=$( xmllint --html --xpath '//img/@src' $TMPFILE 2>/dev/null
+ ↪| awk -F\" '{for (i=2; i<NF; i+=2) {print $i}}' )
+
+# find biggest image
+
+imgcount=0
+
+maximg=$(
+  ( for imgURL in $images ; do
+        wget --timeout=60 --user-agent="$USERAGENT" --quiet
+ ↪--referer=$URL -O $TMPDIR/$imgcount $imgURL
+        echo $(( $( identify -format '%W * %H\n' $TMPDIR/$imgcount
+ ↪| head --lines=1 ) )) $TMPDIR/$imgcount
+        imgcount=$(( imgcount + 1 ))
+    done
+  ) | sort -n -r | awk 'NR==1 {print $2}'
+)
+
+# convert the image
+
+if [ $( file --mime-type --brief $maximg ) = 'image/gif' ] ; then
+        # convert GIF to JPG
+        convert "$maximg[0]" -resize 740\> $CACHEDIR/$NAME.jpg
+else
+        # convert to JPG
+        convert $maximg -resize 740\> $CACHEDIR/$NAME.jpg
+fi
+
+</code>
+
+
+   I've had to add a few extra features to the Bash script, mostly to accommodate animated GIF images.
+   If you ask ImageMagick's identify utility for the dimensions of an animated GIF, it returns a
+   separate entry for every frame in the animation. So in the loop, I limit the image size calculation
+   to the first frame. Similarly, ImageMagick's convert tool to transform an animated GIF to JPEG format
+   generates a separate image for every animation frame. I added an if statement at the end to reference
+   only the first frame for GIF images.
+
+   To make local viewing easier, I use a special option to convert that limits the new image to a
+   maximum width of 740 pixels. If the input is wider than that, the whole image is scaled down
+   appropriately. Smaller images are not resized.
+
+   I run this Bash script every morning via cron on a personal server in my house. The images are copied
+   to the /comics directory on my Web server. I wrote a simple static Web page to display the Web comic
+   images.
+
+   So as I start my day, I just open my Web browser to that local Web page and read all my Web comics at
+   once. It's a big time-saver. Rather than visit 20 different Web sites to get my daily dose of Web
+   comics, I use a simple Bash script to automate the work for me. Like any good programmer, I've gone
+   through a little extra effort up front to make the rest of my day a lot easier—even if it's just for
+   Web comics.
+
+---
+

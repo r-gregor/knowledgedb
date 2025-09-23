@@ -1,0 +1,303 @@
+filename: ptn_calling-rust-from-python_20231010.txt
+frankel.ch/rust-from-python/
+
+Calling Rust from Python
+
+   I recently watched GOTO conferences' talk Calling Functions Across Languages by Richard
+   Feldman. I'm afraid I have to disagree with using the term 'language' in this context. It's a
+   no-brainer to call Java from Kotlin or Scala or to call Java from Kotlin. Hence, in the rest, I'll
+   use 'stack'.
+
+   In the talk, the speaker cites two main reasons to go on this road:
+     * Gradual migration from one stack to the other
+     * Using a library that has no equivalent in one's stack under the assumption that it's too
+       expensive to implement it
+     * Performance, e.g., use a library "closer" to the metal
+     * On the opposite, developer experience, valuing ergonomics at the expense of performance
+
+   All reasons make a lot of sense and depend on the context.
+
+   He then proceeds to demo three methods to call a function developed in one stack from a different
+   stack:
+     * HTTP: I assume every reader is more or less familiar with HTTP
+     * Inter-Process Communication: given the prevalence of Nix-based systems, the implementation is
+       Unix Socket-based. In short, a dedicated file allows writing and reading from different
+       processes.
+     * Foreign Function Interface: The idea is to make a library out of the code of one's stack and load
+       that library from the other stack. In general, C serves as the bridge between both stacks.
+
+   The demo shows that moving from HTTP to IPC, then from IPC to FFI, removes boilerplate code. It uses
+   JavaScript as the client stack and Ruby as the underlying stack. While JavaScript makes sense, using
+   Ruby, a dynamic language not famous for its performance, is not a good fit IMHO.
+
+The demo
+   I already wrote about calling Rust from Java using JNI, the JVM FFI implementation. However, in
+   this post, I want to use Python as the client stack and Rust as the target stack. I want to improve
+   my knowledge in both, and it perfectly fits the performance reason mentioned above.
+
+   The example shall delegate complex number computations from Python to Rust. Even though Python
+   supports them natively, it's good enough for our goal. Moreover, it allows parsing and displaying
+   them without extra code. The idea is to use a CLI to do the computation, e.g.:
+$> python main.py --add --arg1 1+3j --arg2 -5j
+
+   We expect the following output:
+(1-2j)
+
+   For command handling, we will leverage the click library:
+
+   Click is a Python package for creating beautiful command line interfaces in a composable way with as
+   little code as necessary. It's the "Command Line Interface Creation Kit". It's highly configurable
+   but comes with sensible defaults out of the box.
+
+   Here's the "wrapper" code:
+@click.command()
+@click.option('--add', 'command', flag_value='add')
+@click.option('--sub', 'command', flag_value='sub')
+@click.option('--mul', 'command', flag_value='mul')
+@click.option('--arg1', help='First complex number in the form x+yj')
+@click.option('--arg2', help='Second complex number in the form x\'+y\'j')
+def cli(command: Optional[str], arg1: Optional[str], arg2: Optional[str]) -> None:
+	#result: complex = compute result
+	#print(result)
+
+
+if __name__ == '__main__':
+	cli()
+
+   Now that it's settled, let's check the options mentioned above.
+
+HTTP
+   HTTP is the most straightforward approach from a developer's point of view, even though it's the
+   worst in terms of performance: we need to go through lots of the OSI model layers.
+
+   Even if the client and the server and the client implement the same stack, HTTP mandates a
+   serialization format. Despite my love of XML, JSON is the most widespread one.
+
+   On the design level, we will use the HTTP POST method to be able to send body data along the request.
+   We map each operation to a URL, e.g., add and sub.
+
+Python client
+
+   While Python supports HTTP via the http package out-of-the-box, the requests library is a
+   tremendous help.
+json: dict[str, list[float]] = dict(a=[n1.real, n1.imag], b=[n2.real, n2.imag])  (1)
+req = requests.post(f'http://localhost:3000/{command}', json=json)               (2)
+body: dict[str: list[float]] = req.json()                                        (3)
+if body and 'result' in body:
+	real: Optional[str] = body['result'][0]
+	imaginary: Optional[str] = body['result'][1]
+	return complex(float(real), float(imaginary))                                (4)
+raise Exception()
+
+   1 Create the request body
+   2 Send the post request to the Rust service with the payload
+   3 Get the response body
+   4 Create a Python complex from the response body
+
+Rust server
+   I'll use axum, as it's the framework I'm most familiar with:
+
+	 * Route requests to handlers with a macro free API.
+	 * Declaratively parse requests using extractors.
+	 * Simple and predictable error handling model.
+	 * Generate responses with minimal boilerplate.
+	 * Take full advantage of the tower and tower-http ecosystem of middleware, services, and utilities.
+
+   We shall first model the input and output:
+#[derive(Deserialize)]
+struct Input {
+	a: Complex<f64>,
+	b: Complex<f64>,
+}
+
+#[derive(Serialize)]
+struct Output { result: Complex<f64> }
+
+   Next, we need to provide an async function to manage the operation:
+async fn add(Json(payload): Json<Input>) -> impl IntoResponse {
+	Json(Output { result: payload.a + payload.b })
+}
+
+   Finally, we can scaffold the routes and the server itself:
+#[tokio::main]                                                (1)
+async fn main() {
+	let app = axum::Router::new()                             (2)
+		.route("/add", post(add))                             (3)
+		.route("/sub", post(sub))                             (3)
+		.route("/mul", post(mul));                            (3)
+	axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())      (4)
+		.serve(app.into_make_service())                       (5)
+		.await
+		.unwrap()
+}
+
+   1 tokio macro to use the async main function as an entry-point
+   2 Create the router object
+   3 Add each function under its dedicated subpath
+   4 Create an HTTP server that binds to port 3000
+   5 Make the magic happen
+
+Inter-Process Communication
+   We don't need HTTP because the client and the server are on the same machine. Henceforth, we can
+   replace HTTP with IPC.
+
+   On Nix-based systems, we can leverage domain sockets:
+
+   The API for Unix domain sockets is similar to that of an Internet socket, but rather than using an
+   underlying network protocol, all communication occurs entirely within the operating system kernel.
+   Unix domain sockets may use the file system as their address name space. (Some operating systems,
+   like Linux, offer additional namespaces.) Processes reference Unix domain sockets as file system
+   inodes, so two processes can communicate by opening the same socket.
+
+Python client
+   Python natively supports Unix sockets via the `socket ' package.
+with socket.socket(socket.AF_UNIX) as client:              (1)
+	data: dict[str, list[float]] = dict(command=command,a=[n1.real, n1.imag], b=[n2.real, n2.imag])
+	encoded: bytes = json.dumps(data).encode('UTF-8')      (2)
+	client.connect("/tmp/socket")                          (3)
+	client.send(encoded)                                   (4)
+
+   1 Create a socket client
+   2 Encode the JSON string to bytes
+   3 Connect to the socket
+   4 Send data
+
+   From a network perspective, it's much more straightforward. From a developer perspective, we only
+   need to transform the JSON to bytes.
+
+Rust server
+
+   Rust also natively supports Unix sockets.
+let srv_path = "/tmp/socket";                                      (1)
+if metadata(srv_path).is_ok() {
+	remove_file(srv_path).unwrap();                                (2)
+}
+let listener = UnixListener::bind(srv_path).unwrap();              (3)
+loop {
+	let (mut stream, _) = listener.accept().unwrap();              (4)
+	let mut payload = String::new();                               (5)
+	let _ = stream.read_to_string(&mut payload);                   (6)
+	println! {"Received {}", payload};
+	let input = serde_json::from_str::<Input>(&payload).unwrap();  (7)
+	let output = &command(input);
+	let result = serde_json::to_string(output).unwrap();           (8)
+	stream.write(result.as_bytes()).unwrap_or_default();           (9)
+	println! {"Sent {}", result};
+}
+
+   1 A Unix socket is a specific kind of file
+   2 Clean up the potential previous socket
+   3 Bind the socket to the path
+   4 Listen to the socket for data
+   5 Create a new mutable resizable string
+   6 Read socket data into the string
+   7 Deserialize input string to JSON
+   8 Serialize output string to JSON
+   9 Send data back to the socket
+
+   I have no prior experience with Unix sockets. I can send data from Python to Rust but cannot return
+   the data (point 9 above). Any help on the subject would be greatly appreciated.
+
+Foreign Function Interface
+   So far, calling Rust from Python required passing data via the network, either (potentially) remote
+   or local. FFI allows keeping everything in a single process. However, we need a way to pass data
+   across different tech stacks. For historical reasons, most provide a bridge for calling C-based
+   libraries. Indeed, we can compile the Rust code to a C-compatible library and call it from Python.
+
+Python client
+   Python allows loading C libraries via the ctypes package:
+
+   ctypes is a foreign function library for Python. It provides C compatible data types, and allows
+   calling functions in DLLs or shared libraries. It can be used to wrap these libraries in pure Python.
+
+   Depending on the platform, the library can be a .dll (Windows), .so (Nix) or .dylib (OSX). I find
+   myself on the latter. Hence, I can load it with:
+rust = ctypes.CDLL('/path/to/lib/my.dylib')
+
+   From this point on, we can call any function defined in the library via the rust variable. The
+   remaining issue is that Python types are not Rust types. Hence, we need to use C types on both sides.
+from ctypes import c_double
+
+rust.compute(command.encode("UTF-8"), c_double(n1.real), c_double(n1.imag), c_double(n2.real), c_double(n2.imag))
+
+   The c_double function makes a C double out of a Python float.
+
+   We can even re-use our custom classes via the Structure class:
+
+   Structures and unions must derive from the Structure and Union base classes which are defined in the
+   ctypes module. Each subclass must define a fields attribute. fields must be a list of 2-tuples,
+   containing a field name and a field type.
+
+   As we know the form of the Rust Complex, that's easy to provide:
+class RustComplex(Structure):
+	_fields_ = [("re", c_double),                                   (1)
+				("im", c_double)]                                   (2)
+
+	def __init__(self, c: complex, *args: Any, **kw: Any) -> None:  (3)
+		super().__init__(*args, **kw)
+		self.re = c.real
+		self.im = c.imag
+
+   1 As per the documentation
+   2 Constructor for ease of use
+
+   The final bit is to set the return type of the compute function. By default, it's an int:
+
+   By default functions are assumed to return the C int type. Other return types can be specified by
+   setting the restype attribute of the function object.
+
+rust.compute.restype = RustComplex                                                (1)
+return rust.compute(command.encode("UTF-8"), RustComplex(n1), RustComplex(n2))    (2)
+
+   1 Set the compute return type
+   2 Leverage the class created above
+
+Rust library
+   In Rust, the std::ffi module supports FFI:
+
+   Utilities related to FFI bindings.
+
+   This module provides utilities to handle data across non-Rust interfaces, like other programming
+   languages and the underlying operating system. It is mainly of use for FFI (Foreign Function
+   Interface) bindings and code that needs to exchange C-like strings with other languages.
+
+   The main difference with previous steps is that we no longer want an app but a library. We need to
+   rename our main.rs file to lib.rs. Additionally, we have to configure the project to create a lib:
+   Cargo.toml
+[lib]
+name = "my"
+crate-type = ["dylib"]
+
+   Besides, the only dependency we need is complex.
+
+   However, the code becomes very straightforward:
+   lib.rs
+#[no_mangle]                                                                                   (1)
+fn compute(c_string_ptr: *const c_char, a: Complex<f64>, b: Complex<f64>) -> Complex<f64> {    (2)
+	let bytes = unsafe { CStr::from_ptr(c_string_ptr).to_bytes() };                            (3)
+	let command = str::from_utf8(bytes).unwrap();
+	match command {
+		"add" => a + b,
+		"sub" => a - b,
+		"mul" => a * b,
+		_ => panic!("Unknown command"),
+	}
+}
+
+   1 Keep symbol names for external usage
+   2 Use compatible types. The first parameter is a pointer to a C string, the others are regular
+   structures since Python will pass them in the expected format
+   3 Transform a C string into a Rust string
+
+   At this point, we can now use the Rust code inside the Python process.
+
+Conclusion
+   In this post, we detailed three different ways to call Rust from Python: HTTP, IPC, and FFI.
+
+   FFI is the most performant one but is only sometimes possible. The IPC alternative is good on a
+   single machine. When both fail, one can always rely on HTTP.
+   The complete source code for this post can be found on Github.
+
+
+---
+

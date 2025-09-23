@@ -1,0 +1,113 @@
+filename: zig_what-is-string-literal_20250407.txt
+https://zig.news/kristoff/what-s-a-string-literal-in-zig-31e9
+
+What's a String Literal in Zig?
+
+   A string literal is something like "hello world": a hard-coded string in source code. Seemingly one
+   of the most basic parts of Zig, but in fact there are a couple of non-obvious things worth knowing.
+
+Where's the memory?
+   String literals are put in a special section of the executable and even get de-duplicated. This is a
+   process generally called string interning.
+
+   This means that when you're working with string literals, you're not using stack memory for the
+   string itself and instead you're always dealing with pointers. This can be easily confirmed:
+
+pub fn main() void {
+	const foo = "banana";
+	@compileLog(@TypeOf(foo));
+}
+
+   Compiling the code above will show how the type of foo is *const [6:0]u8, a pointer indeed.
+
+   This has also one interesting implication: you can return pointers to string literals defined inside
+   a function, something that would be wrong in any other case.
+
+   Broken code:
+
+pub fn main () void {
+	_ = ohno(); // ohno returns a pointer to garbage memory
+}
+
+fn ohno() []const u8 {
+	const foo = [4]u8{'o', 'h', 'n', 'o'};
+	return &foo; // oh no, the memory where foo is stored
+	             // will be reclaimed as soon as we return!
+}
+
+   Perfectly fine:
+
+pub fn main () void {
+	_ = ohyes(); // everything is fine
+}
+
+fn ohyes() []const u8 {
+	const foo = "ohyes";
+	return foo; // foo is already a pointer, or rather
+	            // foo was a pointer all along
+}
+
+As I mentioned above, string interning is the reason why that works: even though the string literal
+   is declared inside ohyes, the bytes are somewhere else.
+
+The most common newbie mistake
+   So while you're learning Zig you come up with the following program:
+
+const std = @import("std");
+
+pub fn main () void {
+	funnyPrint("banana");
+}
+
+fn funnyPrint(msg: []u8) void {
+	std.debug.print("*farts*, {s}", .{msg});
+}
+
+   Everything seems correct except that the compiler gives you an error:
+
+./example.zig:4:15: error: expected type '[]u8', found '*const [6:0]u8'
+   funnyPrint("banana");
+
+   Reading the error message, you start asking yourself: How do I make a slice from a pointer to an
+   array? Also shouldn't the language to that automatically for me?
+   And you would be right, well almost right.
+
+   The problem here has to do with constness: string literals are constant pointers and you are asking
+   in funnyPrint for a []u8 while you should have been asking for a []const u8.
+
+   Going back to the question about automatic conversion: yes, pointers to arrays coerce to slices, but
+   constness is a one-way road, meaning that you can pass a mutable pointer/slice to a function that
+   expects a const pointer/slice, but not vice versa.
+
+   As for why string literals are const, well that has to do with string interning and if you think
+   about it, it's kinda obvious: string literals get de-duplicated so there is no way of changing one
+   instance without affecting the others, making immutability the saner design decision by far.
+
+   When learning Zig this is usually the moment where the student thinks that this constness factor can
+   be removed by assigning the string literal to a variable, like so:
+
+var msg = "banana";
+funnyPrint(msg);
+
+   Given what we learned now, we know that this is not true, because msg itself might be mutable, but
+   that doesn't change the fact that it holds a const pointer. This is a concept that you might not be
+   aware of, if you're not familiar with C or other systems programming languages: there is a difference
+   between pointer constness and var vs const variables.
+
+   Another reason why I think this is a fairly common mistake when learning Zig, is that you are already
+   busy learning the language itself and so you're tempted to be sloppy and just leave out const
+   specifiers. Unfortunately string literals are both a very common placeholder value and the one thing
+   that will punish you if you don't understand const pointers.
+
+Bonus credit
+   How do you make a mutable string from a string literal then? Simple: dereference the pointer and you
+   get an array, which can be assigned to local memory, which can then be used freely.
+
+pub fn main() void {
+	var foo = "hello".*;
+	foo[0] = 'j'; // foo now equals "jello"
+}
+
+
+---
+

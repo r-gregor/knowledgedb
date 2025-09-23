@@ -1,0 +1,113 @@
+filename: bash_cross-os-harddisk-performance-monitoring-script_20250303.txt
+https://dwaves.de/2025/02/27/gnu-linux-cross-os-harddisk-performance-monitoring-script-show-real-time-mbytes-s-writing-reading/
+
+GNU Linux cross os harddisk performance monitoring script (show real time mbytes/s writing reading)
+27.Feb.2025
+
+   yes there is iostat and all the other fancy software but sometimes, it's not possible to access the
+   internet or install packages
+
+   so here is the poor man's iotop in pure bash
+
+   will give this output, in a bit flickering way
+hostnamectl; # tested on
+Operating System: Debian GNU/Linux trixie/sid
+Kernel: Linux 6.12.12-amd64
+Architecture: x86-64
+
+# scripts could be stored here
+$> mkdir /scripts
+$> cd /scripts
+
+# download it
+$> wget https://dwaves.de/scripts/diskio.sh
+
+# or copy paste (if wordpress js did not mess anything up)
+$> vim /scripts/diskio.sh
+
+<code>
+#!/bin/bash
+
+# iterates over every line in /proc/diskstats that does not start with loop*
+# and tries to calculate read | write in MBytes/s according to sectors per second
+# Declare an associative array to store device names and their sector read/write values
+declare -A devices
+
+# First pass: collect the device names and initial read/write sector values
+while read -r line; do
+	# Extract the device name (3rd column in /proc/diskstats)
+	device=$(echo $line | awk '{print $3}')
+
+	# Skip devices starting with 'loop'
+	if [[ ! $device =~ ^loop ]]; then
+		# Get read sectors (6th column) and write sectors (10th column)
+		read_sectors=$(echo $line | awk '{print $6}')
+		write_sectors=$(echo $line | awk '{print $10}')
+
+		# Store the device's initial read and write sector values in the array
+		devices["$device"]="$read_sectors,$write_sectors"
+	fi
+done < /proc/diskstats
+
+# Wait for 1 second to measure sector changes
+sleep 1
+
+# Second pass: calculate read and write speeds for each device
+for device in "${!devices[@]}"; do
+	# Get the initial read/write sector values
+	initial_read_sectors=$(echo ${devices[$device]} | cut -d',' -f1)
+	initial_write_sectors=$(echo ${devices[$device]} | cut -d',' -f2)
+
+	# Get the updated read/write sector values
+	updated_line=$(grep " $device " /proc/diskstats)
+	updated_read_sectors=$(echo $updated_line | awk '{print $6}')
+	updated_write_sectors=$(echo $updated_line | awk '{print $10}')
+
+	# Calculate the difference in sectors read and written
+	read_sectors_diff=$((updated_read_sectors - initial_read_sectors))
+	write_sectors_diff=$((updated_write_sectors - initial_write_sectors))
+
+	# 1 sector = 512 bytes (verify with `lsblk -o NAME,PHY-SEC`)
+	read_bytes=$((read_sectors_diff * 512))
+	write_bytes=$((write_sectors_diff * 512))
+
+	# Convert to MB/s
+	read_mbps=$(echo "scale=2; $read_bytes / 1024 / 1024" | bc)
+	write_mbps=$(echo "scale=2; $write_bytes / 1024 / 1024" | bc)
+
+	# Display the results
+	echo "$device | read $read_mbps MBytes/s | write $write_mbps MBytes/s"
+done
+</code>
+
+# run it like
+$> chmod +x /scripts/*.sh
+$> while true; do clear; /scripts/diskio.sh | column -t | sort -t' ' -k1,1V; sleep 1; done
+
+# example output
+dm-0       |  read  0       MBytes/s  |  write  0       MBytes/s
+dm-1       |  read  0       MBytes/s  |  write  0       MBytes/s
+dm-2       |  read  0       MBytes/s  |  write  0       MBytes/s
+nvme0n1    |  read  0       MBytes/s  |  write  0       MBytes/s
+nvme0n1p1  |  read  0       MBytes/s  |  write  0       MBytes/s
+nvme0n1p2  |  read  0       MBytes/s  |  write  0       MBytes/s
+nvme0n1p3  |  read  0       MBytes/s  |  write  0       MBytes/s
+nvme1n1    |  read  0       MBytes/s  |  write  0       MBytes/s
+nvme1n1p1  |  read  0       MBytes/s  |  write  0       MBytes/s
+nvme1n1p2  |  read  0       MBytes/s  |  write  0       MBytes/s
+nvme1n1p3  |  read  0       MBytes/s  |  write  0       MBytes/s
+nvme1n1p4  |  read  0       MBytes/s  |  write  0       MBytes/s
+nvme1n1p5  |  read  0       MBytes/s  |  write  0       MBytes/s
+sda        |  read  154.09  MBytes/s  |  write  0       MBytes/s
+sda1       |  read  139.09  MBytes/s  |  write  0       MBytes/s
+sdb        |  read  0       MBytes/s  |  write  168.79  MBytes/s
+sdb1       |  read  0       MBytes/s  |  write  161.86  MBytes/s
+sdc        |  read  0       MBytes/s  |  write  0       MBytes/s
+sdc1       |  read  0       MBytes/s  |  write  0       MBytes/s
+sr0        |  read  0       MBytes/s  |  write  0       MBytes/s
+
+   pretty neat eh?
+
+
+---
+

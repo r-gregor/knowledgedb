@@ -1,0 +1,222 @@
+filename: bash_script-to-configure-ssh_20210827.txt
+https://www.redhat.com/sysadmin/bash-script-configure-ssh
+
+Edit sshd_config using a Bash script
+August 25, 2021 
+
+   Using Bash scripts can ensure consistent configuration of SSH and other services.
+
+   Using a Bash script, you can ensure certain configuration parameters are set in your sshd_config
+   file.
+
+   Bash is the default shell on most Linux systems these days. It can be used as an interactive
+   command-line interpreter as well as a scripting language to automate common tasks. This article shows
+   you how to use a Bash script to ensure specific configuration parameters are set in your
+   /etc/ssh/sshd_config file.
+
+Why use a script instead of an editor?
+
+   Manually editing the /etc/ssh/sshd_config using an editor multiple times on multiple systems is prone
+   to errors. There's always the risk of making a typo or forgetting to set a parameter. These mistakes
+   could have a severe impact on your production environment.
+
+   Using a script is a form of configuration as code and offers several advantages. For one, you only
+   need to specify your parameters once and can reuse the script to set them on any host where you want
+   them. Also, using a script makes sure the same parameters with the same values are set in the same
+   way on every host where the script runs.
+
+The scenario
+   The task at hand is to make sure the following four keyword argument pairs are used in any
+   /etc/ssh/sshd_config on all Linux systems in the infrastructure:
+PermitRootLogin no
+
+PubkeyAuthentication yes
+
+AuthorizedKeysFile .ssh/authorized_keys
+
+PasswordAuthentication no
+
+   Say your environment looks like this:
+	* Linux hosts run various distros.
+	* Bash is the default shell.
+	* The hosts use OpenSSH for their SSH service, and the configuration file is /etc/ssh/sshd_config.
+	* The current content of that file on the different hosts is unknown.
+	* The hosts belong to different departments and teams.
+	* There are different sysadmins with root access to these hosts.
+
+   [ You might also be interested in reading [50]Introduction to Linux Bash programming: 5 `for` loop
+   tips. ]
+
+The script
+   There isn't just one way of doing it. I chose the following method because I believe it follows the
+   "keep it simple" principle and has a pretty robust solution. So here is the script, followed by an
+   explanation:
+<code>
+#!/bin/bash
+#
+# Description:
+# This script sets certain parameters in /etc/ssh/sshd_config.
+# It's not production ready and only used for training purposes.
+#
+# What should it do?
+# * Check whether a /etc/ssh/sshd_config file exists
+# * Create a backup of this file
+# * Edit the file to set certain parameters
+# * Reload the sshd configuration
+# To enable debugging mode remove '#' from the following line
+# set -x
+# Variables
+
+file="$1"
+param[1]="PermitRootLogin "
+param[2]="PubkeyAuthentication"
+param[3]="AuthorizedKeysFile"
+param[4]="PasswordAuthentication"
+
+# Functions
+usage(){
+cat << EOF
+	usage: $0 ARG1
+	ARG1 Name of the sshd_config file to edit.
+	In case ARG1 is empty, /etc/ssh/sshd_config will be used as default.
+
+	Description:
+	This script sets certain parameters in /etc/ssh/sshd_config.
+	It's not production ready and only used for training purposes.
+
+	What should it do?
+	* Check whether a /etc/ssh/sshd_config file exists
+	* Create a backup of this file
+	* Edit the file to set certain parameters
+EOF
+}
+
+backup_sshd_config() {
+	if [ -f ${file} ]
+	then
+		/usr/bin/cp ${file} ${file}.1
+	else
+		/usr/bin/echo "File ${file} not found."
+		exit 1
+	fi
+}
+
+edit_sshd_config() {
+	for PARAM in ${param[@]}
+	do
+		/usr/bin/sed -i '/^'"${PARAM}"'/d' ${file}
+		/usr/bin/echo "All lines beginning with '${PARAM}' were deleted from ${file}."
+	done
+	/usr/bin/echo "${param[1]} no" >> ${file}
+	/usr/bin/echo "'${param[1]} no' was added to ${file}."
+	/usr/bin/echo "${param[2]} yes" >> ${file}
+	/usr/bin/echo "'${param[2]} yes' was added to ${file}."
+	/usr/bin/echo "${param[3]} .ssh/authorized_keys" >> ${file}
+	/usr/bin/echo "'${param[3]} .ssh/authorized_keys' was added to ${file}."
+	/usr/bin/echo "${param[4]} no" >> ${file}
+	/usr/bin/echo "'${param[4]} no' was added to ${file}"
+}
+
+reload_sshd() {
+	/usr/bin/systemctl reload sshd.service
+	/usr/bin/echo "Run '/usr/bin/systemctl reload sshd.service'...OK"
+}
+
+# main
+while getopts .h. OPTION
+do
+	case $OPTION in
+		h)
+			usage
+			exit;;
+		?)
+			usage
+			exit;;
+	esac
+done
+
+if [ -z "${file}" ]
+then
+	file="/etc/ssh/sshd_config"
+fi
+backup_sshd_config
+edit_sshd_config
+reload_sshd
+</code>
+
+   The script starts with the shebang and some lines of comments. I like to use comments at the top to
+   briefly describe what the script is supposed to do. Then I put in a debug switch with set -x. Try it
+   out if you're not familiar with debugging. It comes in pretty handy when tracing errors in your
+   script.
+
+   I like to have all the variables I need to define in one place. They are found in the next few lines
+   following the comments and before I define some functions. You don't need to use functions, but I
+   like them because they help give the script some structure. And the functions help you when it comes
+   to troubleshooting. You could easily comment out large parts of your code (the functions) and focus
+   on the sections that cause you trouble. If you are not familiar with functions, please see the "Shell
+   Function Definitions" section in the bash(1) manpage.
+
+   I'll go through the rest of the script function by function.
+
+usage()
+
+   This function outputs a brief instruction on how to use this script. It is called when the script is
+   executed with the option -h or -?.
+
+backup_sshd_config()
+   Before changing anything on a production system, it's best practice to create a backup of the files
+   that are subject to change. And that's what happens here, by copying ${file} to ${file}.1.
+
+   If the file specified in ${file} does not exist, the script prints an error message to STDOUT.
+
+edit_sshd_config()
+   Now that I have a backup, I'll edit the file. First, I remove all lines beginning with the specified
+   parameters because I don't know how often they already occur in the file. I need to make sure that
+   only my desired configuration exists in the end. This is the job of the sed command running in a for
+   loop.
+
+   Since my parameters are stored as elements in a Bash array, I can loop over all the array elements to
+   remove them. You can find information about Bash arrays in the "Arrays" section on the bash(1)
+   manpage.
+
+   Second, the desired keyword-argument pairs are appended to the sshd_config file. The changes are
+   printed to STDOUT to inform the user.
+
+reload_sshd()
+   SSHD needs to reload the config to put it in action. That's what's happening here.
+
+# main
+   After all variables and functions are declared, the script starts to work. The following code will
+   print a description of how to use this script to STDOUT when it's executed with the option -h or -?:
+while getopts .h. OPTION
+do
+	case $OPTION in
+		h)
+			usage
+			exit;;
+		?)
+			usage
+			exit;;
+	esac
+done
+
+   In case no argument is specified, /etc/ssh/sshd_config should be used as the default file:
+if [ -z "${file}" ]
+then
+	file="/etc/ssh/sshd_config"
+fi
+
+   And finally, the functions are called to back up, edit, and reload the sshd_config.
+
+Wrapping up
+   This article showed you how to use a Bash script to edit the file /etc/ssh/sshd_config. I explained
+   the advantage of using a script instead of an editor, provided a sample script, and explained the
+   different components.
+
+   This script could be put on a schedule with cron to ensure the desired values are reset regularly if
+   a sysadmin changes them and forgets to switch them back.
+
+
+
+---
+

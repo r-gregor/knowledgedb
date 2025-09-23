@@ -1,0 +1,951 @@
+filename: c_interfaces-2-multif_20250218.txt
+https://kleinembedded.com/interfaces-in-c/
+
+Interfaces in C
+August 28, 2022
+
+Interfaces in C
+   Interfaces are an extremely useful tool to develop loosely-coupled, testable software. In the
+   embedded world it will even allow us to write firmware and run it on our development PC instead of
+   the actual hardware, which may be scarce or not even produced yet.
+
+   Imagine we're building an automated greenhouse and we're writing a task to control the climate inside
+   the greenhouse. To keep it simple, let's say we need a temperature sensor and some kind of actuator
+   to open and close a window. The hardware folks are still figuring out which sensor and actuator to
+   use, and a PCB might not land on our desk for weeks or even months - and even then we might have to
+   share it between several developers. But we don't really care. We can start developing the
+   application using interfaces to the hardware that abstract away the details, and then worry about
+   implementing the actual drivers later. We can think of the interface as a contract between a module
+   and the user of the module.
+
+   Let's use the temperature sensor as an example. I will start by showing a solution in an
+   object-oriented language, namely C++, and then how to do the same in C.
+
+Interfaces in an object-oriented language (C++)
+   The interface to our temperature sensor is fairly simple. All we need is a way to initialize the
+   sensor and to get the temperature in either Celsius or Fahrenheit. Our interface, or abstract class,
+   might look like this:
+
+class ITempSensor {
+	public:
+		virtual void Init() = 0;
+		virtual float GetTempC() = 0;
+		virtual float GetTempF() = 0;
+};
+
+   Notice that all the functions are declared pure virtual, meaning that the class is abstract.
+   Therefore, it is not possible to create an instance of the ITempSensor class itself. When we get the
+   actual sensor, we can write a concrete class that implements the interface. For now we'll create a
+   fake implementation which we can use for testing.
+
+#include "ITempSensor.h"
+
+class FakeTempSensor : public ITempSensor {
+	public:
+		FakeTempSensor();
+		~FakeTempSensor();
+
+		/* ITempSensor */
+		void Init();
+		float GetTempC();
+		float GetTempF();
+};
+
+   I have omitted the method definitions here for brevity, but we can simply let the getters return a
+   fixed number or we can choose to add functions that will let us set the fake temperature.
+
+   In our application, we will have a task function (let's call it ClimateTask()) which takes a pointer
+   to an ITempSensor as a parameter. In the application code we inject the actual sensor implementation,
+   but in our test code we can simply inject our fake implementation instead. The task function does not
+   know, let alone care, which implementation we use. As long as it complies with the contract, i.e. the
+   ITempSensor interface!
+
+#include "FakeTempSensor.h"
+
+void ClimateTask(ITempSensor *sensor);
+
+int main() {
+	FakeTempSensor fakeSensor;
+
+	while (1) {
+		ClimateTask(&fakeSensor);
+	}
+
+	return 0;
+}
+
+   This is fairly straightforward in C++. Let's take a look a how we might implement this in a
+   structured programming language such as C.
+
+Interfaces in a structured language (C)
+   Since there are no classes in C, we will use a struct to create [**1]multiple instances of our
+   modules. For the interface, our struct will contain pointers to the three interface functions:
+
+typedef struct itf_temp_sensor itf_temp_sensor_t;
+
+struct itf_temp_sensor {
+	void (*init)(itf_temp_sensor_t *this);
+	float (*get_temp_c)(itf_temp_sensor_t *this);
+	float (*get_temp_f)(itf_temp_sensor_t *this);
+};
+
+   Notice that all functions take a pointer to the interface struct as the first parameter, so we know
+   which instance to operate on. In C++ this is done for us automagically behind the scenes, but in C we
+   have to do it ourselves. I've named the parameter 'this' in order to make it similar to C++, but you
+   may also see it named 'me', 'self' or 'handle' elsewhere.
+
+   Now, when creating a module that implements 'this' interface, the struct of the module must have the
+   interface struct as its first member. We're free to add any variables or functions, that are specific
+   to the concrete implementation, afterwards. Here I have added two floats, fake_temp_c and
+   fake_temp_f, for illustration:
+
+#include "itf_temp_sensor.h"
+
+typedef struct fake_temp_sensor fake_temp_sensor_t;
+
+struct fake_temp_sensor {
+	itf_temp_sensor_t interface;
+	float fake_temp_c;
+	float fake_temp_f;
+};
+
+void fake_temp_sensor_create(fake_temp_sensor_t *this);
+void fake_temp_sensor_init(itf_temp_sensor_t *this);
+float fake_temp_sensor_get_temp_c(itf_temp_sensor_t *this);
+float fake_temp_sensor_get_temp_f(itf_temp_sensor_t *this);
+
+   In addition to the three functions of the itf_temp_sensor interface, I have also added a create()
+   function. The purpose of this function is to bind the function pointers of the interface member to
+   the concrete function implementations of the fake_temp_sensor. Without this binding, the interface
+   member will contain NULL pointers and bad things will happen. Since this function is not part of the
+   interface, we can take a fake_temp_sensor_t pointer instead of a itf_temp_sensor_t pointer as the
+   parameter.
+
+#include "fake_temp_sensor.h"
+
+void fake_temp_sensor_create(fake_temp_sensor_t *this) {
+	this->interface.init = fake_temp_sensor_init;
+	this->interface.get_temp_c = fake_temp_sensor_get_temp_c;
+	this->interface.get_temp_f = fake_temp_sensor_get_temp_f;
+}
+
+   Now, the interface functions take a pointer to itf_temp_sensor_t, but what if we want to access the
+   variables fake_temp_c and fake_temp_f that are specific to the fake_temp_sensor_t? This is where it
+   gets a little dirty: We must do a pointer typecast from itf_temp_sensor_t* to fake_temp_sensor_t*.
+
+   Let's take fake_temp_sensor_get_temp_c() as an example. We know that the itf_temp_sensor_t pointer
+   that is passed as an argument is actually a fake_temp_sensor_t pointer. It's just that we have to
+   declare it as an itf_temp_sensor_t pointer to comply with the interface. Since interface is the first
+   member, and thus has the same memory address as the struct it belongs to, we can simply perform a
+   pointer typecast to be able to access the implementation-specific variables, like this:
+
+float fake_temp_sensor_get_temp_c(itf_temp_sensor_t *this) {
+	fake_temp_sensor_t *fake_this = (fake_temp_sensor_t *) this;
+	return fake_this->fake_temp_c;
+}
+
+   Or we can use the container_of() macro known from Linux like this:
+
+float fake_temp_sensor_get_temp_c(itf_temp_sensor_t *this) {
+	fake_temp_sensor_t *fake_this = container_of(this, fake_temp_sensor_t, interface);
+	return fake_this->fake_temp_c;
+}
+
+   Some may like this solution more, because we're explicitly stating that this is actually the
+   interface member of the fake_temp_sensor_t, instead of just performing some obscure typecast.
+   Additionally, the interface doesn't strictly have to be the first member of the struct, and we also
+   could create modules that implement more than just one interface.
+
+   Lastly, to use the fake temperature sensor in our application, we will inject it into the
+   climate_task() like we did in C++. Remember to call the create() function first, in order to
+   initialize the function pointers. Also, since the climate_task() takes an itf_temp_sensor_t pointer,
+   an explicit typecast is good practice, although GCC will let you off with a warning if you forget.
+
+#include "fake_temp_sensor.h"
+
+void climate_task(itf_temp_sensor_t *sensor);
+
+int main() {
+	fake_temp_sensor_t fake_sensor;
+	fake_temp_sensor_create(&fake_sensor);
+
+
+	while (1) {
+		climate_task((itf_temp_sensor_t*) &fake_sensor);
+	}
+
+	return 0;
+}
+
+   Inside the climate_task() we have no knowledge of the implementation details of the sensor. All we
+   know is that we can initialize it and get the temperature - and that is all we care about in this
+   context.
+
+bool initialized;
+float current_temp;
+
+void climate_task(itf_temp_sensor_t *sensor) {
+	if (!initialized) {
+		sensor->init(sensor);
+		initialized = true;
+	}
+
+	current_temp = sensor->get_temp_c(sensor);
+}
+
+Conclusion
+   Although C is not an object-oriented language per se, it is possible to apply object-oriented design
+   patterns. Here we have seen how to use interfaces and dependency injection to achieve low coupling
+   and facilitate off-target development and testing.
+
+   Although creating interfaces in C this way may look a bit messy at first, it's nice to know how to do
+   it. For some projects you're strictly required (e.g. by a client or manager) to use C, but if this is
+   not the case, I would much prefer using C++ for this kind of design.
+
+
+---
+[**1]
+https://kleinembedded.com/multiple-instances-of-a-module-in-c/
+
+Multiple instances of a module in C
+
+When writing modules for your application, sometimes it might be enough to have just a single instance of the
+module (e.g. a global "logging" module), but oftentimes you will need to create multiple instances of a module
+(e.g. a "queue" module). In this article I will take a look at various ways to implement this in C.
+
+In the examples below, we will be writing a very simple LED driver module. We will be able to configure the
+port and pin number that the LED is connected to, and to turn the LED on and off.
+
+A single instance
+To start simple, we'll first explore the most basic way to implement this functionality. Imagine we have only
+a single LED on our PCB - a status LED - and we don't expect to add more in the future. We might be tempted to
+just write the module in a way that we have the possibility of creating multiple LED instances in the future,
+should the need arise. But as good programmers, we will of course adhere to the YAGNI principle and only
+implement the simplest solution that solves the problem.
+
+The header will contain an initialization function, which is used to set the port and pin number, and
+functions for turning the LED on and off:
+
+[led.h]
+#include <stdint.h>
+
+void led_init(uint8_t port, uint8_t pin);
+void led_turn_on();
+void led_turn_off();
+
+The configuration (port and pin) and the state of the LED (whether it is on or off) is stored as static
+variables (I will call these instance variables) in the source file, and thus hidden from the user of the
+module:
+
+[led.c]
+#include "led.h"
+#include "gpio.h"
+
+static uint8_t port;
+static uint8_t pin;
+
+void led_init(uint8_t led_port, uint8_t led_pin) {
+	port = led_port;
+	pin = led_pin;
+	led_turn_off();
+}
+
+void led_turn_on() {
+	gpio_set(port, pin);
+}
+
+void led_turn_off() {
+	gpio_clear(port, pin);
+}
+
+This is just fine for a single instance - but what if we need to control more than one LED?
+
+Multiple instances using internal arrays
+Suppose we add a Bluetooth module to our PCB and we now want an additional LED that will indicate if a
+Bluetooth connection is active. How can we extend our LED module in order to control more than one LED? The
+first thing that comes to mind, is simply to turn the instance variables from the previous example into
+arrays. Then we assign an ID number to each LED, which corresponds to the index in the array. We will also
+need to specify the maximum number of LEDs, in order to make sure the arrays are large enough:
+
+[led.h]
+#include <stdint.h>
+
+#define MAX_NUM_LEDS 2
+
+void led_init(uint8_t id, uint8_t port, uint8_t pin);
+void led_turn_on(uint8_t id);
+void led_turn_off(uint8_t id);
+
+All the functions now take id as the first parameter, so we know which LED to control.
+
+[led.c]
+#include "led.h"
+#include "gpio.h"
+
+static uint8_t port[MAX_NUM_LEDS];
+static uint8_t pin[MAX_NUM_LEDS];
+
+void led_init(uint8_t id, uint8_t led_port, uint8_t led_pin) {
+	port[id] = led_port;
+	pin[id] = led_pin;
+	led_turn_off(id);
+}
+
+void led_turn_on(uint8_t id) {
+	gpio_set(port[id], pin[id]);
+}
+
+void led_turn_off(uint8_t id) {
+	gpio_clear(port[id], pin[id]);
+}
+
+To keep track of which ID belongs to which LED, we will make a header file with all our #defines for the
+project:
+
+[project_defines.h]
+/* LED identifiers */
+#define STATUS_LED     0
+#define BLUETOOTH_LED  1
+
+This solution works, but it does have a few drawbacks:
+    Every time we want to add more LEDs, we will have to change MAX_NUM_LEDS. We could just set it to some
+    arbitrary "large enough" number, but we will be wasting memory for each ID that is not being used.  With
+    only two instance variables, arrays do not seem so bad. If we get a lot of instance variables, however, it
+    may get unwieldy. Grouping the variables together for each instance (i.e. in a struct) might be a better
+    solution. All LEDs are essentially global: Any LED can be manipulated anywhere in the program. This is
+    generally discouraged, as you risk increasing the coupling in your program and it will be harder to
+    determine which parts of your program use each LED.
+
+Let's see if we can find a better solution.
+Multiple instances using public structs
+
+Instead of assigning an ID to each LED, let's group all the instance variables together in a struct and then
+pass a pointer to that struct as the first parameters to our functions:
+
+[led.h]
+#include <stdint.h>
+
+typedef struct led_handle led_handle_t;
+
+void led_init(led_handle_t *self, uint8_t port, uint8_t pin);
+void led_turn_on(led_handle_t *self);
+void led_turn_off(led_handle_t *self);
+
+struct led_handle {
+	uint8_t port;
+	uint8_t pin;
+};
+
+Now, we don't have to worry about how many LEDs the application will use, because the structs will be
+allocated outside our module. In the source file, we no longer need the arrays. We simply dereference the
+pointer given to us by the user.
+
+[led.c]
+#include "led.h"
+#include "gpio.h"
+
+void led_init(led_handle_t *self, uint8_t led_port, uint8_t led_pin) {
+	self->port = led_port;
+	self->pin = led_pin;
+	led_turn_off(self);
+}
+
+void led_turn_on(led_handle_t *self) {
+	gpio_set(self->port, self->pin);
+}
+
+void led_turn_off(led_handle_t *self) {
+	gpio_clear(self->port, self->pin);
+}
+
+Note, that in this example, the struct led_handle is publicly defined in the header file, meaning that the
+user of the module is free to change any variable within that struct - breaking encapsulation! It does,
+however, also allow the user to statically allocate memory for the struct, which may be necessary on very
+memory-limited microcontrollers.
+
+If we don't mind using dynamic memory allocation, we can improve the solution even further.
+
+Multiple instances using private structs
+Instead of declaring struct led_handle in the header file, we will now only provide the user with a pointer to
+the struct, without revealing any of its members. We also need to add a constructor (led_create()) and a
+destructor (led_destroy()), in order to allocate and deallocate memory for the struct.
+
+[led.h]
+#include <stdint.h>
+#include <stdbool.h>
+
+typedef struct led_handle* led_handle_ptr_t;
+
+led_handle_ptr_t led_create();
+void led_destroy(led_handle_ptr_t self);
+void led_init(led_handle_ptr_t self, uint8_t port, uint8_t pin);
+void led_turn_on(led_handle_ptr_t self);
+void led_turn_off(led_handle_ptr_t self);
+
+In the source file, we declare struct led_handle and implement the two new functions:
+
+[led.c]
+#include "led.h"
+#include "gpio.h"
+#include <stdlib.h>
+
+struct led_handle {
+	uint8_t port;
+	uint8_t pin;
+};
+
+led_handle_ptr_t led_create() {
+	return (led_handle_ptr_t) malloc(sizeof(struct led_handle));
+}
+
+void led_destroy(led_handle_ptr_t self) {
+	free(self);
+}
+
+void led_init(led_handle_ptr_t self, uint8_t led_port, uint8_t led_pin) {
+	self->port = led_port;
+	self->pin = led_pin;
+	led_turn_off(self);
+}
+
+void led_turn_on(led_handle_ptr_t self) {
+	gpio_set(self->port, self->pin);
+}
+
+void led_turn_off(led_handle_ptr_t self) {
+	gpio_clear(self->port, self->pin);
+}
+
+In my opinion, this way of creating instances makes the application code very clean and easy to follow.
+Suppose we have two tasks in our program: One for blinking the status LED to indicate that the system is
+running, and one for handling Bluetooth communication. In main() we can instantiate the two LEDs and pass them
+to each of the tasks, making it obvious where each LED is used:
+
+[main.c]
+#include "led.h"
+#include "blink_task.h"
+#include "bluetooth_task.h"
+#include "project_defines.h"
+
+int main() {
+	led_handle_ptr_t status_led = led_create(STATUS_LED_PORT, STATUS_LED_PIN);
+	led_handle_ptr_t bluetooth_led = led_create(BLUETOOTH_LED_PORT, BLUETOOTH_LED_PIN);
+
+	blink_task_init(status_led);
+	bluetooth_task_init(bluetooth_led);
+
+	while (1) {
+		blink_task_run();
+		bluetooth_task_run();
+	}
+}
+
+
+
+---
+https://www.quora.com/How-can-an-interface-be-implemented-in-C
+
+How can an interface be implemented in C?
+
+It depends what type of interface. The software interface is given by a header or ".h" file. If you want it to
+be compatible with other languages, you should avoid the use of C-specific features such as structures. To
+interface with Fortran, all function arguments need to be passed by reference. To interface with interpretted
+languages like Python, you will need to write special "glue" code comprising mostly wrapper functions that
+have a special calling convention.
+
+To write command line interfaces, you use the "main" function to take the arguments from the command line:
+
+	int main(int argc, char **argv) { ...
+
+
+Then it becomes a matter of parsing the arguments for the particular syntax you've decided for your command.
+You can write your own parser but there are many utilities out there that do the job. The most common syntax
+for command-line programs is a set of mandatory arguments plus a bunch of optional arguments. Optional
+	arguments are denoted by a dash, "-", followed by a letter, e.g. "-h" or "-v 20". The getopt utility can
+	be used to parse optional arguments. Personally I find getopt to be a bit laborious in terms of the amount
+	of code needed so I wrote my own utility called "parse_command_opts". It can be found in the "libpetey"
+	library in the "msci" open source project: msci / Code / [r377] /libpetey/parse_command_opts.h[**2]
+
+[**2]
+<code>
+#ifndef PARSE_COMMAND_OPTS_H_INCLUDED
+#define PARSE_COMMAND_OPTS_H_INCLUDED
+
+
+namespace libpetey {
+//returns number of options found
+//if there is a non-fatal error, returns -(# of found options)
+
+int parse_command_opts(int argc,    // number of command line args
+	char **argv,                    // arguments passed to command line
+	const char *code,               // code for each option
+	const char *format,             // format code for each option
+	void **parm,                    // returned parameters
+	int *flag,                      // found flags
+	int opts=0);                    // option flags (optional)
+
+}
+
+#endif
+</code>
+
+Next up in complexity are interactive command line interfaces such those for the vi editor or mail programs
+such as Pine. I don't have a lot of experience writing these but there are many libraries for creating them.
+One of the most popular is curses.
+
+Finally, you might want to write a GUI-based interface. I have some experience with these, mainly from using
+the GUI subroutines in Interactive Data Language which were mainly just wrappers for equivalent X-windows
+subroutines. X-windows is a C library designed specifically for creating GUI interfaces and is probably what
+you should learn if you want to write windowing applications in C.
+
+To get good at GUI programming, you will have to understand event-based programming. You should also get good
+at prototyping. I found that the best way to make a good GUI interface is to create a mock-up (prototype) of
+the dialog (that normally doesn't do anything useful itself) and then test it over and over again until it
+works exactly the way you want it to. Then you can link it in with the rest of the code. It's normally
+considered good programming practice to keep the code for the interface separate from that which does the
+actual work, also called the "engine".
+
+All of the utilities I've mentioned here are available free online and there is generous documentation. The
+most difficult, obviously, will be X-windows. It is a huge library, the documentation is enormous, and many of
+the calls are quite complex and difficult to understand unless put into context with other calls.
+
+***
+In C, interfaces are not defined in the same way as they are in object-oriented languages like Java or C#.
+However, you can achieve a similar effect using function pointers and structures. Here's how you can implement
+an interface-like pattern in C:
+
+Step 1: Define a Structure
+You can create a structure that contains function pointers. This structure acts like an "interface."
+
+typedef struct {
+	void (*method1)(void);
+	int (*method2)(int);
+} MyInterface;
+
+Step 2: Implement the Interface
+Next, you define functions that will serve as the implementations of the methods declared in your interface
+structure.
+
+void implementationMethod1(void) {
+	printf("Method 1 implementation\n");
+}
+
+int implementationMethod2(int value) {
+	printf("Method 2 implementation with value: %d\n", value);
+	return value * 2;
+}
+
+Step 3: Initialize the Interface
+You can then create an instance of your interface structure and set the function pointers to the
+implementations.
+
+MyInterface myInterface = {
+	.method1 = implementationMethod1,
+	.method2 = implementationMethod2
+};
+
+Step 4: Use the Interface
+Now you can use the interface to call the methods.
+
+int main() {
+	myInterface.method1();                        // Calls implementationMethod1
+	int result = myInterface.method2(5);          // Calls implementationMethod2 with argument 5
+	printf("Result from method2: %d\n", result);
+
+	return 0;
+}
+
+Complete Example
+
+Here's the complete code for the above steps:
+
+#include <stdio.h>
+
+// Step 1: Define the interface
+typedef struct {
+	void (*method1)(void);
+	int (*method2)(int);
+} MyInterface;
+
+// Step 2: Implement the methods
+void implementationMethod1(void) {
+	printf("Method 1 implementation\n");
+}
+
+int implementationMethod2(int value) {
+	printf("Method 2 implementation with value: %d\n", value);
+	return value * 2;
+}
+
+// Step 3: Initialize and use the interface
+int main() {
+	MyInterface myInterface = {
+		.method1 = implementationMethod1,
+		.method2 = implementationMethod2
+	};
+
+	myInterface.method1();
+	int result = myInterface.method2(5);
+	printf("Result from method2: %d\n", result);
+
+	return 0;
+}
+
+Explanation
+	Function Pointers: Allow you to define methods that can be assigned at runtime, enabling polymorphic
+	behavior.
+
+	Structures: Encapsulate the function pointers, simulating an interface.
+
+	Flexibility: You can create multiple implementations of the same interface by defining different functions
+	and assigning them to the function pointers in the structure.
+
+This approach gives you a way to define and use interfaces in C, allowing for a level of abstraction similar
+to that found in object-oriented programming.
+
+
+---
+https://www.reddit.com/r/C_Programming/comments/sfjddu/how_to_do_interface_in_c/
+
+How to do interface in C?
+
+I have been tasked with making an app with interface in C, but I can't find any explanation to how? Can
+someone please tell me were I can learn how to do it?
+
+***
+If you are coming from Java, C++, or another OOP language, you are going to have to get a little more abstract
+in your understanding of what an interface is exactly.
+
+You won't really have nice type-based polymorphism in C but with function pointers you can get about as close
+as you need.
+
+You may want to take a close look at the Linux virtual file system layer. Linux (written in C) has a generic
+interface for accessing POSIX file system functions that concrete implementations like ext4 or XFS need to
+implement.
+
+There are some interesting nugs here: https://tldp.org/LDP/khg/HyperNews/get/fs/vfstour.html[**3]
+
+
+---
+[**3]
+https://tldp.org/LDP/khg/HyperNews/get/fs/vfstour.html
+
+A tour of the Linux VFS
+
+    I'm not an expert on this topic. I've never written a filesystem from scratch; I've only worked on the
+    proc filesystem, and I didn't do much real filesystem hacking there, only extensions to what was already
+    there.
+
+    So if you see any mistakes or ommissions here (there have got to be ommissions in a piece this short on a
+    topic this large), please respond, in order to let me fix them and let other people know about them.
+
+In Linux, all files are accessed through the Virtual Filesystem Switch, or VFS. This is a layer of code which
+implements generic filesystem actions and vectors requests to the correct specific code to handle the
+request. Two main types of code modules take advantage of the VFS services, device drivers and filesystems.
+Because device drivers are covered elsewhere in the KHG, we won't cover them explicitly here. This tour will
+focus on filesystems. Because the VFS doesn't exist in a vacuum, we'll show its relationship with the
+favorite Linux filesystem, the ext2 filesystem.
+
+One warning: without a decent understanding of the system calls that have to do with files, you are not
+likely to be able to make heads or tails of filesystems. Most of the VFS and most of the code in a normal
+Linux filesystem is pretty directly related to completing normal system calls, and you will not be able to
+understand how the rest of the system works without understanding the system calls on which it is based.
+
+Where to find the code
+The source code for the VFS is in the fs/ subdirectory of the Linux kernel source, along with a few other
+related pieces, such as the buffer cache and code to deal with each executable file format. Each specific
+filesystem is kept in a lower subdirectory; for example, the ext2 filesystem source code is kept in fs/ext2/.
+
+This table gives the names of the files in the fs/ subdirectory and explains the basic purpose of each one.
+The middle column, labeled system, is supposed to show to which major subsystem the file is (mainly)
+dedicated. EXE means that it is used for recognizing and loading executable files. DEV means that is for
+device driver support. BUF means buffer cache. VFS means that it is a part of the VFS, and delegates some
+functionality to filesystem-specific code. VFSg means that this code is completely generic and never
+delegates part of its operation to specific filesystem code (that I noticed, anyway) and which you shouldn't
+have to worry about while writing a filesystem.
+
++---------------+------+------------------------------------------------------------------------------------+
+|   Filename    |system|                                      Purpose                                       |
++---------------+------+------------------------------------------------------------------------------------+
+|binfmt_aout.c  |EXE   |Recognize and execute old-style a.out executables.                                  |
++---------------+------+------------------------------------------------------------------------------------+
+|binfmt_elf.c   |EXE   |Recognize and execute new ELF executables                                           |
++---------------+------+------------------------------------------------------------------------------------+
+|binfmt_java.c  |EXE   |Recognize and execute Java apps and applets                                         |
++---------------+------+------------------------------------------------------------------------------------+
+|binfmt_script.c|EXE   |Recognize and execute #!-style scripts                                              |
++---------------+------+------------------------------------------------------------------------------------+
+|block_dev.c    |DEV   |Generic read(), write(), and fsync() functions for block devices.                   |
++---------------+------+------------------------------------------------------------------------------------+
+|buffer.c       |BUF   |The buffer cache, which caches blocks read from block devices.                      |
++---------------+------+------------------------------------------------------------------------------------+
+|dcache.c       |VFS   |The directory cache, which caches directory name lookups.                           |
++---------------+------+------------------------------------------------------------------------------------+
+|devices.c      |DEV   |Generic device support functions, such as registries.                               |
++---------------+------+------------------------------------------------------------------------------------+
+|dquot.c        |VFS   |Generic disk quota support.                                                         |
++---------------+------+------------------------------------------------------------------------------------+
+|exec.c         |VFSg  |Generic executable support. Calls functions in the binfmt_* files.                  |
++---------------+------+------------------------------------------------------------------------------------+
+|fcntl.c        |VFSg  |fcntl() handling.                                                                   |
++---------------+------+------------------------------------------------------------------------------------+
+|fifo.c         |VFSg  |fifo handling.                                                                      |
++---------------+------+------------------------------------------------------------------------------------+
+|file_table.c   |VFSg  |Dynamically-extensible list of open files on the system.                            |
++---------------+------+------------------------------------------------------------------------------------+
+|filesystems.c  |VFS   |All compiled-in filesystems are initialized from here by calling init_name_fs().    |
++---------------+------+------------------------------------------------------------------------------------+
+|inode.c        |VFSg  |Dynamically-extensible list of open inodes on the system.                           |
++---------------+------+------------------------------------------------------------------------------------+
+|ioctl.c        |VFS   |First-stage handling for ioctl's; passes handling to the filesystem or device driver|
+|               |      |if necessary.                                                                       |
++---------------+------+------------------------------------------------------------------------------------+
+|locks.c        |VFSg  |Support for fcntl() locking, flock() locking, and manadatory locking.               |
++---------------+------+------------------------------------------------------------------------------------+
+|namei.c        |VFS   |Fills in the inode, given a pathname. Implements several name-related system calls. |
++---------------+------+------------------------------------------------------------------------------------+
+|noquot.c       |VFS   |No quotas: optimization to avoid #ifdef's in dquot.c                                |
++---------------+------+------------------------------------------------------------------------------------+
+|open.c         |VFS   |Lots of system calls including (surprise) open(), close(), and vhangup().           |
++---------------+------+------------------------------------------------------------------------------------+
+|pipe.c         |VFSg  |Pipes.                                                                              |
++---------------+------+------------------------------------------------------------------------------------+
+|read_write.c   |VFS   |read(), write(), readv(), writev(), lseek().                                        |
++---------------+------+------------------------------------------------------------------------------------+
+|readdir.c      |VFS   |Several different interfaces for reading directories.                               |
++---------------+------+------------------------------------------------------------------------------------+
+|select.c       |VFS   |The guts of the select() system call                                                |
++---------------+------+------------------------------------------------------------------------------------+
+|stat.c         |VFS   |stat() and readlink() support.                                                      |
++---------------+------+------------------------------------------------------------------------------------+
+|super.c        |VFS   |Superblock support, filesystem registry, mount()/umount().                          |
++---------------+------+------------------------------------------------------------------------------------+
+
+Attaching a filesystem to the kernel
+
+If you look at the code in any filesystem for init_name_fs(), you will find that it probably contains about
+one line of code. For instance, in the ext2fs, it looks like this (from fs/ext2/super.c):
+
+int init_ext2_fs(void) {
+	return register_filesystem(&ext2_fs_type);
+}
+
+All it does is register the filesystem with the registry kept in fs/super.c. ext2_fs_type is a pretty simple
+structure:
+
+static struct file_system_type ext2_fs_type = {
+	ext2_read_super, "ext2", 1, NULL
+};
+
+The ext2_read_super entry is a pointer to a function which allows a filesystem to be mounted (among other
+things; more later). "ext2" is the name of the filesystem type, which is used (when you type mount ... -t
+ext2) to determine which filesystem to use to mount a device. The 1 says that it needs a device to be mounted
+on (unlike the proc filesyste or a network filesystem), and the NULL is required to fill up space that will
+be used to keep a linked list of filesystem types in the filesystem registry, kept in (look it up in the
+table!) fs/super.c.
+
+It's possible for a filesystem to support more than one type of filesystem. For instance, in fs/sysv/inode.c,
+three possible filesystem types are supported by one filesystem, with this code:
+
+static struct file_system_type sysv_fs_type[3] = {
+	{sysv_read_super, "xenix", 1, NULL},
+	{sysv_read_super, "sysv", 1, NULL},
+	{sysv_read_super, "coherent", 1, NULL}
+};
+
+int init_sysv_fs(void) {
+	int i;
+	int ouch;
+
+	for (i = 0; i < 3; i++) {
+		if ((ouch = register_filesystem(&sysv_fs_type[i])) != 0)
+			return ouch;
+	}
+	return ouch;
+}
+
+Connecting the filesystem to a disk
+The rest of the communication between the filesystem code and the kernel doesn't happen until a device
+bearing that type of file system is mounted. When you mount a device containing an ext2 file system,
+ext2_read_super() is called. If it succeeds in reading the superblock and is able to mount the filesystem, it
+fills in the super_block structure with information that includes a pointer to a structure called
+super_operations, which contains pointers to functions which do common operations related to superblocks; in
+this case, pointers to functions specific to ext2.
+
+A superblock is the block that defines an entire filesystem on a device. It is sometimes mythical, as in the
+case of the DOS filesystem--that is, the filesystem may or may not actually have a block on disk that is the
+real superblock. If not, it has to make something up. Operations that pertain to the filesystem as a whole
+(as opposed to individual files) are considered superblock operations. The super_operations structure
+contains pointers to functions which manipulate inodes, the superblock, and which refer to or change the
+status of the filesystem as a whole (statfs() and remount()).
+
+You have probably noticed that there are a lot of pointers, and especially pointers to functions, here. The
+good news is that all the messy pointer work is done; that's the VFS's job. All the author for the filesystem
+needs to do is fill in (usually static) structures with pointers to functions, and pass pointers to those
+structures back to the VFS so it can get at the filesystem and the files.
+
+For example, the super_operations structure looks like this (from <linux/fs.h>):
+
+struct super_operations {
+	void (*read_inode) (struct inode *);
+	int (*notify_change) (struct inode *, struct iattr *);
+	void (*write_inode) (struct inode *);
+	void (*put_inode) (struct inode *);
+	void (*put_super) (struct super_block *);
+	void (*write_super) (struct super_block *);
+	void (*statfs) (struct super_block *, struct statfs *, int);
+	int (*remount_fs) (struct super_block *, int *, char *);
+};
+
+That's the VFS part. Here's the much simpler declaration of the ext2 instance of that structure, in fs/ext2/
+super.c:
+
+static struct super_operations ext2_sops = {
+	ext2_read_inode,
+	NULL,
+	ext2_write_inode,
+	ext2_put_inode,
+	ext2_put_super,
+	ext2_write_super,
+	ext2_statfs,
+	ext2_remount
+};
+
+First, notice that an unneeded entry has simply been set to NULL. That's pretty normal Linux behavior;
+whenever there is a sensible default behavior of a function pointer, and that sensible default is what you
+want, you are almost sure to be able to provide a NULL pointer and get the default painlessly. Second, notice
+how simple and clean the declaration is. All the painful stuff like sb->s_op->write_super(sb); s hidden in
+the VFS implementation.
+
+The details of how the filesystem actually reads and writes the blocks, including the superblock, from and to
+the disk will be covered in a different section. There will actually be (I hope) two descriptions--a simple,
+functional one in a section on how to write filesystems, and a more detailed one in a tour through the buffer
+cache. For now, assume that it is done by magic...
+
+Mounting a filesystem
+When a filesystem is mounted (which file is in charge of mounting a filesystem? Look at the table above, and
+find that it is fs/super.c. You might want to follow along in fs/super.c), do_umount() calls read_super,
+which ends up calling (in the case of the ext2 filesystem), ext2_read_super(), which returns the superblock.
+That superblock includes a pointer to that structure of pointers to functions that we see in the definition
+of ext2_sops above. It also includes a lot of other data; you can look at the definition of struct
+super_block in include/linux/fs.h if you like.
+
+Finding a file
+Once a filesystem is mounted, it is possible to access files on that filesystem. There are two main steps
+here: looking up the name to find what inode it points to, and then accessing the inode.
+
+When the VFS is looking at a name, it includes a path. Unless the filename is absolute (it starts with a /
+character), it is relative to the current directory of the process that made the system call that included a
+path. It uses filesystem-specific code to look up files on the filesystems specified. It takes the path name
+one component (filename components are separated with / characters) at a time, and looks it up. If it is a
+directory, then the next component is looked up in the directory returned by the previous lookup. Every
+component which is looked up, whether it is a file or a directory, returns an inode number which uniquely
+identifies it, and by which its contents are accessed.
+
+If the file turns out to be a symbolic link to another file, then the VFS starts over with the new name which
+is retrieved from the symbolic link. In order to prevent infinite recursion, there's a limit on the depth of
+symlinks; the kernel will only follow so many symlinks in a row before giving up.
+
+When the VFS and the filesystem together have resolved a name into an inode number (that's the namei()
+function in namei.c), then the inode can be accessed. The iget() function finds and returns the inode
+specified by an inode number. The iput() function is later used to release access to the inode. It is kind of
+like malloc() and free(), except that more than one process may hold an inode open at once, and a reference
+count is maintained to know when it's free and when it's not.
+
+The integer file handle which is passed back to the application code is an offset into a file table for that
+process. That file table slot holds the inode number that was looked up with the namei() function until the
+file is closed or the process terminates. So whenever a process does anything to a ``file'' using a file
+handle, it is really manipulating the inode in question.
+
+inode Operations
+That inode number and inode structure have to come from somewhere, and the VFS can't make them up on it's
+own. They have to come from the filesystem. So how does the VFS look up the name in the filesystem and get an
+inode back?
+
+It starts at the beginning of the path name and looks up the inode of the first directory in the path. Then
+it uses that inode to look up the next directory in the path. When it reachs the end, it has found the inode
+of the file or directory it is trying to look up. But since it needs an inode to get started, how does it get
+started with the first lookup? There is an inode pointer kept in the superblock called s_mounted which points
+at an inode structure for the filesystem. This inode is allocated when the filesystem is mounted and
+de-allocated when the filesystem is unmounted. Normally, as in the ext2 filesystem, the s_mounted inode is
+the inode of the root directory of the filesystem. From there, all the other inodes can be looked up.
+
+Each inode includes a pointer to a structure of pointers to functions. Sound familiar? This is the
+inode_operations structure. One of the elements of that structure is called lookup(), and it is used to look
+up another inode on the same filesystem. In general, a filesystem has only one lookup() function that is the
+same in every inode on the filesystem, but it is possible to have several different lookup() functions and
+assign them as appropriate for the filesystem; the proc filesystem does this because different directories in
+the proc filesystem have different purposes. The inode_operations structure looks like this (defined, like
+most everything we are looking at, in <linux/fs.h>):
+
+struct inode_operations {
+	struct file_operations * default_file_ops;
+	int (*create) (struct inode *,const char *,int,int,struct inode **);
+	int (*lookup) (struct inode *,const char *,int,struct inode **);
+	int (*link) (struct inode *,struct inode *,const char *,int);
+	int (*unlink) (struct inode *,const char *,int);
+	int (*symlink) (struct inode *,const char *,int,const char *);
+	int (*mkdir) (struct inode *,const char *,int,int);
+	int (*rmdir) (struct inode *,const char *,int);
+	int (*mknod) (struct inode *,const char *,int,int,int);
+	int (*rename) (struct inode *,const char *,int,struct inode *,const char *,int);
+	int (*readlink) (struct inode *,char *,int);
+	int (*follow_link) (struct inode *,struct inode *,int,int,struct inode **);
+	int (*readpage) (struct inode *, struct page *);
+	int (*writepage) (struct inode *, struct page *);
+	int (*bmap) (struct inode *,int);
+	void (*truncate) (struct inode *);
+	int (*permission) (struct inode *, int);
+	int (*smap) (struct inode *,int);
+};
+
+Most of these functions map directly to system calls.
+
+In the ext2 filesystem, directories, files, and symlinks have different inode_operations (this is normal).
+The file fs/ext2/dir.c contains ext2_dir_inode_operations, the file fs/ext2/file.c contains
+ext2_file_inode_operations, and the file fs/ext2/symlink.c contains ext2_symlink_inode_operations.
+
+There are many system calls related to files (and directories) which aren't accounted for in the
+inode_operations structure; those are found in the file_operations structure. The file_operations structure
+is the same one used when writing device drivers and contains operations that work specifically on files,
+rather than inodes:
+
+struct file_operations {
+	int (*lseek) (struct inode *, struct file *, off_t, int);
+	int (*read) (struct inode *, struct file *, char *, int);
+	int (*write) (struct inode *, struct file *, const char *, int);
+	int (*readdir) (struct inode *, struct file *, void *, filldir_t);
+	int (*select) (struct inode *, struct file *, int, select_table *);
+	int (*ioctl) (struct inode *, struct file *, unsigned int, unsigned long);
+	int (*mmap) (struct inode *, struct file *, struct vm_area_struct *);
+	int (*open) (struct inode *, struct file *);
+	void (*release) (struct inode *, struct file *);
+	int (*fsync) (struct inode *, struct file *);
+	int (*fasync) (struct inode *, struct file *, int);
+	int (*check_media_change) (kdev_t dev);
+	int (*revalidate) (kdev_t dev);
+};
+
+There are also a few functions which aren't directly related to system calls--and where they don't apply,
+they can simply be set to NULL.
+
+Summary
+The role of the VFS is:
+  * Keep track of available filesystem types.
+  * Associate (and disassociate) devices with instances of the appropriate filesystem.
+  * Do any reasonable generic processing for operations involving files.
+  * When filesystem-specific operations become necessary, vector them to the filesystem in charge of the
+    file, directory, or inode in question.
+
+The interaction between the VFS and specific filesystem types occurs through two main data structures, the
+super_block structure and the inode structure, and their associated data structures, including
+super_operations, inode_operations, file_operations, and others, which are kept in the include file <linux/
+fs.h>.
+
+Therefore, the role of a specific filesystem code is to provide a superblock for each filesystem mounted and
+a unique inode for each file on the filesystem, and to provide code to carry out actions specific to
+filesystems and files that are requested by system calls and sorted out by the VFS.
+
+
+---
+

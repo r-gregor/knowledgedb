@@ -1,0 +1,1236 @@
+filename: c_opaque-data-types-multif_20250129.txt
+https://www.ibm.com/docs/en/informix-servers/14.10?topic=dt-opaque-data-types
+Opaque data types
+Last Updated: 2022-10-21
+
+An opaque data type is a user-defined data structure.
+
+To successfully interpret opaque data types, the database server requires that the DataBlade module provide
+opaque data type support routines. You must provide support routines for your opaque data type.
+
+BladeSmith generates boilerplate code for opaque data type support routines. You can write additional code in
+C or Java to implement the functionality your opaque data type requires. If you provide ActiveX value objects
+as a client-side interface to your opaque data types, you can write the underlying support routines for the
+opaque data type in C++. See Opaque data type support routines for more information.
+
+Opaque data types typically contain more than one member, so they are similar to row data types, except that
+the database server can only operate on the individual components with support routines you define in the
+DataBlade module.  The following diagram illustrates an opaque data type called circle, based on a structure
+called circle_t, in a column called circle_col.  Figure 1. Sample opaque type
+
+    Table cicrcle_tab
+	+----------------------------------------+
+	| circle_id       color       circle_col |
+	+----------------------------------------+
+	| 831256          blue        (2,3,4.5)  |
+	+----------------------------------------+
+                                      |
+            circle opaque type        V
+	        +---------------------------------+
+	        | typedef struct {                |
+	        |     ml_double_precision x;      |
+	        |     ml_double_precision y;      |
+	        | } point_t;                      |
+	        |                                 |
+	        | typedef struct {                |
+	        |     point_t corner;             |
+	        |     ml_double_precision radius; |
+	        | } circle_t;                     |
+	        |                                 |
+	        +---------------------------------+
+
+The table circle_tab consists of the columns circle_id(SERIAL), color(VARCHAR(15)), and circle_col(circle).
+The opaque data type circle is defined as a C structure, circle_t, which contains a radius member and another
+structure, point_t. The point_t structure contains x and y members. To the database server, however, the whole
+circle_t structure is indivisible, unless you provide accessor functions.
+
+Use an opaque type to extend SQL to address fundamentally new data types and allow operations on them. Such
+data types are typically indivisible or made up of components to which you want to control access.
+
+For example, geographic data and many sorts of rich media data (images, audio, text, and so on) are have been
+represented by the use of opaque types. Opaque data types often contain smart large objects. Smart large
+objects are logically stored in a column in a database table but physically stored in a file. For example, an
+opaque data type for images could have a smart large object member containing the image and other members
+containing metadata about the image.
+
+Opaque types require more work to create than other data types because you must write all the routines that
+support them.
+
+	Opaque data type support routines BladeSmith enables you to generate support routine code for opaque data
+	types. You might have to add code to implement the functionality your opaque data type requires.
+
+
+---
+https://benjamintoll.com/2022/08/31/on-opaque-data-types-in-c/
+
+On Opaque Data Types in C
+August 31, 2022
+
+   Opaque data types are a method of information hiding.
+
+   For example, it's good practice to expose a stable API to the world that won't change, and then
+   behind this interface hide all of the complexity of the implementation of those APIs. The
+   implementations can then frequently change as needed without impacting the user code, because it is
+   using the well-defined and stable public API that does not change.
+
+   Object-oriented languages do this through data abstraction and data encapsulation of private data
+   members variables, methods and classes. The C language does this through an opaque data type, where
+   any data manipulation details are hidden and only accessible through the declared subroutines that
+   are exposed as the public API in the header file (the interface).
+
+   One of the niceties of this pattern is that the application (user code), doesn't need to be
+   re-compiled, as the implementation that changed is most likely going to be in a shared object.
+
+   The canonical example of an opaque data type in C is the FILE type.
+
+     Just to be clear, if someone is really determined to see what's behind the opaque data type, they
+     will. It's a deterrent rather than a guarantee.
+
+   Before we dig into some code, let's take a look at the Makefile that we'll use to compile the
+   program.
+
+Compiling
+
+   Makefile
+CC=clang
+CFLAGS=-g -Wall
+MAIN=main.c
+OBJS=person.o
+BIN=person
+
+all: $(BIN)
+
+%.o: %.c %.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BIN): $(MAIN) $(OBJS)
+	$(CC) $(CFLAGS) $^ -o $@
+
+clean:
+	$(RM) -r $(OBJS) $(BIN)
+
+
+   Ok, now, let's see some code!
+
+One Big Program
+   We'll just going to use a little toy program that is intentionally small so the ideas are clearly
+   expressed without a lot of extraneous noise.
+
+   The program is expecting to get two pieces of data from the user: name and age. It is going to create
+   a local variable to store this information and then print a nice message to the terminal.
+
+   The interface that the program exposes are:
+     * structs
+          + person
+     * functions
+          + make_person
+          + destroy_person
+          + error
+          + reverse
+          + say_hello
+          + slen
+
+     Yes, I know that there is a strlen function defined in strings.h.
+
+=== program.c ===
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
+
+struct person {
+	char *name;
+	int age;
+	int token;
+};
+
+int generate_token() {
+	srand(time(NULL));
+	return rand();
+}
+
+struct person *make_person(char *name, int age) {
+	struct person *p = malloc(sizeof(struct person));
+
+	p->name = name;
+	p->age = age;
+	p->token = generate_token();
+
+	return p;
+}
+
+void error(char *msg) {
+	fprintf(stderr, "%s\n", msg);
+	exit(-1);
+}
+
+void destroy_person(struct person *p) {
+	if (p != NULL)
+		free(p);
+}
+
+int slen(struct person *p) {
+	if (p == NULL)
+		error("slen()");
+
+	char *s = p->name;
+	int i = 0;
+
+	while (s[i] != '\0')
+		++i;
+
+	return i;
+}
+
+int reverse(struct person *p) {
+	if (p == NULL)
+		error("reverse()");
+
+	char *s = p->name;
+	int swap, i, j;
+	int l = slen(p);
+
+	for (i = 0, j = l - 1; i < j; ++i, --j) {
+		swap = s[i];
+		s[i] = s[j];
+		s[j] = swap;
+	}
+
+	return l;
+}
+
+void say_hello(struct person *p) {
+	if (p == NULL)
+		error("say_hello()");
+
+	printf("Hi %s, you are %d years of age!  Your token is %d.\n", p->name, p->age, p->token);
+}
+
+int main(int argc, char **argv) {
+	if (argc != 3)
+		error("Not enough arguments.");
+
+	struct person *p = make_person(argv[1], atoi(argv[2]));
+	say_hello(p);
+	reverse(p);
+	say_hello(p);
+	destroy_person(p);
+}
+
+
+$> clang -o program program.orig.c
+$> ./program
+Not enough arguments.
+
+$> ./program "Fred Moseley" 42
+Hi Fred Moseley, you are 42 years of age!  Your token is 1595752298.
+Hi yelesoM derF, you are 42 years of age!  Your token is 1595752298.
+
+   Exciting stuff.
+
+   The problem with this implementation is that there is no data abstraction. This means that the
+   internal workings of the person struct can be directly modified by the user.
+
+   For instance, the user could define a main function like this:
+
+int main(int argc, char **argv) {
+	if (argc != 3)
+		error("Not enough arguments.");
+
+	struct person *p = make_person(argv[1], atoi(argv[2]));
+	p->token = 55555555;
+
+	say_hello(p);
+	destroy_person(p);
+}
+
+
+$> ./program "Kilgore Trout" 42
+Hi Kilgore Trout, you are 42 years of age!  Your token is 55555555.
+
+   Here the person type is exposed, so the developer can supply their own token, which may or may not be
+   a problem.
+
+   Admittedly, this may not be a big deal, but it's good practice to hide these kinds of implementation
+   details behind an opaque data type. After all, we want them to use the code paths (the API) that
+   we've established, not the least because it allows us to change the interface implementations without
+   any disruption to the user (and without having to recompile the program).
+
+   Let's now look at how we can start improving the program.
+
+Breaking It Apart
+
+The Interface
+   The first change we'll make is to create a header file that will define the interface. We'll move the
+   person struct into it, as well as create function prototypes for all of the publicly exposed APIs:
+
+   person.h
+#ifndef PERSON_H
+#define PERSON_H
+
+struct person {
+	char *name;
+	char *token;
+	int age;
+};
+
+struct person *make_person(char *, int);
+void destroy_person(struct person *);
+int generate_token(void);
+void error(char *);
+int reverse(struct person *);
+void say_hello(struct person *);
+int slen(struct person *);
+
+#endif
+
+
+The Library
+   Secondly, we'll move the implementation into its own file:
+
+=== person.c ===
+#include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
+#include "person.h"
+
+int generate_token(void) {
+	srand(time(NULL));
+	return rand();
+}
+
+struct person *make_person(char *name, int age) {
+	struct person *p = malloc(sizeof(struct person));
+
+	p->name = name;
+	p->age = age;
+	p->token = generate_token();
+
+	return p;
+}
+
+void destroy_person(struct person *p) {
+	if (p != NULL)
+		free(p);
+}
+
+void error(char *msg) {
+	fprintf(stderr, "%s\n", msg);
+	exit(-1);
+}
+
+void say_hello(struct person *p) {
+	if (p == NULL)
+		error("say_hello()");
+
+	printf("Hi %s, you are %d years of age!  Your token is %d.\n", p->name, p->age, p->token);
+}
+
+int slen(struct person *p) {
+	if (p == NULL)
+		error("slen()");
+
+	char *s = p->name;
+	int i = 0;
+
+	while (s[i] != '\0')
+		++i;
+
+	return i;
+}
+
+int reverse(struct person *p) {
+	if (p == NULL)
+		error("reverse()");
+
+	char *s = p->name;
+	int swap, i, j;
+	int l = slen(p);
+
+	for (i = 0, j = l - 1; i < j; ++i, --j) {
+		swap = s[i];
+		s[i] = s[j];
+		s[j] = swap;
+	}
+
+	return l;
+}
+
+
+The User Program
+
+   Lastly, remove everything from the main program except for the main function entry point:
+
+=== main.c ===
+#include <stdlib.h>
+#include <stdio.h>
+#include "person.h"
+
+int main(int argc, char **argv) {
+	if (argc != 3)
+		error("Not enough arguments.");
+
+	struct person *p = make_person(argv[1], atoi(argv[2]));
+	say_hello(p);
+	reverse(p);
+	say_hello(p);
+	destroy_person(p);
+}
+
+
+   Looking much better:
+$> tree
+.
++-- main.c
++-- person.c
++-- person.h
+
+0 directories, 3 files
+
+Low-hanging Fruit
+
+Remove Private Functions from the Interface
+   In person.h, remove the generate_token and slen function prototypes. The complete header file then
+   looks like the following:
+#ifndef PERSON_H
+#define PERSON_H
+
+struct person {
+	char *name;
+	int age;
+	int token;
+};
+
+struct person *make_person(char *, int);
+void destroy_person(struct person *);
+void error(char *);
+int reverse(struct person *);
+void say_hello(struct person *);
+
+#endif
+
+
+   Then, in person.c, add the static keyword to the slen function to make it only available to that
+   library file:
+
+static int slen(struct person *p) {
+	if (p == NULL)
+		error("slen()");
+
+	char *s = p->name;
+	int i = 0;
+
+	while (s[i] != '\0')
+		++i;
+
+	return i;
+}
+
+
+   Recompile and run:
+$> make
+clang -g -Wall -c person.c -o person.o
+clang -g -Wall main.c person.o -o person
+
+$> ./person "Kilgore Trout" 93
+Hi Kilgore Trout, you are 93 years of age!
+Hi tuorT erogliK, you are 93 years of age!
+
+Creating a typedef
+   Let's name our person struct so we can just reference it by the name person instead of always
+   prefacing it with the struct keyword.
+
+   So:
+struct person {
+	char *name;
+	int age;
+	int token;
+};
+
+
+   Becomes:
+typedef struct {
+	char *name;
+	int age;
+	int token;
+} person;
+
+
+   This allows us to remove the struct keyword everywhere it prefaces person. For instance, the header
+   file will now look like this:
+#ifndef PERSON_H
+#define PERSON_H
+
+typedef struct {
+	char *name;
+	int age;
+	int token;
+} person;
+
+person *make_person(char *, int);
+void destroy_person(person *);
+void error(char *);
+int reverse(person *);
+void say_hello(person *);
+
+#endif
+
+
+   In other words, you can remove the keyword struct before any instance of person:
+[DEL: struct :DEL]  person *p = make_person(argv[1], atoi(argv[2]));
+
+...
+
+[DEL: struct :DEL]  person *make_person(char *name, int age) {
+    [DEL: struct :DEL]  person *p = malloc(sizeof([DEL: struct :DEL]  person));
+
+...
+
+int reverse([DEL: struct :DEL]  person *p) {
+
+...
+
+Etc.
+
+     To save space, I won't print the other two files, but make sure that you also change main.c and
+     person.c.
+
+Creating the Opaque Data Type
+   Now that the program has been restructured and improved, creating the opaque data type is only a
+   couple of extra simple steps.
+
+   The first is to move the person struct definition into the program.c library file and give it a name
+   p:
+
+=== person.c ===
+#include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
+#include "person.h"
+
+typedef struct p {
+	char *name;
+	int age;
+	int token;
+} person;
+
+int generate_token(void) {
+	srand(time(NULL));
+	return rand();
+}
+
+...
+
+   Next, remove the body of the struct and give it the same name p as we just did in the library file.
+   This is enough so that the function definitions will still compile. The p name could have been
+   anything, it's not going to affect the functionality of the program.
+
+=== person.h ===
+#ifndef PERSON_H
+#define PERSON_H
+
+typedef struct p person;
+
+person *make_person(char *, int);
+void destroy_person(person *);
+void error(char *);
+int reverse(person *);
+void say_hello(person *);
+
+#endif
+
+
+   So, it's at this point that person can now be considered an opaque data type. It's also what's known
+   as an incomplete type, as the compiler knows it's a type and that it's a struct, but it can't
+   know its definition, as there is no struct body.
+
+   Recompile and run:
+$> make
+clang -g -Wall -c person.c -o person.o
+clang -g -Wall main.c person.o -o person
+
+$> ./person "Kilgore Trout" 93
+Hi Kilgore Trout, you are 93 years of age!
+Hi tuorT erogliK, you are 93 years of age!
+
+   Interestingly, if a developer tried futzing with the internals of the person type as they did before,
+   they'll get a giant error when compiling:
+
+int main(int argc, char **argv) {
+	if (argc != 3)
+		error("Not enough arguments.");
+
+	struct person *p = make_person(argv[1], atoi(argv[2]));
+	p->token = 55555555;
+
+	say_hello(p);
+	destroy_person(p);
+}
+
+
+$> make
+clang -g -Wall -c person.c -o person.o
+clang -g -Wall main.c person.o -o person
+main.c:10:6: error: incomplete definition of type 'struct p'
+    p->token = 333333;
+    ~^
+./person.h:4:16: note: forward declaration of 'struct p'
+typedef struct p person;
+               ^
+1 error generated.
+make: *** [Makefile:16: person] Error 1
+
+     The incomplete type error is because the compiler cannot figure out the size of the identifier.
+     This will force the user of your library to use your carefully crafted API.
+
+   Weeeeeeeeeeeeeeeeeeeeeeeeeeee
+
+Summary
+   This is an important summary and should not be skipped.
+
+References
+
+     * [https://www.youtube.com/watch?v=TsUOhPsZk6k]Make your Data Type more Abstract with Opaque Types in C
+
+
+---
+https://flameeyes.blog/2009/11/21/the-importance-of-opaque-types/
+
+The importance of opaque types
+
+   I sincerely don't remember whether I already discussed about this before or not; if I didn't, I'll
+   try to explain here. When developing in C, C++ and other languages that support some kind of objects
+   as type, you usually have two choices for a composited type: transparent or opaque. If the code using
+   the type is able to see the content of the type, it's a transparent type, if it cannot, it's an
+   opaque type.
+
+   There are though different grades of transparent and opaque types depending on the language and the
+   way they would get implemented; to simplify the topic for this post, I'll limit myself to the C
+   language (not the C++ language, be warned) and comment about the practises connected to opaque types.
+
+   In C, an opaque type is a structure whose content is unknown; this usually is declared in ways such
+   as the following code, in a header:
+
+struct MyOpaqueType;
+typedef struct MyOpaqueType MyOpaquetype;
+
+   At that point, the code including the header will have some limitations compared to transparent
+   types; not knowing the object size, you cannot declare objects with that type directly, but you can
+   only deal with pointers, which also means you cannot dereference them or allocate new objects. For
+   this reason, you need to provide functions to access and handle the type itself, including allocation
+   and deallocation of them, and these functions cannot simply be inline functions since they would need
+   to access the content of the type to work.
+
+   All in all you can see that the use of opaque types tend to be a big hit for what concerns
+   performance; instead of a direct memory dereference you need always to pass through a function call
+   (note that this seems the same as accessor functions in C++, but those are usually inline functions
+   that will be replaced at compile-time with the dereference anyway); and you might even have to pass
+   through the PLT (Procedure Linking Table) which means further complication to get to the type.
+
+   So why should you ever use opaque types? Well they are very useful when you need to export the
+   interface of a library: since you don't know either the size or the internal ordering of an opaque
+   type, the library can change the opaque type without changing ABI, and thus requiring a rebuild of
+   the software using it. Repeat with me: changing the size of a transparent type, or the order of its
+   content, will break ABI.
+
+   And this gets also particularly important when you'd like to reorder some structures, so that you can
+   remove padding holes (with tools like pahole from the dwarves package, see this as well if you
+   want to understand what I mean). For this reason, sometimes you might prefer having slower, opaque
+   types in the interface, instead of faster but riskier transparent types.
+
+   Another place where opaque types are definitely helpful is when designing a plugin interface
+   especially for software that was never designed as a library and has, thus, had an in-flux API. Which
+   is one more reason why I don't think feng is ready for plugins just yet.
+
+
+---
+https://interrupt.memfault.com/blog/opaque-pointers
+
+Practical Design Patterns: Opaque Pointers and Objects in C
+11 May 2021
+
+   I've written a lot of C++ in my career, but I still prefer to design in C for most embedded projects
+   ("why" is the subject of a much longer, rant-filled post). I'm not a big proponent of OOP in general,
+   but I do think having an "instance" of something which contains stateful data is a generally useful
+   thing for embedded software. For example, you may want to have several instances of a ring buffer
+   (aka circular FIFO queue) on your system. Each instance contains stateful data, like the current
+   position of read and write pointers. What's the best way to model this in C?
+
+   Objects are not a native concept in C, but you can achieve something resembling objects by using a
+   design pattern known as the "opaque pointer". This post will show you what the pattern is, explain
+   some of the finer details, and provide guidance on when you should and shouldn't use it.
+
+   The opaque pointer is one of the most useful and frequently-encountered design patterns in C. Even if
+   you are a die-hard C++ proponent (or gasp Rust!), the reality is that there are, and will continue to
+   be, a lot of embedded projects out there written in C. And you may need to contribute to one of them.
+
+The Opaque Pointer Pattern
+   opaque: not able to be seen through; not transparent.
+
+   In traditional OOP, an object has state (data) and behavior (functions) coupled together in one
+   class.
+
+   If you want to have something resembling objects in C, you can:
+    1. Define a struct with your state data
+    2. Define functions which take a pointer to the struct as the first parameter
+    3. Declare a variable with that struct type to create an instance of the "object"
+
+   Need another object instance? Declare another variable with that struct type. Boom! Objects in C,
+   baby!
+
+   Of course, there's a little more to it than that (but not much).
+
+   Before getting into the details, let me show you the complete pattern first, using a ring buffer that
+   stores uint8_t as an example. This is not a complete ringbuffer implementation. It's just enough to
+   show you the general pattern.
+
+=== ringbuffer.h ===
+#pragma once
+
+#include <stdint.h>
+#include <stdbool.h>
+
+// Opaque pointer type to represent a ringbuffer instance
+typedef struct ringbuffer_instance_t *ringbuffer_t;
+
+// Functions that operate on an instance
+ringbuffer_t ringbuffer_create(uint32_t capacity);
+uint32_t ringbuffer_capacity(ringbuffer_t instance);
+bool ringbuffer_enqueue(ringbuffer_t instance, uint8_t item);
+bool ringbuffer_dequeue(ringbuffer_t instance, uint8_t *item);
+void ringbuffer_destroy(ringbuffer_t instance);
+
+=== ringbuffer.c ===
+#include "ringbuffer.h"
+#include <stdlib.h>
+
+// Private struct, only accessible from within this file
+struct ringbuffer_instance_t {
+	volatile uint32_t wr_pos;
+	volatile uint32_t rd_pos;
+	uint8_t *data;
+	uint32_t capacity;
+};
+
+ringbuffer_t ringbuffer_create(uint32_t capacity) {
+	ringbuffer_t inst = calloc(1, sizeof(struct ringbuffer_instance_t));
+	inst->data = calloc(capacity, sizeof(uint8_t));
+	inst->capacity = capacity;
+	inst->wr_pos = 0;
+	inst->rd_pos = 0;
+	return inst;
+}
+
+uint32_t ringbuffer_capacity(ringbuffer_t instance) {
+	return instance->capacity;
+}
+
+bool ringbuffer_enqueue(ringbuffer_t instance, uint8_t item) {
+	// implementation omitted
+	return true;
+}
+
+bool ringbuffer_dequeue(ringbuffer_t instance, uint8_t *item) {
+	// implementation omitted
+	return true;
+}
+
+void ringbuffer_destroy(ringbuffer_t instance) {
+	if (instance) {
+		if (instance->data) {
+			free(instance->data);
+		}
+		free(instance);
+	}
+}
+
+Object Life Cycle
+   When you use this pattern, it's customary to declare *_create and *_destroy functions. These are
+   analogous to constructors and destructors in OOP.
+
+   The *_create function will perform allocation and initialization of an instance and return an
+   opaque pointer to the user, which represents the instance. It's really just a pointer to a
+   struct, but the user can't see what's in the struct. The user's calling code will fail to compile if
+   it tries to dereference the struct pointer because the struct is not defined in the header (it is
+   only declared).
+
+   Likewise, *_destroy will clean up the instance, making it null-and-void for future use (it would be
+   user error if they try to use the instance after it's been destroyed).
+
+   After the user has created an instance, they call functions which take the instance as the first
+   parameter. This is analogous to class member functions in C++, which implicitly take a this pointer
+   as the first parameter.
+
+It's a Handle, Not a Pointer
+   The opaque pointer typedef is such that it hides the fact that it's a pointer:
+typedef struct ringbuffer_instance_t *ringbuffer_t;
+
+   It's an abstract representation of the instance, often referred to as a handle.
+
+   We could just as easily define the handle as a uint32_t (maybe it's an index into an array), and none
+   of the using code would change:
+typedef uint32_t ringbuffer_t;
+
+   Once created, the handle is passed in by value to each function. At the call site, a variable of type
+   ringbuffer_t almost looks like a normal value, like a number:
+ringbuffer_t rbuf = ringbuffer_create(10);
+ringbuffer_enqueue(rbuf, 0xA5);
+
+   Using a non-pointer handle type is a stylistic choice, but I think it makes the API easier to use.
+   When it looks like a normal value, users don't have to use the * or & operators. Conversely, if the
+   user sees an API that deals with pointers, there is a small bit of cognitive overhead and anxiety
+   (questions of ownership, calling mechanics).
+
+Encapsulation
+   Because the pointer is opaque, the user's calling code cannot access the data inside the struct. Why
+   is this a good thing?
+     * It simplifies the API. The user does not need to know or care about internal data.
+     * The struct definition can change without impacting any of the using code.
+     * It prevents misuse of internal struct data.
+
+   On the topic of misuse, imagine if the user could see inside the opaque pointer. They might think
+   they're clever enough to manipulate read and write pointers in the ringbuffer themselves, to get some
+   kind of custom behavior they're looking for, but most likely, they will end up shooting themselves in
+   the foot (maybe they forgot to account for wraparound). Furthermore, it creates hidden coupling in
+   the system. If the ringbuffer implementation changes the way it uses read and write pointers, it will
+   need to visit all the using code that accesses the pointers as well. In effect, the ringbuffer
+   implementation would be spread out across multiple files in the system (good luck finding them all!)
+   instead of being isolated to one file.
+
+   By defining the struct in ringbuffer.c, the data is "private" to that file (or more precisely, the
+   translation unit).
+
+   What if you have a large module, spread over many .c files, that all need access to the struct? In
+   that case, a good option is to define the struct inside of a private header file -
+   ringbuffer_private.h in the example - which you can #include in other module files. This keeps the
+   public interface in ringbuffer.h clean and minimal, and gives internal module files access to the
+   private struct data.
+
+What If I Don't Want to Dynamically Allocate Memory?
+   There are some reading this that have their spidey sense tingling when they see the word calloc in
+   ringbuffer_create.
+
+   In many embedded systems, dynamic memory allocation is strongly discouraged or outright forbidden.
+   Even if it's not forbidden, it's often a good idea to eliminate dynamic memory if static memory
+   suffices.
+
+   In the example, we could statically allocate an array of some maximum number of ringbuffers, and give
+   the user a uint32_t handle, which is an index into the array.
+
+   The example code would look slightly different:
+
+=== ringbuffer.h ===
+// ...
+typedef uint32_t ringbuffer_t;
+// ...
+
+=== ringbuffer.c ===
+#include "ringbuffer.h"
+
+#define MAX_NUM_RINGBUFFERS 10
+#define MAX_RINGBUFFER_CAPACITY 100
+
+struct ringbuffer_instance_t {
+	volatile uint32_t wr_pos;
+	volatile uint32_t rd_pos;
+	uint8_t data[MAX_RINGBUFFER_CAPACITY];
+	uint32_t capacity;
+};
+
+static struct ringbuffer_instance_t g_instances[MAX_NUM_RINGBUFFERS];
+static bool g_instance_in_use[MAX_NUM_RINGBUFFERS];
+
+ringbuffer_t ringbuffer_create(uint32_t capacity) {
+	// Search for an instance that is not in use
+	for (uint32_t i = 0; i < MAX_NUM_RINGBUFFERS; i++) {
+		if (!g_instance_in_use[i]) {
+			g_instance_in_use[i] = true;
+			g_instances[i].wr_pos = 0;
+			g_instances[i].rd_pos = 0;
+			g_instances[i].capacity = capacity;
+			return i;
+		}
+	}
+
+	// No available instances, fail hard here.
+	// Alternatively, could return an error code and let the user handle it.
+	assert(false);
+}
+
+uint32_t ringbuffer_capacity(ringbuffer_t handle) {
+	return g_instances[handle].capacity;
+}
+
+// ...
+
+void ringbuffer_destroy(ringbuffer_t handle) {
+	g_instance_in_use[handle] = false;
+}
+
+   Notice that it's still possible to run out of instances, which is similar to a dynamic memory
+   allocation failure. The benefit of static memory is that problems like fragmentation are avoided.
+   Ultimately, the system designer still needs to think about how to handle failed instance creation.
+
+   One downside to this approach is that it can be wasteful of memory. If you create an array that is
+   capable of holding 100 instances, and you only ever create one instance, then you've wasted the
+   memory of 99 instances. Furthermore, for a specific instance, if the user only needs a capacity of
+   25, then the other 75 slots are completely unused.
+
+   Some might balk at the performance of the linear scan in ringbuffer_create. In practice, I've found
+   it's rarely a concern, especially if you have a small number of instances (ten or less), or if you
+   rarely call *_create (e.g. only once at system startup).
+
+   The linear scan could become a concern if you create and destroy instances many times (e.g. inside of
+   a loop), or if you have a large number of instances, in which case you probably don't want to pay the
+   O(n) price each time. For those cases, a linked list of available instances is a good approach.
+
+   My personal approach - dynamic memory is okay if it's only allocated at system startup, and not
+   during normal operation. The implementation is much simpler using dynamic memory.
+
+When Should I Use This Pattern?
+   Opaque pointers are a good fit if you need multiple instances. They are also a good fit for
+   general-purpose libraries, like cJSON.
+
+   If you only ever need one of something (e.g. a state machine), then the pattern can be overkill.
+   Since there's just one instance (in OOP, a singleton), there's no need for handles. The opaque
+   pointer would just be useless overhead.
+
+   In my experience, a large portion of C modules do not need multiple instances, so I use this pattern
+   sparingly.
+
+   Once you are comfortable with the pattern, you may be tempted to apply it to every C module in the
+   system ("We must objectify all the things!"), but this would be a mistake. APIs which don't have
+   opaque pointers are easier to use than ones that do, so default to not using them. The less "stuff"
+   that's in the header file, the better.
+
+
+---
+https://gist.github.com/hosaka/90854562693e12e2042d
+
+Abstract Data Type using opaque pointers in C
+
+
+Compile and run
+$> gcc adt.c array.c -o adt
+$> ./adt
+
+=== adt.c ===
+#include <stdio.h>
+#include <stdlib.h>
+#include "array_api.h"
+
+// Opaque pointer:
+// An ADT implementation hidden behind the interface that is abstract to
+// the client, making it easier to maintain, apply changes and improve
+// in this example the array_t data type provides a bunch of functins
+// for manipulating the array, these are accessed through the array_api.h
+// interface but the implementation stays hidded in array.c
+int main(int argc, char const *argv[]) {
+	// A static structure can not be defined because the compiler doesn't know
+	// how big the data type is since we didn't add any elements to it
+	// array_t new_array;
+	// error: storage size of 'new_array' isn't known
+	// We can however define a pointer to such structure because a pointer is
+	// always of a known size
+	array_t *arr;
+	// Create a new abstract array with size 3
+	arr = array_alloc(3);
+	// Set some values
+	array_set(arr, 0, 1);
+	array_set(arr, 1, 2);
+	array_set(arr, 2, 4);
+	// Display the array
+	array_print(array_begin(arr), array_end(arr));
+	// Cause the array to grow by setting new indices
+	array_set(arr, 3, 8);
+	array_set(arr, 6, 42);
+	// Display the array, note the empty indices 4 and 5 are set to zero
+	array_print(array_begin(arr), array_end(arr));
+	// Free up the array
+	array_free(arr);
+	return EXIT_SUCCESS;
+}
+
+
+=== array.c ===
+#include <stdio.h>
+#include <stdlib.h>
+#include "array_api.h"
+
+// this is the abstract implementation of the array api
+// including the header here helps us stay consistent with the public api we provide
+// this file can, of course, also have it's own private header file
+// abstract data type
+struct array_s {
+	int m_size;
+	int m_capacity;
+	int *m_data; // actual array data
+};
+
+// memory management
+array_t *array_alloc(int size) {
+	// memory for the return structure
+	array_t *ret = malloc(sizeof(array_t));
+	// size and capacity
+	ret->m_size = ret->m_capacity = size;
+	// array data allocation
+	ret->m_data = malloc(ret->m_capacity * sizeof(int));
+	return ret;
+}
+
+void array_free(array_t *arr) {
+	// free array data and struct itself
+	free(arr->m_data);
+	free(arr);
+}
+
+// manipulations
+void array_set(array_t *arr, int index, int value) {
+	// set the size if requested index is bigger than we have
+	if (index >= arr->m_size) {
+		arr->m_size = index + 1;
+	}
+	// check the capacity
+	if (arr->m_size >= arr->m_capacity) {
+		// grow the array by doubling it's current capacity
+		int new_capacity = arr->m_capacity * 2;
+		if (new_capacity <= arr->m_size) {
+			new_capacity = arr->m_size + 1;
+		}
+		// realloc more memory
+		arr->m_data = realloc(arr->m_data, new_capacity * sizeof(int));
+		arr->m_capacity = new_capacity;
+	}
+	// set the value
+	arr->m_data[index] = value;
+}
+
+void array_print(int *begin, int *end) {
+	while (begin != end) {
+		printf("%d ", *begin);
+		begin++;
+	}
+	printf("\n");
+}
+
+// array status info
+int *array_begin(array_t *arr) {
+	return arr->m_data;
+}
+
+int *array_end(array_t *arr) {
+	return arr->m_data + arr->m_size;
+}
+
+
+=== array_api.h ===
+
+#ifndef ARRAY_H
+#define ARRAY_H
+// Abstract Data Type
+//
+// This demonstrates information hiding (encapsulation) using C
+// If the declaration of array_t or the internal structure were to change
+// it would be unnecessary to recompile other modules, unless the API was also
+// changed
+// object of an incomplete type
+typedef struct array_s array_t;
+// interface for the ADT
+array_t *array_alloc(int size);
+void array_free(array_t *arr);
+void array_set(array_t *arr, int index, int value);
+int *array_begin(array_t *arr);
+int *array_end(array_t *arr);
+void array_print(int *begin, int *end);
+#endif
+
+
+***
+   // and other junk, but the array_api.h can stays separate
+
+   The purpose of opaque pointers is to keep the implementation separate, that allows you to do
+   "separate compilation", but the api is something that is NOT separate and this is an error to not
+   include it here.
+
+   It would be better to include array_api.h inside array.c that way the compiler could guarantee that
+   the definition used by the callers match the function declarations inside array.c
+
+   If at some point you decide to evolve the api, and you make the following mistake: the function
+   declarations and the header prototypes are not matching anymore because you copy pasted wrong, or
+   forgot something, then It is likely that everything will compile just fine and you will have ABI
+   errors at runtime. If you are not lucky they could even NOT trigger segmentation fault and go
+   undetected while you're code is not working.
+
+   you would have to remove that typedef to prevent a name conflict probably (did not test it)
+
+typedef struct array_s {
+	int m_size;
+	int m_capacity;
+	int *m_data; // actual array data
+} array_t;
+
+   would become
+#include "array_api.h"
+
+struct array_s {
+	int m_size;
+	int m_capacity;
+	int *m_data; // actual array data
+};
+
+
+---
+https://www.reddit.com/r/C_Programming/comments/d2ck10/revealed_struct_vs_opaque_struct/?rdt=46818
+
+Revealed struct VS. Opaque struct
+
+   When writing an interface header file, books like C Interfaces and Implementations specify to create
+   an opaque data structure by creating a pointer to the specified type (example: typedef struct Type*
+   type_t;). However, other sources like some of Linux's own files just leave the struct completely open
+   (example: struct Type { /* .... */ };). Which one should I use?
+
+***
+If you are writing a library, use pointers to opaque structures. If you are writing an application, use open
+structures. If you are writing an operating system, think hard and tread carefully.
+
+Secondly, writing nice interfaces off the bat is hard. Get a library working first using whatever paradigm you
+are comfortable with, then take a step back and consider how you can minimize the attack surface; working out
+the smallest, simplest interface for your library will make it easier for users to use it, which in turn will
+make things less error-prone and therefore more reliable.
+
+***
+My general rule is: if the users of your interface are allowed to look inside your struct and manipulate its
+contents, give them a struct Type { ... }. If they are not allowed these things they don't even need to know
+it's a struct, so you give them a typedef ... Type;
+
+I rarely make type_t (as in "pointer-to") typedefs, though. Don't like to hide the fact something is a
+pointer.
+
+***
+I'd just like to add that you don't need a typedef to make an opaque struct. One can just declare the struct
+without defining it in the public header file, and then define it in an implementation file.  Ex.:
+
+In Foo.h:
+struct foo;
+
+In Foo.c:
+struct foo { int a; };
+
+
+---
+https://www.linkedin.com/pulse/what-opaque-types-c-how-do-i-use-them-abdu-hameed-oluwashegu-tade
+
+What are opaque types in C ? How do you use them ?
+Feb 8, 2022
+
+   Sometimes when working with C, you might want to perform some data abstraction. There is an easy
+   technique to do this in C using opaque types.
+
+=== opaque.c ===
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_LEN 256
+
+typedef struct _Opaque {
+	char name[MAX_LEN];
+	char Country[MAX_LEN];
+	unsigned long long age;
+} Opaque, *pOpaque;
+
+Opaque *CreateHuman(char name[MAX_LEN], char Country[MAX_LEN], unsigned long long, age) {
+	Opaque *op = (Opaque *)malloc(sizeof(Opaque));
+	memcpy(op->name, name, MAX_LEN);
+	memcpy(op->Country, Country, MAX_LEN);
+	op->age = age;
+	return op;
+}
+
+void PrintHuman(Opaque *op) {
+	printf("--------------------------------------------------\n");
+	printf("Name:        %s\n", op->name);
+	printf("Country:     %s\n", op->Country);
+	printf("Agw:         %s\n", op->age);
+	printf("--------------------------------------------------\n");
+}
+
+void OpaqueFree(Opaque *op) {
+	free(op);
+}
+
+
+
+=== opaque.h ===
+
+#ifndef __OPAQUE_H__
+#define __OPAQUE_H__
+
+extern struct _Opaque;
+typedef struct _Opaque opaque;
+
+#define MAX_LEN 256
+
+Opaque *CreateHuman(char name[MAX_LEN], char Country[MAX_LEN], unsigned long long, age);
+void PrintHuman(Opaque *op);
+void OpaqueFree(Opaque *op);
+
+#endif // __OPAQUE_H__
+
+
+   Opaque.c contains the definition of the struct. In opaque.h, we declare the struct, but this time we
+   do not define its fields. We use the extern keyword to tell the compiler/linker that the definition
+   of the struct is in another file. Let's write a test program to use this struct. Open an editor,
+   create the file test.c, and copy the following into it.
+
+#include <stdio.h>
+#include "opaque.h"
+
+int main() {
+
+	char name[256] = "Jerome Boateng";
+	char Country[256] = "Ghana";
+	unsigned long long age = 30;
+
+	Opaque *op = CreateHuman(name,Country,age);
+	PrintHuman(op);
+	OpaqueFree(op);
+
+	return 0;
+}
+
+
+   Compiling and running on Ubuntu-18.04 LTS WSL with gcc 9.3.0 by typing the commands below,
+1| $> gcc -o test test.c opaque.c
+2| $> ./test
+
+   we get the following output:
+
+1| -------------------------------------------------
+2| Name:       Jerome Boateng
+3| Country:    Ghana
+4| Age:        30
+5| -------------------------------------------------
+
+   The CreateHuman function takes a structure of type Opaque, populates the fields of the structure with
+   the arguments provided, namely the name and country of origin as character strings and then an age of
+   type unsigned long long. It then passes the Opaque struct to PrintHuman which then formats and prints
+   the corresponding fields to standard output (screen). OpaqueFree is then called, which frees the
+   allocated block .
+
+   So everything works fine as you can see. What we have essentially done here is data abstraction. We
+   declared the struct with its fields in the C source file, but in the header file, we qualified the
+   declaration of the struct name with the extern keyword which tells the linker to look elsewhere, in
+   another file, for the actual definition of the fields of the Opaque structure. That way, any source
+   file using the structure would only be able to declare it but not get access to the fields of the
+   structure.
+
+   This technique is used all over the C runtime library to hide its internal data structures from user
+   mode programs that use it.
+
+
+---
+

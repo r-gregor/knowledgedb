@@ -1,0 +1,561 @@
+filename: dd_creating-partitioned-virtual-disk-images-multif_20180409.txt
+https://adayinthelifeof.nl/2011/10/11/creating-partitioned-virtual-disk-images/
+
+Creating partitioned virtual disk images
+
+   Warning: This blogpost has been posted over two years ago. That is a long time in development-world!
+   The story here may not be relevant, complete or secure. Code might not be complete or obsoleted, and
+   even my current vision might have (completely) changed on the subject. So please do read further, but
+   use it with caution.
+
+   Using a disk image is very easy: download the file, mount it through a so-called "loopback"
+   device and your OS will see the image as it was an real harddisk, CDR or DVD. When I needed to test
+   the IDE-drivers, the partitioning-functionality, the ext2 drivers etc, I wanted to use just such an
+   image so I can quickly make modifications and check how the actual structure looked like, just by
+   reading the disk image file. This is a great help when it comes to debugging.
+
+   Our OS debugging takes place in both QEMU and Bochs. These two virtual machines / emulators can use a
+   disk image to emulate a harddisk. This way, I can test my IDE/ATA drivers all the way up to the
+   virtual file system to see if everything works.
+    1. Create an empty image.
+    2. Partition the image through fdisk
+    3. Create the loopbacks for each partition
+    4. Format the partitions
+    5. Mount the partitions and populate
+
+Create an empty image.
+   There are multiple ways to do this, but one of the easiest methods is to use either dd or bximage.
+   The latter one is a tool from the Bochs Emulator that can create disks.
+0xdeadbeef:image joshua$ <strong>bximage</strong>
+========================================================================
+                                bximage
+                  Disk Image Creation Tool for Bochs
+        $Id: bximage.c,v 1.34 2009/04/14 09:45:22 sshwarts Exp $
+========================================================================
+
+Do you want to create a floppy disk image or a hard disk image?
+Please type hd or fd. [hd]
+
+What kind of image should I create?
+Please type flat, sparse or growing. [flat]
+
+Enter the hard disk size in megabytes, between 1 and 129023
+[10]
+
+I will create a 'flat' hard disk image with
+  cyl=20
+  heads=16
+  sectors per track=63
+  total sectors=20160
+  total size=9.84 megabytes
+
+What should I name the image?
+[c.img] <strong>hdd.img</strong>
+
+Writing: [] Done.
+
+I wrote 10321920 bytes to hdd.img.
+
+The following line should appear in your bochsrc:
+    ata0-master: type=disk, path="hdd.img", mode=flat, cylinders=20, heads=16, spt=63
+
+   Another way is to use the "dd" utility that comes on most unix/linux systems:
+dd if=/dev/zero of=hdd.img bs=1024 count=10240
+
+   You will notice a difference in size even though I both entered that I wanted 10MB of space. This is
+   because bximage does it's calculations on CHS level, while dd just copy bytes. For our purpose,
+   this doesn't matter.
+
+Partition the image through fdisk
+
+   Now that we have a completely blank file (or virtual disk), we need to partition it just like any
+   other disk. The "fdisk" utility it the way to go here, and there is nothing different between
+   creating partitions on a virtual disk than it is on a physical one.
+fdisk hdd.img
+
+   I've added a bunch of partitions (again: I'm testing my OS here, so it needs to be able to handle
+   stuff like extended partitions etc). Just make sure you set the correct settings for your cylinders,
+   heads and sectors-per-track in the fdisk menu. They are located in the "Expert menu" through
+   "x". I've added a big 5MB partition for Linux, a small 2MB partition for dos/fat16, another
+   1.5MB for linux, and a-little-bit-less-than-1MB partition for Linux, but I've put the last one
+   inside an extended partition:
+# fdisk -l -u hdd.img -C 20 -H 16 -S 63
+
+Disk hdd1.img: 0 MB, 0 bytes
+16 heads, 63 sectors/track, 20 cylinders, total 0 sectors
+Units = sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x839d4362
+
+   Device Boot      Start         End      Blocks   Id  System
+hdd.img1              63       10079        5008+  83  Linux
+hdd.img2           10080       15119        2520    6  FAT16
+hdd.img3           15120       18143        1512   83  Linux
+hdd.img4           18144       20159        1008    5  Extended
+hdd.img5           18207       20159         976+  83  Linux
+
+   Now for the most important part, we NEED to remember the values used in the "Start" and "End"
+   column. As you can see, the first partition does not start at 0 as you might have expected. That is
+   because fdisk leaves room for boot-programs in this first part of the disk. The actual partition
+   starts on sector 63, which is 63 * 512 = position 32256 inside our virtual image. This is important
+   to realize in the next part..
+
+Create the loopbacks for each partition
+   Get your calculator up and running, because we need a bit of math to do. This is because we don't
+   mount the whole file as a whole, but we mount each partition separately. So we get 4 mounts: primary
+   partition 1 (linux), primary partition 2 (fat16), primary partition 3 (linux) and extended partition
+   5 (linux). We don't need to mount the extended partition, since this is not really more than a
+   placeholder for other partitions.
+
+   Before we can mount the partitions, we add them to the loopback driver. This is done with
+   "losetup".
+# losetup -o 32256 --sizelimit 5160448 /dev/loop1 hdd.img
+
+   We have 4 arguments: the start (offset) inside the file, the LIMIT of the image, the loopback device
+   we want to add the file to, and the last one is the actual file that we want to create a loopback
+   for.
+
+   The offset is a byte-offset and is calculated by \* 512. As you saw in the fdisk-list above,
+   partition 1 starts at sector 63, so 63 \* 512 makes 32256. The sizelimit is **VERY** important. It
+   tells the loopback driver it should not use the complete file, but only until this limit. It is
+   calculated by the end-sector of the partition. In our case: 10079 * 512 = 5160448.
+
+   The complete list  should look like this:
+# losetup -o 32256 --sizelimit 5160448 /dev/loop1 hdd.img
+# losetup -o 5160960 --sizelimit 7740928 /dev/loop2 hdd.img
+# losetup -o 7741440 --sizelimit 9289216 /dev/loop3 hdd.img
+# losetup -o 9321984 --sizelimit 10321408 /dev/loop5 hdd.img
+
+   I've used the /dev/loopN to match the actual partition. You could use /dev/loop0 to /dev/loop3 if
+   you want. Doesn't really matter.
+
+Format the partitions
+   At this point you are able to format the partitions. Again, just like any physical partition.
+# mkfs.ext2 /dev/loop1
+# mkdosfs /dev/loop2
+# mkfs.ext2 /dev/loop3
+# mkfs.ext2 /dev/loop5
+
+   Did I mention the importance of the sizelimit argument during losetup? If you didn't you will run
+   into trouble when formatting the partitions. In the case of the first partition, the loopback device
+   knows it starts from sector 63 (which is correct), but since you didn't specify a limit, it thinks
+   it can use the rest of the file. In our case, this would mean it would use a little bit less than
+   10MB. Same goes for the other partitions as well.
+
+Mount the partitions and populate
+   Now we can actually mount and populate the partitions.
+mkdir /mnt/hd1p1 ; mount /dev/loop1 /mnt/hd1p1
+mkdir /mnt/hd1p2 ; mount /dev/loop2 /mnt/hd1p2
+mkdir /mnt/hd1p3 ; mount /dev/loop3 /mnt/hd1p3
+mkdir /mnt/hd1p5 ; mount /dev/loop5 /mnt/hd1p5
+
+   Now you can populate the filesystems any way you like (and in my case, I can actually mount them
+   correctly from CybOS :))
+
+Conclusion
+   Using partitioned based virtual images isn't something that is used much, but can come in handy
+   from time to time. One of the biggest issues with them is not to forget the "-sizelimit" argument
+   during losetup. Forgetting this can make your life miserable since you can (and will) overwrite data
+   from other partitions as well without noticing.
+
+
+---
+https://web2.clarkson.edu/projects/itl/honeypot/ddtutorial.txt
+
+A virtual filesystem is filesystem that exists in a file, which in turn exists on a physical disk. There's a lot
+of great things you can do with virtual file systems; the reason I was messing with them was to configure a virtual
+machine on a linux host. Other uses include encrypting filesystems without encrypting entire disks; Mac OS X's
+File Vault encrypts users home directories this way. Maybe you went ahead and made yourself one giant partition
+and then realized for one reason or another that you want multiple partitions! Virtual filesystems can help
+(to some extent) with that as well.
+
+So how do you make a virtual file system? Easy. The first thing you need to do is make a file for the filesystem
+to live in. This is where 'dd' starts to come in. Consider, for example, the following command:
+
+dd if=/dev/zero of=~/myFileSystem.img bs=1024 count=1048576
+
+This command will read 1,048,576 blocks from /dev/zero and write them to ~/myFileSystem.img; each block is 1024 bytes,
+resulting in a 1 gigabyte file containing all zeroes. The actual values that you use for the blocksize (bs) and
+count aren't really important, the key is to get your math right: bs * count = imageSize.
+
+So now you have your file; great. It's time to make a file system! this part is even easier... we'll create an EXT2
+filesystem, using the following command:
+
+mke2fs myFileSystem.img
+
+You may notice a warning prompt, saying that myFileSystem.img is not a block device, would you like to proceed?
+We'll get to that in just a second, for now, go ahead and say yes. Everything should go smooth, it'll look just
+as if you'd created a filesystem on an actual disk drive. You now have a virtual file system! The only thing
+left to do is mount your filesystem so you can access it...
+
+mkdir /mnt/virtual
+mount -o loop ~/myFileSystem.img /mnt/virtual
+
+Now any file you put into /mnt/virtual is actually being put directly into myFileSystem.img! Wasn't that easy?
+
+Fantastic. Now that you know how to make a virtual filesytsem, why not make a while virtual disk image? What's
+the difference you ask? A disk image is going to have a partition table that defines some number of partitions,
+and each partition contains its own filesystem; so a virtual filesystem is essentially a "virtual partition" of
+a virtual disk image; the virtual disk image contains multiple virtual filesystems, and a virtual partition table
+that describes where the bounds of each partition are.
+
+Creating a virtual disk image starts out the same; the first thing you need is a big empty file, just you created
+above. This time, though, instead of making a file system, we'll want to partition the file using fdisk. To make
+things a little nicer though, we're going to throw loopback devices into the mix. You should make sureyou have
+loopback device support enabled in your kernel (most distributions do by default; but if you're a kernel compiling
+linux junky, you might wanna check ). So we'll create a big file, and attach it to a loopback device,
+as follows:
+
+dd if=/dev/zero of=~/myDisk.img bs=1024 count=1048576
+losetup /dev/loop0 ~/myDisk.img
+
+By attaching the disk image to the loopback device, we can use /dev/loop0 the same way we would use ~/myDisk.img;
+the main difference is that /dev/loop0 is a what's known as a "block device". You'd have to ask someone with more
+experience than I've got what precisely this gets you, but what I do know is that the filesystem utilities work
+better with block devices than they do with the flat files. Plus, it's fun.
+
+So good, we've got a big empty file attached to a loopback device (/dev/loop0)... now it's time to create
+partitions in the disk image. To do this, we'll run fdisk on our loopback device:
+
+fdisk /dev/loop0
+
+Lets create three partitions... if you're following this, you should already be familiar with fdisk, so go ahead
+and create the following:
+      Device Boot      Start         End      Blocks   Id  System
+/dev/loop0p1               1          17      136521   83  Linux
+/dev/loop0p2              18          80      506047+  82  Linux swap
+/dev/loop0p3              81         130      401625   83  Linux
+
+Once you've made your partitions, write your changes and quit fdisk. What we'll need to do next is create filesystems
+on each partition. Remember how easy that was back with Virtual Filesystems? Not quite so much anymore
+...
+
+Not to panic though... the trouble is that "mkfs" can't "reach into" our virtual disk image and make a filesystem
+just on individual partition. Infact, if you try, you'll probably wind up wiping our your virtual disk image
+and having to rerun fdisk . So what to do... what to do?? Loopback devices to the rescue. What we'll do is attach
+a loopback device to the myDisk.img file at the specific offsets where each partition begins.
+
+It's helpful then to look at the partitions in terms of blocks. Execute the following command:
+
+fdisk -ul /dev/loop0
+
+ should look (hopefully exactly) like this:
+
+Disk /dev/loop0: 1073 MB, 1073741824 bytes
+
+255 heads, 63 sectors/track, 130 cylinders, total 2097152 sectors
+
+Units = sectors of 1 * 512 = 512 bytes
+
+
+
+
+      Device Boot      Start         End      Blocks   Id  System
+
+/dev/loop0p1              63      273104      136521   83  Linux
+
+/dev/loop0p2          273105     1285199      506047+  82  Linux swap
+
+/dev/loop0p3         1285200     2088449      401625   83  Linux
+
+These numbers are important for the math... we'll use the losetup command like we did before, only this time
+we'll reach in specifically to the start of each of the three partitions. losetup takes offsets as the number
+of bytes to skip at the beginning of the file. The output from fdisk -ul /dev/loop0 shows us that the first
+partition starts at block 63, and that each block is 512 bytes. So partition 1 starts at byte 32,256
+
+losetup -o 32256 /dev/loop1 /dev/loop0
+
+That command reaches 32,256 bytes into /dev/loop0 and mounts it at /dev/loop1. Remember that since /dev/loop0
+is attached the myDisk.img file, this is the same as reaching 32,256 bytes into that file... follow? Ok, good.
+ Same logic for partitions 2 and 3:
+
+losetup -o 139829760 /dev/loop2 /dev/loop0
+
+losetup -o 658022400 /dev/loop3 /dev/loop0
+
+So now we have four loopback devices set up; /dev/loop0 is attached to the myDisk.img file. /dev/loop1 is the
+first partition of the virtual disk represented by /dev/loop0; /dev/loop2 is the 2_nd, and /dev/loop3 is the
+3_rd.
+
+ Now it's finally time to make those file systems! This is now just as easy as making a regular filesystem,
+ since that's all we're doing. Remember, mkfs doesn't know the device isn't a physical device! We'll make three
+ kinds of file systems, an ext2 file system for partition 1, a swap filesystem for partition 2, and an XFS
+ fileystem for partition 3:
+
+mkfs /dev/loop1
+
+mkswap /dev/loop2
+
+mkfs.xfs /dev/loop3
+
+Since loop1, loop2, and loop3 are tied directly to loop0, and loop0 is ~/myDisk.img, everything that we just
+did to loop1, loop2, and loop3 affected myDisk.img directly! We can now mount /dev/loop3, for instance,
+on /mnt/virtual as an XFS file system, and use it as a regular file system!
+
+So I hope you found that helpful... you can do some pretty neat things with virtual file systems and virtual
+disk images; and loopback devices make a world of difference for making things go smooth.
+
+
+
+---
+https://thelinuxexperiment.com/create-a-virtual-hard-drive-volume-within-a-file-in-linux/comment-page-1/
+
+Create a virtual hard drive volume within a file in Linux
+
+   If you are not familiar with the concept of virtual hard drive volumes, sometimes called file
+   containers, they are basically regular looking files that can be used by your computer as if they
+   were real hard drives. So for example you could have a file called MyDrive.img on your computer and
+   with a few quick actions it would appear as though you had just plugged in an external USB stick or
+   hard drive into your computer. It acts just like a normal, physical, drive but whenever you copy
+   anything to that location the copied files are actually being written to the MyDrive.img file behind
+   the scenes. This is not unlike the [21]dmg files you would find on a Mac or even something akin to
+   TrueCrypt file containers.
+
+Why would I want this?
+   There are a number of reasons why you may be interested in creating virtual volumes. From adding
+   additional swap space to your computer (i.e. something similar to a page file on Windows without
+   needing to create a new hard drive partition) to creating portable virtual disk drives to back up
+   files to, or even just doing it because this is Linux and it’s kind of a neat thing to do.
+
+What are the steps to creating a file container?
+   The process seems a bit strange but it’s actually really straight forward.
+    1. Create a new file to hold the virtual drive volume
+        (Optional) Initialize it by filling it with data
+    2. Format the volume
+    3. Mount the volume and use it
+
+Create a new file to hold the virtual drive volume
+   There are probably a million different ways to do this but I think the most simple way is to run the
+   following command from a terminal:
+fallocate -l <size> <file to create>
+
+   So let’s say you wanted to create a virtual volume in a file called MyDrive.img in the current
+   directory with a size of 500MiB. You would simply run the following command:
+fallocate -l 500M MyDrive.img
+
+   You may notice that this command finishes almost instantly. That’s because while the system created a
+   500MiB file it didn’t actually write 500MiB worth of data to the file.
+
+   This is where the optional step of ‘initializing’ the file comes into play. To be clear you do not
+   need to do this step at all but it can be good practice if you want to clean out the contents of the
+   allocated space. For instance if you wanted to prevent someone from easily noticing when you write
+   data to that file you may pre-fill the space with random data to make it more difficult to see or you
+   may simply want to zero out that part of the hard drive first.
+
+   Anyway if you choose to pre-fill the file with data the easiest method is to use the dd command.
+   PLEASE BE CAREFUL – dd is often nicknamed disk destroyer because it will happily overwrite any data
+   you tell it to, including the stuff you wanted to keep if you make a mistake typing the command!
+
+   To fill the file with all zeros simply run this command:
+dd if=/dev/zero of=<your file> bs=1M count=<your file size in MiB>
+
+   So for the above file you would run:
+dd if=/dev/zero of=MyDrive.img bs=1M count=500
+
+   If you want to fill it with random data instead just swap /dev/zero for /dev/urandom or /dev/random
+   in the command:
+dd if=/dev/urandom of=MyDrive.img bs=1M count=500
+
+Format and mount the virtual volume
+
+   Next up we need to give the volume a filesystem. You can either do this via the command line or using
+   a graphical tool. I’ll show you an example of both.
+
+   From the terminal you would run the appropriate mkfs command on the file. As an example this will
+   format the file above using the ext3 filesystem:
+mkfs -t ext3 MyDrive.img
+
+   You may get a warning that looks like this
+MyDrive.img is not a block special device.
+Proceed anyway? (y,n)
+
+   Simply type the letter ‘y’ and press Enter. With any luck you’ll see a bunch of text telling you
+   exactly what happened and you now have a file that is formatted with ext3!
+
+   If you would rather do things the graphical way you could use a tool like Disks (gnome-disk-utility)
+   to format the file.
+
+   From the menu in Disks, select Disks -> Attach Disk Image and browse to your newly created file (i.e.
+   MyDrive.img).
+   Don't forget to uncheck the box! Don't forget to uncheck the box! Don’t forget to uncheck the
+   box!
+
+   Be sure to uncheck “Set up read-only loop device”. If you leave this checked you won’t be able to
+   format or write anything to the volume. Select the file and click Attach.
+
+   This will attach the file, as if it were a real hard drive, to your computer:
+
+   [24]MyDriveAttached MyDriveAttached
+
+   Next we need to format the volume. Press the little button with two gears right below the attached
+   volume and click Format. Make sure you do this for the correct ‘drive’ so that you don’t accidentally
+   format your real hard drive!
+   Make sure you're formatting the correct drive! Make sure you're formatting the correct drive!
+   Make sure you’re formatting the correct drive!
+
+   From this popup you can select the filesystem type and even name the drive. You may also use the
+   “Erase” option to write zeros to the file if you wanted to do it here instead of via the terminal as
+   shown previously. In the image above the settings will format the drive using the ext4 filesystem.
+   Click Format, confirm the action and you’re done. Disks will format the file and even auto-mount it
+   for you. You can now copy files to your mounted virtual drive. When you’re done simply eject the
+   drive like normal or press the square Stop button in Disks. To use that same volume again in the
+   future just re-attach the disk image using the steps above.
+
+   To mount the formatted file from the terminal you will need to first create a folder to mount it to.
+   Let’s say we wanted to mount it to the folder /media/MyDrive. First create the folder there:
+sudo mkdir /media/MyDrive
+
+   Next mount the file to the folder:
+sudo mount -t auto -o loop MyDrive.img /media/MyDrive/
+
+   Now you can copy files to the drive just like before. When you’re finished unmount the volume by
+   running this command:
+sudo umount /media/MyDrive/
+
+   And there you have it. Now you know how to create virtual volume files that you can use for just
+   about anything and easily move from computer to computer.
+
+
+---
+https://major.io/2010/12/14/mounting-a-raw-partition-file-made-with-dd-or-dd_rescue-in-linux/
+
+Mounting a raw partition file made with dd or dd_rescue in Linux
+December 14, 2010
+
+   This situation might not affect everyone, but it struck me today and left me scratching my head.
+   Consider a situation where you need to clone one drive to another with [16]dd or when a hard drive is
+   failing badly and you use [17]dd_rescue to salvage whatever data you can.
+
+   Let’s say you cloned data from a drive using something like this:
+# dd if=/dev/sda of=/mnt/nfs/backup/harddrive.img
+
+   Once that’s finished, you should end up with your partition table as well as the grub data from the
+   MBR in your image file. If you run file against the image file you made, you should see something
+   like this:
+# file harddrive.img
+   harddrive.img: x86 boot sector; GRand Unified Bootloader, stage1 version 0x3, stage2
+   address 0x2000, stage2 segment 0x200, GRUB version 0.97; partition 1: ID=0x83,
+   active, starthead 1, startsector 63, 33640047 sectors, code offset 0x48
+
+   What if you want to pull some files from this image without writing it out to another disk? Mounting
+   it like a loop file isn’t going to work:
+# mount harddrive /mnt/temp
+   mount: you must specify the filesystem type
+
+   The key is to mount the file [18]with an offset specified. In the output from file, there is a
+   particular portion of the output that will help you:
+... startsector 63 ...
+
+   This means that the filesystem itself starts on sector 63. You can also view this with fdisk -l:
+# fdisk -l harddrive.img
+                       Device Boot      Start         End      Blocks   Id  System
+   harddrive.img                *          63    33640109    16820023+  83  Linux
+
+   Since we need to scoot 63 sectors ahead, and each sector is 512 bytes long, we need to use an offset
+   of 32,256 bytes. Fire up the mount command and you’ll be on your way:
+# mount -o ro,loop,offset=32256 harddrive.img /mnt/loop
+   # mount | grep harddrive.img
+   /root/harddrive.img on /mnt/loop type ext3 (ro,loop=/dev/loop1,offset=32256)
+
+   If you made this image under duress (due to a failing drive or other emergency), you might have to
+   check and repair the filesystem first. Doing that is easy if you make a loop device:
+# losetup --offset 32256 /dev/loop2 harddrive.img
+   # fsck /dev/loop2
+
+   Once that’s complete, you can save some time and mount the loop device directly:
+# mount /dev/loop2 /mnt/loop
+
+
+---
+http://www.andremiller.net/content/mounting-hard-disk-image-including-partitions-using-linux
+
+Mounting a hard disk image including partitions using Linux
+January 22, 2008
+
+   A while ago I thought it would be a good idea to make a backup of my Linux server by just dumping the
+   complete disk to a file. In retrospect, it would have been much easier had I just dumped the
+   individual filesystems.
+
+   When I finally got around to using this backup, long after the 10GB disk had perished I realized that
+   to use the loopback device to mount a filesystem it actually needs a filesystem to mount. What I had
+   was a disk image, including partition table and individual partitions. To further complicate matters
+   the data partition was also not the first partition inside this image.
+
+   For reference, I created this image using the Unix ‘dd’ tool:
+# dd if=/dev/hda of=hda.img
+30544113+0 records in
+30544113+0 records out
+# ls -lh
+-rw-r--r-- 1 root    root  9.6G 2008-01-22 14:12 hda.img
+
+   I followed the instructions on http://www.trekweb.com/~jasonb/articles/linux_loopback.html to try and
+   mount the partitions inside the disk image, but ran into two problems.
+
+   To mount a partition inside the disk image you need to calculate the offset of where the partition
+   starts. You can use fdisk to show this information to you, but you need to specify the number of
+   cylinders if you are using a disk image.
+
+   You then also need to multiply the start and end numbers with the calculated sectors to get a byte
+   offset.
+
+   I found another tool more useful for this task, called parted. If you are using Ubuntu, you can
+   install it with ‘apt-get install parted’
+# parted hda.img
+GNU Parted 1.7.1
+Using /data/rabbit/disk_image/test2
+Welcome to GNU Parted! Type 'help' to view a list of commands.
+(parted) unit
+Unit?  [compact]? B
+(parted) print
+Disk /data/rabbit/disk_image/test2: 10262568959B
+Sector size (logical/physical): 512B/512B
+Partition Table: msdos
+Number  Start        End           Size         Type     File system  Flags
+1      32256B       106928639B    106896384B   primary  ext3         boot
+2      106928640B   1184440319B   1077511680B  primary  linux-swap
+3      1184440320B  10256924159B  9072483840B  primary  ext3
+(parted) quit
+
+   Now we have the offsets and we can use those to mount the filesystems using the loopback device:
+# mount -o loop,ro,offset=32256 hda.img /mnt/rabbit
+
+   That mounted the first partition, the ‘boot’ partition, but this didn’t have the data on it that I
+   was looking for. Lets try to mount partition number 3.
+# umount /mnt/rabbit
+# mount -o loop,ro,offset=1184440320 test2 /mnt/rabbit
+# mount: wrong fs type, bad option, bad superblock on /dev/loop0,
+missing codepage or helper program, or other error
+In some cases useful info is found in syslog - try
+dmesg | tail  or so
+
+   Oops, that doesn’t look right. According the article referred to above if you are using a util-linux
+   below v2.12b then you cannot specify an offset higher than 32bits. I’m using util-inux 2.13 which
+   shouldn’t have that problem, and besides, my offset is well below the 32bit limit.
+
+   The article also offers an alternative loopback implementation that supports mounting partitions
+   within an image, but that requires patching and recompiling your kernel which I would rather not do.
+
+   Instead I decided to extra ct the filesystem from the image which would then allow me to mount it
+   without specifying an offset.
+   Doing this is quite straightforward with ‘dd’. You need to give ‘dd’ a skip count, or, how far into
+   the source to start copying, and a count, how much to copy.
+   Here you can either use the single byte offsets retrieved with parted or divide them by 512 and let
+   ‘dd’ use 512 byte blocks. Copying just one byte at a time takes a very long time, so I suggest using
+   a larger block size.
+
+   Here is the command I used to extract my filesystem. Skip is 2313360 (1184440320/512) and Count is
+   17719695 (9072483840/4)
+# dd if=hda.img of=hda3.img bs=512 skip=2313360 count=17719695
+17719695+0 records in
+17719695+0 records out
+9072483840 bytes (9.1 GB) copied, 485.679 seconds, 18.7 MB/s
+
+   After extracting the filesystem I was able to mount it without any problems.
+# mount -o loop hda3.img /mnt/rabbit/
+# df -h /mnt/rabbit
+Filesystem            Size  Used Avail Use% Mounted on
+/data/rabbit/image/hda3.img
+8.4G  6.3G  1.7G  80% /mnt/rabbit
+
+---

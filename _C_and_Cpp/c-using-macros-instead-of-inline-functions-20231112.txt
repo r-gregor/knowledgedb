@@ -1,0 +1,178 @@
+filename: c_using-macros-instead-of-inline-functions_20231112.txt
+https://www.quora.com/Why-do-people-keep-using-macros-instead-of-inline-functions-in-C/answer/Joe-Zbiciak~
+
+Why do people keep using macros instead of inline functions in C?
+Function-like macros are polymorphic, while C inline functions are not. They can also create expressions
+that can be evaluated at compile time, while functions can not. Function-like macros also provide C a poor
+man’s template mechanism.
+
+And then there’s all the other miscellaneous shenanigans you can do with function-like macros as well.
+
+Polymorphism
+Let’s use a classic example:
+
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
+
+This works on every C data type that has a greater-than operator. I can use it with char, uint64_t, float,
+pointers, etc.
+
+Now, this example also comes with all of the problems of a function-like macro, such as:
+
+The operands a and b are both evaluated more than once. This could be a problem if an operand has side
+effects, or if evaluating it is expensive. Potentially ugly error messages if you flub the arguments. Macros
+are textual replacement. While this example will likely be easy to figure out, more complicated macros can
+sometimes give inexplicable error messages. And, they can confuse a debugger as well.
+
+Compile time evaluation
+Suppose you need to declare a structure buffer that’s large enough to hold one of several message types:
+
+#define MAX_STRING (128)
+			struct msg1 { /* details */ };
+struct msg2 { /* details */ };
+
+emum msg_type {
+	MSG_STRING,
+	MSG_TYPE1,
+	MSG_TYPE2
+};
+
+struct message_packet {
+	enum msg_type type;
+	char buf[MAX(MAX_STRING,
+	MAX(sizeof(struct msg1), sizeof(struct msg2)))];
+};
+
+You can’t implement that with inline functions and const variables. (Although, in C++11 and later, though,
+constexpr functions let you do something like this.)
+
+This won’t compile:
+
+static inline int max(int a, int b) {
+	return a > b ? a : b;
+}
+
+const int max_string = 128;
+struct msg1 { /* details */ };
+struct msg2 { /* details */ };
+
+emum msg_type {
+	MSG_STRING,
+	MSG_TYPE1,
+	MSG_TYPE2
+};
+
+struct message_packet {
+	enum msg_type type;
+	char buf[max(MAX_STRING,
+	max(sizeof(struct msg1), sizeof(struct msg2)))];
+};
+
+Poor-man’s Templates
+Want a version of calloc that “knows” about the type your allocating?
+
+#define CALLOC(t, cnt) ((t*)calloc(sizeof(t), (cnt))
+
+If this were written as a C++ template—ignoring the fact you shouldn’t use calloc in C++ unless you need it
+to interface with C—you might write:
+
+template <typename T>
+T* my_calloc(std::size_t cnt) {
+	return std::static_cast<T*>(std::calloc(sizeof(T), cnt));
+}
+
+You can even declare whole structures and functions this way, using token pasting to give you unique symbol
+. I’m not saying this is a great idea, but I’ve seen it used.
+
+Here’s a sketch of this idea:
+
+#include <stdbool.h>
+
+#define CALLOC(t, cnt) ((t*)calloc(sizeof(t), cnt)
+
+#define DECLARE_QUEUE_OF(t)                    \
+	struct t##_list_elem {                     \
+	struct t##_list *next;                     \
+	struct t *elem;                            \
+};                                             \
+struct t##_queue {                             \
+	struct t##_list *rd_ptr;                   \
+	struct t##_list *wr_ptr;                   \
+};                                             \
+                                               \
+struct t *t##_queue_get(struct t##_queue *q) { \
+	if (!q->rd_ptr) return NULL;               \
+	struct t *le = q->rd_ptr;                  \
+	struct t *elem = q->rd_ptr->elem;          \
+	q->rd_ptr = q->rd_ptr->next;               \
+	if (!q->rd_ptr) q->wr_ptr = NULL;          \
+	free((void*)le);                           \
+	return elem;                               \
+}                                              \
+                                               \
+bool t##_queue_put(struct t##_queue *q,        \
+		struct t *elem) {                      \
+	struct t##_list_elem *le =                 \
+	CALLOC(struct t##_list_elem, 1);           \
+	if (!le) return false;                     \
+	le->elem = elem;                           \
+	if (!q->rd_ptr) {                          \
+		q->rd_ptr = q->wr_ptr = le;            \
+	} else {                                   \
+		q->wr_ptr->next = le;                  \
+		q->wr_ptr = le;                        \
+	}                                          \
+	return true;                               \
+}
+
+Now, while I don’t think the above is great code, I’ve seen such things in C. This was just a quick example
+off the top of my head.
+
+I’ve seen even larger abuses of this style in floating point libraries. For example, you might want to share
+a common implementation across different precision types. Define some macros with the specifics for the type,
+some more macros with the generic implementation, and instantiate the algorithm for that type by combining
+the two.
+
+In C++, this probably wants to be a template class, perhaps with a non-template portion for the common logic.
+
+Miscellany
+I’ll give one example as a taste. It’s only the tip of the tip of the tip of the iceberg.
+
+In one of my programs, I needed to declare a bunch of bit-fields to reflect the layout of some packed data.
+I wanted my code to compile for big and little endian. However, for the compilers I was using, the two
+endians packed data in the opposite order within each word.
+
+Enter, the “bitfield endian” macro, BFE().
+
+#ifdef BYTE_BE
+#  define BFE(x,y) y; x
+#else /* BYTE_LE */
+#  define BFE(x,y) x; y
+#endif
+
+This ugly little macro let me do ugly things like this:
+
+typedef struct op_jump {
+	/* Word #1  */
+	BFE(unsigned op         :  2,       /* Can have all four values */
+	BFE(unsigned one        :  1,       /* Must be one!             */
+	BFE(unsigned zero       :  7,       /* Must be zero!            */
+	unsigned pad1       : 22)));        /* Pad to 32-bit word       */
+
+	/* Word #2 */
+	BFE(unsigned intr_mode  :  2,       /* 11 is invalid            */
+	BFE(unsigned dst_msb    :  6,       /* MSBs of destination      */
+	BFE(unsigned save_reg   :  2,       /* Register to save to      */
+	unsigned pad2       : 22)));        /* Pad to 32-bit word       */
+
+	/* Word #3 */
+	BFE(unsigned dst_lsb    : 10,       /* LSBs of destination      */
+	unsigned pad3           : 22);      /* Pad to 32-bit word       */
+
+} op_jump;
+
+So, yeah, there are things C macros can do that inline functions cannot, and for which C doesn’t offer a
+replacement. C++ (especially as of C++11) offers replacements for nearly all of those, thankfully.
+
+
+---
+

@@ -1,0 +1,232 @@
+filename: archlinux_howto-rebuild-a-package-using-build-system_20201120.txt
+https://linuxconfig.org/how-to-rebuild-a-package-using-the-arch-linux-build-system
+
+How to rebuild a package using the Arch Linux Build System
+31 August 2020
+
+   The ABS or Arch Build System is a package building system native to the Arch Linux distribution: with
+   it, we can easily build packages which can be installed with pacman, the distribution package
+   manager, starting from source code. All we have to do is to specify instruction inside a PKGBUILD
+   file and then build the package using the makepkg tool. In this tutorial we will see how to customize
+   and re-build an already existing package.
+
+   In this tutorial you will learn:
+     * What is the Arch Build System
+     * How to download an existing package source files
+     * How to modify a PKGBUILD
+     * How to build a package using the makepkg utility
+
+Software requirements and conventions used
+
+   Category     Requirements, Conventions or Software Version Used
+   System       Arch Linux
+   Software     asp, makepkg, base-devel
+   Other        Root permissions to install build and runtime dependencies
+   Conventions  # - requires given linux commands to be executed with root privileges either directly
+                as a root user or by use of sudo command
+                $ - requires given linux commands to be executed as a regular non-privileged user
+
+Rebuilding a package
+   As an example for this tutorial we will rebuild the hplip package. This package contains the open
+   source software needed to use some HP printers on Linux. On distributions like Debian and Fedora, we
+   have the choice to install the hplip package which contains only command line utilities and drivers,
+   and optionally hplip-gui, which includes also graphical tools that can be used to setup and control
+   the printer. Since I use the system-config-printer tool to control existing printers and I don't want
+   to have unnecessary and overlapping tools on my system, I need to change how the software is built
+   and packaged on Arch Linux: this is what we will do in this tutorial.
+
+Software installation
+   As a first step we need to install some packages: base-devel and asp. The first is a package group
+   which contains many essential utilities to compile software like fakeroot, gcc and make. The second
+   is a tool to retrieve source files for existing Arch Linux packages. To install them we use pacman:
+$> sudo pacman -S base-devel asp
+
+   As already mentioned, we will also need the makepkg which is already installed since it comes with
+   pacman itself. Once we installed all the needed packages we can proceed to the makepkg configuration.
+
+Makepkg configuration
+   The default, system-wide makepkg configuration file is /etc/makepkg.conf; we will copy this to
+   ~/.makepkg.conf, to create a user-specific configuration we can tweak without the need to use
+   administrative privileges (~/.config/pacman/makepkg.conf could also be used). Some noticeable
+   variables one may want to tweak in the file are the following:
+   Variable Use Default value
+   CPPFLAGS The flags to use for the C preprocessors -D_FORTIFY_SOURCE=2
+   CFLAGS The flags to use for the C compiler -march=x86-64 -mtune=generic -O2 -pipe -fno-plt
+   CXXFLAGS The flags to use for the C++ compiler -march=x86-64 -mtune=generic -02 -pipe -fno-plt
+   BUILDDIR The directory to use for package building /tmp/makepkg
+   INTEGRITY_CHECK The integrity check to use md5
+   PKGDEST The directory where all packages will be placed . (working directory)
+   SRCDEST The directory where source data will be stored ./src
+
+   Once we tweaked our configuration to better suite our needs, we can proceed and download the source
+   files for the Arch Linux package we want to modify, in this case, as we said before, hplip.
+
+Downloading the package source files
+   To download the source files for the package we want to modify, we must use the asp tool we installed
+   before. In this case we run:
+$> asp checkout hplip
+
+   After few seconds the hplip directory should be created in our working directory. Inside of it, we
+   will find two subdirectories: repos which contains subdirectories of its own, named after repository
+   name and system architecture, and trunk, which contains the main line of development of the SVN
+   repository.
+hplip/
++-- repos
+|   +-- extra-x86_64
+|       +-- 0022-Add-include-cups-ppd.h-in-various-places-as-CUPS-2.2.patch
+|       +-- 0023-Fix-handling-of-unicode-filenames-in-sixext.py.patch
+|       +-- 0025-Remove-all-ImageProcessor-functionality-which-is-clo.patch
+|       +-- disable_upgrade.patch
+|       +-- hplip-revert-plugins.patch
+|       +-- PKGBUILD
+|       +-- python3.diff
+|       +-- reproducible-gzip.patch
++-- trunk
+    +-- 0022-Add-include-cups-ppd.h-in-various-places-as-CUPS-2.2.patch
+    +-- 0023-Fix-handling-of-unicode-filenames-in-sixext.py.patch
+    +-- 0025-Remove-all-ImageProcessor-functionality-which-is-clo.patch
+    +-- disable_upgrade.patch
+    +-- hplip-revert-plugins.patch
+    +-- PKGBUILD
+    +-- python3.diff
+    +-- reproducible-gzip.patch
+
+   We can modify the hplip/repos/extra-x86_64/PKGBUILD file.
+
+Modifying the PKGBUILD file
+   The PKGBUILD file is a Bash script containing the building instruction for the Arch Linux package. In
+   this case, what we need to modify in the file is the content of the build function which contains the
+   commands use to configure and compile the source files, in this case hplip. In the function we can
+   see that the ./configure script is launched with the following flags:
+[...]
+./configure --prefix=/usr \
+            --enable-qt5 \
+            --disable-qt4 \
+            --enable-hpcups-install \
+            --enable-cups-drv-install \
+            --enable-pp-build
+[...]
+
+   Since I don't want graphical applications to be built, and I want to install the minimum necessary
+   for my printer to work correctly, I don't need support for qt5, so I can remove the --enable-qt5
+   option (I could use --disable-qt5 or --enable-qt5=no instead, but this would be redundant since the
+   flag is disabled by default, as we can read by launching ./configure --help in the hplip source
+   directory). I then need to use the --disable-gui-build flag to disable gui build and use the
+   --enable-lite-build flag to obtain a lite build with only the necessary components to build and scan
+   (the printer includes also a scanner). The final result would be something like:
+[...]
+./configure --prefix=/usr \
+            --disable-qt4 \
+            --enable-hpcups-install \
+            --enable-cups-drv-install \
+            --enable-pp-build \
+            --disable-gui-build \
+            --enable-lite-build
+[...]
+
+   Since we disabled qt5 support, we can also remove python-pyqt5 from the list of dependencies needed
+   to build the software, listed in the makedepends Bash array on line 15 of the file:
+makedepends=('python-pyqt5' 'sane' 'rpcbind' 'cups' 'libusb')
+
+   Now that we modified the PKGBUILD, we can proceed to the next step and build our package using
+   makepkg.
+
+Build the package
+   Once our PKGBUILD file is ready, we can build our modified package using the makepkg utility. Before
+   we do it, we need to another thing: since the signature of the downloaded source files for the
+   software we want to build is checked automatically against a gpg key, we need to said key to our gpg
+   keyring, otherwise the build process will fail. In this case to import the key we would run:
+$> gpg --keyserver keyserver.ubuntu.com --recv 73D770CDA59047B9
+
+   We should be notified that the key was successfully imported:
+gpg: key 73D770CDA59047B9: public key "HPLIP (HP Linux Imaging and Printing) <hplip@hp.com>" imported
+gpg: Total number processed: 1
+gpg:               imported: 1
+
+   The key identified by 73D770CDA59047B9 is the key used to sign the hplip source tarball. If you want
+   to know more about verifying a gpg signature you can take a look at our How to verify the
+   integrity of a Linux distribution iso image article I wrote on the subject.
+
+   Once ready, we move inside the directory where the PKGBUILD is stored and run the following command:
+$> makepkg --clean --syncdeps --rmdeps
+
+   Let's take a quick look at the options we use used when invoking the makepkg tool. With the --clean
+   option (-c) we can make so that leftover files and directories are removed after a successful package
+   build. We also used --syncdeps (-s): when this option is used the missing runtime and build
+   dependency of the package are installed using pacman. Finally, we used the --rmdeps option (-r): this
+   will cause the previously installed dependencies to be uninstalled after the build is complete.
+
+   If we have already performed a build of the package, and we want to re-run the process we also need
+   to use the --force (-f) option, since makepkg normally refuses to build a package that already exists
+   in the same directory).
+
+   Once we launch the command above, the compilation of the source files and the creation of the package
+   will begin. We will be asked to confirm we want to install the missing dependencies:
+==> Making package: hplip 1:3.20.6-2 (Tue 18 Aug 2020 10:29:43 AM CEST)
+==> Checking runtime dependencies...
+==> Installing missing dependencies...
+[sudo] password for egdoc:
+resolving dependencies...
+looking for conflicting packages...
+
+Packages (18) jbig2dec-0.18-1  libidn-1.36-1  perl-alien-build-2.29-1
+              perl-alien-libxml2-0.16-2  perl-capture-tiny-0.48-4
+              perl-clone-0.45-2  perl-dbi-1.643-2  perl-ffi-checklib-0.27-2
+              perl-file-chdir-0.1011-4  perl-file-which-1.23-4
+              perl-path-tiny-0.112-2  perl-xml-libxml-2.0205-2
+              perl-xml-namespacesupport-1.12-4  perl-xml-sax-1.02-1
+              perl-xml-sax-base-1.09-4  foomatic-db-engine-4:20200206-1
+              ghostscript-9.52-1  net-snmp-5.8-6
+
+Total Installed Size:  61.76 MiB
+
+:: Proceed with installation? [Y/n] y
+
+[...]
+
+==> Checking buildtime dependencies...
+==> Installing missing dependencies...
+resolving dependencies...
+looking for conflicting packages...
+
+Packages (6) gd-2.3.0-1  libgphoto2-2.5.25-1  libieee1284-0.2.11-9
+             libxpm-3.5.13-2  rpcbind-1.2.5-3  sane-1.0.30-1
+
+Total Installed Size:  26.50 MiB
+
+:: Proceed with installation? [Y/n] y
+
+[...]
+
+   Once the build is complete, we will be asked to confirm that we want to remove the previously
+   installed packages. At this point, if everything went as expected, we should find the package created
+   in the directory we specified with in the makepkg configuration file (the PKGDEST directory). By
+   default the package is created in the working directory. In this case, the
+   hplip-1:3.20.6-2-x86_64.pkg.tar.zst package was generated; we can install it using pacman:
+$> sudo pacman -U hplip-1:3.20.6-2-x86_64.pkg.tar.zst
+
+Handle conflicts on system upgrades
+   Since we generated a custom package based on the modification we made inside the PKGBUILD file, a
+   problem arises: when the system will be updated, a new version of the standard package may be
+   installed, thus overwriting the modifications we made. How we can avoid this? The simpler solution is
+   to make the packages we modify member of a specific group (say we want to call it "modified"), and
+   then instruct pacman to avoid upgrading its members. To do this we must modify the PKGBUILD again and
+   add this line:
+groups=('modified')
+
+   At this point we must rebuild the package. Once done we must modify the /etc/pacman.conf file and add
+   the group to the list of the ignored ones. The line to modify is 26:
+IgnoreGroup = modified
+
+   The pacman package manager will skip the upgrade of the package, so we must do it manually when
+   needed.
+
+Conclusions
+   In this article we saw how we can use ABS, the Arch Build System to modify and re-build an existing
+   package in order to tailor it to our specific needs. We saw how to download a package source files,
+   how to modify a PKGBUILD, and how to re-build the package using the makepkg utility. To better
+   explore the subject you can take a look at the makepkg manpage and consult the Arch Build System
+   wiki page.
+
+
+---

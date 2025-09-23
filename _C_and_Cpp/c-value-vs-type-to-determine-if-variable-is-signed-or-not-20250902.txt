@@ -1,0 +1,144 @@
+filename: c-value-vs-type-to-determine-if-variable-is-signed-or-not-20250902.txt
+https://stackoverflow.com/questions/7469915/value-vs-type-code-to-determine-if-a-variable-is-signed-or-not
+
+value vs type: Code to Determine if a Variable Is Signed or Not
+
+   I came across this question in a forum. The answer is something like this:
+#define ISUNSIGNED(a) (a >= 0 && ~a >= 0)
+
+//Alternatively, assuming the argument is to be a type, one answer would use type casts:
+#define ISUNSIGNED(type) ((type)0 - 1 > 0)
+
+   I have a few questions regarding this.Why do we need to check ~a >= 0? What is the second solution
+   all about? I did not understand the statement: "argument is to be a type". More importantly the
+   author states that first #define will not work in ANSI C (but will work in K&R C). Why not?
+
+***
+#define ISUNSIGNED(a) (a >= 0 && ~a >= 0)
+
+   For a signed value which is positive, a >= 0 will be true (obviously) and ~a >= 0 will be false since
+   we've flipped the bits so the sign bit is now set, resulting in a negative value. The entire
+   expression is therefore false.
+
+   For a signed value which is negative, a >= 0 will be false (obviously) and the rest of the expression
+   will not be evaluated; the overall result for the expression is false.
+
+   For an unsigned value, a >= 0 will always be true (obviously, since unsigned values can't be
+   negative). If we flip the bits then ~a >= 0 is also true, since even with the most significant bit
+   (the sign bit) set to 1, it's still treated as a positive value.
+
+   So, the expression returns true if the original value and its bitwise inverse are both positive, i.e.
+   it's an unsigned value.
+#define ISUNSIGNED(type) ((type)0 - 1 > 0)
+
+   This is to be called with a type rather than a value: ISUNSIGNED(int) or ISUNSIGNED(unsigned int),
+   for example.
+
+   For an int, the code expands to
+((int)0 - 1 > 0)
+
+   which is false, since -1 is not greater than 0.
+
+   For an unsigned int, the code expands to
+((unsigned int)0 - 1 > 0)
+
+   The signed 1 and 0 literals in the expression are promoted to unsigned to match the first 0, so the
+   entire expression is evaluated as an unsigned comparison. 0 - 1 in unsigned arithmetic will wrap
+   around resulting in the largest possible unsigned value (all bits set to 1), which is greater than 0,
+   so the result is true.
+
+   As to why it would work with K&R C, but not ANSI C, maybe
+   [http://www.informatik.uni-hamburg.de/RZ/software/SUNWspro/c-compiler/transition/tguide.doc.html]this
+   article can shed some light:
+     When an unsigned char or unsigned short is widened, the result type is int if an int is large
+     enough to represent all the values of the smaller type. Otherwise, the result type is unsigned
+     int. The value preserving rule produces the least surprise arithmetic result for most expressions.
+
+   I guess that means that when comparing an unsigned short to 0, for example, the unsigned value is
+   converted to a signed int which breaks the behaviour of the macro.
+
+   You can probably work around this by having (a-a) which evaluates to either signed or unsigned zero
+   as appropriate, instead of the literal 0 which is always signed.
+
+***
+   The tricks with bit-flipping are cute, but if you want to know the signedness of something there are
+   more straightforward ways to do it. Signedness is the property of a type, not a value. To determine
+   if a variable is signed, you can ask your compiler if -1, cast to that type, is less than 0, like so:
+#define issigned(t) (((t)(-1)) < 0)
+
+   If you want to know this for a particular variable, you can ask the compiler for the type of that
+   variable:
+issigned(typeof(v))
+
+***
+   For the first macro: If a value is positive (>= 0), its bitwise negation must be negative in
+   2-complement, if it is singed. An unsigned value will remain positive:
+~64 == -65 (signed)
+~64 == 191 (unsigneD)
+
+   For the second: if you pass a type to the marco, it checks if this type can hold singed values. For
+   singed types, 0-1 == -1, for unsigned, it is a positive value:
+(char) 0-1 == -1
+(unsigned char) 0-1 == 255
+
+***
+   The check for ~a >= 0 relies on flipping the signed bit. The logic is as follows:
+     * if the number is negative, it cannot be unsigned, so a >= 0 returns false.
+     * if it is positive, it's either signed or unsigned.
+     * if this is unsigned, applying ~ a will result in the maximum unsigned value - a, still a positive
+       unsigned number.
+     * if it is signed, the sign bit will be negated, yielding a negative value.
+
+   In fact, I think it can be true that a >= 0 && ~a >= 0 and still the number be signed. This is
+   because there may be a negative zero. In particular, for one's complement a value of all zeros
+   represents 0, while the representation negated (all 1's) will be negative 0 (or a trap
+   representation).
+
+   There's also the problem of integer promotions:
+     If an int can represent all values of the original type, the value is converted to an int;
+     otherwise, it is converted to an unsigned int. These are called the integer promotions. All other
+     types are unchanged by the integer promotions.
+
+   Integer promotions apply to "object or expression with an integer type whose integer conversion rank
+   is less than or equal to the rank of int and unsigned int" and "[a] bit-field of type _Bool, int,
+   signed int, or unsigned int." They are used with both with the unary operator ~ and in the "usual
+   arithmetic conversions", which encompass the first comparison, so they apply here.
+
+   So an unsigned char will be promoted to an int, therefore becoming signed while it was originally
+   unsigned.
+
+   For instance, this will give the wrong result:
+
+#include<stdio.h>
+#define ISUNSIGNED(a) (a >= 0 && ~a >= 0)
+void main(void) {
+	unsigned char uc = 8;
+	printf("%d", ISUNSIGNED(uc));
+}
+
+***
+   The answer (a >= 0 && ~a >= 0) proposed in the question is bad as it depends on the integer
+   representation, and in particular it does not work in ones' complement if a is 0 of signed type.
+   Here's a correct, portable way of doing things.
+
+   First, if T is an integer type, one can use the following macro:
+#define ISUNSIGNED(T) ((T) -1 > 0)
+
+   Therefore, for the version with a value as an argument, if the type of the value a is at least an int
+   (to avoid integer promotions, which may change the signedness of the type), the following macro can
+   be used:
+#define ISUNSIGNED(a) (0*(a) - 1 > 0)
+
+   It does not depend on the representation of integers, thus it is compatible with all integer
+   representations allowed by the ISO C standard (two's complement, ones' complement, and
+   sign-magnitude).
+
+***
+   The first #define works on a variable name. The second #define works on a type name. (Obviously, if
+   you intended to use both in the same program you'd have to give them distinct names.)
+
+   I don't offhand know why either wouldn't work with ANSI C.
+
+
+---
+

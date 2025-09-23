@@ -1,0 +1,147 @@
+filename: howto-properly-disable-ipv6-on-linux-20250923.txt
+https://anagogistis.com/posts/ipv6-disable/
+
+How to properly disable IPv6 on Linux
+Sep 20, 2025
+
+   While IPv6 is the modern standard and the "future of the internet", there are specific situations
+   where you might need to disable it. The most common reason is to prevent a VPN IPv6 leak which
+   can happen when your VPN client doesn't fully support IPv6 and fails to properly block it, allowing
+   your system to use its native IPv6 address outside the secure tunnel.
+
+   Many online guides suggest modifying the /etc/sysctl.conf file like this:
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+
+   These settings disable IPv6 on all (existing and future) interfaces, including the loopback interface
+   (lo). However, disabling IPv6 on lo can potentially break things. Many system services, GUI
+   components, and even session daemons rely on the IPv6 loopback for local communication. If the
+   loopback interface can't use IPv6, those services may fail silently or crash.
+
+   Also, directly editing /etc/sysctl.conf is not considered best practice. It's better to create a
+   dedicated file in /etc/sysctl.d/. This keeps your changes modular and avoids conflicts with packages
+   or other tools. Files in this directory are loaded at boot in order, and most modern systems follow
+   this approach.
+
+   But there is a catch: tools like NetworkManager or systemd-networkd manage interface settings
+   independently of sysctl and may overwrite or ignore its settings depending on timing and
+   configuration. When a network interface comes back up (for example, after toggling Wi-Fi or resuming
+   from suspend), they can silently re-enable IPv6 even if you disabled it before. That means traffic
+   may leak outside your VPN without you noticing.
+
+   For this reason, I don't recommend relying on sysctl alone, especially on desktop systems. Instead,
+   use one of the methods below.
+
+Method 1: Using a network manager (recommended)
+   The safest and most user-friendly way to disable IPv6 is per interface, using your system's network
+   manager.
+
+   Common network managers are:
+     * NetworkManager - the default on most modern desktop distributions like Ubuntu, Fedora, and
+       Debian. It's user-friendly and tightly integrated with graphical environments.
+     * systemd-networkd - a minimal and efficient network stack built into systemd, commonly used on
+       servers, VMs, or distributions like Arch. Often paired with other systemd services.
+
+   To determine which one your system is using:
+$> systemctl is-active NetworkManager
+$> systemctl is-active systemd-networkd
+
+   If neither is active, you're likely using a different tool (e.g. ifupdownn, netplan), and you should
+   disable IPv6 using that tool's method.
+
+   Below are the methods for disabling IPv6 with NetworkManager and systemd-networkd, which are the most
+   common network managers.
+
+Disabling IPv6 via NetworkManager
+   If your system uses NetworkManager, IPv6 is configured per connection (e.g. home Wi-Fi, office
+   network, wired LAN).
+
+   Using GUI (Ubuntu):
+    1. Open Settings and go to Wi-Fi (for wireless) or Network (for wired).
+    2. For Wi-Fi: under Visible Networks, find the one you're connected to and click the gear icon.
+       For Wired: select your wired connection and click the gear icon.
+    3. In the IPv6 tab, set the method to Disabled. Disable IPv6 on Ubuntu
+    4. Click Apply, then disconnect and reconnect for the changes to take effect.
+
+   If you prefer the command line, you can achieve the same result with the nmcli tool:
+# List all connections
+$> nmcli connection show
+
+# Disable IPv6 for a specific connection
+$> nmcli connection modify "YourConnectionName" ipv6.method "disabled"
+$> nmcli connection up "YourConnectionName"
+
+   This method is persistent, survives reboots and suspend/resume cycles, and leaves the loopback
+   interface (::1) untouched.
+
+Disabling IPv6 via systemd-networkd
+   If your system uses systemd-networkd instead, you can disable IPv6 at the interface level via a
+   .network file.
+    1. Create or edit a .network config:
+$> sudo vim /etc/systemd/network/10-disable-ipv6.network
+
+    2. Add the following content:
+[Match]
+Name=*
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=no
+LinkLocalAddressing=ipv4
+
+       Explanation:
+          + Name=* matches all interfaces (or specify a particular one like eth0, wlo1).
+          + DHCP=ipv4 enables IPv4 DHCP only and disables DHCPv6.
+          + IPv6AcceptRA=no disables SLAAC via router advertisements.
+          + LinkLocalAddressing=ipv4 prevents assignment of fe80::/64 addresses while preserving IPv4
+            link-local.
+
+    3. Restart the network stack:
+$> sudo systemctl restart systemd-networkd
+
+   This method is also persistent and does not interfere with the loopback interface.
+
+Method 2: Using GRUB (aggressive but effective)
+   To truly guarantee IPv6 is disabled system-wide, you can disable the entire IPv6 stack at the kernel
+   level very early in the boot process. This is done via GRUB:
+    1. Open the GRUB configuration file:
+$> sudo vim /etc/default/grub
+
+    2. Find the GRUB_CMDLINE_LINUX line and append ipv6.disable=1 inside the quotes.
+GRUB_CMDLINE_LINUX="... existing args ... ipv6.disable=1"
+
+    3. Update GRUB and reboot:
+$> sudo update-grub
+$> sudo reboot
+
+   After the reboot, the /proc/sys/net/ipv6/ directory will not exist. No IPv6 addresses or routes will
+   be assigned. Any service that tries to use IPv6 will receive EAFNOSUPPORT ("address family not
+   supported"), causing it to fall back to IPv4 if supported.
+
+   This method is clean and effective but should only be used if you are sure that no services on your
+   system rely IPv6. For most systems, especially desktops, disabling IPv6 per interface via the network
+   manager is safer and more flexible.
+
+Verifying your changes
+   After applying any of the methods above, it's important to verify that IPv6 is, in fact, disabled.
+     * Check for IPv6 addresses:
+$> ip -6 addr
+
+       You should not see any IPv6 addresses on the network interfaces where you disabled it. You may
+       still see a ::1/128 address on the loopback interface, which is normal and harmless.
+     * Check for IPv6 routes:
+$> ip -6 route
+
+       This command should show no default IPv6 route.
+     * Test for hostname resolution:
+$> getent hosts localhost
+
+       If you've disabled IPv6 system-wide (via GRUB method), the command should only return 127.0.0.1.
+       If you've used a network manager, the command will likely return both 127.0.0.1 and ::1.
+
+   Use whatever method fits your system and needs, but always properly test it to make sure it actually
+   works.
+
+
+---
+

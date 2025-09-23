@@ -1,0 +1,175 @@
+filename: c-free-and-null-pointer-20250801.txt
+https://nrk.neocities.org/articles/free-null
+
+Should you set free()-ed pointers to NULL?
+28 Jul 2023
+
+   Every now and then, I'll come across code like the following:
+#define SAFE_FREE(P) do { free(P); P = NULL; } while (0)
+
+   And when asked what the purpose of setting a free-ed pointer to NULL is, the usual answer is that
+   it's for catch use-after-free (UAF) errors.
+
+   Here's a little refresher on dangling pointers:
+
+   img[dangling-pointer]
+
+   In the above picture, A, B, C are all pointers pointing into the same memory. And so when free is
+   called on C, it frees the underlying data. This means that A and B are now danging pointers because
+   they are pointing at invalid memory. If the program now tries to use pointer A, best case scenario is
+   a segfault/crash - which can be easily investigated under a debugger - while the worst case is that
+   the program continues on with silent memory corruption.
+
+   (Beginners tend to be really afraid of a crash/segfault because they're usually not taught how to
+   debug it. But during development, a crash is a good thing because it loudly signals that something
+   has gone wrong. Whereas silent memory corruption can easily sneak into production code causing havoc
+   later on.)
+
+   Just by having a clear understanding of the problem, it already becomes obvious that setting a single
+   pointer to NULL does little to nothing to prevent use-after-free errors. Indeed, most use-after-free
+   errors I come across are not the result of reusing the same pointer, but rather due to having
+   multiple pointers referencing the same data and then failing to coordinate the deletion of that data
+   (more on this later).
+
+   So should you just give up on catching use-after-free errors? Nope. Just because the silly SAFE_FREE
+   macro fails doesn't mean there aren't better tools for the job.
+
+Address-Sanitizer
+   The best tool for catching use-after-free (along with various other memory related errors) is by
+   using Address-Sanitizer (ASan) - which comes builtin with gcc and clang already.
+
+   Using it is easy, just compile with -fsanitize=address,undefined -g3 - which will insert runtime
+   checks into the compiled binary - and then run that binary. The -g3 flag tells gcc to build debug
+   info, which ASan will be able to use to show you which line in the source code causes the problem in
+   the reported stack-trace.
+
+   Here's a simple (and obviously contrived) demonstration:
+// test.c
+#include <stdlib.h>
+
+int main(void) {
+	char *p, *q;
+	p = q = malloc(10);
+	free(p);
+	*q = 0; // use-after-free
+}
+
+   Now compile this with gcc -fsanitize=address,undefined -g3 -o test test.c and run it:
+$> ./test
+=================================================================
+==15230==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010 at pc 0x000000401206 \
+	bp 0x7ffc52ddeba0 sp 0x7ffc52ddeb98 WRITE of size 1 at 0x602000000010 thread T0
+    #0 main test.c:8
+    #2 __libc_start_main
+    #3 _start
+
+   I've cleaned up some noise from the output, but here are the important bits:
+     * It caught the use-after-free where SAFE_FREE would've failed spectacularly.
+     * It produced a stack-trace telling you exactly where the use-after-free occurs (in test.c at line
+       8).
+
+   Not only is ASan significantly more reliable, it also becomes apparent that by setting free-ed
+   pointers to NULL it might actually prevent catching use-after-free since often times various
+   functions tend to ignore NULL arguments. Here's another silly example:
+free(p);
+free(p);
+
+   A double free, which ASan won't have any problems catching, but if you replace this with SAFE_FREE
+   then it wouldn't be caught by ASan (since free(NULL) is a no-op).
+
+Old-school tricks
+   But what if you're running some obscure OS that doesn't support ASan. In those cases, does SAFE_FREE
+   make sense? Something is better than nothing, right?
+
+   Well, not really. If you look back at the dangling pointer image, it's clear that the problem isn't
+   really the individual pointers but rather the data that they are pointing to. And thus it makes much
+   more sense to destroy the data rather than clearing a single pointer. And by "destroy", I mean
+   filling up the memory region with clearly garbage values such as memset-ing everything to 0xCD or
+   similar in your debug builds.
+
+   Now if any dangling pointer, no matter which, tries to read something from that buffer they'll see
+   some variation of 0xCDCDCDCD and when you see such values in your debugger, you'll instantly know
+   what's going on.
+#ifdef DEBUG
+  #define FREE(P, SIZE) do { memset_explicit((P), 0xCD, (SIZE)); free(P); } while (0)
+#else
+  #define FREE(P, SIZE) free(P)
+#endif
+
+   While this isn't perfect, it's significantly more reliable at finding use-after-free errors compared
+   to clearing a single pointer to NULL.
+
+   Do be aware of optimizing compilers removing your memset as part of their dead store elimination
+   pass (which is why I've used the C23 memset_explicit() in the above snippet, but a for loop with
+   volatile pointer also works). But depending on your application, you might even want to omit the
+   actual free call in debug builds to ensure future malloc calls don't end up reusing the same buffer.
+
+   (If your libc provides it, then you can also use malloc_usable_size() instead of having the FREE
+   macro accept a SIZE. Just make sure to use it for debugging purposes like the above only.)
+
+   Steve Maguire's "Writing Solid Code" includes a lot of other well thought out, old-school memory
+   debugging technique like the above (E.g realloc wrapper always forcing a relocation in debug builds
+   to sniff out bad realloc usage). And while most of the specific examples are now obsolete whenever
+   ASan is available, the principles are still timeless.
+
+Lightweight release check
+   While the above two methods are more reliable, they're also much more performance costly and thus not
+   suitable for release builds. So does it make sense to use SAFE_FREE in release builds as a
+   light-weight - even though incomplete - check? Maybe, but as explained above, you should pick an
+   invalid value other than NULL. Something absurd such as a pointer with all bits set could work (void
+   *)(uintptr_t)-1.
+
+   But if light-weight runtime safety check is a goal, you'd probably also want to write some wrappers
+   around certain libc calls which check for bad addresses and set the errno instead of crashing. (E.g
+   write with a bad address on linux returns EFAULT).
+
+ssize_t strict_write(int fd, const void *p, size_t n) {
+	ssize_t ret = write(fd, p, n);
+	if (ret < 0 && (errno == EFAULT || errno == EBADF))
+		abort();
+	return ret;
+}
+
+   The lightweight-ness of such check does depend on how efficient thread-local storage access is (since
+   errno usually sits there). But it should be relatively cheap (compared to the cost of syscall at
+   least) on most cases.
+
+   I've also thrown in a check for EBADF in there as well, since a program feeding invalid file
+   descriptor to write is almost certainly a sign of bug.
+
+Actually solving the problem
+   The above only talks about detecting the problem. But what then? How do you actually solve the issue
+   if you need references which may outlive the underlying data?
+
+   I'll keep this section brief since this is not the main focus of this article but there are a
+   number of ways to solve it. Generational-handles tend to be the most effective and efficient
+   solution for this, but it all depends on your exact problem context.
+
+   (It's also interesting to look at memory reclamation schemes such as QSBR or EBR - even though
+   they are meant for lock-less multi-threaded context - it's still tackling a coordination problem and
+   thus the general principles can be useful outside of such settings as well.)
+
+   However you should also first make sure that you actually have an inherently dynamic lifetime
+   problem. In my experience, a lot of C programs tend to create needless lifetime for individual
+   objects when they could've been better managed in group.
+
+   For example, in a graph like data structure if you malloc each and every node then free-ing it will
+   require traversing the data-structure and making N calls to free while making sure you don't end up
+   double free-ing something.
+
+   Instead if you had used an array of node as a "pool" and then used indexes into that array to
+   establish edges between nodes - then free-ing the entire graph becomes just a single free(node_array)
+   call - no need to traverse anything or worry about double-freeing a specific node. (This is a simple
+   case of an arena).
+
+Conclusion
+     * Use ASan when available.
+     * Otherwise trash the data instead of clearing pointers.
+     * And if you still want to clear the pointer, use an invalid value other than NULL.
+
+   But most importantly, ask yourself what exact problem you're trying to solve and try to understand
+   the problem clearly before being sold on some supposed solution.
+
+
+---
+

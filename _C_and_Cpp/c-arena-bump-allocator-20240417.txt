@@ -1,0 +1,484 @@
+filename: c_arena-bump-allocator_20240417.txt
+https://codereview.stackexchange.com/questions/291416/an-arena-bump-allocator-in-c
+
+Code Review Stack Exchange Feed for question 'An Arena/Bump Allocator in C'
+
+   An arena allocator is a memory allocation technique used in computer programming where memory is
+   allocated from a pre-allocated block (arena) rather than individually requesting memory from the
+   operating system.
+
+   Once allocated, memory within the arena typically remains allocated until the entire arena is
+   deallocated, simplifying memory management and reducing the risk of memory leaks.
+
+Working:
+   The whole implementation is about 55 lines of code (besides the test run).
+
+   The API is straightforward: begin with arena_new() and end with arena_destroy(). Memory allocations
+   are made using arena_alloc(), without the need for manual deallocation or tracking. The arena
+   dynamically resizes as needed.
+
+   An example follows:
+
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "arena.h"
+
+int main(void) {
+	// Create a new arena
+	Arena *arena = arena_new();
+
+	// Allocate memory within the arena
+	int *data = arena_alloc(arena, sizeof *data);
+
+	// Deallocate memory and destroy the arena
+	arena_destroy(arena);
+
+	return EXIT_SUCCESS;
+}
+
+Code:
+
+   arena.h:
+#ifndef ARENA_H
+#define ARENA_H 1
+
+#include <stddef.h>
+
+#if defined(__GNUC__) || defined(__clang__) || defined(__INTEL_LLVM_COMPILER)
+#define ATTRIB_NONNULL          __attribute__((nonnull))
+#else
+#define ATTRIB_NONNULL          /**/
+#endif
+
+typedef struct arena Arena;
+
+Arena *arena_new(void);
+void *arena_alloc(Arena *arena, size_t alloc_size) ATTRIB_NONNULL;
+void arena_destroy(Arena *arena);
+
+#endif                          /* ARENA_H */
+
+   arena.c:
+#include "arena.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+
+/* In C2X/C23 or later, nullptr is a keyword. */
+/* Patch up C18 (__STDC_VERSION__ == 201710L) and earlier versions.  */
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ <= 201710L
+#define nullptr ((void *)0)
+#endif
+
+#define ARENA_INITIAL_CAPACITY  10 * (size_t)1024
+
+#define GROW_CAPACITY(capacity, initial) \
+	((capacity) < initial ? initial : (capacity) * 2)
+
+struct arena {
+	size_t count;
+	size_t capacity;
+	uint8_t pool[];
+};
+
+Arena *arena_new(void) {
+	Arena *a = calloc(1, sizeof *a + ARENA_INITIAL_CAPACITY * sizeof a->pool[0]);
+	a->capacity = ARENA_INITIAL_CAPACITY;
+	return a;
+}
+
+void *arena_alloc(Arena *arena, size_t alloc_size) {
+	if ((arena->count + alloc_size) >= arena->capacity) {
+		arena->capacity =
+			GROW_CAPACITY(arena->capacity, ARENA_INITIAL_CAPACITY);
+		Arena *a = realloc(arena,
+				sizeof *arena + arena->capacity * sizeof arena->pool[0]);
+
+		if (a == nullptr) {
+			return nullptr;
+		}
+
+		arena = a;
+	}
+
+	void *result = arena->pool + arena->count;
+
+	arena->count += alloc_size;
+	return result;
+}
+
+void arena_destroy(Arena *arena) {
+	free(arena);
+}
+
+#ifdef TEST_MAIN
+
+#include <stdio.h>
+
+int main(void) {
+	Arena *const arena = arena_new();
+
+	if (arena == nullptr) {
+		fprintf(stderr, "error: arena_new(): failed to allocate memory.\n");
+		return EXIT_FAILURE;
+	}
+
+	int *a = arena_alloc(arena, sizeof *a);
+	int *b = arena_alloc(arena, sizeof *b);
+	int *c = arena_alloc(arena, sizeof *c);
+
+	if (a == nullptr || b == nullptr || c == nullptr) {
+		arena_destroy(arena);
+		fprintf(stderr, "error: arena_alloc(): failed to allocate memory.\n");
+		return EXIT_FAILURE;
+	}
+
+	*a = 1;
+	*b = 2;
+	*c = 3;
+
+	printf("&a: %p, a: %d\n"
+			"&b: %p, b: %d\n"
+			"&c: %p, c: %d\n",
+			(void *)a,
+			*a,
+			(void *)b,
+			*b,
+			(void *)c,
+			*c);
+	arena_destroy(arena);
+	return EXIT_SUCCESS;
+}
+
+#endif  /* TEST_MAIN */
+
+Makefile:
+
+CC := gcc-13
+
+CFLAGS += -std=c2x
+CFLAGS += -fPIC
+CFLAGS += -Wall
+CFLAGS += -Wextra
+CFLAGS += -Wpedantic
+CFLAGS += -Wwrite-strings
+CFLAGS += -Wno-parentheses
+CFLAGS += -Wpedantic
+CFLAGS += -Warray-bounds
+CFLAGS += -Wno-unused-function
+CFLAGS += -Wstrict-prototypes
+
+all: arena
+
+test: CFLAGS += -DTEST_MAIN
+test: arena
+
+clean:
+    $(RM) arena
+
+.PHONY: all test clean
+.DELETE_ON_ERROR:
+
+Building:
+
+   To build a sample program, simply do:
+make test
+./arena
+
+   For ease, here's the github link: [https://github.com/Melkor-1/arena/tree/main]An Arena Allocator in C
+
+Review Request:
+   Possible optimizations, potential undefined/implementation-defined behavior, integer
+   overflow/underflow, style et cetera.
+
+   Is the initial pool size okay? Should it be higher or lower?
+     * [https://codereview.stackexchange.com/questions/tagged/c]c
+     * [https://codereview.stackexchange.com/questions/tagged/arena]arena
+
+
+***
+General
+   The code is nicely formatted, and the use of comments judicious. Thanks!
+
+Tests?
+   There is a distinct lack of tests.
+
+   You do have a "brush" test, but it's quite insufficient in "depth". It doesn't test growth, doesn't
+   test heterogeneous allocations (which may have caught the alignment issue), etc... I would advise
+   writing a unit-test suite.
+
+Documentation?
+   Documentation comments on the public API (header) would be more useful than comments on the function
+   calls in main.
+
+   The fact that nullptr is returned on failure (instead of aborting) should be documented, even if it
+   just follows malloc, for example.
+
+Bug: realloc
+   (As also noted by @ComicSansMS)
+
+   The use of realloc is a terrible, terrible, mistake.
+
+   It means that if I have a pointer p allocated by arena_alloc and then at some point arena_alloc
+   decides to call realloc (which I will never know) then using p afterwards will be Undefined Behavior.
+
+   You cannot use realloc. Instead you can:
+     * Never grow the arena.
+     * Keep a list of previous arena allocations, and add a new one as necessary.
+
+   I note that the typical approach is to never grow: the user can always create a new arena should they
+   wish to, after all.
+
+Bug: alignment
+   (As also noted by @Davislor)
+
+   The memory returned is not guaranteed to be aligned, leaving it to the user to do so.
+
+   You could simply align memory to alignof(max_align_t) as malloc does, it's as simple as just rounding
+   up the allocation size to a multiple of it prior to bumping count.
+
+   Note, though, that with the rise of SIMD, many types are now more aligned than max_align_t (which
+   cannot be changed for backward compatibility reason) and thus new C versions provide
+   aligned_alloc instead.
+
+   I would advise following the new API. If anything, it means that you do get the benefit of packing
+   memory more tightly, by not wasting up to alignof(max_align_t) - 1 bytes between allocations. For
+   example when allocating two string buffers one after another. The added flexibility may add a slight
+   cost to the call (a few instructions), though, so it's a trade-off.
+
+Bug: overflow
+   Beware that the alloc_size argument passed to arena_alloc may be so large (consider SIZE_MAX) that
+   arena->count + alloc_size may overflow, thereby wrapping around at 0 and returning a very small
+   total, which may then compare less than arena->capacity.
+
+   Handling of overflow requires some care: using a > b - c rather than a + c > b is better, though that
+   may require proving c <= b first.
+
+API Improvements
+   There are two improvements which could be worthwhile:
+    1. Allow passing an initial size to the arena_new function, rather than picking an arbitrary one.
+       The user is better placed to know how much they'll need.
+    2. Pass the alignment to arena_alloc, as discussed above.
+
+   Aside: good use of __attribute__((nonnull))!
+
+API Additions
+   Some functions could be useful:
+     * Array allocation: where element size and number of elements are passed separately, so the
+       multiplication can be checked not to overflow.
+     * Reallocation: by keeping track of the last size allocated, or by having the user supply the
+       original size of the allocation to reallocate, you can detect whether it's the last, and if so
+       extend in place instead of copying. Can be handy.
+     * Reset: rather than having the user destroy and re-create a fresh arena, a reset function (which
+       just resets count) is more efficient.
+
+Considerations
+   It may be worth annotating arena_alloc with __attribute__((malloc)), instructing GCC that the
+   returned pointer cannot alias any other pointer.
+
+   While in theory the arena pointer does point to a memory block which aliases with the return value,
+   in practice the "allocated" block is not accessed via arena for the lifetime of the pointer, so this
+   should be sound.
+
+Putting it altogether
+
+   Core of header:
+/* Bump allocator arena. */
+typedef struct arena Arena;
+
+/* Returns a new arena with the specific `capacity`.
+   On allocation failure, returns `nullptr`. */
+Arena *arena_new(size_t capacity);
+
+/* Destroys the arena, freeing its memory.
+   Any pointer allocated by this arena is invalidated. */
+void arena_destroy(Arena *arena);
+
+/* Resets the arena, invalidating all existing allocations.
+   While existing pointers allocated by this arena are this valid as far as the
+   language is concerned, they should be considered invalid as using them may
+   cause Undefined Behavior. */
+void arena_reset(Arena *arena) ATTRIB_NONNULL;
+
+/* Allocates a pointer from the arena.
+   The allocated pointer is at least aligned to `alignment`, and is valid until
+   the arena is reset or destroyed.
+   `alignment` must be a power of 2.
+   `size` must be a multiple of `alignment`. */
+void *arena_alloc(Arena *arena, size_t alignment, size_t size) ATTRIB_NONNULL;
+
+   Core of source:
+struct arena {
+	size_t count;
+	size_t capacity;
+	uint8_t pool[];
+};
+
+Arena *arena_new(size_t capacity) {
+	Arena *a = calloc(1, sizeof *a + capacity);
+	a->capacity = capacity;
+	return a;
+}
+
+void arena_destroy(Arena *arena) {
+	free(arena);
+}
+
+void arena_reset(Arena *arena) {
+	arena->count = 0;
+}
+
+void *arena_alloc(Arena *arena, size_t alignment, size_t size) {
+	assert(alignment == 1 || !(alignment & (alignment - 1)));
+	assert(size / alignment * alignment == size);
+
+	char* p = arena->pool + arena->count;
+
+	uintptr_t original = ((uintptr_t) p);
+
+	if (original > UINTPTR_MAX - alignment) {
+		return nullptr;
+	}
+
+	/*
+	Rounds up the pointer value to the next multiple of alignment.
+	- With alignment being a power of 2, alignment - 1 is of the form
+	0b001..1.
+	- Thus "x & !(alignment - 1)" rounds x down to the previous multiple of
+	alignment.
+	- And "(x + alignment - 1) & !(alignment -1)" rounds up.
+	*/
+	uintptr_t aligned = (original + alignment - 1) & !(alignment - 1);
+
+	size_t offset = aligned - original;
+
+	if (size > SIZE_MAX - offset) {
+		return nullptr;
+	}
+
+	size += offset;
+
+	if (size > arena->capacity - arena->count) {
+		return nullptr;
+	}
+
+	arena->count += size;
+
+	/* Equal to "aligned", but preserves provenance */
+	return p + offset;
+}
+
+***
+   Pointers returned by the allocator are not stable
+
+   Because you are using realloc for growing the heap, each call to arena_alloc will potentially
+   invalidate all of the pointers you have given out before. This is highly unusual behavior for an
+   allocator, and doubly so since it is very difficult for a user to predict when the reallocation will
+   take place.
+
+   There's several ways to address this:
+
+   The easiest way is to just not allow growing the arena beyond the initial size.
+
+   A more advanced approach will keep allocating new regions of memory, potentially with a geometric
+   growth factor for the size. This requires you to keep track of all the regions of memory managed by
+   the arena, either by storing an array of pointers somewhere, or by having an intrusive linked list as
+   part of the memory regions, where each region contains at a fixed offset a pointer to the previous
+   region.
+
+***
+Memory Alignment
+
+   Your implementation returns unaligned memory. On some architectures, allocating a char followed by an
+   int, and dereferencing the int*, will crash the program with a bus error.
+
+   If you don't pass in the required alignment (as calloc() does), the only way for the allocator to
+   work correctly is to always return a pointer aligned to alignof(max_align_t) (as malloc() does).
+
+Using the Global Heap
+   A common use case for an arena allocator is to give multiple threads their own allocators that can be
+   used without sharing the heap, which serializes the algorithm. Another is to allocate objects from a
+   specific region of memory, such as a memory-mapped file or device.
+
+   Even if you only needed something simpler, and your only purpose is to reduce the number of calls to
+   the heap, you'd still want the user to be able to specify the size.
+
+   This implementation breaks that by always creating the arena on the global heap. Each individual
+   allocation could potentially lock the heap as well, since it calls realloc().
+
+   An arena allocator that always calls the global heap is useless. Bypassing the global heap is what
+   you want an arena allocator for!
+
+   Some alternatives you might consider:
+Arena pool = ARENA_INITIALIZER; // Initializes a valid Arena of size 0.
+/* ... */
+pool = arena_resize(ARENA_SIZE); // Or whatever API you want.
+
+char alignas(max_align_t) thread_local_arena[ARENA_SIZE]; // Stack-allocated.
+// Does not use the global heap:
+Arena pool = arena_new(thread_local_arena, sizeof(thread_local_arena));
+/* The lifetime of the arena is the same as the lifetime of this thread procedure,
+ * which is the lifetime of the thread.
+ */
+
+Arena* arena_ref = malloc(sizeof(struct arena));
+assert(arena_ref); // Production code might want more complex error-handling.
+*arena_ref = *arena_new();
+
+   Any of these gives the user more flexibility to allocate the arena and its control block.
+
+   Another approach is what K&R did in their (wholly obsolete now) implementation of malloc(): store the
+   control block at the beginning of the allocated memory, add its size to the pointer you return, and
+   subtract the right number of bytes from the pointer you're passed back to get the pointer to the
+   control block.
+
+The Makefile
+   You add -Wpedantic twice, and neither target, optimization nor debugging flags. You generally are
+   compiling either a debug or a release build. I normally add -Wconversion -Wdeprecated. There is also
+   no need to add flags one at a time.
+
+***
+debug
+
+   The contract between caller and library goes two ways.
+    1. Library promises to deliver a unique pointer to memory of proper size N.
+    2. Caller promises to color within the lines, from 0 .. N-1, not accessing the [-1] or the [N]th
+       byte.
+
+   When caller creates new arena with a debug flag turned on, the library might take additional actions
+   for each alloc(). The idea is to make buggy calling code behave in a more obviously buggy way.
+
+alignment
+   We probably want to return memory blocks that obey some alignment restriction. Simplest approach
+   would be to let caller specify that when creating an arena, or on each alloc request.
+
+bookkeeping
+   You currently pack user memory requests together as tightly as possible, taking advantage of the lack
+   of an alignment requirement. Consider inserting enough padding bytes between user blocks so you can
+    1. insert one or more guard bytes before beginning,
+    2. insert guard byte(s) just after end,
+    3. pad to satisfy alignment,
+    4. remember the size of this block, and
+    5. maybe thread this block to adjacent ones.
+
+   So mixed in with user storage we have overhead (length) storage that you own, plus guard storage that
+   you own, which user must not access.
+
+enforcement
+   Write something along the lines of 0xDeadBeef to the guard bytes upon each allocation.
+
+   On each arena_alloc() call, and perhaps whenever a paranoid app calls arena_check() for debugging,
+   you could perform zero or more guard checks. Read the guards before and after a given user block to
+   verify they still say 0xDeadBeef or are otherwise intact. Write new values there, perhaps 0xBeefDead
+   or a counter, so caller will realize they cannot rely on that storage.
+
+   It is important that bytes immediately before a user block, and especially the bytes immediately
+   following such a block, should be non-zero. The idea is to trigger OBOB failures for
+   inappropriate app use of strlen() or strnlen(), which keep forging ahead till encountering ascii NUL.
+   It might seem sensible to pad with zeros until alignment boundary, but that actually does app
+   developers a disservice. It would be better if they noticed their bugs more quickly.
+
+
+---
+
