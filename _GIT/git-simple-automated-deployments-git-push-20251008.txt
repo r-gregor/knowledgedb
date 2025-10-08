@@ -1,0 +1,211 @@
+filename: git-simple-automated-deployments-git-push-20251008.txt
+https://garrido.io/notes/simple-automated-deployments-git-push/
+
+Simple automated deployments using git push
+April 13, 2024
+
+   Using git push remains one of my favorite ways of deploying software. It's simple, effective, and you
+   can stretch it significantly until you need more complex workflows.
+
+   I'm not referring to using git push to trigger a Github action which builds and deploys software. I'm
+   talking about using git push web main to deploy your main branch to a server that you've named web.
+
+   I learned this workflow from Josef Strzibny's excellent book Deployment from Scratch, which I've
+   adapted somewhat.
+
+   This note supposes you have SSH access to a server that has git installed. Let's assume that said
+   server is already configured as a host in your machine's SSH configuration file:
+
+$> cat ~/.ssh/config
+Host web
+HostName project.com
+User admin
+IdentityFile ~/.ssh/id_rsa
+
+Creating a remote repository
+   I keep an Ansible playbook that automates provisioning this workflow. It should be easy to derive an
+   equivalent bash script if you're not using Ansible.
+
+[playbook.yml]
+<code>
+---
+- hosts: all
+  become: true
+  vars:
+    user: "admin"
+
+  tasks:
+    - name: Create project directories
+      file:
+        path: "/srv/{{ item }}"
+        state: directory
+        owner: "{{ user }}"
+        group: "{{ user }}"
+        mode: 0755
+      with_items:
+        - "project"
+        - "project/git"
+        - "project/source"
+        - "project/www"
+
+    - name: Create bare git repository
+      shell:
+        cmd: |
+          git init --bare
+          git config --global --add safe.directory /srv/project/git
+      args:
+        chdir: "/srv/project/git"
+        creates: "/srv/project/git/HEAD"
+
+    # git init --bare creates files and directories, let's ensure
+    # these have the correct permissions. Otherwise, pushing may
+    # result in permission errors.
+    - name: Ensure correct permissions in git subdirectories
+      file:
+        path: "/srv/project/git"
+        state: directory
+        owner: "{{ user }}"
+        group: "{{ user }}"
+        mode: "0755"
+        recurse: true
+
+    - name: Copy scripts
+      copy:
+        src: "{{ item.src }}"
+        dest: "/srv/project/{{ item.dest }}"
+        owner: "{{ user }}"
+        group: "{{ user }}"
+        mode: "a+x"
+      with_items:
+        - src: "post-receive.sh"
+          dest: "git/hooks/post-receive"
+        - src: "deploy.sh"
+         dest: ""
+</code>
+
+
+   The way this works is that you keep a bare git repository in the server where you want to deploy
+   software. A bare repository is a repository that does not have a working directory. It does not push
+   or pull. Anyone with access and permission to the server and the directory where git repository is
+   created will be able to push to it to deploy.
+
+   My convention is to create a directory for the project at hand in the /srv/ directory. Inside, I will
+   create two directories: a git directory where the bare repository lives, and a source directory where
+   the source-controlled project files live.
+
+   Then, you configure a post-receive script in the git repository hook's directory. This script will
+   check out the code that was pushed to the main branch into the source directory.
+
+   You could do other git operations here like obtaining the current HEAD hash if you're using that
+   somewhere in your application code.
+
+/srv/project/git/hooks/post-receive
+
+[post-receive.sh]
+<code>
+#!/bin/bash
+
+set -e
+
+GIT_WORK_TREE=/srv/project/source git checkout main -f
+/srv/project/deploy.sh
+</code>
+
+   Finally, you trigger a deployment script that also lives in the project root.
+
+   This deployment script, in turn, takes care of whatever is necessary to build and release the pushed
+   code. For example, you could use it generate a new version of a website that uses Hugo:
+
+/srv/project/deploy.sh
+[deploy.sh]
+<code>
+#!/bin/bash
+
+set -e
+
+hugo --gc --minify -s /srv/project/source -d /srv/project/www
+echo "Deployed"
+</code>
+
+   It's important to note that the current working directory for that script will be
+   /srv/project/git/hooks, so you may need to change directory or use absolute paths as I showed in the
+   example above.
+
+   Another important consideration is that the remote repository gets updated even if post-receive exits
+   because of an error. It is recommended, particularly in the deploy script, to use set -e so that the
+   script stops if any command exits with an non-zero status. If an error ocurrs you'll know right away
+   because the stdout and stderr of post-receive is piped back to the client that pushed.
+
+   I also recommend writing the deploy.sh script such that it is not coupled to a particular push. It
+   should work with what's in the source directory. In other words, I should be able to use the same
+   script to manually deploy the application if I have a reason to.
+
+   Here are a couple of uses for this workflow, some of which I've done:
+     * Build a new binary of a Go program using go build and replace the process
+     * Build a new image of a Docker container using docker build or docker compose build and
+       replace the running containers
+     * Restart a Node.js server
+
+   If you're using PHP, or serving plain HTML files, you may even get away with not having a deploy.sh
+   script given that the hook updates the source files.
+
+Adding the remote and pushing code
+   At this point all you need to do is create a new SSH remote for the repository in your machine:
+$> git remote add web ssh://web/srv/project/git
+
+   The first web above is the name of the remote, which is arbitrary. The second web matches the name of
+   the host we defined configured in our SSH configuration file.
+
+   And finally, you push to it.
+
+$> git push web main
+Enumerating objects: 86, done.
+Counting objects: 100% (86/86), done.
+Delta compression using up to 20 threads
+Compressing objects: 100% (77/77), done.
+Writing objects: 100% (86/86), 5.66 MiB | 1.99 MiB/s, done.
+Total 86 (delta 1), reused 0 (delta 0), pack-reused 0
+remote: Switched to branch 'main'
+remote: Start building sites ...
+remote: hugo v0.92.2+extended linux/amd64 BuildDate=2023-01-31T11:11:57Z VendorInfo=ubuntu:0.92.2-1ubuntu0.1
+remote:
+remote:                    | EN
+remote: -------------------+-----
+remote:   Pages            |  9
+remote:   Paginator pages  |  0
+remote:   Non-page files   |  1
+remote:   Static files     | 38
+remote:   Processed images |  2
+remote:   Aliases          |  0
+remote:   Sitemaps         |  1
+remote:   Cleaned          |  0
+remote:
+remote: Total in 283 ms
+remote: Deployed
+To ssh://web/srv/project/git
+ * [new branch]      main -> main
+
+   Because this workflow is version-controlled, reverting or jumping to a specific version is just
+   another git operation.
+
+   I should emphasize that this workflow is pinned to the main branch. Any change that you do must be
+   reflected in that branch in order to get it live. That said, you can push other branches to this
+   remote as it is a regular git repository. However, note the following difference.
+
+   Doing git push web my-feature-branch will not deploy a new version with the contents of that branch.
+   The post-receive hook above always checks out the contents of main.
+
+   You can either merge my-feature-branch to main in your machine and then push to it, or push directly
+   from the branch to the remote:
+
+$> git push web my-feature-branch:main
+
+   You can force push with -f if the remote warns you about discrepancies.
+
+    1. This one is quite convenient for projects where you can get away with not using an image
+       repository and build pipeline, and if building your image is not too process-intensive. Running
+       docker system prune periodically is necessary though.
+
+
+---
+
