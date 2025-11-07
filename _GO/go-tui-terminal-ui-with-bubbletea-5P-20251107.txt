@@ -1,0 +1,1271 @@
+filename: go-tui-terminal-ui-with-bubbletea-5P-20251107.txt
+https://themarkokovacevic.com/posts/terminal-ui-with-bubbletea/
+
+Building a TUI app
+2024-07-11
+
+   Have you ever wondered, once you would see those beautiful terminal apps and wonder how they built
+   them or how could you add that animated spinner on the terminal to display that some IO is happening?
+   Well we are going to dive straight into making one with the use of Go and a powerful little TUI
+   framework that gives us all of that amazing power to build a TUI (terminal user interface)
+   bubbletea!
+
+   More info about the library and it's ecosystem can be found at charm.sh.
+
+When to use a TUI app
+   Now, before we run into building a TUI we should think about, when do we want to build a TUI? I mean,
+   yeah, we will get the visual flare of it, but we also need to be real, that visual display consumes
+   quite a bit of time to make (especially if we want to have good UX). If you just want to execute a
+   function and spit out an output, a normal command line app will do the job without much hassle.
+
+   Ideas of when it would be good to use a TUI app:
+     * State management
+          + result from function a is stored for later use as argument in function b and/or function c
+     * Visual lookup and selection is needed
+          + file selection through a file tree or list
+     * Realtime work
+          + editing with immediate visual feedback, like a text editor
+     * Multiple steps and choices/State machine
+          + Focus on state with multiple dependencies on it, like a game
+
+Before we start
+   The bubbletea GitHub page has a fantastic introduction example which I suggest you first check
+   out and build as it will give you a better overview of how the framework works.
+
+   The TUI framework implements the Elm architecture which I will try to really, really roughly
+   summarize as: functional event flow goes event (Model) -> state (Update) -> view (View).
+   ./elm_architecture.svg Elm Architecture
+
+What are we building?
+   We want to build something that's a little bit more complex than just the selection list, we will go
+   towards having a simple state to justify building a TUI instead of a command line application with a
+   little bit of layout organization.
+
+   Application requirements:
+     * Retrieve the user from the database and store it
+     * Use the stored user to retrieve it's token
+
+   Style requirements:
+     * Have a list of commands which we can run
+     * Display the status of the app, the user stored and any errors
+     * The token command is disabled until we retrieve the user
+     * Add a loading spinner for lengthy actions
+
+   It should look something like the following:
+   [https://themarkokovacevic.com/posts/terminal-ui-with-bubbletea/tui_example.gif]
+
+Structure
+   Alongside bubbletea, we will be using another 2 libraries from its ecosystem:
+     * lipgloss for styling
+     * bubbles for additional components
+
+   As always we would start from just a main.go file, but to give a better glimpse of what's to come,
+   the whole directory structure will look like the following:
+example-go-tui/
++- internal/
+|  +- storage
+|  +- tui
++- commands_database.go
++- main.go
+
+   This structure would certainly change depending on the complexity of the app, but for now I think is
+   more than good.
+     * internal/storage/ - stores only database related functionality
+     * internal/tui/ - stores our components used for rendering
+     * commands_database.go - wrappers for tui commands
+     * main.go - main entry where we do the composition and state management
+
+   Concurrency
+   When using bubbletea framework refrain from using goroutines!. The framework has a unique
+   architecture and the proper way to use concurrency and I/O is via provided framework commands. For
+   more info, refer to the official blog post on commands in bubbletea.
+
+   This example will also showcase how to use such.
+
+First step, hello world
+   As usual, it's always a good approach to bootstrap the application in barebones state, so we start
+   from a functional example. For start, we just need main.go file, we will just set a basic model,
+   display the cursor index and allow the user of app to exit.
+
+   General codebase approach
+   Review the code as something done in a hybrid approach, I tend to show-off multiple ways of achieving
+   things or a different approach as most things like refactoring and evolving is done on the go and is
+   based on complexity.
+
+package main
+
+import (
+	"fmt"
+	tea "github.com/charmbracelet/bubbletea"
+	"log"
+	"os"
+	"strings"
+)
+
+type command struct {
+	disabled bool
+	name     string
+}
+
+type model struct {
+	stateDescription string
+	commands         []command // items on the to-do list
+	cursor           int       // which to-do list item our cursor is pointing at
+}
+
+func initialModel() model {
+	return model{
+		stateDescription: "Initializing...",
+		commands: []command {
+			{name: "Set user"},
+			{name: "Fetch token", disabled: true},
+			{name: "Other..."},
+		},
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	// No I/O
+	return nil
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+		// Is it a key press?
+		case tea.KeyMsg:
+			// Cool, what was the actual key pressed?
+			switch msg.String() {
+				// These keys should exit the program.
+				case "ctrl+c", "q":
+					return m, tea.Quit
+
+						// The "up" and "k" keys move the cursor up
+				case "up", "k":
+					if m.cursor > 0 {
+						m.cursor--
+					}
+
+					// The "down" and "j" keys move the cursor down
+				case "down", "j":
+					if m.cursor < len(m.commands)-1 {
+						m.cursor++
+					}
+			}
+	}
+	// Return the updated model to the Bubble Tea runtime for processing.
+	// Note that we're not returning a command.
+	return m, nil
+}
+
+func (m model) View() string {
+	doc := &strings.Builder{}
+	doc.WriteString(fmt.Sprintf("Cursor: %d", m.cursor))
+	doc.WriteString("\n\n")
+
+	// Footer
+	doc.WriteString("Press q to quit.")
+	doc.WriteString("\n")
+
+	// Send the UI for rendering
+	return doc.String()
+}
+
+func main() {
+	// Set DEBUG=true and watch the file for logs: 'tail -f debug.log'
+	if len(os.Getenv("DEBUG")) > 0 {
+		f, err := tea.LogToFile("debug.log", "debug")
+		if err != nil {
+			log.Fatalf("failed setting the debug log file: %v", err)
+		}
+		defer f.Close()
+	}
+
+	p := tea.NewProgram(initialModel())
+	if _, err := p.Run(); err != nil {
+		log.Fatalf("TUI run error: %v", err)
+	}
+}
+
+   At the main method you can see that we added an environment variable check for DEBUG value, so if set
+   all logs will get logged to a debug.log file for us to inspect live when testing.
+
+   This will just render the cursor index which we can move with up and down arrows on our keyboard and
+   allow us to quit with q:
+Cursor: 0
+
+Press q to quit.
+
+   Now we know it's working!
+
+   String builder
+   We are using string builder as it's more performant than just having + and fmt.Sprintf our strings,
+   but in the end we are not building a really performant app, so you can just do it the old-fashioned
+   way.
+
+   Though note that it might be convenient that we can pass the builder to a function to let it append
+   strings by itself.
+
+Second step, header and footer
+   Let's put to use lipgloss library and add a stylish title row that will show off our app, for this we
+   should start creating a directory internal/tui/, so we have these components separated from our main
+   logic.
+
+   There we create a file title_row.go to house our component that's independent
+package tui
+
+import (
+	"github.com/charmbracelet/lipgloss"
+	"strings"
+)
+
+type TitleRowProps struct {
+	Title string
+}
+
+func RenderTitleRow(width int, doc *strings.Builder, props TitleRowProps) {
+	var (
+		highlight = lipgloss.AdaptiveColor{Light: "#347aeb", Dark: "#347aeb"}
+
+		activeTabBorder = lipgloss.Border{
+			Top:         "-",
+			Bottom:      " ",
+			Left:        "|",
+			Right:       "|",
+			TopLeft:     "╭",
+			TopRight:    "╮",
+			BottomLeft:  "+",
+			BottomRight: "+",
+		}
+
+		tabBorder = lipgloss.Border{
+			Top:         "-",
+			Bottom:      "-",
+			Left:        "|",
+			Right:       "|",
+			TopLeft:     "╭",
+			TopRight:    "╮",
+			BottomLeft:  "+",
+			BottomRight: "+",
+		}
+
+		tab = lipgloss.NewStyle().
+			Border(tabBorder, true).
+			BorderForeground(highlight).
+			Padding(0, 1)
+
+		activeTab = tab.Border(activeTabBorder, true)
+
+		tabGap = tab.
+			BorderTop(false).
+			BorderLeft(false).
+			BorderRight(false)
+	)
+
+	row := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		activeTab.Render(props.Title),
+	)
+
+	gap := tabGap.Render(strings.Repeat(" ", max(0, width-lipgloss.Width(row)-2)))
+	row = lipgloss.JoinHorizontal(lipgloss.Bottom, row, gap)
+
+	doc.WriteString(row)
+}
+
+   Adaptive color
+   lipgloss.AdaptiveColor selects which color to use based on terminal, if the terminal is light themed,
+   the light color will be used and opposite.
+
+   We then just need to update the main.go file to have some constants
+
+package main
+
+const (
+	// In real life situations we'd adjust the document to fit the width we've
+	// detected. In the case of this example we're hardcoding the width, and
+	// later using the detected width only to truncate in order to avoid jaggy
+	// wrapping.
+	width = 96
+
+	columnWidth = 30
+)
+
+   and render in the View this new title row
+
+tui.RenderTitleRow(width, doc, tui.TitleRowProps{Title: "GO TUI example"})
+doc.WriteString("\n\n")
+
+   Which will render us a better view of our app:
+╭----------------╮
+| GO TUI example |
++                +------------------------------------------------------------------------------
+
+Cursor: 0
+
+Press q to quit.
+
+   Now before we move to status bar on footer, lets create a file to share our color constants
+   internal/tui/constants.go
+
+package tui
+
+import "github.com/charmbracelet/lipgloss"
+
+const (
+	colorRed    = lipgloss.Color("#f54242")
+	colorYellow = lipgloss.Color("#b0ad09")
+	colorBlue   = lipgloss.Color("#347aeb")
+	colorGray   = lipgloss.Color("#636363")
+	colorGreen  = lipgloss.Color("#1fb009")
+	colorWhite  = lipgloss.Color("#FFFDF5")
+)
+
+var (
+	whiteStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colorWhite)
+	errorStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colorRed)
+	yellowStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colorYellow)
+	grayStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colorGray)
+	goodStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colorGreen)
+	blueStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colorBlue)
+)
+
+   Here is the code for the footer status bar component, which we want to be configurable as much as
+   possible
+
+package tui
+
+import (
+	"github.com/charmbracelet/lipgloss"
+	"strings"
+)
+
+type StatusBarState string
+
+const (
+	StatusBarStateGreen  StatusBarState = "green"
+	StatusBarStateYellow StatusBarState = "yellow"
+	StatusBarStateBlue   StatusBarState = "blue"
+	StatusBarStateGray   StatusBarState = "gray"
+	StatusBarStateRed    StatusBarState = "red"
+)
+
+var styleMapByColor = map[StatusBarState]lipgloss.Style{
+	StatusBarStateRed:    statusStyleErr,
+	StatusBarStateBlue:   statusStyleBlue,
+	StatusBarStateGreen:  statusStyleGreen,
+	StatusBarStateYellow: statusStyleYellow,
+	StatusBarStateGray:   statusStyleGray,
+}
+
+type StatusBarProps struct {
+	Status        string
+	Description   string
+	User          string
+	StatusState   StatusBarState
+	Width         int
+}
+
+func NewStatusBarProps(props *StatusBarProps) StatusBarProps {
+	defaultProps := StatusBarProps{
+		Status:      "STATUS",
+		Description: "",
+		User:        "NONE",
+		StatusState: StatusBarStateGreen,
+		Width:       98,
+	}
+	if props == nil {
+		return defaultProps
+	}
+
+	if props.User != "" {
+		defaultProps.User = props.User
+	}
+	if props.Status != "" {
+		defaultProps.Status = props.Status
+	}
+	if props.Description != "" {
+		defaultProps.Description = props.Description
+	}
+	if props.Width > 0 {
+		defaultProps.Width = props.Width
+	}
+	if props.StatusState != "" {
+		defaultProps.StatusState = props.StatusState
+	}
+	return defaultProps
+}
+
+var (
+	statusNugget = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFDF5")).
+		Padding(0, 1)
+
+	statusBarStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.AdaptiveColor{Light: "#343433", Dark: "#C1C6B2"}).
+		Background(lipgloss.AdaptiveColor{Light: "#D9DCCF", Dark: "#353533"})
+
+	statusStyleGreen = lipgloss.NewStyle().
+		Inherit(statusBarStyle).
+		Foreground(lipgloss.Color("#FFFDF5")).
+		Background(lipgloss.Color(colorGreen)).
+		Padding(0, 1).
+		MarginRight(1)
+
+	statusStyleErr    = statusStyleGreen.Background(colorRed)
+	statusStyleGray   = statusStyleGreen.Background(colorGray)
+	statusStyleYellow = statusStyleGreen.Background(colorYellow)
+	statusStyleBlue   = statusStyleGreen.Background(colorBlue)
+
+	encodingStyle = statusNugget.
+		Background(lipgloss.Color("#A550DF")).
+		Align(lipgloss.Right)
+
+	statusText = lipgloss.NewStyle().Inherit(statusBarStyle)
+
+	fishCakeStyle = statusNugget.Background(lipgloss.Color("#6124DF"))
+)
+
+func RenderStatusBar(doc *strings.Builder, props StatusBarProps) {
+
+	coloredStyle, ok := styleMapByColor[props.StatusState]
+	if !ok {
+		coloredStyle = statusStyleGreen
+	}
+
+	statusKey := coloredStyle.Render(props.Status)
+	encoding  := encodingStyle.Render("USER")
+	fishCake  := fishCakeStyle.Render(props.User)
+
+	w         := lipgloss.Width
+	statusVal := statusText.
+		Width(props.Width - w(statusKey) - w(encoding) - w(fishCake)).
+		Render(whiteStyle.Render(props.Description))
+
+	bar := lipgloss.JoinHorizontal(lipgloss.Top,
+		statusKey,
+		statusVal,
+		encoding,
+		fishCake,
+	)
+
+	doc.WriteString(statusBarStyle.Width(props.Width).Render(bar))
+
+	doc.WriteString("\n\n")
+}
+
+   Then we need to update the main model to hold state of a new field: stateStatus
+
+type model struct {
+	stateDescription string             // <- Sets the description on the status bar
+	stateStatus      tui.StatusBarState // <- Sets the color of the status bar
+	commands         []command          // items on the to-do list
+	cursor           int                // which to-do list item our cursor is pointing at
+}
+
+   Add the rendering just above the footer:
+
+tui.RenderStatusBar(doc, tui.NewStatusBarProps(&tui.StatusBarProps{
+	Description: m.stateDescription,
+	User:        "NONE",
+	StatusState: tui.StatusBarStateBlue,
+	Width:       width,
+}))
+
+   And now we look more stylish! (better in real terminal than copy/pasted text)
+╭----------------╮
+| GO TUI example |
++                +------------------------------------------------------------------------------
+
+Cursor: 0
+
+ STATUS  Initializing...                                                              USER  N\A
+
+   Now our TUI is starting to look like something!
+
+Third step, commands
+   It's time we replace the counter for a list of commands, remember that we will have 2 components next
+   to each other horizontally and the commands list will be first and on the left utilizing our cursor
+   and commands list. With it, we can later execute these commands, so for those reasons we will create
+   2 list files: list_commands.go and list_display.go,
+
+   We want the list_commands.go to render differently a list item which is disabled.
+
+package tui
+
+import (
+	"github.com/charmbracelet/lipgloss"
+	"slices"
+	"strings"
+)
+
+type Item struct {
+	Value    string
+	Disabled bool
+}
+
+type ListProps struct {
+	Items    []Item
+	Selected int
+}
+
+func RenderListCommands(doc *strings.Builder, props *ListProps) string {
+	var list = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder(), false, true, false, false).
+		BorderForeground(subtle).
+		MarginRight(2).
+		Height(8).
+		Width(columnWidth + 1)
+
+	var processedItems []string
+
+	for i, item := range props.Items {
+		if i == props.Selected && !item.Disabled {
+			processedItems = append(processedItems, selected(item.Value))
+		} else {
+			if item.Disabled {
+				processedItems = append(processedItems, disabled(item.Value))
+			} else {
+				processedItems = append(processedItems, item.Value)
+			}
+		}
+	}
+
+	return list.Render(
+		lipgloss.JoinVertical(lipgloss.Left,
+			slices.Insert(processedItems, 0, listHeader("Commands"))...,
+		),
+	)
+}
+
+   The second list list_display.go we also want to keep simple, just a header and a list of values to
+   render
+
+package tui
+
+import (
+	"github.com/charmbracelet/lipgloss"
+	"slices"
+)
+
+var selected = func(s string) string {
+	return lipgloss.NewStyle().Foreground(colorBlue).Render(s)
+}
+var disabled = func(s string) string {
+	return lipgloss.NewStyle().Foreground(colorGray).Render(s)
+}
+
+var subtle = lipgloss.AdaptiveColor{Light: "#D9DCCF", Dark: "#383838"}
+
+var list = lipgloss.NewStyle().
+	Border(lipgloss.NormalBorder(), false, true, false, false).
+	BorderForeground(subtle).
+	MarginRight(2).
+	Height(8).
+	Width(columnWidth + 1)
+
+var listHeader = lipgloss.NewStyle().
+	BorderStyle(lipgloss.NormalBorder()).
+	BorderBottom(true).
+	BorderForeground(subtle).
+	MarginRight(2).
+	Render
+
+func RenderListDisplay(header string, items []string) string {
+	return list.Width(columnWidth).
+		Border(lipgloss.NormalBorder(), false, false, false, false).
+		Render(
+			lipgloss.JoinVertical(lipgloss.Left,
+				slices.Insert(items, 0, listHeader(header))...,
+			),
+		)
+}
+
+Because we will be changing the header value of the second list and its items, we will need to add 2
+   more fields to the model in main.go
+
+type model struct {
+	stateDescription string
+	stateStatus      tui.StatusBarState
+	commands         []command
+	cursor           int
+	secondListHeader string   // <- Header value
+	secondListValues []string // <- List of values
+}
+
+   Ok, we are set for rendering, but since there's quite a bit of code we should move it into a separate
+   function
+
+func renderLists(doc *strings.Builder, m model) {
+	var items []tui.Item
+	for _, c := range m.commands {
+		items = append(items, tui.Item {
+			Value:    c.name,
+			Disabled: c.disabled,
+		})
+	}
+
+	lists := lipgloss.JoinHorizontal(lipgloss.Top,
+		tui.RenderListCommands(doc, &tui.ListProps {
+			Items:    items,
+			Selected: m.cursor,
+		}),
+		tui.RenderListDisplay(m.secondListHeader, m.secondListValues),
+	)
+
+	doc.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, lists))
+	doc.WriteString("\n\n")
+}
+
+   You can see that we use lipgloss.JoinHorizontal to make the components properly aligned. Then we can
+   just call the function instead of our cursor rendering: renderLists(doc, m) and now we have it look
+   like the following:
+
+╭----------------╮
+| GO TUI example |
++                +------------------------------------------------------------------------------
+
+Commands                       |
+--------                       |
+Set user                       |
+Fetch token                    |
+Other...                       |
+                               |
+                               |
+                               |
+
+ STATUS  Initializing...                                                             USER  NONE
+
+   Though when you move with the cursor you see that nothing happens when you move atop of Fetch token,
+   no coloring, just nothing, plus if you remember, a lot of systems just skip the disabled item. Let's
+   do just that!
+
+// The "up" and "k" keys move the cursor up
+case "up", "k":
+	if m.cursor > 0 {
+		if m.commands[m.cursor-1].disabled {
+			m.cursor--
+		}
+		m.cursor--
+	}
+
+// The "down" and "j" keys move the cursor down
+case "down", "j":
+	if m.cursor < len(m.commands)-1 {
+		if m.commands[m.cursor+1].disabled {
+			m.cursor++
+		}
+		m.cursor++
+	}
+}
+
+   Super easy as we just check if the next one is disabled and jump 2 sizes instead of 1 if true.
+
+Fourth step, database
+   Before we can continue with other steps, we need to start connecting and using the database, for that
+   I will quickly show off the code for the database, so we can move faster towards building the TUI.
+   The best approach is to create an internal/storage/ directory where we will put everything database
+   related and completely obliviate of our TUI logic.
+
+   Next we initialize the database connection for our app and since we are wrapping functions with
+   bubble tea function, so for easier separation we put these wrappers in a separate file, for db:
+   commands_database.go.
+
+   Let's start with bootstrapping the client, we'll use MongoDB as it's fast to start with in
+   internal/storage/database.go.
+package storage
+
+import (
+	"context"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"time"
+	)
+
+func NewDbConnection(ctx context.Context, uri string) (*mongo.Client, error) {
+	var updatedUri string
+	if uri == "" {
+		updatedUri = "mongodb://localhost:27017"
+	}
+
+	return mongo.Connect(ctx, options.Client().
+		ApplyURI(updatedUri).
+		SetTimeout(5*time.Second),
+	)
+}
+
+   Now one for user CRUD operations: user_repository.go
+
+package storage
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+)
+
+type User struct {
+	Id    primitive.ObjectID `bson:"_id"`
+	Email string
+}
+
+type UserRepository struct {
+	db   *mongo.Database
+	coll *mongo.Collection
+}
+
+func NewUserRepository(db *mongo.Database) (*UserRepository, error) {
+	return &UserRepository{db: db, coll: db.Collection("users")}, nil
+}
+
+func (r *UserRepository) AddUserIfNotExists(ctx context.Context, user User) error {
+	existing, err := r.FindByEmail(ctx, user.Email)
+	if err != nil {
+		return fmt.Errorf("failing searching for existing: %v", err)
+	}
+	if existing != nil {
+		return nil
+	}
+
+	_, err = r.coll.InsertOne(ctx, user)
+	return err
+}
+
+func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*User, error) {
+	var user User
+	if err := r.coll.FindOne(ctx, bson.D{{"email", email}}).Decode(&user); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed searching user by email: %v", err)
+	}
+	return &user, nil
+}
+
+   Now as mentioned earlier, we cannot directly call I/O within our bubbletea program, we need to wrap
+   them in tea.Command functions, thus we create internal/commands/database.go file where we will
+   provide with these wrappers
+
+   Reference for bubbletea commands.
+
+package commands
+
+import (
+	"context"
+	"fmt"
+	tea "github.com/charmbracelet/bubbletea"
+	"go.mongodb.org/mongo-driver/mongo"
+	"gotui/internal/storage"
+	"os"
+)
+
+type DbConnection struct {
+	Client         *mongo.Client
+	UserRepository *storage.UserRepository
+	Err            error
+}
+
+var preloadedUsers = []storage.User {
+	{Email: "john@gmail.com"},
+	{Email: "ana2@yahoo.com"},
+}
+
+func InitDatabase() tea.Msg {
+	ctx := context.TODO()
+	dbClient, err := storage.NewDbConnection(ctx, os.Getenv(""))
+	if err != nil {
+		return DbConnection{Err: err}
+	}
+	err = dbClient.Ping(ctx, nil)
+	if err != nil {
+		return DbConnection{Err: fmt.Errorf("failed pinging db: %v", err)}
+	}
+
+	userRepository, err := storage.NewUserRepository(dbClient.Database("gotui"))
+	if err != nil {
+		return DbConnection{Err: fmt.Errorf("failed creating user repository: %v", err)}
+	}
+
+	for _, user := range preloadedUsers {
+		if err = userRepository.AddUserIfNotExists(ctx, user); err != nil {
+			return err
+		}
+	}
+
+	return DbConnection {
+		Client:         dbClient,
+		UserRepository: userRepository,
+		Err:            nil,
+	}
+}
+
+type GetUserByEmailMsg struct {
+	User *storage.User
+	Err  error
+}
+
+func GetUserByEmail(userRepo *storage.UserRepository, email string) tea.Cmd {
+	return func() tea.Msg {
+		user, err := userRepo.FindByEmail(context.TODO(), email)
+
+		return GetUserByEmailMsg {
+			User: user,
+			Err:  err,
+		}
+	}
+}
+
+   Now let's apply all of this in our main.go file.
+
+type model struct {
+	stateDescription string
+	stateStatus      tui.StatusBarState
+	commands         []command
+	cursor           int
+	secondListHeader string
+	secondListValues []string
+	dbConnection     *commands.DbConnection   // <- Reference to the connection
+	user             *storage.User            // <- User which we will later retrieve
+	loading          bool                     // <- Is the whole app in loading state
+	spinner          spinner.Model            // <- Spinner we will use from the bubbles library
+}
+
+   For the spinner you will need to import it
+
+import "github.com/charmbracelet/bubbles/spinner"
+
+   We then initialize model values (and by the way fix the state status to be blue)
+
+func initialModel() model {
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
+	return model{
+		spinner:          s,
+		loading:          true,
+		stateDescription: "Initializing...",
+		stateStatus:      tui.StatusBarStateBlue,
+
+		commands: []command{
+			{name: "Set user"},
+			{name: "Fetch token", disabled: true},
+			{name: "Other..."},
+		},
+	}
+}
+
+   The init function now performs I/O on app init
+
+func (m model) Init() tea.Cmd {
+	return tea.Batch (
+		commands.InitDatabase,
+		m.spinner.Tick,
+	)
+}
+
+   Now we can update the view, so we check if the app is loading in order to render the list or not and
+   to change the status bar description to show the spinner until it has loaded.
+
+var stateDescription string
+
+if !m.loading {
+	stateDescription = m.stateDescription
+	renderLists(doc, m)
+} else {
+	stateDescription = m.spinner.View()
+}
+
+tui.RenderStatusBar(doc, tui.NewStatusBarProps(&tui.StatusBarProps {
+	Description: stateDescription,
+	User:        "NONE",
+	StatusState: m.stateStatus,
+	Width:       width,
+}))
+
+   Before we go to handle logic for handling custom commands, we need to create a helper function for
+   shortening errors:
+
+func shortenErr(err error, length int) string {
+	if len(err.Error()) < length {
+		return err.Error()
+	}
+
+	return err.Error()[:length] + "..."
+}
+
+   On initialization, we fired the database connection, and we need to catch that message in Update and
+   handle it properly.
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	case commands.DbConnection:
+		m.stateDescription = ""
+		m.dbConnection = &msg
+		if m.dbConnection != nil {
+			if m.dbConnection.Err != nil {
+				m.stateStatus = tui.StatusBarStateRed
+				m.stateDescription = "Failed to connect to database: " + shortenErr(m.dbConnection.Err, 35)
+			} else {
+				m.stateStatus = tui.StatusBarStateGreen
+				m.stateDescription = "Connected to database"
+			}
+		}
+		m.loading = false
+		return m, nil
+
+	// Is it a key press?
+	case tea.KeyMsg:
+		// Cool, what was the actual key pressed?
+		switch msg.String() {
+			// These keys should exit the program.
+			case "ctrl+c", "q":
+				return m, tea.Quit
+
+			// The "up" and "k" keys move the cursor up
+			case "up", "k":
+				if m.cursor > 0 {
+					if m.commands[m.cursor-1].disabled {
+						m.cursor--
+					}
+					m.cursor--
+				}
+
+			// The "down" and "j" keys move the cursor down
+			case "down", "j":
+				if m.cursor < len(m.commands)-1 {
+					if m.commands[m.cursor+1].disabled {
+						m.cursor++
+					}
+					m.cursor++
+				}
+		}
+	}
+
+	var cmd tea.Cmd
+	m.spinner, cmd = m.spinner.Update(msg)
+
+	// Return the updated model to the Bubble Tea runtime for processing.
+	// Note that we're not returning a command.
+	return m, cmd
+}
+
+   And of course not to forget the docker-compose.yaml file for starting the database with: docker
+   compose up -d
+
+version: '3.8'
+
+services:
+
+  mongo:
+    image: mongo:7.0.11
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: "gotui"
+
+   Try running the terminal with and without database and observe how it handles with and without error.
+DEBUG=true go run .
+
+Fifth step, fetch user
+   We want to input user email on the first command and load the user or notify that the user was not
+   found. We will use textinput component provided in bubbles library.
+import "github.com/charmbracelet/bubbles/textinput"
+
+   We will need app mode for switching mode to input and back
+
+type appMode string
+
+const (
+	appModeInput   appMode = "input"
+	appModeLoading appMode = "loading"
+	appModeDefault appMode = ""
+)
+
+   Update our model with textInput and mode fields.
+type model struct {
+	stateDescription string
+	stateStatus      tui.StatusBarState
+	commands         []command // items on the to-do list
+	cursor           int       // which to-do list item our cursor is pointing at
+	secondListHeader string
+	secondListValues []string
+	dbConnection     *commands.DbConnection
+	user             *storage.User
+	loading          bool
+	spinner          spinner.Model
+	textInput        textinput.Model    // <- text input component
+	mode             appMode            // <- mode in which our app is input entering or not
+}
+
+   Initialize text input component
+
+func initialModel() model {
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
+	ti := textinput.New()
+	ti.Placeholder = "john@email.com"
+	ti.Focus()
+	ti.CharLimit = 156
+	ti.Width = 20
+
+	return model{
+		textInput:        ti,
+		spinner:          s,
+		loading:          true,
+		stateDescription: "Initializing...",
+		stateStatus:      tui.StatusBarStateBlue,
+		commands: []command{
+			{name: "Set user"},
+			{name: "Fetch token", disabled: true},
+			{name: "Other..."},
+		},
+	}
+}
+
+   Update view to handle different app mode and text input rendering
+
+var stateDescription string
+if !m.loading {
+	stateDescription = m.stateDescription
+
+	if m.mode == appModeInput {
+		doc.WriteString(m.textInput.View())
+		doc.WriteString("\n\n")
+		doc.WriteString("Press tab to return")
+		doc.WriteString("\n\n")
+	} else {
+		// Lists
+		renderLists(doc, m)
+	}
+} else {
+	stateDescription = m.spinner.View()
+}
+
+// And update the user email to be shown when retrieved in status bar instead of NONE
+retrievedUser := "NONE"
+if m.user != nil {
+	retrievedUser = m.user.Email
+}
+
+tui.RenderStatusBar(doc, tui.NewStatusBarProps(&tui.StatusBarProps{
+	Description: stateDescription,
+	User:        retrievedUser,
+	StatusState: m.stateStatus,
+	Width:       width,
+}))
+
+   One more helper function for transformation of the retrieved user
+
+func userFieldsToArray(user *storage.User) []string {
+	if user == nil {
+		return []string{}
+	}
+
+	return []string{
+		fmt.Sprintf("id: %s", user.Id.Hex()),
+		fmt.Sprintf("email: %s", user.Email),
+	}
+}
+
+   The biggest change falls upon the Update method where we need to add handling for the
+   commands.GetUserByEmailMsg message and tea.KeyTab and tea.Enter messages to properly handle returning
+   back and sending the fetch user command.
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	case commands.DbConnection:
+		m.stateDescription = ""
+		m.dbConnection = &msg
+		if m.dbConnection != nil {
+			if m.dbConnection.Err != nil {
+				m.stateStatus = tui.StatusBarStateRed
+				m.stateDescription = "Failed to connect to database: " + shortenErr(m.dbConnection.Err, 35)
+			} else {
+				m.stateStatus = tui.StatusBarStateGreen
+				m.stateDescription = "Connected to database"
+			}
+		}
+		m.loading = false
+		return m, nil
+
+	case commands.GetUserByEmailMsg:
+		m.user = msg.User
+		if msg.Err != nil {
+			m.stateDescription = msg.Err.Error()
+		}
+		if m.user == nil {
+			m.stateDescription = "User not found"
+			m.stateStatus = tui.StatusBarStateYellow
+			m.commands[1].disabled = true
+			m.secondListHeader = "User"
+			m.secondListValues = []string{"Not Found"}
+		} else {
+			m.stateDescription = "User set"
+			m.stateStatus = tui.StatusBarStateBlue
+			m.commands[1].disabled = false
+			m.secondListHeader = "User"
+			m.secondListValues = userFieldsToArray(m.user)
+		}
+		return m, nil
+
+	// Is it a key press?
+	case tea.KeyMsg:
+		// Cool, what was the actual key pressed?
+		switch msg.String() {
+			case tea.KeyTab.String():
+				if m.mode == appModeInput {
+					m.mode = appModeDefault
+				}
+				return m, nil
+
+			case tea.KeyEnter.String():
+				if m.mode == appModeInput {
+					m.mode = ""
+					email := m.textInput.Value()
+					m.textInput.SetValue("")
+					if email == "" {
+						return m, nil
+					}
+
+					return m, commands.GetUserByEmail(m.dbConnection.UserRepository, email)
+				}
+
+				if m.cursor == 0 {
+					m.mode = appModeInput
+				}
+
+				return m, nil
+
+			// These keys should exit the program.
+			case "ctrl+c", "ctrl+q":
+				return m, tea.Quit
+
+			// The "up" and "k" keys move the cursor up
+			case "up", "k":
+				if m.cursor > 0 {
+					if m.commands[m.cursor-1].disabled {
+						m.cursor--
+					}
+					m.cursor--
+				}
+
+			// The "down" and "j" keys move the cursor down
+			case "down", "j":
+				if m.cursor < len(m.commands)-1 {
+					if m.commands[m.cursor+1].disabled {
+						m.cursor++
+					}
+					m.cursor++
+				}
+		}
+	}
+
+	var cmd tea.Cmd
+	if m.mode == appModeInput {
+		m.textInput, cmd = m.textInput.Update(msg)
+	}
+	m.spinner, cmd = m.spinner.Update(msg)
+
+	// Return the updated model to the Bubble Tea runtime for processing.
+	// Note that we're not returning a command.
+	return m, cmd
+}
+
+   You noticed at the end that we are handling input rendering for all other types of events and that we
+   had to change the quit button from q to ctrl+q otherwise we would exit the app when typing, so don't
+   forget to update the footer
+
+// Footer
+doc.WriteString("Press ctrl+q to quit.")
+doc.WriteString("\n")
+
+   And when we retrieve the user it is properly displayed in the status bar, you can use the one we
+   always create: john@gmail.com or type a random value for not found message. When user is set, notice
+   that Fetch token becomes selectable
+
+Last step, user's token
+   For the final step we want to utilize the retrieved user and fake call the Fetch token command with a
+   bit lengthier response to simulate longer request, like against a service.
+
+   Let's create a command that simulates lengthy user retrieval to internal/commands/database.go
+
+type GetTokenByUserEmail struct {
+	Token string
+	Err   error
+}
+
+func GetLatestTokenByUserEmail(userEmail string) tea.Cmd {
+	return func() tea.Msg {
+		// We simulate an I/O
+		time.Sleep(time.Second * 2)
+
+		timeTextBytes, err := time.Now().UTC().MarshalText()
+
+		return GetTokenByUserEmail{Token: userEmail + string(timeTextBytes), Err: err}
+	}
+}
+
+   So in the Update method we need to handle the case when we trigger it via tea.Enter
+
+if m.cursor == 0 {
+	m.mode = appModeInput
+} else if m.cursor == 1 && m.user != nil {
+	m.stateDescription = fmt.Sprintf("Fetching %s token...", m.user.Email)
+	m.loading = true
+	m.mode = appModeLoading
+	m.stateStatus = tui.StatusBarStateBlue
+	return m, commands.GetLatestTokenByUserEmail(m.user.Email)
+}
+
+   And handle it
+
+	case commands.GetTokenByUserEmail:
+		m.loading = false
+		m.mode = appModeDefault
+		if msg.Err != nil {
+			m.stateDescription = msg.Err.Error()
+			m.stateStatus = tui.StatusBarStateRed
+		} else {
+			m.stateDescription = "Retrieved token"
+			m.stateStatus = tui.StatusBarStateGreen
+			m.secondListHeader = "Token"
+			m.secondListValues = []string{msg.Token}
+		}
+
+		return m, nil
+
+   With this, when we run the app we will get a nice loading animation in the status bar and the display
+   of the token value at the end. A little bit different from the one in GIF, but it's up to you to
+   alter it however you want :)
+
+   That's it! TUI app done!
+
+   For the codebase check out the GitHub repository
+   [https://github.com/doppelganger113/example-go-tui/tree/main]example-go-tui there you will also have
+   branches
+   that have all the steps completed in them
+   Updated on 2024-07-11
+
+
+---
+
