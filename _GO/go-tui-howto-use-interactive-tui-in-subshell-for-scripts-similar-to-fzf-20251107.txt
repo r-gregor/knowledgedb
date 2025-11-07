@@ -1,0 +1,232 @@
+filename: go-tui-howto-use-interactive-tui-in-subshell-for-scripts-similar-to-fzf-20251107.txt
+How to use interactive TUI in subshell for scripts (similar to fzf)
+
+How to use interactive TUI in subshell for scripts (similar to fzf)?
+Aug 1, 2022
+
+I'm trying to write a program that allows me to search a list of items and output the result to the terminal.
+I have everything working when I run the application normally via go run main.go or when installed. However, I
+want to run this as apart of a bash alias but it just hangs and the UI never renders. Is it possible to mimic
+the behavior of fzf in this regard with bubbletea?
+
+Example
+
+main.go
+
+package main
+
+import (
+	"fmt"
+	"os"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+func main() {
+	p := tea.NewProgram(initialModel())
+	if err := p.Start(); err != nil {
+		fmt.Printf("Alas, there's been an error: %v", err)
+		os.Exit(1)
+	}
+}
+
+type model struct {
+	choices  []string         // items on the to-do list
+	cursor   int              // which to-do list item our cursor is pointing at
+	selected map[int]struct{} // which to-do items are selected
+}
+
+func initialModel() model {
+	return model{
+		// Our shopping list is a grocery list
+		choices: []string{"Buy carrots", "Buy celery", "Buy kohlrabi"},
+
+		// A map which indicates which choices are selected. We're using
+		// the  map like a mathematical set. The keys refer to the indexes
+		// of the `choices` slice, above.
+		selected: make(map[int]struct{}),
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	// Just return `nil`, which means "no I/O right now, please."
+	return nil
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	// Is it a key press?
+	case tea.KeyMsg:
+		// Cool, what was the actual key pressed?
+		switch msg.String() {
+
+		// These keys should exit the program.
+		case "ctrl+c", "q":
+			return m, tea.Quit
+
+		// The "up" and "k" keys move the cursor up
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+
+		// The "down" and "j" keys move the cursor down
+		case "down", "j":
+			if m.cursor < len(m.choices)-1 {
+				m.cursor++
+			}
+
+		// The "enter" key and the spacebar (a literal space) toggle
+		// the selected state for the item that the cursor is pointing at.
+		case "enter", " ":
+			_, ok := m.selected[m.cursor]
+			if ok {
+				delete(m.selected, m.cursor)
+			} else {
+				m.selected[m.cursor] = struct{}{}
+			}
+		}
+	}
+
+	// Return the updated model to the Bubble Tea runtime for processing.
+	// Note that we're not returning a command.
+	return m, nil
+}
+
+func (m model) View() string {
+	// The header
+	s := "What should we buy at the market?\n\n"
+
+	// Iterate over our choices
+	for i, choice := range m.choices {
+		// Is the cursor pointing at this choice?
+		cursor := " " // no cursor
+		if m.cursor == i {
+			cursor = ">" // cursor!
+		}
+
+		// Is this choice selected?
+		checked := " " // not selected
+		if _, ok := m.selected[i]; ok {
+			checked = "x" // selected!
+		}
+
+		// Render the row
+		s += fmt.Sprintf("%s [%s] %s\n", cursor, checked, choice)
+	}
+
+	// The footer
+	s += "\nPress q to quit.\n"
+
+	// Send the UI for rendering
+	return s
+}
+
+In that directory run $(go run main.go)
+
+Program will hang and do nothing
+
+In comparison, when using fzf you can do this without issue. $(fzf) works just fine and open the interactive
+shell.
+
+***
+We've worked on this a bit and you can now (speaking of the master branch, this isn't part of a release yet)
+initialize tea.Program with custom output & inputs, while maintaining proper color detection. Use WithOutput
+like this:
+
+p := tea.NewProgram(m, tea.WithOutput(os.Stderr))
+
+***
+Figured it out! Sharing here in case anyone else needs to solve a similar problem.
+
+The issue is that by default I'm printing to os.Stdout and not os.Stderr. Fzf uses stderr to force the
+rendering of the text, this issue helped point me down the right path.
+
+I needed to install github.com/jwalton/go-supportscolor and copy some code from
+github.com/muesli/termenv@v0.9.0/termenv_unix.go run the following code before starting the application
+
+package tui
+
+import (
+	"os"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/jwalton/go-supportscolor"
+	"github.com/muesli/termenv"
+)
+
+func setup() {
+	term := supportscolor.Stderr()
+	if term.Has16m {
+		lipgloss.SetColorProfile(termenv.TrueColor)
+	} else if term.Has256 {
+		lipgloss.SetColorProfile(termenv.ANSI256)
+	} else {
+		lipgloss.SetColorProfile(termenv.ANSI)
+	}
+}
+
+// Copy-pasted from github.com/muesli/termenv@v0.9.0/termenv_unix.go.
+// TODO: Refactor after, [feature](https://ï.at/stderr) implemented.
+func colorProfile() termenv.Profile {
+	term := os.Getenv("TERM")
+	colorTerm := os.Getenv("COLORTERM")
+
+	switch strings.ToLower(colorTerm) {
+		case "24bit":
+			fallthrough
+		case "truecolor":
+			if term == "screen" || !strings.HasPrefix(term, "screen") {
+				// enable TrueColor in tmux, but not for old-school screen
+				return termenv.TrueColor
+			}
+		case "yes":
+			fallthrough
+		case "true":
+			return termenv.ANSI256
+	}
+
+	if strings.Contains(term, "256color") {
+		return termenv.ANSI256
+	}
+
+	if strings.Contains(term, "color") {
+		return termenv.ANSI
+	}
+
+	return termenv.Ascii
+}
+
+Then when you start the tea.NewProgram you passin the option towrite to os.Stderr
+
+func FuzzyFinder(matches []gofind.Match) (string, error) {
+	setup()
+
+	ctrl := fuzzyFinderController{
+		matches:  matches,
+		selected: 0,
+	}
+
+	p := tea.NewProgram(
+		newFuzzyFinderView(&ctrl),
+		tea.WithMouseCellMotion(),
+		tea.WithAltScreen(),
+		tea.WithOutput(os.Stderr), // This Line!
+	)
+
+	err := p.Start()
+
+	selected := ctrl.Selected()
+
+	if selected.Name == "" {
+		return "", NoResults
+	}
+
+	return selected.Path, err
+}
+
+
+---
+
