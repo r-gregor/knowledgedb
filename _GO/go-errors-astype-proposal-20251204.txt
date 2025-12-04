@@ -1,0 +1,140 @@
+filename: go-errors-astype-proposal-20251204.txt
+https://antonz.org/accepted/errors-astype/
+
+Go proposal: Type-safe error checking
+
+   Part of the [https://antonz.org/tags/accepted/]Accepted! series, explaining the upcoming Go changes in
+   simple terms.
+
+   Introducing errors.AsType - a modern, type-safe alternative to errors.As.
+   Ver. 1.26 * Stdlib * High impact
+
+Summary
+
+   The new errors.AsType function is a generic version of errors.As:
+// go 1.13+
+func As(err error, target any) bool
+
+// go 1.26+
+func AsType[E error](err error) (E, bool)
+
+   It's type-safe, faster, and easier to use:
+// using errors.As
+var appErr AppError
+if errors.As(err, &appErr) {
+	fmt.Println("Got an AppError:", appErr)
+}
+
+// using errors.AsType
+if appErr, ok := errors.AsType[AppError](err); ok {
+	fmt.Println("Got an AppError:", appErr)
+}
+
+   errors.As is not deprecated (yet), but errors.AsType is recommended for new code.
+
+Motivation
+   The errors.As function requires you to declare a variable of the target error type and pass a pointer
+   to it:
+
+var appErr AppError
+
+if errors.As(err, &appErr) {
+	fmt.Println("Got an AppError:", appErr)
+}
+
+   It makes the code quite verbose, especially when checking for multiple types of errors:
+
+var connErr *net.OpError
+var dnsErr *net.DNSError
+
+if errors.As(err, &connErr) {
+	fmt.Println("Network operation failed:", connErr.Op)
+} else if errors.As(err, &dnsErr) {
+	fmt.Println("DNS resolution failed:", dnsErr.Name)
+} else {
+	fmt.Println("Unknown error")
+}
+
+   With a generic errors.AsType, you can specify the error type right in the function call. This makes
+   the code shorter and keeps error variables scoped to their if blocks:
+
+if connErr, ok := errors.AsType[*net.OpError](err); ok {
+	fmt.Println("Network operation failed:", connErr.Op)
+} else if dnsErr, ok := errors.AsType[*net.DNSError](err); ok {
+	fmt.Println("DNS resolution failed:", dnsErr.Name)
+} else {
+	fmt.Println("Unknown error")
+}
+
+   Another issue with As is that it uses reflection and can cause runtime panics if used incorrectly
+   (like if you pass a non-pointer or a type that doesn't implement error). While static analysis tools
+   usually catch these issues, using the generic AsType has several benefits:
+
+     * No reflection.
+     * No runtime panics.
+     * Less allocations.
+     * Compile-time type safety.
+     * Faster.
+
+   Finally, AsType can handle everything that As does, so it's a drop-in improvement for new code.
+
+Description
+
+   Add the AsType function to the errors package:
+
+// AsType finds the first error in err's tree that matches the type E,
+// and if one is found, returns that error value and true. Otherwise, it
+// returns the zero value of E and false.
+//
+// The tree consists of err itself, followed by the errors obtained by
+// repeatedly calling its Unwrap() error or Unwrap() []error method.
+// When err wraps multiple errors, AsType examines err followed by a
+// depth-first traversal of its children.
+//
+// An error err matches the type E if the type assertion err.(E) holds,
+// or if the error has a method As(any) bool such that err.As(target)
+// returns true when target is a non-nil *E. In the latter case, the As
+// method is responsible for setting target.
+func AsType[E error](err error) (E, bool)
+
+   Recommend using AsType instead of As:
+// As finds the first error in err's tree that matches target, and if one
+// is found, sets target to that error value and returns true. Otherwise,
+// it returns false.
+// ...
+// For most uses, prefer [AsType]. As is equivalent to [AsType] but sets its
+// target argument rather than returning the matching error and doesn't require
+// its target argument to implement error.
+// ...
+func As(err error, target any) bool
+
+Example
+
+   Open a file and check if the error is related to the file path:
+
+// go 1.25
+var pathError *fs.PathError
+if _, err := os.Open("non-existing"); err != nil {
+	if errors.As(err, &pathError) {
+		fmt.Println("Failed at path:", pathError.Path)
+	} else {
+		fmt.Println(err)
+	}
+}
+
+Failed at path: non-existing
+
+// go 1.26
+if _, err := os.Open("non-existing"); err != nil {
+	if pathError, ok := errors.AsType[*fs.PathError](err); ok {
+		fmt.Println("Failed at path:", pathError.Path)
+	} else {
+		fmt.Println(err)
+	}
+}
+
+Failed at path: non-existing
+
+
+---
+
