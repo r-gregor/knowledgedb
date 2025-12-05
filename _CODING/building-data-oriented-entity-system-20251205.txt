@@ -1,0 +1,1040 @@
+filename: building-data-oriented-entity-system-20251205.txt
+https://bitsquid.blogspot.com/2014/08/building-data-oriented-entity-system.html
+
+Building a Data-Oriented Entity System (part 1)
+Wednesday, August 27, 2014
+
+   We have recently started to look into adding an entity/component system to the Bitsquid engine.
+
+   You may be surprised to learn that the Bitsquid engine isn't already component based. But actually
+   there has never been a great need for that. Since the gameplay code is usually written in Lua rather
+   than C++, we don't run into the common problems with deep and convoluted inheritance structures that
+   prompt people to move to component based designs. Instead, inheritance is used very sparingly in the
+   engine.
+
+   But as we are expanding our plugin system, we need a way for C++ plugins to bestow game objects
+   with new functionalities and capabilities. This makes a component architecture a very natural fit.
+
+Entities and Components
+   In the Bitsquid engine, we always strive to keep systems decoupled and data-oriented and we want to
+   use the same approach for the component architecture. So, in our system, entities are not heap
+   allocated objects. Instead, an entity is just an integer, a unique ID identifying a particular
+   entity:
+
+struct Entity {
+	unsigned id;
+};
+
+   A special class, the EntityManager keeps track of the entities that are alive.
+
+   A component is not an object either. Instead, a component is something that is handled by a
+   ComponentManager. The task of a ComponentManager is to associate entities with components. For
+   example, the DebugNameComponentManager can be used to associate debug names with entities:
+
+class DebugNameComponentManager {
+	public:
+		void set_debug_name(Entity e, const char *name);
+		const char *debug_name(Entity e) const;
+};
+
+   Two things are interesting to note about this decoupled design.
+
+   First, there is no DebugNameComponent class for handling individual debug name components in this
+   design. That is not needed, because all component data is managed internally by the
+   DebugNameComponentManager. The manager could decide to use heap allocated DebugNameComponent objects
+   internally. But it is not forced to. And usually it is much more efficient to lay out the data
+   differently. For example, as a structure of arrays in a single continuous buffer. In a future post,
+   I'll show some examples of this.
+
+   Second, there is no place where we keep a list of all the components that an entity has. It is only
+   the DebugNameComponentManager that knows whether an entity has a debug name component or not, and if
+   you want to talk about that component you have to do it through the DebugNameComponentManager. There
+   is no such thing as an "abstract" component.
+
+   So what components an entity has is only defined by what has been registered with the different
+   component managers in the game. And plugins may extend the system with new component managers.
+
+   It is up to the component manager to decide if it makes sense for an entity to have multiple
+   components of its type. For example, the DebugNameComponentManager only allows a single debug name to
+   be associated with an entity. But the MeshComponentManager allows an entity to have multiple meshes.
+
+   The manager is responsible for performing any computations necessary to update the components.
+   Updates are done one component manager at a time, not one entity at a time, and when a component
+   manager is updated it updates all its components in one go. This means that common calculations can
+   be shared and that all the data is hot in the caches. It also makes the update easier to profile,
+   multithread or offload to an external processor. All this translates to huge performance benefits.
+
+The EntityManager
+   We want to be able to use the entity ID as a weak reference. I.e., given an entity ID we want to be
+   able to tell if it refers to a living entity or not.
+
+   Having a weak reference system is important, because if we only have strong references then if the
+   entity dies we must notify everybody that might possibly hold a reference to the entity so that they
+   can delete it. This is both costly and complicated. Especially since references might be held by
+   other threads or by Lua code.
+
+   To enable weak referencing, we use the EntityManager class to keep track of all live entities. The
+   simplest way of doing that would be to just use a set:
+
+class EntityManager {
+	HashSet<Entity> _entities;
+	Entity _next;
+
+	public:
+	Entity create() {
+		++_next.id;
+		while (alive(_next))
+			++_next.id;
+		_entities.insert(_next);
+		return _next;
+	}
+
+	bool alive(Entity e) {
+		return _entities.has(e);
+	}
+
+	void destroy(Entity e) {
+		_entities.erase(e);
+	}
+};
+
+   This is pretty good, but since we expect the alive() function to be a central piece of code that gets
+   called a lot, we want something that runs even faster than a set.
+
+   We can change this to a simple array lookup by splitting the entity ID into an index and a generation
+   part:
+
+const unsigned ENTITY_INDEX_BITS = 22;
+const unsigned ENTITY_INDEX_MASK = (1<<ENTITY_INDEX_BITS)-1;
+
+const unsigned ENTITY_GENERATION_BITS = 8;
+const unsigned ENTITY_GENERATION_MASK = (1<<ENTITY_GENERATION_BITS)-1;
+
+struct Entity {
+	unsigned id;
+
+	unsigned index() const {return id & ENTITY_INDEX_MASK;}
+	unsigned generation() const {return (id >> ENTITY_INDEX_BITS) & ENTITY_GENERATION_MASK;}
+};
+
+   The idea here is that the index part directly gives us the index of the entity in a lookup array. The
+   generation part is used to distinguish entities created at the same index slot. As we create and
+   destroy entities we will at some point have to reuse an index in the array. By changing the
+   generation value when that happens we ensure that we still get a unique ID.
+
+   In our system we are restricted to using 30 bits for the entity ID. The reason for this is that we
+   need to fit it in a 32 bit pointer in order to be able to use a Lua light userdata to store it. We
+   also need to steal two bits from this pointer in order to distinguish it from other types of light
+   userdata that we use in the engine.
+
+   If you didn't have this restriction, or if you only targeted 64-bit platforms it would probably be a
+   good idea to use some more bits for the ID.
+
+   We've split up our 30 bits into 22 bits for the index and 8 bits for the generation. This means that
+   we support a maximum of 4 million simultaneous entities. It also means that we can only distinguish
+   between 256 different entities created at the same index slot. If more than 256 entities are created
+   at the same index slot, the generation value will wrap around and our new entity will get the same ID
+   as an old entity.
+
+   To prevent that from happening too often we need to make sure that we don't reuse the same index slot
+   too often. There are various possible ways of doing that. Our solution is to put recycled indices in
+   a queue and only reuse values from that queue when it contains at least MINIMUM_FREE_INDICES = 1024
+   items. Since we have 256 generations, an ID will never reappear until its index has run 256 laps
+   through the queue. So this means that you must create and destroy at least 256 * 1024 entities until
+   an ID can reappear. This seems reasonably safe, but if you want you can play with the numbers to get
+   different margins. For example, if you don't need 4 M entities, you can steal some bits from index
+   and give to generation.
+
+   A nice thing about only having 8 bits in generation is that we just need 8 bits per entity in our
+   lookup array. This saves memory, but also gives us better performance, since we will fit more in the
+   cache. With this solution, the code for the EntityManager becomes:
+
+class EntityManager {
+	Array<unsigned char> _generation;
+	Deque<unsigned> _free_indices;
+
+	public:
+	Entity create() {
+		unsigned idx;
+		if (_free_indices.size() > MINIMUM_FREE_INDICES) {
+			idx = _free_indices.front();
+			_free_indices.pop_front();
+		} else {
+			_generation.push_back(0);
+			idx = _generation.size() - 1;
+			XENSURE(idx < (1 << ENTITY_INDEX_BITS));
+		}
+		return make_entity(idx, _generation[idx]);
+	}
+
+	bool alive(Entity e) const {
+		return _generation[e.index()] == e.generation();
+	}
+
+	void destroy(Entity e) {
+		const unsigned idx = e.index();
+		++_generation[idx];
+		_free_indices.push_back(idx);
+	}
+};
+
+   In the next post, we will take a look at the design of the component classes.
+
+
+---
+https://bitsquid.blogspot.com/2014/09/building-data-oriented-entity-system.html
+
+Building a Data-Oriented Entity System (Part 2: Components)
+Monday, September 8, 2014
+
+   In the last post, I talked about the design of the Entity Manager and how we handle creation and
+   destruction of game entities.
+
+   In this post we will look at how components can be implemented.
+
+   A quick recap: Components in our system are not individual objects, instead all components of a
+   particular type are handled by a component manager for that type. The component manager has full
+   control over how the component data is stored internally and how updates are applied.
+
+A Component Example
+   To have something to talk about we will consider a fictitious component that handles point mass
+   objects. For each component instance we want to store the following data:
+Entity entity;          ///< Entity owner
+float mass;             ///< Mass of object
+Vector3 position;       ///< Object's position
+Vector3 velocity;       ///< Object's velocity
+Vector3 acceleration;   ///< Object's acceleration
+
+   The component needs functions for accessing this data and simulating physics.
+
+   It is perhaps not self-evident why we want to store the entity that owns the component, but it will
+   come in handy later.
+
+   Note that this is not a real world example. We don't actually have a component like this in the
+   engine, and perhaps it's not the best or most interesting design, but it gives us something to talk
+   about.
+
+Component Data Layout
+   When considering how we should layout the data in the component manager we have two goals:
+     * Given an entity we want to be able to quickly look up the component data for that entity.
+     * We want the component data to be packed tightly in memory for good cache performance.
+
+   Let's tackle the second question first.
+
+   Actual cache performance depends on how your CPU works and what the data access patterns in the code
+   are. You can spend a lot of time trying to bend your mind around those things, but I would recommend
+   going with a simple rule of thumb instead:
+
+     Pack the data in arrays that you access sequentially.
+
+   Only get more fancy than that when you are trying to fix a diagnosed performance issue.
+
+   A generally good approach is to use a structure-of-arrays. I.e., each field is stored in an array in
+   memory, with one entry for each component instance:
+[entity_1]  [entity_2]  [entity_3] ...
+[mass_1]    [mass_2]    [mass_3]   ...
+[pos_1]     [pos_2]     [pos_3]    ...
+[vel_1]     [vel_2]     [vel_3]    ...
+[acc_1]     [acc_2]     [acc_3]    ...
+
+   The advantage of having each field stored separately is that code that only processes some of the
+   fields don't have to waste precious cache space on the others.
+
+   You could go even further and put each x, y and z component of a Vector3 into its own array. An
+   advantage of that is that you can do more efficient SIMD calculations, if you want to go down that
+   route. But for this example, let's keep things a bit simpler and store the Vector3s together. Since
+   the layout of the data is entirely encapsulated in the ComponentManager class we can always go back
+   and redesign that later if we need some extra performance.
+
+   The simplest way of implementing this data layout is to use an Array for each component:
+
+class PointMassComponentManager {
+	struct InstanceData {
+		Array<Entity> entity;
+		Array<float> mass;
+		Array<Vector3> position;
+		Array<Vector3> velocity;
+		Array<Vector3> acceleration;
+	};
+	InstanceData _data;
+};
+
+   That works well enough, but it does mean that the data gets stored in five separately allocated
+   memory buffers. So I use a different approach. I allocate the entire memory buffer as a single
+   allocation and then just let entity, mass, etc, point to different parts of that buffer:
+
+struct InstanceData {
+	unsigned n;          ///< Number of used instances.
+	unsigned allocated;  ///< Number of allocated instances.
+	void *buffer;        ///< Buffer with instance data.
+
+	Entity *entity;
+	float *mass;
+	Vector3 *position;
+	Vector3 *velocity;
+	Vector3 *acceleration;
+};
+
+InstanceData _data;
+
+void allocate(unsigned sz) {
+	assert(sz > _data.n);
+
+	InstanceData new_data;
+	const unsigned bytes = sz * (sizeof(Entity) + sizeof(float) + 3 * sizeof(Vector3));
+	new_data.buffer = _allocator.allocate(bytes);
+	new_data.n = _data.n;
+	new_data.allocated = sz;
+
+	new_data.entity = (Entity *)(new_data.buffer);
+	new_data.mass = (float *)(new_data.entity + sz);
+	new_data.position = (Vector3 *)(new_data.mass + sz);
+	new_data.velocity = new_data.position + sz;
+	new_data.acceleration = new_data.velocity + sz;
+
+	memcpy(new_data.entity, _data.entity, _data.n * sizeof(Entity));
+	mempcy(new_data.mass, _data.mass, _data.n * sizeof(float));
+	memcpy(new_data.position, _data.position, _data.n * sizeof(Vector3));
+	memcpy(new_data.velocity, _data.velocity, _data.n * sizeof(Vector3));
+	memcpy(new_data.acceleration, _data.acceleration, _data.n * sizeof(Vector3));
+
+	_allocator.deallocate(_data.buffer);
+	_data = new_data;
+}
+
+   This avoids any hidden overheads that might exist in the Array class and we only have a single
+   allocation to keep track of. This is better both for the cache and the memory allocation system.
+
+   Side note: I'm tempted to write a memory system with a 4 K allocation granularity. I.e. there is no
+   traditional heap allocator, just a page allocator and you have to design your systems so that they
+   only work with large allocations.
+
+Accessing Data
+   Let's consider the second issue, how we map from an entity to its component data. For the sake of
+   simplicity, let's assume for now that we don't support multiple components per entity.
+
+   In the data layout, we refer to a particular component instance by its index in the mass, position,
+   etc arrays. So what we need is a way to map from an entity to an index.
+
+   You may remember from the previous post, that Entity itself contains a unique index. So one
+   alternative would be to just use this index.
+
+   This could be a good approach if almost every entity in the game had this component. But if that is
+   not the case our arrays will contain a lot of "holes" corresponding to entities that lack the
+   component. This will waste memory, but also performance, because we will fill our caches with unused
+   data.
+
+   We can improve this somewhat by using a level of indirection:
+Array<unsigned> _map;
+
+   Here, the _map allows us to look up a component index based on the entity index. This is a lot
+   better, because now it is just the _map array that has holes, not the _data array, which means that
+   the holes are fewer and smaller.
+
+   Still, I would only use this if I was certain that the component was almost universal and that
+   lookups where performance critical. In most cases, I think a hash index is a better approach:
+HashMap<Entity, unsigned> _map;
+
+   This uses less memory and lookups are still pretty fast.
+
+   Since the lookup from Entity to instance index involves an extra step we want to reflect that in the
+   API and not force the user to do multiple lookups when she wants to access different fields of the
+   same component. Something like this:
+
+/// Handle to a component instance.
+struct Instance {int i;};
+
+/// Create an instance from an index to the data arrays.
+Instance make_instance(int i) {Instance inst = {i}; return inst;}
+
+/// Returns the component instance for the specified entity or a nil instance
+/// if the entity doesn't have the component.
+Instance lookup(Entity e) {return make_instance(_map.get(e, 0));}
+
+float mass(Instance i) {return _data.mass[i.i];}
+void set_mass(Instance i, float mass) {_data.mass[i.i] = mass;}
+Vector3 position(Instance i) {return _data.position[i.i];}
+...
+
+   To support multiple component instance per entity, you can add a next_instance field to the component
+   data that allows you to traverse a linked list of component instances belonging to the same entity.
+   This is left as an exercise to the reader.
+
+Component Updates
+   Since the component data is laid out sequentially in memory, writing a function that simulates
+   physics for all entities is simple:
+
+void simulate(float dt) {
+	for (unsigned i=0; i<_data.n; ++i) {
+		_data.velocity[i] += _data.acceleration[i] * dt;
+		_data.position[i] += _data.velocity[i] * dt;
+	}
+}
+
+   This function traverses memory in-order which gives us good cache performance. It's also easy to
+   profile, vectorize and parallelize, should the need arise.
+
+   Side rant: I'm somewhat allergic to methods being called update(). That is a bad remain from bad
+   inheritance-based designs. If you take a second to think about it you can almost always come up with
+   better, more informative names than update().
+
+Destroying Components
+   When destroying components, we want to make sure that we keep the _data array tightly packed. We can
+   achieve that by moving the last element to the position of the component we want to remove. We must
+   also update the _map entry for the corresponding entity.
+
+void destroy(unsigned i) {
+	unsigned last = _data.n - 1;
+	Entity e = _data.entity[i];
+	Entity last_e = _data.entity[last];
+
+	_data.entity[i] = _data.entity[last];
+	_data.mass[i] = _data.mass[last];
+	_data.position[i] = _data.position[last];
+	_data.velocity[i] = _data.velocity[last];
+	_data.acceleration[i] = _data.acceleration[last];
+
+	_map[last_e] =	i;
+	_map.erase(e);
+
+	--_n;
+}
+
+   Another question is how we handle destruction of components when an entity is destroyed. As you may
+   recall, the entity does not have an explicit list of components that it owns. Also, it seems onerous
+   to require of the user of the API to manually destroy the right components when the entity dies.
+
+   Instead, we use one of two approaches.
+
+   Components that need to be destroyed immediately (perhaps because they hold external resources) can
+   register a destruction callback with the EntityManager and that callback will be called when the
+   entity is destroyed.
+
+   However, for simpler components, like the point mass component, there is nothing that require
+   components to be destroyed at exactly the same time as the entity. We can take advantage of that and
+   use garbage collection to lazily destroy components instead of spending memory and effort on storing
+   callback lists:
+
+void gc(const EntityManager &em) {
+	unsigned alive_in_row = 0;
+	while (_data.n > 0 && alive_in_row < 4) {
+		unsigned i = random_in_range(0, _data.n - 1);
+		if (em.alive(_data.entity[i])) {
+			++alive_in_row;
+			continue;
+		}
+		alive_in_row = 0;
+		destroy(i);
+	}
+}
+
+   Here, we pick random component indices and destroy them if the corresponding entity has been
+   destroyed. We do this until we hit four living entities in a row.
+
+   The nice thing about this code is that it cost almost nothing if there are no destroyed entities
+   (just four passes of the loop). But when there are a lot of destroyed entities the components will be
+   quickly destroyed.
+
+   In the next post, we will look at the Transform Component that handles links between parent and child
+   entities.
+
+
+---
+https://bitsquid.blogspot.com/2014/10/building-data-oriented-entity-system.html
+
+Building a Data-Oriented Entity System (Part 3: The Transform Component)
+Friday, October 3, 2014
+
+   In the last post, I talked generally about the design of components. Today I will focus on a
+   specific real-world component, the TransformComponent.
+
+The Transform Component
+   The purpose of the TransformComponent is to allow entities to be positioned in the world.
+
+   It handles positioning of entities in the world and child-parent linking. For example, you may want
+   to link a "wheel" entity to a "car" entity, so that the wheel follows the car around when it moves.
+
+   In that sense, the TransformComponent is what forms the scene graph of an engine world.
+
+Design Decisions
+
+Should every entity have a transform component?
+   In some engines, every entity has to have a transform component, even if it is just a purely
+   "logical" entity that doesn't really have a position in the world.
+
+   To me it seems strange to force an entity to have a position when that has no real meaning. I also
+   want entities to be as cheap as possible. So it seems better to have the transform component
+   optional, just as any other component. An entity that doesn't have a transform component doesn't have
+   any position in the world.
+
+   Actually, talking about the world is a bit of misnomer. The Bitsquid engine does not have a single
+   World where everything has to live. Instead you can create multiple worlds, each populated with its
+   own objects. So you might have one world for your "main game", one world for the "inventory screen",
+   one world for the "loading screen", etc.
+
+   This is a lot better than having an "inventory room" at some secret hidden place in the main game
+   world.
+
+   Each world has its own TransformComponent manager, and an entity can create transform components in
+   several of these managers, if it so desires. So the same entity can exist and be positioned at
+   different places in different game worlds. Since a MeshComponent manager also exists in each world,
+   the entity can have different graphical representations in each world.
+
+   This is a bit esoteric, and I don't expect many entities to make use of this, but there are
+   situations when it could be interesting. For example, a player's pickaxe could exist both in the
+   "game world" and in the "inventory world" and still be managed as the same entity.
+
+Entity scene graphs and model scene graphs
+   In the entity system there are really two kinds of "scene graphs" that we need to deal with.
+
+   The first is the one we have already talked about, the graph formed by entities and their linked
+   child entities.
+
+   The second is the graph of nodes within an entity. For example, a character entity may have a model
+   with hundreds of bones that can be individually animated.
+
+   What should the relationship be between these two graphs?
+
+   In previous engine code, I have always treated these two graphs as parts of the same system. The
+   model scene graphs were linked to nodes in the entity scene graphs and computed their transforms in
+   world space. This creates an update order dependency. We can't compute the world positions in the
+   model scene graph until we have computed the world position in the entity scene graph. This limits
+   what kinds of things we can do in parallel.
+
+   For the entity system I've decided to decouple these two concepts. The model scene graph won't
+   compute world space poses, instead it will compute poses relative to the entity pose. This means that
+   we can evaluate the animations and compute the model pose without knowing anything about the entity
+   pose. (Ignoring world space constraints, of course, but they will be handled in a later pass.)
+
+   Of course it also requires us to multiply the model node transforms with the entity transform to get
+   the actual world position of the model nodes.
+
+   I have not completed the design of the model scene graph component yet, but maybe I'll get a chance
+   to return to this in a future post.
+
+Immediate or deferred updates
+   In previous engines I have always used deferred updates of the world transforms. I.e., changing the
+   local transform of a node would not immediately update its world transform (or the world transforms
+   of its children). Instead it would simply set a "dirty" flag in the entity. Later, I would compute
+   the world transforms of all the dirty nodes (and their children) as a single step.
+
+   This has the advantage that we never have to compute the world transform of a node more than once.
+
+   Consider the worst case scenario, a long chain of nodes:
+[ node_1 ] ---> [ node_2 ] ---> [ node_3 ] ---> ... ---> [ node_n ]
+
+   With a deferred update, changing the local pose of every node will still just require O(n)
+   computations to compute all the world transforms. With an immediate update, where we compute the
+   world transforms of all children as soon as the parent transform changes, we will need O(n^2)
+   computations.
+
+   On the other hand, there is a drawback to using deferred updates. Whenever we ask for an object's
+   world position we won't get its actual world position, but its world position from the last frame
+   (unless we ask after the world transform update). This can lead to a lot of confusion and subtle
+   bugs. Solving them often requires ugly hacks, such as forcing graph updates at different times.
+
+   So what should we choose?
+   I think that with the decision to decouple the model scene graphs from the entity scene graphs the
+   performance problems of immediate updates are a lot less serious. Long chains of nodes that are all
+   moving can certainly exist in the model scene graph. (Consider an animation of a character swinging a
+   whip.) But I would guess that long chains of objects that are all moving at once are a lot less
+   common in the entity scene graph.
+
+   Note that the performance problems do not appear if it is just the root entity that is moving. In
+   that case, both the immediate and the deferred update will be O(n). It is only when the parent and
+   the children are moving that the immediate update does worse.
+
+   I don't expect there to be very long chains of entities (n <= 5 ???) and I don't expect all of the
+   objects in those chains to be moving simultaneously. So I have decided to go with immediate updates
+   so that we always have accurate world transforms.
+
+   Note: If we run into performance problems as a result of this, we can always create an API function
+   that allows us to set multiple local transforms at once while doing a single world transform update,
+   thus getting back the O(n) performance.
+
+A side note on deferred updates
+   Note that if you want to do deferred updates, you want to keep the entity array sorted so that
+   parents always appear before children. That way you can just walk the array from beginning to end and
+   compute the transforms and be sure that the world transform of a parent has been computed before you
+   compute the world transform of its children.
+
+   Also, you don't want to loop over the entire array to look for dirty objects:
+for (int i=0; i<n; ++i) {
+	if (dirty[i])
+		transform(i);
+}
+
+   Typically, in a scene, only a small percentage of the objects are moving at any one time (maybe as
+   little as 1 %). So looping over all objects, even just to check a flag, can waste a lot of time.
+
+   A better solution is to sort all the dirty objects to the end of the array, so we can loop over just
+   them:
+
+for (int i=first_dirty; i<n; ++i)
+	transform(i);
+
+   Since we only need a partial sorting of the array, we don't have to run an expensive O(n log n)
+   sorting algorithm. (It would kind of defeat the purpose to run an O(n log n) sort to avoid an O(n)
+   update.) Instead, we can achieve this by judicious swapping.
+
+   When a node becomes dirty we move it to the start of the dirty list by swapping it with the element
+   before the dirty list and decreasing first_dirty:
+
+                                 =============== dirty ==============
+|   |   |   | D |   |   |   | X |   |   |   |   |   |   |   |   |   |
+
+                             ================= dirty ================
+|   |   |   | X |   |   |   | D |   |   |   |   |   |   |   |   |   |
+
+   We do the same for all children of the node and the children's children, etc.
+
+   As we process the items in the dirty array, whenever we find a child that has its parent at a later
+   position in the array, we swap the child and the parent.
+
+                             ================= dirty ================
+|   |   |   |   |   |   |   |   |   |   | C |   |   | P |   |   |   |
+                                          ^
+
+                             ================= dirty ================
+|   |   |   |   |   |   |   |   |   |   | P |   |   | C |   |   |   |
+                                          ^
+
+   This guarantees that parents are always processed before their children.
+
+   We also need a way to move items off the dirty list, or it will continue to grow indefinitely. We
+   could clear the list every frame, but that might lead to a lot of swapping as items are moved in and
+   out of the list. A better approach might be to check if an item hasn't moved in five frames or so,
+   and in that case we move it off the dirty list. This avoids swapping those items which are always
+   moving.
+
+   When using the immediate update strategy, sorting the list is not as important, but we can employ
+   similar swapping strategies to make sure that a parent node and its children are kept close together
+   in the array, so that the immediate update is cache friendly.
+
+Implementation
+   With the design thought through, there is really not that much to the implementation.
+
+   Just as in the last post, we store the transform component data for all instances in a single big
+   memory block:
+
+struct Instance {int i;};
+
+/// Instance data.
+struct InstanceData {
+	unsigned size;            ///< Number of used entries in arrays
+	unsigned capacity;        ///< Number of allocated entries in arrays
+	void *buffer;             ///< Raw buffer for data.
+
+	Entity *entity;           ///< The entity owning this instance.
+	Matrix4x4 *local;         ///< Local transform with respect to parent.
+	Matrix4x4 *world;         ///< World transform.
+	Instance *parent;         ///< The parent instance of this instance.
+	Instance *first_child;    ///< The first child of this instance.
+	Instance *next_sibling;   ///< The next sibling of this instance.
+	Instance *prev_sibling;   ///< The previous sibling of this instance.
+};
+
+   The parent, first_child, next_sibling and prev_sibling arrays all store instance indexes. We can find
+   all the children of a particular entity by following the first_child link and then the next_sibling
+   links of that link.
+
+   We can use that to do the immediate transform update:
+
+void TransformComponent::set_local(Instance i, const Matrix4x4 &m) {
+	_data.local[i.i] = m;
+	Instance parent = _data.parent[i.i];
+	Matrix4x4 parent_tm = is_valid(parent) ? _data.world[ parent.i ] : matrix4x4_identity();
+	transform(parent_tm, i);
+}
+
+void TransformComponent::transform(const Matix4x4 &parent, Instance i) {
+   _data.world[i.i] = _data.local[i.i] * p;
+
+	Instance child = _data.first_child[i.i];
+	while (is_valid(child)) {
+		transform(_data.world[i.i], child);
+		child = _data.next_sibling[child.i];
+	}
+}
+
+   Note: I've written this as a recursive function for easier reading, but you might want to rewrite it
+   as an iterative function for better performance.
+
+   Note that when you swap two instances in the array (to do swap-erase or to sort the array as
+   described above), in addition to swapping the entries in the array you also need to take care to keep
+   all the parent, first_child, next_sibling and prev_sibling references intact. This can get a little
+   hairy, especially when you are changing references and trying to walk those lists of references at
+   the same time. My suggestion when you want to swap two instances [A] and [B] is to use the element at
+   the end of the array [size] as a temporary storage slot and instead of trying to do everything at
+   once, use three steps:
+
+// Move element at A (and references to it) to size.
+[size] <--- [A]
+
+// Now nothing refers to A, so we can safely move element at B (and references
+// to it) to A.
+[A] <--- [B]
+
+// And finally move the element at size to B.
+[B] <-- [size]
+
+   In the next post I'll look at compiling entities into resource files.
+
+
+---
+https://bitsquid.blogspot.com/2014/10/building-data-oriented-entity-system_10.html
+
+Building a Data-Oriented Entity System (Part 4: Entity Resources)
+Friday, October 10, 2014
+
+   In the last post, I talked about the design of the TransformComponent. Today we will look at how
+   we can store entities as resources.
+
+Dynamic and Static Data
+   I'm a huge fan of compiling resources into big blobs of binary data that can be read directly into
+   memory and used as-is without any need for "deserialization" or "reference patching".
+
+   This requires two things:
+     * First, the data must be swapped to the right endianness when the data is generated.
+     * Second, internal references in the resource must use offsets instead of pointers, since we don't
+       know where the loaded resource will end up in memory and we want to avoid pointer patching.
+
+   Initially, this approach can seem a bit complicated. But it is actually a lot simpler than messing
+   around with deserialization and reference patching.
+
+   Note though, that this approach only works for static (read-only) data, such as meshes, textures,
+   etc. If data needs to change for each instance of a resource, we must store it somewhere else. If an
+   instance needs to change color, we can't store that color value in a memory area that is shared with
+   other instances.
+
+   So what typically happens is that we split out the dynamic data as "instance data" and let that data
+   refer to the static resource data. Many instances can make use of the same resource data, thus saving
+   memory:
+
+---------------                -----------------
+|Instance of A| --------+----> |A resource data|
+---------------         |      -----------------
+                        |
+---------------         |
+|Instance of A| --------+
+---------------
+
+---------------                -----------------
+|Instance of B| --------+----> |B resource data|
+---------------         |      -----------------
+                        |
+---------------         |
+|Instance of B|---------+
+---------------
+
+   We typically hard-code what goes into the instance. For example, we know that the color is something
+   that we want to modify so we add it to the instance data. The vertex and index buffers cannot be
+   changed and thus go into the static data. When we create the instance we initialize the instance data
+   with "default" values from an instance template in the resource data.
+
+   You could imagine doing this another way. Instead of hard-coding the data that can be modified per
+   instance, you could say that everything can be modified per instance. In the instance data you would
+   then use a flexible key-value store to store the delta between the instance and the resource data.
+
+   This is more flexible than hard-coding, because it allows you to override everything per instance,
+   even texture or vertex data if you want that. It can also save memory, because the instance data will
+   only contain the things you actually override, not everything that potentially could be overridden.
+   So if you have many instances that use the default values, you don't have to store any data for them.
+
+   On the other hand, there are drawbacks to this approach. Accessing value becomes a lot more
+   complicated and expensive, because we always need to perform an extra query to find out if the
+   instance has overridden the default value or not.
+
+   We currently don't use this approach anywhere in the engine. But I think there are circumstances
+   where it would make sense.
+
+   Anyway, I'm getting sidetracked. Back to the entity system.
+
+   The thing is, the way I envision the entity system, it is very dynamic. Components can be added and
+   removed at runtime, child entities linked in and properties changed. Components that handle static
+   data, such as the MeshComponent do it by referencing a separate MeshResource that contains the mesh
+   data. There is no mesh data stored in the component itself.
+
+   Since everything in the entity system is dynamic, there is only instance data. The only thing we have
+   in the resource is the template for the instance data. Essentially, just a set of "instructions" for
+   setting up an instance. There is no need for the instance to refer back to the resource after those
+   instructions have been followed.
+
+Defining the Resource Format
+   So an entity resource should contain "instructions" for setting up an entity. What should it look
+   like? Let's start by just writing up what needs to go in there:
+
+struct EntityResource {
+	unsigned num_components;
+	ComponentData components[num_components];
+	unsigned num_children;
+	EntityResource children[num_children];
+};
+
+   Note: Of course the above is not legal C++ code. I'm using some kind of C-like pseudo-code that
+   allows things like dynamically sized structs in order to describe the data layout. I've written about
+   the need for a language to describe data layouts before.
+
+   The exact binary layout of the ComponentData is defined by each component type, but let's use a
+
+   common wrapper format:
+struct ComponentData {
+	unsigned component_identifier;
+	unsigned size;
+	char data[size];
+};
+
+   Now we have a common way of identifying the component type, so we know if we should create a
+   MeshComponent, a TransformComponent or something else. We also know the size of the component data,
+   so if we should encounter a component type that we don't understand, we can ignore it and skip over
+   its data to get to the next component. (Another option would be to treat unknown component types as a
+   fatal error.)
+
+   A quick fix to make this layout slightly better is to move all the fixed size fields to the start of
+   the struct:
+
+struct EntityResource {
+	unsigned num_components;
+	unsigned num_children;
+	ComponentData components[num_components];
+	EntityResource children[num_children];
+};
+
+   Now we can access the num_children parameter without having to look at all the components and their
+   sizes to know how far we need to skip forward in the resource to get to the num_children field.
+
+   This may or may not matter in practice. Perhaps, we only need the value of num_children after we have
+   processed all the component data, and at that point we already have a pointer into the resource that
+   points to the right place. But I always put the fixed size data first as a force of habit, in case we
+   might need it.
+
+   Sometimes, it makes sense to add offset tables to these kinds of resources, so that we can quickly
+   lookup the offset of a particular component or child, without having to walk all of the memory and
+   count up the sizes:
+
+struct EntityResource {
+	unsigned num_components;
+	unsigned num_children;
+	unsigned offset_to_component_data[num_components];
+	unsigned offset_to_child_data[num_children];
+	ComponentData components[num_components];
+	EntityResource children[num_children];
+};
+
+   With this layout, we can get to the data for the i'th component and the j'th child as:
+
+struct EntityResourceHeader {
+	unsigned num_components;
+	unsigned num_children;
+};
+
+const EntityResourceHeader *resource;
+const unsigned *offset_to_component_data = (const unsigned *)(resource + 1);
+ComponentData *data_i = (const ComponentData *)
+	((const char *)resource + offset_to_component_data[i]);
+
+const unsigned *offset_to_child_data = (const unsigned *)
+	(offset_to_component_data + num_components);
+
+EntityResourceHeader *child_j = (const EntityResourceHeader *)
+	((const char *)resource + offset_to_child_data[j]);
+
+   The first time you encounter code like this it can seriously spin your head around with all the
+   casting and pointer arithmetic. However, if you think about what happens and how the data is laid out
+   in memory it is really pretty straight forward. Any mistakes you do will most likely cause huge
+   crashes that are easy to find, not sneaky subtle bugs. And after a while you get used to these kinds
+   of manipulations.
+
+   But, anyway, I'm drifting off on a tangent again, because actually for our purposes we don't need
+   these lookup tables. We will just walk the memory from beginning to end, creating one component at a
+   time. Since we don't need to jump around between different components, we don't need the lookup
+   tables.
+
+   What we do need though is some way of storing more than one resource. Storing one entity is fine if
+   we are dealing with a "prefab" type of resource, that contains a definition of a single entity.
+   However, what about a level? It will probably contain a bunch of entities. So it would be nice to
+   have a resource type that could store all those entities.
+
+   Ok, no biggie, we know how to do that:
+
+struct EntitiesResource {
+	unsigned num_entities;
+	EntityResource entities[num_entities];
+};
+
+   Done, yesno?
+
+Pivot!
+   Working for a while in this business you get an intuitive feel for when performance matters and when
+   it doesn't. Of course, intuitions can be wrong, so don't forget to measure, measure, measure. But
+   level spawning tends to be one of these areas where performance does matter.
+
+   A level can easily have 10 000 objects or more and sometimes you want to spawn them really fast, such
+   as when the player restarts the level. So it seems worth it to spend a little bit of time to think
+   about how we can spawn levels fast.
+
+   Looking at the resource layout, our spawn algorithm seems pretty straight forward:
+     * Create the first entity
+          + Add its first component
+          + Add its second component
+          + ...
+          + Create its child entities
+     * Create the second entity
+          + Create its first component
+          + Create its second component
+          + ...
+     * ...
+
+   This is so simple and straight forward that it might seem impossible to improve on. We are walking
+   the resource memory linearly as we step through components, so we are being cache friendly, aren't
+   we?
+
+   Well, not really. We are violating one of the fundamental principles of data-oriented design: Do
+   similar things together.
+
+   If we write out the operations we actually perform linearly instead of in an hierarchy and make
+   things a bit more concrete, it's easier to see:
+     * Create entity A
+     * Create a TransformComponent for A
+     * Create a MeshComponent for A
+     * Create an ActorComponent for A
+     * Create entity B
+     * Create a TransformComponent for B
+     * Create a MeshComponent for B
+     * ...
+
+   Note how we are alternating between creating different kinds of components and entities. This not
+   only messes with our instruction cache (because each component has its own code path), but with our
+   data cache as well (because each component has its own data structures where the instances get
+   inserted).
+
+   So let's rewrite this so that we keep common operations together:
+     * Create entity A
+     * Create entity B
+     * Create a TransformComponent for A
+     * Create a TransformComponent for B
+     * Create a MeshComponent for A
+     * Create a MeshComponent for B
+     * Create an ActorComponent for A
+
+   Much better. And we can go even further.
+
+   Instead of telling the EntityManager to "create an entity" one hundred times, let's just tell it to
+   "create 100 entities". That way, if there is any economy of scale to creating more than one entity,
+   the EntityManager can take advantage of that. And let's do the same thing for the components:
+     * Create entities (A, B)
+     * Create TransformComponents for (A,B)
+     * Create MeshComponents for (A,B)
+     * Create an ActorComponent for A
+
+   Notice how we are encountering and making use of a whole bunch of data-oriented principles and
+   guidelines here:
+     * Access memory linearly.
+     * Where there is one, there are many.
+     * Group similar objects and operations together.
+     * Perform operations on multiple objects at once, rather than one at a time.
+
+   Let's rewrite the data format to reflect all our newly won insight:
+
+struct EntityResource {
+	unsigned num_entities;
+	unsigned num_component_types;
+	ComponentTypeData component_types[num_component_types];
+};
+
+struct ComponentTypeData {
+	unsigned component_identifier;
+	unsigned num_instances;
+	unsigned size;
+	unsigned entity_index[num_instances];
+	char instance_data[size];
+};
+
+   For each component, we store an identifier so we know if it's a MeshComponent, TransformComponent,
+   etc. Then we store the number of instances of that component we are going to create and the size of
+   the data for all those instances.
+
+   Note that now when we are walking the format, we can skip all instances of an unknown component type
+   with a single jump, instead of having to ignore them one by one. This doesn't matter that much, but
+   it is interesting to note that data-oriented reorganizations often make a lot of different kinds of
+   operations more efficient, not just the one you initially targeted.
+
+   The entity_index is used to associate components with entities. Suppose we create five entities: A,
+   B, C, D and E and two ActorComponents. We need to know which entity each ActorComponent should belong
+   to. We do that by simply storing the index of the entity in the entity_index. So if the entity index
+   contained {2,3} the components would belong to C and D.
+
+   There is one thing we haven't handled in the new layout: child entities.
+
+   But child entities are not conceptually different from any other entities. We can just add them to
+   num_entities and add their component instances to the ComponentTypeData just as we would do for any
+   other entity.
+
+   The only additional thing we need is some way of storing the parent-child relationship. We could
+   store that as part of the data for the TransformComponent, or we could just store an array that
+   specified the index of each parent's entity (or UINT_MAX for root entities):
+
+struct EntityResource {
+	unsigned num_entities;
+	unsigned num_component_types;
+	unsigned parent_index[num_entities];
+	ComponentTypeData component_types[num_component_types];
+};
+
+   If parent_index was {UINT_MAX, 0, 1, 1, 2} in our A, B, C, D, E example, the hierarchy would be:
+A --- B --- C --- E
+      |
+      + --- D
+
+Implementation Details
+   This post is too long already, so I'll just say something quickly about how the implementation of
+   this is organized.
+
+   In the engine we have a class EntityCompiler for compiling entities and a similar class EntitySpawner
+   for spawning entities.
+
+   A component that can compile data needs to register itself with the entity compiler, so that it can
+   be called when component data of that kind is encountered by the compiler.
+
+   Ignoring some of the nitty-gritty details, like error handling, endian swapping and dependency
+   tracking, this looks something like this:
+
+typedef Buffer (*CompileFunction)(const JsonData &config, NittyGritty &ng);
+
+void register_component_compiler(const char *name, CompileFunction f, int spawn_order);
+
+   The compile function takes some JSON configuration data that describes the component and returns a
+   binary BLOB of resource data for insertion into the entity resource. Note that the compile function
+   operates on a single component at a time, because we are not that concerned with compile time
+   performance.
+
+   When registering the compiler we specify a name, such as "mesh_component". If that name is found in
+   the JSON data, the entity compiler will redirect the compile of the component data to this function.
+   The name is also hashed into the component_identifier for the component.
+
+   The spawn_order is used to specify the compile order of the different component, and by extension,
+   their spawn order as well. Some components make use of other components. For example, the
+   MeshComponent wants to know where the enitty is, so it looks for a TransformComponent in the entity.
+   Thus, the TransformComponent must be created before the MeshComponent.
+
+   A similar approach is used to register a component spawner:
+typedef void (*SpawnFunction)(const Entity *entity_lookup,
+	unsigned num_instances, const unsigned *entity_index, const char *data);
+
+void register_component_spawner(const char *name, SpawnFunction f);
+
+   Here the entity_lookup allows us to look up an entity index in the resource data to a an actual
+   Entity that is created in the first step of spawning the resource. num_instances is the number of
+   component instances that should be created and entity_index is the entity index from the
+   ComponentTypeData that lets us lookup which entity should own the component.
+
+   So entity_lookup[entity_index[i]] gives the Entity that should own the ith component instance.
+
+   The data finally is a pointer to the instance_data from the ComponentTypeData.
+
+   That's certainly enough for today. Next time, we'll look at a concrete example of this.
+
+
+---
+
+
