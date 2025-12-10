@@ -1,0 +1,297 @@
+filename: c-pool-memory-allocator-embedded-systems-20251209.txt
+https://medium.com/@learn_aryan/pool-memory-allocator-in-c-embedded-systems-22e9f1d0026e
+
+Pool Memory Allocator in C (Embedded Systems)
+Jan 15, 2025
+
+In some scenarios, you don't have the luxury of using malloc or other sophisticated memory
+allocators. Instead, you're working with limited resources-perhaps only a few kilobytes of RAM-and
+must allocate and release memory during runtime while staying within strict CPU cycle constraints.
+
+There are many categories of memory allocation techniques, and I'll cover them in detail in future
+posts. Today, however, I want to focus on the pool memory allocator.
+
+  +-----------------------------------------------+
+  |[DATA][BSS][    HEAP    ] ......[   STACK     ]|
+  +-----------------------------------------------+
+
+A pool allocator is extremely fast, offering O(1) complexity for both allocation and release. It's
+particularly well-suited for scenarios where allocations are of a fixed size.
+
+For instance, imagine working with network packets. These packets are small, typically only a few bytes, and
+you know they won't exceed a certain size. In such a case, a pool allocator is a feasible solution. Each
+time you call allocate, it provides you with a fixed block of memory. When you're done with the memory,
+you can release it back to the pool with minimal overhead-often requiring just a few CPU cycles.
+
+The only downside is that in a 32-bit system architecture, you waste 4 bytes per chunk, while in a 64-bit
+system, the waste increases to 8 bytes per chunk.
+
+This overhead is caused by the need to store metadata, such as pointers or bookkeeping information,
+to manage the chunks. The size of this metadata is directly tied to the system's pointer size - 4
+bytes for 32-bit systems and 8 bytes for 64-bit systems.
+
+While this overhead might seem negligible for large chunks, it can become significant when managing a
+large number of small, fixed-size allocations.
+
+Pointers &
+You've probably heard many stories about pointers and watched numerous tutorials explaining "internal
+pointer variables"!
+
+Let's focus on the aspect that interests us most: memory addresses.
+
+In C, pointers are essentially memory addresses. The type of data only determines how much memory will
+be read after the pointer's address. The compiler handles this automatically based on the pointer's type.
+
+For example:
+
+// on 32-bit system:
+void hello() {
+	// 'a' is initialized on the stack at address 0x00000100
+	uint32_t a = 2;
+	// Since 'a' is of type 'int'
+	// it occupies 4 consecutive memory addresses:
+	// 0x00000100, 0x00000101, 0x00000102, 0x00000103
+	printf("%x", &a);
+}
+
+In C, using the & operator on a variable allows you to obtain its memory address. This gives you a
+pointer to the variable, which can be used for direct memory manipulation.
+
+Once you have a memory address, you can convert it to a specific type later by dereferencing it with the
+* operator. This tells the compiler to treat the memory at that address as the specified type, allowing
+you to access or modify the value stored there.
+
+For example:
+
+uint32_t val = 23;
+
+// get memory address of the variable
+// ex: 0x00000010
+size_t address = (size_t)(&val);
+
+// convert the variable to a byte array
+// ex: {0x17, 0x00, 0x00, 0x00}
+uint8_t *bytes = (uint8_t *)(address);
+
+// get the first byte of the variable
+// ex: 0x17
+uint8_t first_byte = *bytes;
+
+// get the second byte of the variable
+// ex: 0x00
+uint8_t second_byte = *(bytes + 1);
+
+In C, strings are essentially pointers to a memory address where the characters are stored
+consecutively. Unlike some higher-level languages, C does not store the string length explicitly. Instead,
+strings are terminated by a null character ('\0'), which marks the end of the string.
+
+Functions like strlen work by manually scanning the string character by character until they encounter
+the null terminator. The number of characters scanned (excluding the null terminator) gives the length
+of the string.
+
+For example:
+
+const char* text = "hello world!";
+
+In this example, the pointer text points to the memory address where the string "hello world!" is stored. If
+the pointer text is at memory address 0x00000100, then the next 12 bytes will contain the characters
+"hello world!", and the 13th byte will be the null terminator ('\0'), which marks the end of the string.
+
+Since each character typically occupies 1 byte, we can conclude that the string "hello world!" occupies
+13 bytes in memory. This includes the 12 characters in the string and the null terminator at the end.
+
+    0x00000100 -> 'h'
+    0x00000101 -> 'e'
+    0x00000102 -> 'l'
+    0x00000103 -> 'l'
+    0x00000104 -> 'o'
+    0x00000105 -> ' '
+    0x00000106 -> 'w'
+    0x00000107 -> 'o'
+    0x00000108 -> 'r'
+    0x00000109 -> 'l'
+    0x0000010A -> 'd'
+    0x0000010B -> '!'
+    0x0000010C -> '\0' (null terminator)
+
+Pool Allocator Basics
+A pool allocator is a memory management structure that operates as a stack that implemented using a
+linked list. It works by dividing a pre-allocated block of memory into fixed-size chunks, which can be
+efficiently managed during runtime.
+
+  0x00   0x08       0x30       0x58       0x80       0xA8       0xD0       0xF8
+  +-------------------------------------------------------------------------+
+  | Pool *[chunk(1)]*[chunk(2)]*[chunk(3)]*[chunk(4)]*[chunk(5)]*[chunk(6)]*|
+  +-------------------------------------------------------------------------+
+
+The pool allocator itself occupies the first bytes of the given memory space. It primarily consists of
+a head, which is a pointer to the next available chunk. This head acts as the entry point for managing
+the free list.
+
+// pool.h
+#pragma once
+
+#include <stdint.h>
+
+typedef struct pool_t {
+	struct pool_t *next;
+} pool_t;
+
+// given a memory space, create and initialize a memory pool
+pool_t *pool_create(void *memory_space, uint16_t size, uint8_t object_size);
+
+// allocate and return the memory address to the user
+void *pool_alloc(pool_t *self);
+
+// free the memory, and release it to the pool
+void pool_free(pool_t *self, void *ptr);
+
+
+                                      +------------------------------+
+                                      |                              |
+  0x00      0x08               0x28   V    0x30               0x50   |    0x58             0x78
+  +--------------------------+ | +--------------------------+ | +----|---------------------+
+  | Header  Data section     | | | Header  Data section     | | | Header  Data section     |
+  | [&next] [(fixed length)] | | | [&next] [(fixed length)] | | | [&next] [(fixed length)] |
+  +----|---------------------+ | +--------------------------+ | +--------------------------+
+       |                                                           ^
+       |                                                           |
+       +-----------------------------------------------------------+
+
+Each chunk in the pool follows the same structure:
+    Header: Contains a pointer to the next available chunk in the free list.
+    Data Section: The remaining bytes in the chunk are allocated to the user when the alloc function
+    is called.
+
+Create
+When the pool allocator is created, all chunks are pre-initialized and added to the pool's free list.
+
+// pool.c
+
+#include "pool.h"
+#include <stddef.h>
+
+// simply works as adding an item to a stack
+void __pool_push(pool_t *self, pool_t *node) {
+	node->next = self->next;
+	self->next = node;
+}
+
+// create a pool using
+pool_t *pool_create(void *memory_space, uint16_t size, uint8_t object_size) {
+	// initialize the first bytes to the pool instance itself
+	pool_t *self = (pool_t *)(memory_space);
+	self->next = NULL;
+
+	// get the address of the memory space
+	size_t address = (size_t)memory_space;
+
+	// initialize a cursor to calculate chunk addresses
+	size_t cursor = sizeof(pool_t);
+
+	// actual chunk size, which is the
+	// block(object) size + the size of its header
+	size_t chunk_size = object_size + sizeof(pool_t);
+
+	while (1) {
+		// if the next chunk cannot fit into the memory space
+		// break the loop, that's enough partitioning for today!
+		if (cursor + chunk_size > size)
+			break;
+
+		// extend the pool chunks with current memory address
+		__pool_push(self, (pool_t *)(address + cursor));
+
+		// move the cursor
+		cursor += chunk_size;
+	}
+	return self;
+}
+
+ALLOC
+When the alloc function is called, the next available chunk is removed from the pool and passed to the user.
+
+// pool.c
+
+...
+
+// just like you pop an item from a stack
+// pool pop is a helper function that will do that for you
+pool_t *__pool_pop(pool_t *self) {
+	pool_t *node = self->next;
+	if (!node)
+		return NULL;
+	self->next = node->next;
+	return node;
+}
+
+
+// allocate memory and return the reference to the user
+void *pool_alloc(pool_t *self) {
+	// pop a chunk from the stack
+	pool_t *node = __pool_pop(self);
+	// if it's null, we're probably out of memory!
+	if (!node)
+		return NULL;
+
+	// return a valid reference to the data section
+	return (void *)((size_t)node + sizeof(pool_t));
+}
+
+The tricky part of implementing a pool allocator is passing the reference to the user while ensuring
+the metadata remains protected.
+
+The metadata, which is stored in the earliest bytes of each chunk, is essential for managing the pool
+and must not be overwritten by the user. To prevent this, we ensure that when a reference is passed to
+the user, it is shifted by the size of the pool header.
+
+return (void *)((size_t)node + sizeof(pool_t));
+
+This means the pointer provided to the user points directly to the usable memory space, bypassing the
+metadata.
+
+FREE
+When the free function is called, the chunk is returned to the pool by adding it back to the free list.
+
+// pool.c
+
+...
+
+// free the allocated memory and return it back to the pool
+void pool_free(pool_t *self, void *ptr) {
+	if (!ptr)
+		return;
+	// as you remember, we did shift the pointer when alloc function is called
+	// so we need to shift it back, to access the pool header
+	pool_t *node = (pool_t *)(ptr - sizeof(pool_t));
+	// extend the pool with this new available
+	__pool_push(self, node);
+}
+
+Caution
+As you can see, this implementation is not completely safe. To prioritize performance and reduce overhead,
+I intentionally removed many error-handling mechanisms, making it lightweight and suitable for use on
+microcontrollers with limited resources.
+
+However, this comes with trade-offs:
+  - Manual Memory Management: You need to keep track of all allocated memory and ensure that each
+    allocation is properly deallocated.
+  - Risk of Memory Leaks: Any memory not properly deallocated during runtime will result in memory
+    leaks. In the constrained environment of a microcontroller, losing even a few bytes can have
+    catastrophic consequences, potentially causing your application to fail without any way to recover
+
+Key Considerations:
+ 1. Careful Deallocation: Always ensure memory chunks are freed back to the pool as soon as they are no
+    longer needed.
+ 2. Error Handling: If adapting this for a critical system, consider adding basic error-handling mechanisms
+    to track invalid allocations or double frees.
+ 3. Testing: Rigorously test the implementation under various scenarios to ensure stability and reliability,
+    especially in long-running systems.
+
+This lightweight implementation is ideal for highly constrained environments, but it demands extra caution
+from developers to avoid runtime issues. In such systems, a disciplined approach to memory management
+is crucial.
+
+
+---
+
