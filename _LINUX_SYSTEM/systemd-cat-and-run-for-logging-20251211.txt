@@ -1,0 +1,115 @@
+filename: systemd-cat-and-run-for-logging-20251211.txt
+https://utcc.utoronto.ca/~cks/space/blog/linux/SystemdCatAndRunForLogging
+
+Some notes on using systemd-run or systemd-cat for logging program output
+December 8, 2025
+
+   In response to [**1]yesterday's entry on using systemd (service) units for easy capturing of log
+   output, a commentator drew my attention to systemd-run and systemd-cat. I spent a bit of time
+   poking at both of them and so I've wound up with some things to remember and some opinions.
+
+   (The short summary is that you probably want to use systemd-run with a specific unit name that you
+   pick.)
+
+   Systemd-cat is very roughly the systemd equivalent of logger. As you'd expect, things that it
+   puts in the systemd journal flow through to anywhere that regular journal entries would, including
+   things that directly get fed from the journal and syslog (including remote syslog
+   destinations). The most convenient way to use systemd-cat is to just have it run a command, at which
+   point it will capture all of the output from the command and put it in the journal. However, there is
+   a little issue with using just 'systemd-cat /some/command', which is that the journal log identifiers
+   that systemd-cat generates in this case will be the direct name of whatever program produced the
+   output. If /some/command is a script that runs a variety of programs that produce output (perhaps it
+   echos some status information itself then runs a program, which produces output on its own), you'll
+   get a mixture of identifier names in the resulting log:
+
+your-script[...]: >>> Frobulating the thing
+some-prog[...]: Frobulation results: 23 processed, 0 errors
+
+   Journal logs written by systemd-cat also inherit whatever unit it was in (a session unit,
+   cron.service, etc), and the combination can make it hard to clearly see all of the logs from running
+   your script. To do better you need to give systemd-cat an explicit identifier, 'systemd-cat -t
+   <something> /some/command', which point everything is logged with that name, but still in whatever
+   systemd unit systemd-cat ran in.
+
+   Generally you want your script to report all its logs under a single unit name, so you can find them
+   and sort them out from all of the other things your system is logging. To do this you need to use
+   systemd-run with an explicit unit name:
+$> systemd-run -u myscript --quiet --wait -G /some/script
+
+   I believe you can then hook this into any systemd service unit infrastructure you want, such as
+   sending email if the unit fails (if you do, you probably want to add '--service-type=oneshot').
+   Using systemd-run this way gets you the best of both systemd-cat worlds; all of the output from
+   /some/script will be directly labeled with what program produced it, but you can find it all using
+   the unit name.
+
+   Systemd-run will refuse to activate a unit with a name that duplicates an existing unit, including
+   existing systemd-run units. In many cases this is a feature for script use, since you basically get
+   'run only one copy' locking for free (although the error message is noisy, so you may want to do your
+   own quiet locking). If you want to always run your program even if another instance is running,
+   you'll have to generate non-constant unit names (or let systemd-run do it for you).
+
+   Systemd-cat has some features that systemd-run doesn't offer, such as setting the priority of
+   messages (and setting a different priority for standard error output). If these features are
+   important to you, I'd suggest nesting systemd-cat (with no '-t' argument) inside systemd-run, so you
+   get both the searchable unit name and the systemd-cat features. If you're already in an environment
+   with a useful unit name and you just need to divert log messages from wherever else the environment
+   wants to send them into the system journal, bare systemd-cat will do the job.
+
+   (Arguably this is the case for things run from cron, if you're content to look for all of them under
+   cron.service (or crond.service, depending on your Linux distribution). Running things under
+   systemd-cat puts their output in the journal instead of having them send you email, which may be good
+   enough and saves you having to invent and then remember a bunch of unit names.)
+
+
+---
+[**1]https://utcc.utoronto.ca/~cks/space/blog/linux/SystemdScriptsEasyLogCapture
+
+Turning to systemd units for easy capturing of log output
+December 7, 2025
+
+   Suppose, not hypothetically, that you have a third party tool that you need to run periodically.
+   This tool prints things to standard output (or standard error) that are potentially useful to capture
+   somehow. You want this captured output to be associated with the program (or your general system for
+   running the program) and timestamped, and it would be handy if the log output wound up in all of the
+   usual places in your systems for output. Unix has traditionally had some solutions for this, such as
+   logger for sending things to syslog, but they all have a certain amount of annoyances associated
+   with them.
+
+   (If you directly run your script or program from cron, you will automatically capture the output in a
+   nice dated form, but you'll also get email all the time. Let's assume we want a quieter experience
+   than email from cron, because you don't need to regularly see the output, you just want it to be
+   available if you go looking.)
+
+   On modern Linux systems, the easy and lazy thing to do is to run your script or program from a
+   systemd service unit, because systemd will automatically do this for you and send the result into the
+   systemd journal (and anything that pulls data from that) and, if configured, into whatever overall
+   systems you have for handling syslog logs. You want a unit like this:
+
+[Unit]
+Description=Local: Do whatever
+ConditionFileIsExecutable=/root/do-whatever
+
+[Service]
+Type=oneshot
+ExecStart=/root/do-whatever
+
+   Unlike the usual setup for running scripts as systemd services, we don't set 'RemainAfterExit=True'
+   because we want to be able to repeatedly trigger our script with, for example, 'systemctl start
+   local-whatever.service'. You can even arrange to get email if this unit (ie, your script) fails.
+
+   You can run this directly from cron through suitable /etc/cron.d files that use 'systemctl start', or
+   set up a systemd timer unit (possibly with a randomized start time). The advantage of a systemd
+   timer unit is that you definitely won't ever get email about this unless you specifically configure
+   it. If you're setting up a relatively unimportant and throwaway thing, it being reliably silent
+   is probably a feature.
+
+   (Setting up a systemd timer unit also keeps everything within the systemd ecosystem rather than
+   worrying about various aspects of running 'systemctl start' from scripts or crontabs or etc.)
+
+   On the one hand, it feels awkward to go all the way to a systemd service unit simply to get easy to
+   handle logs; it feels like there should be a better solution somewhere. On the other hand, it works
+   and it only needs one extra file over what you'd already need (the .service).
+
+
+---
+
