@@ -1,0 +1,168 @@
+filename: cs-whats-differnece-between-memory-pool-and-memory-arena-20251212.txt
+
+What is the difference between memory pool and memory arena?
+2025-12-12
+
+AI overview (google):
+
+Memory Pool typically manages fixed-size chunks for fast reuse (like a pool of balls), while a Memory Arena
+(or Region/Bump Allocator) manages large, contiguous blocks, allocating sequentially and often resetting the
+whole block at once for temporary data (like game frames). The key difference lies in their flexibility: pools
+offer varied, individually reusable slots, whereas arenas excel at bulk allocation/deallocation for
+same-lifetime objects, preventing fragmentation by simply bumping a pointer. 
+
+Memory Pool
+ * Concept: A pre-allocated chunk of memory divided into fixed-size slots.
+ * Allocation: Takes an available chunk from a free list, often using a simple pointer/stack.
+ * Deallocation: Returns a chunk to the free list for reuse in any order.
+ * Best For: Objects of the same size (e.g., network packets, bullets) where rapid individual reuse is needed.
+ * Benefit: Avoids heap overhead and fragmentation for many small, same-sized objects. 
+
+Memory Arena (Region/Bump Allocator)
+ * Concept: A large, single block of memory, often with a single "bump pointer".
+ * Allocation: Advances the bump pointer by the requested size (fastest allocation).
+ * Deallocation: Individual deallocations are often no-ops; the whole arena is reset/freed at once.
+ * Best For: Many short-lived objects with the same lifetime (e.g., game engine frames, compiler parsing data).
+ * Benefit: Extremely fast allocation and deallocation of entire groups of objects, perfect for temporary data.
+
+Key Distinction
+Pools are like a set of reusable buckets for specific item sizes, letting you grab and return individual
+buckets.  Arenas are like a large sandbox where you build things; you can quickly add new items, but you
+usually clear the whole sandbox when you're done with everything.
+
+
+---
+https://handmade.network/forums/t/7217-better_understanding_casey%2527s_stack_based_memory_allocation_system
+
+Better understanding Casey's stack based memory allocation system
+March 6, 2020
+
+In many of the videos Casey repeatedly touches on his stack based memory allocation system. From what I can
+comprehend I can appreciate the usefulness of architecting things based on stacks given their nature of more
+automatic memory management. I feel like, after jumping around between alot of videos, I'm starting to
+understand bits and pieces of how he has setup this memory allocation scheme, though I think there are still
+some gaps in my knowledge. Coming from C++, this is a completely new way of thinking about things so I'm still
+trying to master these ideas. I'm wondering if someone can help give me a clearer overall picture of how
+exactly this scheme is setup to handle most of the games memory needs. From what I have gathered so far it
+seems like the basic idea is you use some type of transient memory arena (which typically only lasts for one
+frame) to hold temporary memory used to perform alot of game calculations/simulations. Within a frame the
+memory used will grow and shrink based on what calculations you need to perform and after you get a desired
+result you store that result into a struct being held on permanent memory space. So something like this:
+
+Game_State *gState = (Game_State *)gameMemory->PermanentStorage;
+transient_state *tranState = (transient_state *)Memory->TransientStorage;
+
+{	//Movement calculations
+	temporary_memory moveMem = BeginTemporaryMemory(transState);
+	SomeStruct *thing = Malloc(moveMem, someStruct);
+	..........
+	//Do calculations
+	..........
+
+	gState->player->position = resultOfCalculations;
+	EndTemporaryMemory(moveMem);
+}
+
+{	//Animation calculations
+	temporary_memory animMem = BeginTemporaryMemory(transState);
+	Animation *animation = Malloc(animMem, Animation);
+	..........
+	//Find new bone positions from animation calculations
+	..........
+
+	gState->player->skeleton = resultingBonePositionsOfSkeleton;
+	EndTemporaryMemory(animMem);
+}
+
+CheckTransMem(transState); //Make sure transient memory is all cleared
+
+Do I have the right idea? If so, what do you do when you need memory that persists across local temp memory
+boundaries? Do you allocate a larger memory block outside of all scopes and then just suballocate from that
+block within the smaller scopes?
+
+***
+You got the idea right.
+
+I like to think about memory in term of "lifetime" and "system" (as in a group of functions in your code that
+perform a task).
+
+You can have different memory arenas for different lifetimes of your data. You could have an arena that last
+one frame, one that last the duration of a level, or the duration of an animation... Those different arenas
+can come from another larger arena, but it's not required.
+
+You can also have a different memory allocator for different systems. For example if you often allocate small
+objects with a random lifetime, you may want to use a pool allocator instead of a stack allocator.
+
+***
+Okay, so I'm trying to visualize what things would be like with different allocators. Would these allocators
+theoretically be tied to a specific arena? So in my previous example I guess I was assuming the transient
+storage was working as a stack so any alloc calls onto the transient arena would be stack based:
+
+{	//Animation calculations
+	temporary_memory animMem = BeginTemporaryMemory(transState);
+	Animation* animation = alloc(animMem, Animation); //alloc just pushes memory on stack
+	..........
+	//Perform other alloc's and dealloc's, pushing and popping in a stack like way
+	..........
+
+	gState->player->skeleton = resultingBonePositionsOfSkeleton;
+	EndTemporaryMemory(animMem); //Acts as a free_all function and just frees all memory
+}
+
+but if I wanted say my level arena to allocate in a more dynamic way with a pool allocator then any alloc or
+dealloc calls would use that by default:
+
+{	//Level calculations
+	temporary_memory levelMem = BeginTemporaryMemory(levelState);
+	Animation* animation = alloc(levelMem, Animation); //alloc here uses pool allocator behind the scenes
+	..........
+	//Will alloc and delloc within here as necessary
+	..........
+
+	gState->player->skeleton = resultingBonePositionsOfSkeleton;
+	EndTemporaryMemory(levelMem); //Still frees all memory here
+}
+
+If so, would the advantage here be that my more dynamic allocation stuff is still limited in scope and all
+memory is still flushed at the end of a level? Meaning the main goal of trying to manage memory is to limit
+the need for manually deleting memory as much as you can. So even within levels I might try to find places
+where I can use the transient arena to keep memory management more stack based?
+
+***
+I wouldn't try to generalize it. Each case has separate constraints and it's a matter of advantages /
+disadvantages.
+
+A 1 frame stack allocator is nice because you don't really worry about freeing memory, but you can't persist
+data stored into it across frames, or free memory in the middle of the stack.
+
+A pool allocator is usefull when you allocate objects of the same size that don't have a know lifetime. But
+it's a bit slower to get or free memory from it.
+
+To summarize, you need to figure out the memory usage for different parts of your code and choose how to
+manage it accordingly. If you want the security that memory doesn't persist between levels, than design your
+allocator for that. You can have the memory block used from a pool allocator come from a "level lifetime"
+arena so it's cleared when you "free" the level memory block.
+
+int main( void ) {
+
+	arena_t frame_arena = ...;
+	arena_t level_arena = ...;
+	pool_t level_pool;
+
+	while ( ... ) {
+		reset( &frame_arena );
+		if ( load_level ) {
+			reset( &level_arena );
+			pool_init( &level_arena );
+		}
+		pool_alloc( &level_pool, ... );
+		...
+		pool_free( &level_pool, ... );
+	}
+
+	return 0;
+}
+
+
+---
+

@@ -1,0 +1,1532 @@
+filename: c-memory-systems-and-allocation-strategies-multif-20251212.txt
+https://blog.molecular-matters.com/2011/07/05/memory-system-part-1/
+
+Memory system - Part 1
+July 5, 2011
+
+   Before we can really delve into the inner workings of the Molecule Engine's memory system, we need to
+   cover some base ground first. Today, we're taking a very thorough look at new, delete, and all their
+   friends. There are some surprising subleties involved, and judging from the interviews I conducted,
+   sometimes even senior level staff messes up questions regarding the inner workings of new and delete.
+
+   To keep things simpler, we don't deal with per-class new and delete, and we don't want to mess with
+   exceptions either.
+
+   new operator / operator new
+   Let's look at a simple statement involving new:
+T *i = new T;
+
+   This is the simplest form of the new operator. What does it really do behind the scenes?
+    1. First, a call to operator new is made to allocate storage for a single T.
+    2. Second, the constructor for T is called which constructs the new instance of T at the memory
+       address returned by the previous call to operator new.
+
+   If T is a fundamental type (e.g. int, float, etc.), or does not have a constructor, no constructor
+   will be called. The above statement will call the simplest form of operator new:
+void *operator new(size_t bytes);
+
+   The compiler will automatically call operator new with the correct size for a given type, which is
+   sizeof(T) in this case.
+
+   So far, so good. But we're not finished with the new operator yet. There's a second version of the
+   new operator, with so called placement-syntax:
+void *memoryAddress = (void*)0x100;
+T *i = new (memoryAddress) T; // placement new
+
+   This can be used to construct instances of classes at a certain place in memory, which in essence is
+   the only way of calling constructors "directly". No memory allocation is involved here - the above
+   calls a different overload of operator new, which is the following:
+void *operator new(size_t bytes, void *ptr);
+
+   This form of operator new does not allocate any memory, and just returns the pointer.
+
+   The placement-syntax of the new operator is very powerful, because we can add our own overloads of
+   operator new. The only rule is that the first argument to every operator new must always be of type
+   size_t, which will automatically be passed to it by the compiler.
+
+   Let's look at an example:
+void *operator new(size_t bytes, const char *file, int line) {
+	// allocate bytes
+}
+
+// calls operator new(sizeof(T), __FILE__, __LINE__) to allocate memory
+T *i = new (__FILE__, __LINE__) T;
+
+   Leaving differences between global operator new and class operator new out of the equation, every use
+   of the placement form of the new operator boils down to the following internally:
+// calls operator new(sizeof(T), a, b, c, d) to allocate memory
+T *i = new (a, b, c, d) T;
+
+   Which is equivalent to:
+T *i = new (operator new(sizeof(T), a, b, c, d)) T;
+
+   The magic of calling operator new is simply done by the compiler. Furthermore, every overload of
+   operator new can be called directly (if we want to do so), and we can do whatever we want with the
+   different overloads. We can even use templates, if we want:
+
+template <class ALLOCATOR>
+void *operator new(size_t bytes, ALLOCATOR& allocator, const char *file, int line) {
+	return allocator.Allocate(bytes);
+}
+
+   This comes in handy later when we're about to use different allocators. With the placement-syntax,
+   memory using different allocators can be allocated with e.g. the following statement:
+T *i = new (allocator, __FILE__, __LINE__) T;
+
+   delete operator / operator delete
+   Calling the delete operator on a previously new'ed instance will first call the destructor, and then
+   operator delete. There's a difference to new, however: Regardless of which form of new we used to
+   create the instance, the same version of operator delete will always be called:
+
+// calls operator new(sizeof(T), a, b, c, d)
+// calls T::T()
+T *i = new (a, b, c, d) T;
+
+// calls T::~T()
+// calls operator delete(void*)
+delete i;
+
+   The only time the corresponding operator delete is called by the compiler is when an exception is
+   thrown inside operator new, so the memory can correctly be freed before the exception is propagated
+   to the calling site. This is also the reason why every overload of operator new must always have a
+   corresponding version of operator delete. But let's not digress.
+
+   Like operator new, operator delete can be called directly (if we want to do so):
+
+template <class ALLOCATOR>
+void operator delete(void *ptr, ALLOCATOR& allocator, const char *file, int line) {
+	allocator.Free(ptr);
+}
+
+// call operator delete directly
+operator delete(i, allocator, __FILE__, __LINE__);
+
+   However, do not forget that the destructor is called by the delete operator, not operator delete.
+   Hence, in the above example, the destructor needs to be called manually:
+// call the destructor
+i->~T();
+
+// call operator delete directly
+operator delete(i, allocator, __FILE__, __LINE__);
+
+   If instances are created wih the simple placement-form of new, the destructor must always be called
+   manually. Using delete on such an instance would invoke undefined behaviour (because the memory was
+   never allocated with a call to new).
+
+   So far, we've only dealt with the non-array versions of new and delete.
+
+   new[] / delete[]
+   Ah, this is where the fun begins! Most people don't realize it, but in something so fundamental such
+   as new[] and delete[], there's already compiler magic involved. The C++ standard just mandates what
+   new[] and delete[] should do, but not how.
+
+   Let's start with a simple example:
+int *i = new int [3];
+
+   The above allocates storage for 3 ints by calling operator new[], and since int is an integral type,
+   there's no constructors to call. Like with operator new, we can overload operator new[] and use
+   placement-syntax as well:
+
+// our own version of operator new[]
+void *operator new[](size_t bytes, const char *file, int line);
+
+// calls the above operator new[]
+int *i = new (__FILE__, __LINE__) int [3];
+
+   The behaviour of delete[] and operator delete[] is the same as with delete and operator delete. We
+   can call operator delete[] directly, but must make sure to call the destructors manually.
+
+   But what happens with non-POD types?
+
+struct Test {
+	Test(void) {
+		// do something
+	}
+
+	~Test(void) {
+		// do something
+	}
+
+	int a;
+};
+
+Test *i = new (__FILE__, __LINE__) Test [3];
+
+   Even though sizeof(Test) == 4, our version of operator new[] will get called with an argument of 16
+   bytes. Why? Think about how the array needs to be deleted:
+delete[] i;
+
+   The compiler must somehow know how many instances of type Test are to be deleted - otherwise it can't
+   call the instances' destructors. So what almost every compiler does upon a call to new[] is the
+   following:
+     * For N instances of type T, request an allocation for sizeof(T)*N + 4 bytes from operator new[].
+     * Store N in the first 4 bytes.
+     * Construct N instances using placement new, starting at ptr + 4
+     * Return ptr + 4 to the user.
+
+   The last bullet point is especially important: If your overload of operator new[] returns the memory
+   address 0x100, the instance Test *i will point to 0x104! The memory layout of the 16 bytes would then
+   be:
+
+   0x100: 03 00 00 00    -> number of instances stored by the compiler-generated code
+   0x104: ?? ?? ?? ??    -> i[0], Test *i
+   0x108: ?? ?? ?? ??    -> i[1]
+   0x10c: ?? ?? ?? ??    -> i[2]
+
+   When delete[] is used later on, the compiler inserts code which reads the number of instances N by
+   going back 4 bytes from the given pointer, and calls the destructors in reverse order - if the type
+   to be deleted is non-POD. Otherwise, there's no 4 byte overhead added because no destructors need to
+   be called (like in the new int[3] example above).
+
+   Unfortunately, this compiler-defined behaviour causes problems when using our own overloads for
+   operator new, operator new[], operator delete, and operator delete[]. Even though we can call
+   operator delete[] directly, we somehow need to figure out how many destructors to call (if any).
+
+   Which we can't.
+
+   The reason is that we can never be sure whether the compiler inserted some extra 4 bytes in the
+   allocation or not. This is totally compiler-dependent. It might work, but it could also horribly
+   break with some user-defined types. And other compilers could do it differently altogether.
+
+   This is also the reason why using delete on instances allocated with new[] will most likely crash
+   your code, and vice versa. The compiler-generated code simply tries to access memory which doesn't
+   belong to him (using delete[] for allocations via new), or not all instances of an array are
+   correctly destructed (using delete for allocations via new[]), or else.
+
+   However, with the knowledge of what happens behind the scenes with calls to new, new[], delete and
+   delete[], we can build our own allocation functions which correctly handle simple and array
+   allocations for all types, can use our custom allocators, provide additional information like file
+   name and line number, and more. The next post in this series will show how.
+
+   In the meantime, make sure to read the following articles as well, which also explain the concept of
+   global operator new and class operator new:
+
+
+---
+https://blog.molecular-matters.com/2011/07/07/memory-system-part-2/
+
+Memory system - Part 2
+July 7, 2011
+
+   In the last installment of the memory system series, we covered how new, delete, and their
+   variants work. This time, we're going to build our own little toolset which allows us to create new
+   instances (or arrays of instances) of any type using custom allocator classes in a
+   standards-compliant way. Be prepared for some function templates, type-based dispatching, template
+   magic, and nifty macros.
+
+   What I essentially wanted for Molecule's memory system was to create new instances using the
+   following syntax (not legal C++):
+
+Arena arena; // one of many memory arenas
+// ...
+Test *test = new (arena, additionalInfo) Test(0, 1, 2);
+delete (test, arena); // no placement-syntax of delete
+// ...
+Test *test = new (arena, additionalInfo) Test[10];
+delete[] (test, arena); // no placement-syntax of delete[]
+
+   We could get the new operator to work, but the above is not legal in C++ because the delete operator
+   has no placement syntax, that is it only accepts one single argument. We could do something like the
+   above by directly calling operator delete, but then we run into problems with operator delete[] like
+   discussed last time, because we can't call the destructors in a compiler-independent, portable
+   way.
+
+   Additionally, we want to pass some extra information like file name, line number, class name, memory
+   tag, etc. to the memory arena (which in turn takes care of allocating memory), so a macro-based
+   solution it is. Still, we want to keep as much as possible of the original C++ syntax, so the
+   solution we're aiming for looks like the following piece of code:
+
+Test *test = ME_NEW(Test, arena)(0, 1, 2);
+ME_DELETE(test, arena);
+// ...
+Test *test = ME_NEW_ARRAY(Test[3], arena);
+ME_DELETE_ARRAY(test, arena);
+
+   Let's deal with implementing the macros and the underlying functions one by one, starting with the
+   least complex ones.
+
+   ME_NEW
+   Like the ordinary new operator, ME_NEW first needs to allocate memory for the given type, and then
+   call its constructor at the correct location. Easily enough, this can be done with just one line,
+   using placement new:
+
+#define ME_NEW(type, arena)    new (arena.Allocate(sizeof(type), __FILE__, __LINE__)) type
+
+   What we do is using placement new with the memory address returned to us by a call to
+   arena.Allocate(), while using the preprocessor symbols __FILE__ and __LINE__ to feed the arena the
+   file name and line number where the allocation was made. Additionally, "type" is added at the end so
+   you can still provide constructor arguments after the macro call, like this:
+
+// Test is a class taking 3 ints in the constructor
+Test *test = ME_NEW(Test, arena)(0, 1, 2);
+
+// the preprocessor expands the above into:
+Test *test = new (arena.Allocate(sizeof(Test), "test.cpp", 123)) Test(0, 1, 2);
+
+   Using ME_NEW, we can provide a memory arena which is responsible for allocating memory, pass
+   additional information to it, and still have syntax which resembles the original new operator syntax.
+   So let's move on to the next macro.
+
+   ME_DELETE
+   Every instance created using ME_NEW needs to be deleted with a call to ME_DELETE. Keep in mind that
+   there is no placement-form of the delete operator, so we must either use operator delete, or
+   something completely different - otherwise we cannot pass the additional arena argument around.
+   Either way, we must make sure to call the destructor for the given instance. We can do that by
+   deferring the actual deletion of the object to a helper function:
+
+#define ME_DELETE(object, arena)    Delete(object, arena)
+
+   Our helper function is implemented using a simple function template:
+
+template <typename T, class ARENA>
+void Delete(T *object, ARENA& arena) {
+	// call the destructor first...
+	object->~T();
+
+	// ...and free the associated memory
+	arena.Free(object);
+}
+
+   The compiler can deduce both template arguments for us, so we don't need to explicitly specify any of
+   the template arguments. So far, so good. Off to the next macro.
+
+   ME_NEW_ARRAY
+   Things start getting more complex here, so keep reading. What we first need is a helper function
+   which allocates memory for N instances of a certain type, and properly constructs them using
+   placement new. Because it has to work for generic types and arenas, we again use a function template:
+
+template <typename T, class ARENA>
+T *NewArray(ARENA& arena, size_t N, const char *file, int line) {
+	union {
+		void *as_void;
+		size_t *as_size_t;
+		T *as_T;
+	};
+
+	as_void = arena.Allocate(sizeof(T)*N + sizeof(size_t), file, line);
+
+	// store number of instances in first size_t bytes
+	*as_size_t++ = N;
+
+	// construct instances using placement new
+	const T *const onePastLast = as_T + N;
+	while (as_T < onePastLast)
+		new (as_T++) T;
+
+	// hand user the pointer to the first instance
+	return (as_T - N);
+}
+
+   What the code does should be clear from the comments. One thing to note is that we allocate memory
+   for N instances of type T, and an additional sizeof(size_t) bytes for storing the number of
+   instances. That is, our memory layout for allocating 3 instances of type T would look like this
+   (assuming sizeof(size_t) == 4, and sizeof(T) == 4):
+
+   Bytes 0-3: N
+   Bytes 4-7: T[0]
+   Bytes 8-11: T[1]
+   Bytes 12-15: T[2]
+
+   The pointer returned to the user is offset by sizeof(size_t) bytes, so it correctly points to the
+   first instance. If we were to call this function directly in C++ code, it would look like the
+   following:
+Test *t = NewArray<Test>(arena, 3, __FILE__, __LINE__);
+
+   There's a small problem here - because the type T is not used as a function argument anywhere (but
+   only as return type), the compiler cannot deduce its type. Therefore, we have to specify it directly
+   in the function call, but we don't know the type in the ME_NEW_ARRAY macro. And neither do we know
+   the number of instances from the macro argument we get. Recall what the macro-call should look like:
+Test *test = ME_NEW_ARRAY(Test[3], arena);
+
+   We really want to have our cake, and keep this syntax - so what do we do? Let's try to write the
+   macro, and fill in the missing parts:
+#define ME_NEW_ARRAY(type, arena)    NewArray<?>(arena, ?, __FILE__, __LINE__)
+
+   What we now need is some kind of helper function which is able to deduce both the type and count from
+   a single argument. Let's conjure up some template magic which does exactly that! Observe:
+
+template <class T>
+struct TypeAndCount {
+};
+
+template <class T, size_t N>
+struct TypeAndCount<T[N]> {
+	typedef T Type;
+	static const size_t Count = N;
+};
+
+   The base template TypeAndCount simply takes a single template argument, and is completely empty. But
+   by providing a partial template specialization for types taking the form T[N], we can define both the
+   type and extract N at compile-time. If you're not used to compile-time tricks like this, let me show
+   you how it can be used by filling in the missing parts in our macro:
+#define ME_NEW_ARRAY(type, arena) \
+   NewArray<TypeAndCount<type>::Type>(arena, TypeAndCount<type>::Count, __FILE__, __LINE__)
+
+   See what we did here? Let's look at the different steps involved by looking at the corresponding
+   source for a call to ME_NEW_ARRAY(Test[3], arena).
+
+   First, it's the preprocessor's turn:
+     * The macro part TypeAndCount<type>::Type will expand to TypeAndCount<Test[3]>::Type.
+     * The macro part TypeAndCount<type>::Count will expand to
+       TypeAndCount<Test[3]>::Count.
+
+   After that, it's the compiler's turn:
+     * The partial template specialization for TypeAndCount<Test[3]>::Type will yield Test.
+     * The partial template specialization for TypeAndCount<Test[3]>::Count will yield 3.
+
+   Hence, we simply plug in those two values into our ME_NEW_ARRAY macro, and don't have to supply any
+   other (redundant) arguments in the macro.
+
+   ME_DELETE_ARRAY
+   Ah, the last of the lot. Again, we need to come up with a helper function - one which first calls the
+   destructors in reverse order (as per the C++ standard), and then frees the associated memory. Without
+   further ado, here's the implementation:
+
+template <typename T, class ARENA>
+void DeleteArray(T *ptr, ARENA& arena, NonPODType) {
+	union {
+		size_t *as_size_t;
+		T *as_T;
+	};
+
+	// user pointer points to first instance...
+	as_T = ptr;
+
+	// ...so go back size_t bytes and grab number of instances
+	const size_t N = as_size_t[-1];
+
+	// call instances' destructor in reverse order
+	for (size_t i=N; i>0; --i)
+		as_T[i-1].~T();
+
+	arena.Free(as_size_t-1);
+}
+
+   The implementation should be clear by reading the comments. And the macro is not too hard either,
+   because we don't need to explicitly specify the function template arguments - those can be deduced by
+   the compiler. Hence, the macro is really simple:
+#define ME_DELETE_ARRAY(object, arena)    DeleteArray(object, arena)
+
+   And that's about it!
+
+   Basically, we're finished now - we achieved our initial goals, and the implementation works for both
+   POD and non-POD types. Still, there is something we can optimize: Remember that we don't need to call
+   constructors/destructors for POD-types, so we would like to optimize our NewArray and DeleteArray
+   function templates in this regard.
+
+   This can be achieved via type-based dispatching in conjunction with template type-traits, but the
+   explanation and implementation have to wait until the next installment in the series, because this
+   post already got longer than expected.
+
+
+---
+https://blog.molecular-matters.com/2011/07/08/memory-system-part-3/
+
+Memory system - Part 3
+July 8, 2011
+
+   Continuing from where we left off last time, we're about to optimize our NewArray and DeleteArray
+   function templates for POD-types this time. Let's start easy by talking about the implementation
+   itself first, and then putting pieces of the puzzle together one by one. Following is the
+   implementation of the function templates NewArrayPOD and DeleteArrayPOD:
+
+template <typename T, class ARENA>
+T *NewArrayPOD(ARENA& arena, size_t N, const char *file, int line) {
+	return static_cast(arena.Allocate(sizeof(T)*N, file, line));
+}
+
+template <typename T, class ARENA>
+void DeleteArrayPOD(T *ptr, ARENA& arena) {
+	arena.Free(ptr);
+}
+
+   That was easy, but how do we make sure that our macros call the correct function based on the type
+   itself? There are several possibilities:
+     * Use a simple if-statement based on the result of some traits-class (e.g. is_pod<T>), and call
+       either NewArray or NewArrayPOD. The disadvantage of this approach is that we're "branching" on
+       something which could be determined at compile-time, and some compilers will warn about it (MSVC
+       does).
+     * Get rid of NewArrayPOD, and provide template specializations of NewArrayfor POD types instead.
+       This approach has several disadvantages:
+         1. It adds a lot of code bloat.
+         2. Function templates cannot be partially specialized (which we would need to do), so we have
+            to refactor our function templates and convert them into class templates.
+         3. It will not work for user-defined POD types unless the user explicitly adds a specialization
+            for each one of his POD types, which is tedious and error-prone.
+     * Get rid of NewArrayPOD, and provide two distinct overloads of NewArray instead - one for POD
+       types, one for non-POD types. This is what we're after.
+
+   The first piece of the puzzle we need is a traits-class which decides whether a given type is POD or
+   not. This can be done via a base template and some specializations:
+
+template <typename T>
+struct IsPOD {
+	static const bool Value = false;
+};
+
+template <>
+struct IsPOD<char> {
+	static const bool Value = true;
+};
+
+template <>
+struct IsPOD<int> {
+	static const bool Value = true;
+};
+
+// etc.
+
+   For any given type T, we can use the compile-time constant IsPOD<T>::Value to decide whether we're
+   dealing with POD types or not. Note that the base template evaluates to false, so we err on the safe
+   side (it would be disastrous to not call constructors and destructors for non-POD types). Adding a
+   few specializations for all integral types at least saves us the cost of doing unnecessary work for
+   these types, but users still have to provide specializations for their own types (but only if they
+   want to make use of the optimizations for POD types - the provided solution will still work
+   correctly!). In this case, I would advise to either use a more sophisticated approach to the
+   IsPOD<> implementation, or check whether your compiler already supports std::is_pod - Visual Studio
+   2010 does, and this is what I use:
+
+template <typename T>
+struct IsPOD {
+	static const bool Value = std::is_pod<T>::value;
+};
+
+   std::is_pod<T> is still wrapped inside IsPOD so I just have to change this template in order to make
+   it work with other compilers/platforms as well.
+
+   Having solved the first piece of the puzzle, we need to add overloads to our NewArray and DeleteArray
+   function templates:
+
+template <typename T, class ARENA>
+T *NewArray(ARENA& arena, size_t N, const char *file, int line, NonPODType) {
+	// implementation for non-POD types
+}
+
+template <typename T, class ARENA>
+T *NewArray(ARENA& arena, size_t N, const char *file, int line, PODType) {
+	// implementation for POD types
+}
+
+template <typename T, class ARENA>
+void DeleteArray(T *ptr, ARENA& arena, NonPODType) {
+	// implementation for non-POD types
+}
+
+template <typename T, class ARENA>
+void DeleteArray(T *ptr, ARENA& arena, PODType) {
+	// implementation for POD types
+}
+
+Of course, function overloads in C++ only work based on types, not values. This means that we cannot add
+overloads for false and true (which is what IsPOD<T>::Value yields), but need to somehow turn them into
+distinct types first. Enter type-based dispatching:
+
+template <bool I>
+struct IntToType {
+};
+
+typedef IntToType<false> NonPODType;
+typedef IntToType<true> PODType;
+
+   Our NewArray and DeleteArray function templates provide overloads for both NonPODType and PODType,
+   and by using the IntToType class template, we can turn compile-time boolean results into distinct
+   types. With the above in place, we can finally change our ME_NEW_ARRAY macro to the following:
+
+// old version
+#define ME_NEW_ARRAY(type, arena) \
+	NewArray<TypeAndCount<type>::Type>(arena, TypeAndCount<type>::Count, __FILE__, __LINE__)
+
+// new version
+#define ME_NEW_ARRAY(type, arena) \
+	NewArray<TypeAndCount<type>::Type>(arena, TypeAndCount<type>::Count, __FILE__, __LINE__, \
+	IntToType<IsPOD<TypeAndCount<type>::Type>::Value>())
+
+   For the ones not used to compile-time programming mechanics like the above, let's put on our compiler
+   hat again, and see what happens with the rather long expression
+
+   IntToType<IsPOD<TypeAndCount<type>::Type>::Value>() in the macro expansion for ME_NEW_ARRAY(Test[3],
+   arena):
+     * The innermost expression is TypeAndCount<type>::Type, which yields Test.
+     * IsPOD<Test>::Value yields false in our case.
+     * The outermost expression then becomes IntToType<false>(), which is a temporary of type NonPODType
+       (note the parentheses at the end).
+
+   Voila! The ME_NEW_ARRAY will now automatically benefit from the optimizations we implemented for POD
+   types. The last missing part is the ME_DELETE_ARRAY macro, which is shown below in its unchanged
+   form:
+#define ME_DELETE_ARRAY(object, arena)    DeleteArray(object, arena)
+
+   We cannot use IsPOD<T> or IntToType<T> in this macro, because object is a value and not a type. We
+   don't want the user to explicitly specify the type in the macro either, because the compiler already
+   knows it. What we need is a helper function which extracts the type by relying on the compiler's
+   template argument deduction, and forwards it to the correct overload:
+
+template <typename T, class ARENA>
+void DeleteArray(T *ptr, ARENA& arena) {
+	DeleteArray(ptr, arena, IntToType<IsPOD<T>::Value>());
+}
+
+   This DeleteArray function template is called by the macro - having access to the type T now, we use
+   it for turning IsPOD<T>::Value into a distinct type using IntToType<>(). This results in calling the
+   correct overload in our ME_DELETE_ARRAY macro as well, which ends today's post.
+
+   One detail we haven't talked about yet is how the memory arenas themselves are implemented  - this
+   has to wait until the next installment in the series.
+
+
+---
+https://blog.molecular-matters.com/2011/07/15/memory-system-part-4/
+
+Memory system - Part 4
+July 15, 2011
+
+   In the last few installments of the Memory system series, we were mostly concerned with how ordinary
+   memory allocation using new and delete works internally, and how we can build our own tools to
+   provide additional functionality. One thing we haven't discussed yet are the memory arenas which are
+   responsible for actually allocating memory, while providing additional things like bounds checking,
+   memory tracking, etc.
+
+   In this post, we'll look at different memory allocation schemes and use cases, and try to build our
+   memory arena system keeping those in mind.
+
+   First of all, we did not build our own memory allocation utilities in order to replace a general
+   purpose allocator with another general purpose allocator. There are several reasons for this:
+     * Nowadays, most general purpose allocators in operating systems either use Doug Lea's malloc
+       (which is still one of the best allocators around even though it was introduced more than 10
+       years ago), or others like ptmalloc, tcmalloc, Hoard. It is very hard to beat them,
+       so don't even try.
+     * Memory allocation in games can be made faster because we know exactly when and where we allocate,
+       and in which context. Not every allocator needs to be general purpose, and not every allocator
+       needs to be thread-safe - quite the contrary.
+     * Even if you enhance the general purpose allocator with some tricks suited for games (e.g. using
+       memory pools for small allocations), it still doesn't quite cut it in the grand scheme of things
+       - I've seen up to 200x speed-ups just by using a single-threaded linear memory allocator instead
+       of the general purpose one (which already employed several performance-improving tricks).
+     * Bounds checking, memory tracking and memory marking are not of global concern, hence they
+       shouldn't be built into the general purpose allocator. We don't need to track each and every
+       memory allocation if we already know which sub-system is leaking memory.
+
+   To get a better picture of what I am talking about, let's take a look at one possible implementation
+   of a memory allocation routine which is used as a replacement for the general purpose allocator:
+
+void *TheMemoryAllocator::Allocate(size_t bytes, ...) {
+	// enter critical section, mutex, etc.
+
+#if BOUNDS_CHECKING_ENABLED
+	bytes = TheBoundsChecker::AdjustSize(bytes);
+#endif
+
+	// do general purpose allocation
+	void *memory = ...;
+
+#if MEMORY_TRACKING_ENABLED
+	// grabs the callstack internally, rather slow
+	TheMemoryTracker::AddAllocation(memory);
+#endif
+
+#if MEMORY_MARKING
+	TheMemoryMarker::Mark(memory);
+#endif
+
+	// leave critical section, mutex, etc.
+
+	return memory;
+}
+
+   The above is definitely an improvement to the built-in allocator, because it adds debugging features
+   like bounds checking and memory tracking without having to rely on external applications, and you can
+   certainly ship games with it. But still, it has a few quirks which just rub me the wrong way:
+     * Bounds checking and memory tracking are now global. You can turn them on and off using the
+       preprocessor macro MEMORY_TRACKING_ENABLED, but only for the whole application. This leads to
+       situations where you enable memory tracking, rebuild your code, start the application - only to
+       find out that the game now needs 10 minutes to start (grabbing a full callstack is rather slow)
+       and runs out of extra dev-kit memory because of the overhead caused by the memory tracker. Not a
+       useful feature as such.
+     * There's only one kind of memory tracking available - if we want to add additional ones, the code
+       becomes a mess of preprocessor #if/#endif clauses rather quickly. We certainly don't want to grab
+       a full callstack for each and every allocation just for tracking purposes.
+     * Thread-safety is global now. Many allocations don't need to be thread-safe, and there are
+       different methods of implementing thread-safety (a linear allocator can easily be lock-free
+       or wait-free), without having to rely on heavy-duty synchronization primitives like mutexes or
+       critical sections.
+
+   Having said what we don't want, let's identify some real-world use cases for memory allocations
+   happening during the lifetime of a game:
+     * Linear allocations, e.g. all allocations having application lifetime. They are allocated once in
+       the beginning, and are freed upon exiting the game. They are fixed-size, can be allocated in a
+       linear fashion, and normally there are no threads involved, hence they can be single-threaded.
+       Still, memory tracking and bounds checking need to be optional, because some of those allocations
+       might become level allocations later, or vice versa.
+     * Linear allocations during a frame, e.g. all allocations done by the render queue. The render
+       queue is built once each frame, is fixed-size, needs the memory to be linearly allocated for
+       increased cache utilization, and normally involves several threads for multi-threaded rendering.
+       Again, bounds checking and memory tracking are optional.
+     * Stack-based allocations, e.g. allocations having level lifetime. Level loading can usually be
+       done in a stack-based fashion, which means that allocations are freed in their reversed order.
+       Additionally, different levels need a different amount of memory, hence the amount of needed
+       memory is variable.
+     * Object pools, e.g. for particles. These are fixed-size, hold a certain number of instances, can
+       be single-threaded or not, and provide O(1) allocation and deallocation.
+     * Chunk-based allocations, e.g. for streaming level data cut into equally-sized chunks. The maximum
+       amount of memory is fixed, allocations often need to be thread-safe, and the allocator can
+       additionally offer on-the-fly defragmentation.
+     * One-frame allocations, used for all temporary allocations during a frame. Often, you need to
+       allocate memory just for one frame in order to get some work done, immediately freeing the
+       allocated memory afterwards. This is comparable to the linear allocations coming from the render
+       queue mentioned above, but often you want to have different allocators in order to be able to
+       provide better cache utilization. Some of them need not be thread-safe, others do.
+     * Two-frame allocations, e.g. for temporary results used in the next frame, such as ray-casts done
+       by an SPU, which are used in the next frame (if a latency of one frame is tolerable).
+     * General-purpose allocations, e.g. coming from 3rd party libraries/middleware, or temporary
+       variable-sized allocations coming from the file-system, needed for decompressing a file into an
+       auxiliary buffer.
+     * Short-term temporary allocations, e.g. used for auxiliary allocations needed while performing an
+       algorithm or similar. Those can be allocated from the stack (!), benefitting from increased data
+       locality, not fragmenting any of the heap allocators.
+
+   The list above is not an exhaustive one, and still we've already identified lots of different
+   allocation strategies involved, along with all the optional bells and whistles like bounds checking,
+   memory tracking, memory marking and thread-safety. For another bunch of examples, read the excellent
+   Game Engine Architecture by Jason Gregory of Naughty Dog.
+
+   Let's do a quick summary of requirements before discussing how we can merge those into our memory
+   arena system.
+
+   Bounds checking
+   Bounds checking is a useful tool for finding memory stomps by adding e.g. a 4 bytes magic value
+   at the start and end of each allocation. Upon freeing an allocation, we can check whether the memory
+   still contains the magic value - if not, it must have been overwritten, resulting in corrupted memory
+   and hard-to-track-down bugs.
+
+   Bounds checking comes in 3 flavours:
+    1. No bounds checking (retail builds).
+    2. Simple bounds checking, as described above. Useful for checking if memory stomps happen.
+    3. Extended bounds checking, which checks the magic value of all allocations upon each
+       allocation/deallocation. Useful for finding out when memory stomps happen.
+
+   Memory tracking
+   Memory tracking is used for finding memory leaks by keeping track of each allocation made during the
+   lifetime of an application. Memory tracking comes in several flavours:
+    1. No memory tracking (retail builds).
+    2. Simple memory tracking. Can already detect the presence of leaks by counting the number of
+       allocations e.g. via ++numAllocations and -numAllocations. Does not detect where leaks are coming
+       from (very fast, usable in all builds)
+    3. Extended memory tracking. Additionally stores the file name and line number where the allocation
+       was originally made (still fast, needs additional memory).
+    4. Full memory tracking. Stores a full callstack for each allocation - useful every now and then for
+       hard-to-track-down leaks (slow, needs even more memory).
+
+   Memory marking
+   Memory marking helps in finding dangling pointers by marking memory with certain bit
+   patterns/magic values. The Visual Studio Debug Heap implementation already does that, and marks newly
+   allocated heap memory with 0xCDCDCDCD, and freed memory with 0xDDDDDDDD. The bit patterns are
+   carefully chosen such that accessing pointers will trigger a segmentation fault, an unaligned read
+   (on some CPUs), or else.
+
+   Memory marking can be either turned on or off.
+
+   Thread-Safety
+   Thread-safety of allocation routines comes in several flavours:
+    1. Single-threaded.
+    2. Multi-threaded.
+    3. Lock-free or wait-free.
+
+   Memory location
+   We want to be able to decide whether allocations are made on the heap or on the stack. Yes, you have
+   to be careful when doing the latter, but it can vastly improve performance and lessen fragmentation
+   of the heap.
+
+   Allocation strategies
+   As already mentioned above, there are several allocation strategies used in a game:
+    1. Linear allocations.
+    2. Stack-based allocations.
+    3. Chunk-sized allocations.
+    4. Object pool allocations.
+    5. Growing object pool allocations.
+    6. General purpose allocations.
+
+   Summary
+   Phew! As can be seen, there's lots of requirements the memory system needs to fulfill. So far, we
+   have identified at least 6 different allocation strategies, 2 locations where allocations can come
+   from, 3 kinds of thread-safety, and several purely optional kinds of bounds checking, memory tracking
+   and memory marking. Still, we want to be able to arbitrarily combine all of the above into simple,
+   easy-to-use memory arenas.
+
+   Next time, we will see how to do exactly that. In the meantime, try to think of possible solutions!
+
+
+---
+https://blog.molecular-matters.com/2011/08/03/memory-system-part-5/
+
+Memory system - Part 5
+August 3, 2011
+
+   This is the final installment in a series of posts about Molecule's memory system. Today, we are
+   going to look at the final piece of the puzzle, glueing together different things like raw memory
+   allocation, bounds checking, memory tracking, and more.
+
+   In the last post of the series, we identified a lot of different use cases for the memory system,
+   and discussed its requirements. Specifically, one thing we want to be able is to arbitrarily combine
+   different features into simple memory arenas. As you may have guessed already, policy-based
+   design is a tremendously powerful instrument which helps in fulfilling this task.
+
+   So, without further ado, here's the solution I came up with as a base memory arena implementation in
+   Molecule:
+
+template <class AllocationPolicy, class ThreadPolicy, class BoundsCheckingPolicy, \
+class MemoryTrackingPolicy,class MemoryTaggingPolicy>
+
+class MemoryArena {
+	public:
+		template <class AreaPolicy>
+			explicit MemoryArena(const AreaPolicy& area)
+			: m_allocator(area.GetStart(), area.GetEnd()) {
+			}
+
+		void *Allocate(size_t size, size_t alignment, const SourceInfo& sourceInfo) {
+			m_threadGuard.Enter();
+
+			const size_t originalSize = size;
+			const size_t newSize = size + BoundsCheckingPolicy::SIZE_FRONT + BoundsCheckingPolicy::SIZE_BACK;
+
+			char *plainMemory = static_cast<char*>(m_allocator.Allocate(newSize, alignment, \
+			BoundsCheckingPolicy::SIZE_FRONT));
+
+			m_boundsChecker.GuardFront(plainMemory);
+			m_memoryTagger.TagAllocation(plainMemory + BoundsCheckingPolicy::SIZE_FRONT, originalSize);
+			m_boundsChecker.GuardBack(plainMemory + BoundsCheckingPolicy::SIZE_FRONT + originalSize);
+
+			m_memoryTracker.OnAllocation(plainMemory, newSize, alignment, sourceInfo);
+
+			m_threadGuard.Leave();
+
+			return (plainMemory + BoundsCheckingPolicy::SIZE_FRONT);
+		}
+
+		void Free(void *ptr) {
+			m_threadGuard.Enter();
+
+			char *originalMemory = static_cast<char*>(ptr) - BoundsCheckingPolicy::SIZE_FRONT;
+			const size_t allocationSize = m_allocator.GetAllocationSize(originalMemory);
+
+			m_boundsChecker.CheckFront(originalMemory);
+			m_boundsChecker.CheckBack(originalMemory + allocationSize - BoundsCheckingPolicy::SIZE_BACK);
+
+			m_memoryTracker.OnDeallocation(originalMemory);
+
+			m_memoryTagger.TagDeallocation(originalMemory, allocationSize);
+
+			m_allocator.Free(originalMemory);
+
+			m_threadGuard.Leave();
+		}
+
+	private:
+		AllocationPolicy m_allocator;
+		ThreadPolicy m_threadGuard;
+		BoundsCheckingPolicy m_boundsChecker;
+		MemoryTrackingPolicy m_memoryTracker;
+		MemoryTaggingPolicy m_memoryTagger;
+};
+
+   By being able to substitute different parts of the arena's implementation using templates, the
+   functionality is split into mutiple classes, each responsible only for one single thing.
+   Additionally, we can combine whatever we want using a simple typedef, like in the following example:
+
+typedef MemoryArena<LinearAllocator, SingleThreadPolicy, NoBoundsChecking, NoMemoryTracking, NoMemoryTagging>\
+SimpleArena;
+
+   Remember that there's absolutely no virtual function call overhead involved! By using different
+   typedefs for certain build configurations (Debug, Release, Retail), you have all the benefits of
+   debugging aids like bounds checking and memory tracking, while having blazingly-fast allocations in
+   retail-builds. For example, Molecule's application arena looks something like the following:
+
+#if ME_DEBUG || ME_RELEASE
+  typedef MemoryArena<LinearAllocator, SingleThreadPolicy, SimpleBoundsChecking, SimpleMemoryTracking, \
+  SimpleMemoryTagging> ApplicationArena;
+#else
+  typedef MemoryArena<LinearAllocator, SingleThreadPolicy, NoBoundsChecking, NoMemoryTracking, \
+  NoMemoryTagging> ApplicationArena;
+#endif
+
+   In retail-builds, all the No*-implementations will be used, which contain nothing more than purely
+   empty inline functions:
+
+class NoBoundsChecking {
+	public:
+		static const size_t SIZE_FRONT = 0;
+		static const size_t SIZE_BACK = 0;
+
+		inline void GuardFront(void*) const {}
+		inline void GuardBack(void*) const {}
+
+		inline void CheckFront(const void*) const {}
+		inline void CheckBack(const void*) const {}
+};
+
+class NoMemoryTracking {
+	public:
+		inline void OnAllocation(void*, size_t, size_t, const SourceInfo&) const {}
+		inline void OnDeallocation(void*) const {}
+};
+
+class NoMemoryTagging {
+	public:
+		inline void TagAllocation(void*, size_t) const {}
+		inline void TagDeallocation(void*, size_t) const {}
+};
+
+   Debugging
+   By not relying on #if/#endif clauses buried deep within the source code itself, but rather using the
+   compiler's template mechanism in order to build our code, we can arbitrarily toggle different kinds
+   of debugging aids using our typedefs, without even having access to the implementations' source code.
+
+   As an example, whenever a memory leak is found, the SimpleMemoryTracking implementation will tell me
+   about it - it just increments/decrements a counter on each allocation/deallocation, respectively. As
+   soon as I know that the code contains leaks, I can simply switch to the ExtendedMemoryTracking
+   implementation in the typedef, and be informed exactly about the place the leak occured. This helps
+   against debug-builds which can no longer be used because they use too much memory for tracking
+   purposes, or are simply too slow because of all the overhead.
+
+   Same for bounds checking - usable in debug builds, and the user can toggle between different
+   implementations easily. Ever wanted to enable extended bounds checking in retail builds for those
+   hard-to-find bugs only occuring in those builds? You can do that now!
+
+   Thread-Safety
+   As stated in the last post of the series, not every allocation needs to be thread-safe. For
+   example, Molecule's application arena is single-threaded by default, because there's no
+   loading-thread (or others) involved at that time - that's what the level arena is for.
+
+   Essentially, being single-threaded is zero overhead:
+
+class SingleThreadPolicy {
+	public:
+		inline void Enter(void) const {}
+		inline void Leave(void) const {}
+};
+
+   Other arenas certainly need their allocations to be thread-safe, which is were the MultiThreadPolicy
+   comes into play:
+
+template <class SynchronizationPrimitive>
+class MultiThreadPolicy {
+	public:
+		inline void Enter(void) {
+			m_primitive.Enter();
+		}
+
+		inline void Leave(void) {
+			m_primitive.Leave();
+		}
+
+	private:
+		SynchronizationPrimitive m_primitive;
+};
+
+   As you can see, the policy takes a template parameter as well, which provides the synchronization
+   primitive to be used. This way, users can decide for themselves which primitive they need. Most of
+   the time, this will either be a mutex or a critical section, but in those rare occasions where a
+   spin-lock proved to be faster (e.g. for a linear allocator in a multi-threaded render queue), you can
+   use exactly that, and not pay the overhead of more heavy-weight primitives.
+
+   Memory areas
+   Memory areas define where memory is being allocated from. The most common areas are the HeapArea and
+   the StackArea. The first allocates memory directly from the OS, while the latter allocates memory on
+   the stack using alloca(). Additionally, there could be areas for GPU memory (e.g. PS3),
+   write-combined memory (Xbox360), external memory (Wii), etc.
+
+   Again, all of them can be combined with any allocator and any kind of debugging aid needed.
+
+   Extensibility
+   The base memory arena implementation can easily be extended without having to touch the source code
+   at all. For example, Molecule provides a facility for recording each and every allocation in an
+   application, which can later be replayed in an external tool (so-called memory replays). This is made
+   possible by simply piggy-backing one allocator onto another:
+
+template <class Arena>
+class RecordingArena {
+	public:
+		void *Allocate(size_t size, size_t alignment, const SourceInfo& sourceInfo) {
+			// send info via TCP/IP...
+			return m_arena.Allocate(size, alignment, sourceInfo);
+		}
+
+		void Free(void *ptr) {
+			// send info via TCP/IP...
+			m_arena.Free(ptr);
+		}
+
+	private:
+		Arena m_arena;
+};
+
+   The RecordingArena is not concerned with how the memory is actually allocated - all it does is send
+   information via TCP/IP to an external application, and use any arena (provided by the template
+   parameter) as the actual Allocate()/Free() implementation.
+
+   Usage
+   Memory arenas and areas are really simple to use. Want to have a pool of objects allocated on the
+   stack, confined to a single thread?
+
+typedef MemoryArena<PoolAllocator, SingleThreadPolicy, NoBoundsChecking, NoMemoryTracking, NoMemoryTagging> \
+ST_PoolStackArena;
+
+void SomeFunction() {
+	char *stackArea[2048];
+	ST_PoolStackArena arena(stackArea);
+
+	MyObject *obj = ME_NEW(MyObject, arena);
+	// ...
+	ME_DELETE(obj, arena);
+}
+
+   Want to have a multi-threaded stack-based allocator allocating from GPU memory?
+typedef MemoryArena<StackBasedAllocator, MultiThreadPolicy<CriticalSection>, NoBoundsChecking, \
+NoMemoryTracking, NoMemoryTagging> MT_StackBasedArena;
+
+	// ...
+	GpuArea gpuArea(16*1024*1024);
+	MT_StackBasedArena gpuArena(gpuArea);
+
+	TextureData *data = ME_NEW(TextureData, gpuArena);
+	// ...
+	ME_DELETE(data , gpuArena);
+}
+
+   A general-purpose, thread-safe allocator with all kinds of debugging bells and whistles ? A linear,
+   lock-free allocator for temporary one-frame allocations? You get the idea, the possibilities are
+   endless.
+
+   Conclusion
+   This concludes the mini-series about Molecule's memory system. So far, I have been quite happy with
+   the memory system for now: Leaks and memory overwrites can be found quite fast, fragmentation is kept
+   to an absolute minimum (by using the right allocator for the job, application-wide and level-wide
+   allocations have zero fragmentation, as well as many kinds of one-frame allocations, I/O allocations,
+   and others), and it can easily be extended.
+
+
+---
+https://blog.molecular-matters.com/2012/08/14/memory-allocation-strategies-a-linear-allocator/
+
+Memory allocation strategies: a linear allocator
+August 14, 2012
+
+   During the next few weeks, I'd like to detail how the memory allocators inside Molecule work,
+   starting with a simple, non-growing linear allocator today in order to cover some base first.
+
+   If you haven't done so already, now would be a good time to read up on Molecule's memory system and
+   its inner workings: Part 1, Part 2, Part 3, Part 4, Part 5.
+
+   In case you are not interested in all the details, here's how the memory system works in a nutshell:
+     * Instances are always allocated/deleted via ME_NEW/ME_DELETE, respectively.
+     * A so-called memory arena takes care of allocating/freeing memory and properly constructing
+       instances or arrays thereof.
+     * The memory arenas are also responsible for handling debugging facilities like bounds checking and
+       memory tagging which can be configured using policies.
+     * Internally, a memory arena will always ask one of the allocators when allocating/freeing raw
+       memory.
+
+   This means that any of the different allocators follows a very simple interface, and never needs to
+   know about whether bounds checking, memory tracking, or something similar is enabled or not. Its only
+   job is to allocate/free raw memory.
+
+   That being said, the interface of the linear allocator is the following:
+
+class LinearAllocator {
+	public:
+		explicit LinearAllocator(size_t size);
+		LinearAllocator(void *start, void *end);
+
+		void *Allocate(size_t size, size_t alignment, size_t offset);
+
+		inline void Free(void *ptr);
+
+		inline void Reset(void);
+
+	private:
+		char *m_start;
+		char *m_end;
+		char *m_current;
+};
+
+   There's a few things to notice here:
+     * Allocate() and Free() are not virtual methods. Allocators can either be used as part of a memory
+       arena, or stand-alone for allocating raw, "untyped" memory, e.g. for per-frame GPU
+       command-buffers. In the former case, memory arenas simply take allocators as one of their
+       policy-based template parameters. In the latter case, there's no virtual function overhead for an
+       operation as simple as bumping a pointer.
+     * One of the constructors takes a memory range [start...end) in which it will allocate memory. This
+       can either be stack-memory (fixed-size or allocated via alloca()), or heap-memory allocated via
+       e.g. VirtualAlloc(). This allows us to use containers and other data structures with both heap
+       memory as well as scratchpad memory on the stack, which is a very useful feature to have.
+     * The other constructor internally uses a page allocator when allocating physical memory for the
+       given size. We will talk about virtual memory and physical page allocators in one of the next
+       posts, discussing API functions like VirtualAlloc().
+     * The memory region handled by this type of allocator can never grow.
+     * A linear allocator cannot free individual allocations, but rather frees them all at once upon
+       calling Reset(). Free() is essentially an empty function, and Reset() just resets the internal
+       pointer member to the start.
+
+   The only thing really left to discuss is the Allocate() method. As can be seen, it takes a third
+   argument called offset which might leave you wondering what exactly that is for.
+
+   The reason for this is simple: of course we want to be able to allocate memory of any given size with
+   arbitrary alignments, but sometimes we don't want the memory returned by the allocator to be aligned,
+   but rather aligned to some offset because we internally need to add book-keeping data or other things
+   like border bytes when bounds checking.
+
+   Let's take bounds checking as an example to illustrate the situation. Suppose we want to allocate 120
+   bytes, aligned to a 16-byte boundary. Without bounds checking, a memory arena would simply just call
+   linearAllocator.Allocate(120, 16, 0). With bounds checking, we want to add a border of 4 bytes both
+   to the left and right of the allocation, which increases the size to 128. Furthermore, we want to
+   ensure that the memory handed to the user is aligned to 16 bytes. Without the additional offset, we
+   would get 128 bytes aligned to a 16-byte boundary, add our 4 bytes of bounds checking border, and
+   return the resulting pointer to the user, destroying the alignment in the process. That's what the
+   additional offset parameter is for: in such a case, we can simply call linearAllocator.Allocate(128,
+   16, 4) which is the same as saying "allocate 128 bytes, and make sure that the returned pointer + 4
+   is aligned to a 16-byte boundary".
+
+   Eventhough such alignment restrictions could have been handled inside the memory arena in a generic
+   way, I decided to let the allocators take care of that, because it leads to less wasted memory
+   because of alignment, and can be implemented rather easily in most cases.
+
+void *LinearAllocator::Allocate(size_t size, size_t alignment, size_t offset) {
+	// offset pointer first, align it, and offset it back
+	m_current = pointerUtil::AlignTop(m_current + offset, alignment) - offset;
+
+	void *userPtr = m_current;
+	m_current += size;
+
+	if (m_current >= m_end) {
+		// out of memory
+		return nullptr;
+	}
+
+	return userPtr;
+}
+
+   All we have to do is add the offset first, align the resulting pointer, and subtract the offset
+   again. This ensures proper alignment with the least amount of wasted space.
+
+   That's basically all there is to implementing a simple linear allocator.
+
+   In the next posts, we will take a look at things like a simple stack-based (LIFO) allocator, how to
+   implement growing allocators, virtual memory/page allocators, and pool allocators.
+
+
+---
+https://blog.molecular-matters.com/2012/08/27/memory-allocation-strategies-a-stack-like-lifo-allocator/
+
+Memory allocation strategies: a stack-like (LIFO) allocator
+August 27, 2012
+
+   Last time, we were looking at a linear allocator, probably the simplest of all memory allocators.
+   This time, we will detail how to implement a non-growing stack-like allocator, along with
+   conventional use-cases.
+
+   When talking about stack-like allocators I mean allocators that behave like a stack data structure,
+   following the LIFO (last-in, first-out) principle. This has nothing to do with stack or heap
+   allocations, the call stack, or anything like that.
+
+Use cases
+   Such a stack allocator is extremely handy for e.g. level loading, where a bunch of allocations need
+   to be made, and they can all be rolled back in reverse order. Additionally, it can also be used for
+   doing some allocations which need to stay resident throughout a certain lifetime, with additional
+   allocations on top. For more use-cases and a more detailed description, check out the excellent book
+   Game Engine Architecture by Jason Gregory.
+
+   One of the most useful extensions to a stack allocator is what is commonly called a double-ended
+   stack allocator. It also follows the LIFO-principle, but one can allocate from both ends of the
+   stack, allowing users to put different types of allocations at different ends of the stack. The most
+   well-known use-case of such an allocator is, again, level loading.
+
+   If you are not careful, loading a level can easily result in quite a lot of fragmentation because of
+   temporary allocations that need to be made while e.g. loading resources. As an example, consider the
+   case where loading a resource needs a temporary buffer A, from which level-resident data B is
+   created. You cannot free A because you need to generate data into B, and you cannot free A after B
+   because of the LIFO-like allocations. A typical example of such fragmentation is reading an
+   XML/JSON-file, and creating/allocating other stuff from there, trying to free the read data
+   afterwards.
+
+   This is where the double-ended stack allocator comes into play. All it takes is to allocate
+   level-resident data from one end, and temporary allocations from the other end. As long as the two
+   ends don't meet or overlap during the loading process, you have exactly the same amount of memory
+   available as you would have using a simple stack-allocator, but with the benefit of having no
+   fragmentation at all.
+
+Interface
+   Knowing why and when we might need a stack allocator, let us try to build one. The interface is
+   similar to the linear allocator from last time:
+
+class StackAllocator {
+	public:
+		StackAllocator(void *start, void *end);
+
+		void *Allocate(size_t size, size_t alignment, size_t offset);
+
+		void Free(void *ptr);
+
+	private:
+		char *m_start;
+		char *m_end;
+		char *m_current;
+};
+
+   Our non-growing allocator again can be used on the stack and on the heap, similar to the linear
+   allocator we saw last time.
+
+   Of course, the implementation is different, because we need to be able to free allocations in a
+   LIFO-like fashion. Let us assume for a moment that the user calls Allocate() and Free() in the
+   correct order - we will concern ourself with adding debug checks later.
+
+Implementation
+   How do we free allocations? Quite simple, just reset the internal buffer pointer to what it was
+   before this allocation had been made. The first thing to realize here is that we can not just take
+   the supplied pointer and set our internal pointer (m_current) to this, because this could result in
+   unused memory which we would never be able to reclaim again!
+
+   As a simple example, consider the following: we haven't done any allocations yet, and we are right at
+   the beginning of our buffer, which sits at address 0x4004. If we want to allocate anything aligned to
+   a 16-byte boundary, we will be handed address 0x4010. If this address is later freed and we simply
+   put our current buffer pointer to this address, we've just lost 12 bytes.
+
+   So, what we need to do is store the original pointer alongside each allocation. This can easily be
+   done by storing it in front of the user allocation, making sure that everything is still properly
+   aligned. We have seen how to do exactly that (using the offset argument) when discussing the
+   linear allocator.
+
+   The implementation could then look like the following:
+
+namespace {
+	static const size_t SIZE_OF_ALLOCATION_OFFSET = sizeof(uint32_t);
+	static_assert(SIZE_OF_ALLOCATION_OFFSET == 4, "Allocation offset has wrong size.");
+}
+
+void *StackAllocator::Allocate(size_t size, size_t alignment, size_t offset) {
+	// store the allocation offset right in front of the allocation
+	size += SIZE_OF_ALLOCATION_OFFSET;
+	offset += SIZE_OF_ALLOCATION_OFFSET;
+
+	const uint32_t allocationOffset = safe_static_cast<uint32_t>(m_current - m_start);
+
+	// offset the pointer first, align it, and then offset it back
+	m_current = core::pointerUtil::AlignTop(m_current + offset, alignment) - offset;
+
+	// is there enough memory left?
+	if (m_current + size > m_end) {
+		// out of memory
+		return nullptr;
+	}
+
+	union {
+		void *as_void;
+		char *as_char;
+		uint32_t *as_uint32_t;
+	};
+
+	as_char = m_current;
+
+	// store allocation offset in the first 4 bytes
+	*as_uint32_t = allocationOffset;
+	as_char += SIZE_OF_ALLOCATION_OFFSET;
+
+	void *userPtr = as_void;
+	m_current += size;
+	return userPtr;
+}
+
+   There are three things to notice here:
+     * Each allocation generates an overhead of 4 bytes (sizeof(uint32_t)) because of storing the offset
+       right in front of each allocation.
+     * I store offsets rather than pointers because this minimizes the overhead on 64-bit systems, based
+       on the assumption that no single stack-allocator will ever allocate more than 4 GB of memory.
+     * Both size and offset need to be increased by 4 bytes. This ensures that the pointer handed to the
+       user will be properly aligned, and not the address we internally use for storing the offset to
+       the buffer's start.
+
+   Freeing an allocation is now as simple as grabbing the offset from the 4 bytes in front of the
+   allocation, and setting our internal buffer pointer to that:
+
+void StackAllocator::Free(void *ptr) {
+	ME_ASSERT_NOT_NULL(ptr);
+
+	union {
+		void *as_void;
+		char *as_char;
+		uint32_t *as_uint32_t;
+	};
+
+	as_void = ptr;
+
+	// grab the allocation offset from the 4 bytes right before the given pointer
+	as_char -= SIZE_OF_ALLOCATION_OFFSET;
+	const uint32_t allocationOffset = *as_uint32_t;
+
+	m_current = m_start + allocationOffset;
+}
+
+Checking for erroneous calls
+   In addition to the above, you can enable error checking for the stack allocators in Molecule, which
+   will assert that calls to Allocate() and Free() are always made in LIFO-order.
+
+   This is done by storing the ID of the allocation in an additional 4 bytes at the front of the
+   allocation, similar to how we store our base offset. The ID is nothing more than a counter which is
+   incremented upon each call to Allocate(), and decremented upon each call to Free(). Whenever Free()
+   is called, I simply fetch the allocation ID and compare it to the current one, asserting that they
+   are the same.
+
+Outlook
+   Next time, we will see how pool allocators can help with allocating objects of a certain size in any
+   order, without fragmentation, in O(1) time.
+
+
+---
+https://blog.molecular-matters.com/2012/09/17/memory-allocation-strategies-a-pool-allocator/
+
+Memory allocation strategies: a pool allocator
+September 17, 2012
+
+   As promised last time, today we will see how pool allocators can help with allocating/freeing
+   allocations of a certain size, in any order, in O(1) time.
+
+Use cases
+   Pool allocators are extremely helpful for allocating/freeing objects of a certain size which often
+   have to be created/destroyed dynamically, such as weapon bullets, entity instances, rigid bodies,
+   etc.
+
+   Most of those objects are created/destroyed in completely random order, due to their dynamic nature.
+   Therefore, it is desirable to be able to allocate/free memory with as little fragmentation as
+   possible. Pool allocators are extremely well suited for that.
+
+How does it work?
+   Simply put, a pool allocator allocates a chunk of memory once, and divides that memory into
+   slots/bins/pools which fit exactly M instances of size N. As an example, consider we want to have a
+   maximum of 256 bullets in flight at the same time, each bullet having a size of 32 bytes. Thus, the
+   pool allocator would allocate 256*32 = 8192 bytes once, dividing it into slots which are then used
+   for allocating/freeing objects of size 32.
+
+   But how are those allocations made? How can we guarantee O(1) time? How can allocations be made in
+   any order, without fragmentation?
+
+   Freelists
+   The answer to all of the above boils down to the use of what is called a free list. Free lists
+   internally store a linked-list of free slots inside the allocated memory. Storing them inplace is
+   crucial - there is no std::vector, std::list, or similar that keeps track of free slots. It is all
+   stored inside the pre-allocated pool of memory.
+
+   The way it is usually done is the following: each slot (32 bytes in our example) in the pool of
+   memory is connected to the next slot simply by storing the pointer to the next slot in the first few
+   bytes of the slot.
+
+   Assuming our pool of memory sits at location 0x0 in memory, the layout would be something like the
+   following:
+
+         +---------+---------+---------+---------+
+         | 0x20    | 0x40    | 0x60    | nullptr |
+         +---------+---------+---------+---------+
+         ^         ^         ^         ^
+         |         |         |         |
+address: 0x0       0x20      0x40      0x60
+
+   The blocks denote the slots in memory, the bottom row shows the address in memory. As can be seen,
+   the memory at 0x0 would contain a pointer to 0x20, which would contain a pointer to 0x40, and so on.
+   We have just formed an intrusive linked-list in our memory pool.
+
+   There is one thing to note here: as long as slots are free, we can store anything we want inside
+   those 32 bytes. When a slot is in use, we don't need to store anything, because that slot is occupied
+   anyway and so no longer part of our free list. All we have to do is remove a slot from the free list
+   whenever it is allocated, and add it to the linked-list again whenever it is freed.
+
+Implementation
+   Let us take a look at the inner workings of a free list:
+
+class Freelist {
+	public:
+		Freelist(void *start, void *end, size_t elementSize, size_t alignment, size_t offset);
+
+		inline void *Obtain(void);
+
+		inline void Return(void *ptr);
+
+	private:
+		Freelist *m_next;
+};
+
+   The only member we need to store is a pointer to the free list, which simply acts as an alias in
+   memory, and stores a pointer to a currently free slot in our memory pool.
+
+   Leaving alignment and offset requirements out of the equation for now, initializing a free list is
+   quite simple:
+
+union {
+	void *as_void;
+	char *as_char;
+	Freelist *as_self;
+};
+
+// assume as_self points to the first entry in the free list
+m_next = as_self;
+as_char += elementSize;
+
+// initialize the free list - make every m_next of each element point to the next element in the list
+Freelist *runner = m_next;
+for (size_t i=1; i<numElements; ++i) {
+	runner->m_next = as_self;
+	runner = as_self;
+	as_char += elementSize;
+}
+
+runner->m_next = nullptr;
+
+   With the intrusive linked-list in place, allocating/freeing memory really becomes an O(1) operation,
+   and is just ordinary linked-list manipulation code:
+
+inline void *Freelist::Obtain(void) {
+	// is there an entry left?
+	if (m_next == nullptr) {
+		// we are out of entries
+		return nullptr;
+	}
+
+	// obtain one element from the head of the free list
+	Freelist *head = m_next;
+	m_next = head->m_next;
+	return head;
+}
+
+inline void Freelist::Return(void *ptr) {
+	// put the returned element at the head of the free list
+	Freelist *head = static_cast<Freelist*>(ptr);
+	head->m_next = m_next;
+	m_next = head;
+}
+
+   I moved the free list implementation to its own class so it can be used by both the non-growing and
+   growing variant of the pool allocator. Furthermore, it is handy for other things, too.
+
+   Alignment requirements
+   In order to satisfy alignment requirements, we need to offset our slots into the memory pool once, so
+   all slots can satisfy the same offset and alignment requirements. The disadvantage of this approach
+   is that a pool allocator can never satisfy more than one offset requirement, but such cases should be
+   very seldom.
+
+   The way it is done in Molecule is that users have to provide their maximum object size and maximum
+   alignment requirement when constructing the pool allocator. The allocator can then satisfy all
+   alignments <= maximumAlignment and object sizes <= maximumSize, and simply asserts in all other
+   cases. This at least allows the user to allocate objects of different sizes (such as e.g. 4, 8, 12,
+   16) out of the same pool, with different alignments (such as e.g. 4, 8, 16, 32), if desired.
+
+   Control is in the user's hands, so it is up to the user to either use different pools for different
+   allocations (often recommended), or live with some wasted memory inside the memory pool.
+
+   Usage
+   Usage is simple. The following shows a free list which is able to satisfy allocations up to a size of
+   32 bytes and an alignment of 8 bytes. Note that the free list takes a range of memory in which it
+   initializes itself. This ensures that free lists can be used for allocations on the stack, on the
+   heap, and by different allocators (non-growing and growing).
+
+ME_ALIGNED_SYMBOL(char memory[1024], 8) = {};
+core::Freelist freelist(memory, memory+1024, 32, 8, 0);
+
+// allocates a slot of 32 bytes, aligned to an 8-byte boundary
+void *object0 = freelist.Obtain();
+
+// allocates another slot of 32 bytes, aligned to an 8-byte boundary
+void *object1 = freelist.Obtain();
+
+// obtained slots can be returned in any order
+freelist.Return(object1);
+freelist.Return(object0);
+
+   The pool allocator described in this post simply has a Freelist instance as member, and forwards all
+   Allocate() calls to freelist.Obtain(), and all Free() calls to freelist.Return(). Additionally, it
+   asserts that allocation sizes and alignment requests fit the initial maximum sizes provided by the
+   user.
+
+Outlook
+   The pool allocator was the last remaining non-growing allocator we haven't discussed yet. Starting
+   with the next post, we will take a look at how to implement growing allocators by means of virtual
+   memory and allocating physical pages from the OS.
+
+
+---
+https://blog.molecular-matters.com/2012/10/02/memory-allocation-strategies-interlude-virtual-memory/
+
+Memory allocation strategies interlude: virtual memory
+October 2, 2012
+
+   Before we can delve into the inner workings of growing allocators, I would like to explain the
+   concept of virtual memory and discuss what it is, why it is needed, and what we can use it for.
+
+What is virtual memory?
+   Speaking in simple terms, virtual memory provides an extra indirection when accessing memory. It
+   provides an abstraction of the virtual address space of a process, which lets each process think that
+   it's alone in the system. It lets us write programs without having to worry which other programs
+   allocated memory, and without having to worry which physical memory we need to access. Even though
+   virtual memory is often also mentioned in conjunction with paging to hard disk (=swapping), this is
+   not what we are interested in!
+
+   Consider a system having 4 GB of RAM that consists of four physical 1 GB RAM units. We are able to
+   allocate more than 1 GB of contiguous memory, even though there's no actual physical memory unit that
+   is larger than 1 GB. This works thanks to virtual memory.
+
+   Similarly, the allocations we make inside an application return virtual addresses which are valid
+   inside our process. Such an address could be 0x80000000, and another process can also have
+   allocations residing at 0x80000000, and yet everything works thanks to virtual memory.
+
+Address translation
+   Before touching actual physical memory, the virtual address needs to be translated. This virtual
+   address to physical address translation is being taken care of by the MMU of the CPU. Modern CPUs
+   also have a TLB which is used to speed up this translation.
+
+   Traditionally, this translation is done on a page-by-page basis. This means that on the OS-level,
+   memory can only be allocated in so-called pages of a certain size. As an example, Windows 7 has a
+   default page-size of 4 KB. Consequently, this also means that whenever you allocate memory directly
+   from the OS, you can only allocate it with page-size granularity.
+
+   The details of address translation are actually quite involved, and here is a very good post
+   describing this process for x86 and Cell architectures: Memory Address Translation.
+
+Allocating pages
+   As an example, allocating just 10 bytes of memory using VirtualAlloc (the low-level allocation
+   function on Windows) will allocate a whole page, that is 4096 bytes. You can access all of the 4096
+   bytes without triggering an access violation, eventhough you only requested 10 bytes.
+
+   Of course, page sizes differ across platforms (consoles). Some platforms even offer more than just
+   one page-size. The reason for this is that because the TLB normally is of limited size, increasing
+   the page-size can lead to fewer TLB misses (similar to cache misses), resulting in an increase in
+   performance. However, larger pages can also lead to more wasted memory if you're not careful. Thus,
+   it's a typical space/time-tradeoff.
+
+   Normally, the OS memory allocator (e.g. malloc/free) takes care of allocating pages, coalescing
+   nearby allocations into contiguous regions, putting several small allocations on the same page, etc.
+   However, as soon as we want to implement our own general-purpose allocator or any other custom
+   allocation scheme, we need to be aware of such details, and cannot use malloc/free for our purposes.
+
+   Furthermore, knowing about such low-level details enables us to use a wealth of new debugging
+   techniques like using protected pages, guard pages, etc. As an example, some pages could be
+   marked read-only in order to find memory stomps, race conditions (writes on shared data), and more.
+   Guard pages serve as a one-shot alarm for memory page access, and are e.g. used for growing an
+   application's stack. Applications like PageHeap use those features for finding memory accesses
+   beyond an allocation's boundary.
+
+Use cases
+   MMU, TLB, pages, address translation, memory protection... that all sounds wonderful, but what can we
+   do with it?
+
+   Because the OS clearly distinguishes between reserving address space (see MEM_RESERVE for the
+   VirtualAlloc function) and allocating physical memory for address space (see MEM_COMMIT), we can
+   build allocators that can grow to a specified upper limit, but only allocate the memory they actually
+   need.
+
+   This is very, very useful when implementing growing allocators, because we can reserve a contiguous
+   region of memory (=virtual address space), but only commit physical memory to it whenever we need it.
+
+   Virtual memory addressing is supported by all common desktop OSs (Windows, Linux, Mac), almost all
+   consoles (cannot go into details because of NDAs) and even on mobiles like the iPhone. How different
+   growing allocators can be built using virtual memory on those platforms will be the topic of the next
+   posts!
+
+
+---
+
