@@ -1,0 +1,253 @@
+filename: linux-routing-fundamentals-20251216.txt
+https://blog.sdn.clinic/2025/01/linux-routing-fundamentals/
+
+Linux Routing Fundamentals
+
+   Linux has been a first class networking citizen for quite a long time now. Every system running a
+   Linux kernel out of the box has at least three routing tables and is supporting multiple mechanisms
+   for advanced routing features from policy based routing (PBR), to VRFs(-lite), and network namespaces
+   (NetNS). Each of these provide different levels or separation and features, with PBR being the oldest
+   one and VRFs the most recent addition (starting with kernel 4.3).
+
+   This article is the first part of the Linux Routing series and will provide an overview of the basics
+   and plumbings of Linux routing tables, what happens when an IP packet is sent from or through a Linux
+   box, and how to figure out why. It's the baseline for future articles on PBR, VRFs, and
+   NetNSes, their differences as well and applications.
+
+Routing tables
+   So what's a routing table? It contains the knowledge about where to send network packets for a given
+   destination. An entry in this table is called a route and usually consists of a prefix defining the
+   destination as well as an interface to send out the packets towards this destination and potentially
+   a next-hop.
+
+   The next-hop is the IP address of a device, directly reachable from the local machine, either via a
+   shared network segment or tunnel, which is the next router on a path to a given destination. The
+   next-hop machine may be directly connected to the destination (subnet) or may use another next-hop to
+   reach it - the local node doesn't know and doesn't need to know. This is called the hot potato
+   principle or hot potato routing, where each router on the path just hands off the hot potato (i.e.
+   the network packet) to the next one and hopes for the best.
+
+   The routing table of my laptop connected to a local WiFi and a VPN currently looks like this:
+   Prefix          Interface   Next-Hop
+   10.0.0.0/8      tun0        10.23.42.1
+   10.23.42.0/25   tun0
+   192.0.2.0/24    wlan0
+   0.0.0.0/0       wlan0       192.0.2.1
+
+   For any IP packet to send, the kernel will do a Longest-Prefix-Match lookup in the routing table
+   to find the most precise match for the target IP. Longest prefix means, that the most specific entry
+   with the longest overlapping prefix length will be used.
+
+   Nerd-snipe: If you're interested on how this works in hardware routers, Sharada Yeluri's blog post on
+   Longest Prefix Matching in Networking Chips might be a fun read.
+
+Source address selection
+   Another interesting thing that's happening while the routing decision for locally generated traffic
+   is made, is that the source address for the packets is selected (if not explicitly specified by the
+   application). Each route for a directly connected subnet usually also contains the locally configured
+   IP address within this subnet as source address:
+
+   Prefix          Interface    Next-Hop      Source address
+   10.0.0.0/8      tun0         10.23.42.   1
+   10.23.42.0/25   tun0                       10.23.42.8
+   192.0.2.0/24    wlan0
+                   192.0.2.42   
+   0.0.0.0/0       wlan0        192.0.2.1   
+
+Source address selection - ICMP erros
+   Sometimes things go wrong and a packet cannot be forwarded, either because there's no route to the
+   destination, a packet filter rule denies forwarding, the packet is too big, or what not. In IP
+   networks this usually results in an ICMP error to be sent back to the source address informing it
+   about the issue at hand. ICMP stands for Internet Control Message Protocol, and, amongst other
+   things, is used for signalling any kinds of error conditions and network probing e.g. via ping,
+   traceroute, or mtr.
+
+   Now, which source address should the local machine pick for sending an ICMP error back to the
+   original sender? Keep in mind, that the local machine may not be the destination for the packet but
+   rather a router on the path. The following sysctl and it's documentation shed some light on the issue
+   and might be a good knob to fiddle with on routers:
+icmp_errors_use_inbound_ifaddr - BOOLEAN
+# If zero, icmp error messages are sent with the primary address
+# of the exiting interface.
+# If non-zero, the message will be sent with the primary address
+# of the interface that received the packet that caused the icmp
+# error. This is the behaviour many network administrators will
+# expect from a router. And it can make debugging complicated
+# network layouts much easier.
+#
+# Note that if no primary address exists for the interface
+# selected, then the primary address of the first non-loopback
+# interface that has one will be used regardless of this setting.
+#
+# Default: 0
+net.ipv4.icmp_errors_use_inbound_ifaddr = 1
+
+   Source: https://www.kernel.org/doc/Documentation/networking/ip-sysctl.rst
+
+   For IPv6 it's complicated, see [https://datatracker.ietf.org/doc/html/rfc6724]RFC6724.
+
+Routing tables on Linux
+   Out of the box, any Linux system will have multiple routing tables. The tool of choice to interact
+   with them is ip from the iproute2 package, aka the networking Swiss army knife. ip route - or ip r in
+   short - is the relevant sub-command. See ip route help for an overview of what it can do, or man
+   ip-route(8) for a detailed man-page.
+
+   Note that you can abbreviate any part of the ip call as long as it stays unique. The commands follow
+   the structure ip <item> <action> [parameters] and, if no action is given, it defaults to show.
+$> ip route help
+Usage: ip route { list | flush } SELECTOR
+...
+SELECTOR := ... [ table TABLE_ID ]
+...
+TABLE_ID := [ local | main | default | all | NUMBER ]
+
+   One thing which stands out is that ip route has a table parameter, which is used to denote which
+   routing table to work with. As shown above, the table can be given as a name or a number. Under the
+   hood routing tables are identified by a number in the range from 1 to 2^32-1, which means we can have
+   a lot of routing tables! Humans usually prefer names over numbers, so you can set up a mapping in
+   /etc/iproute2/rt_tables. By default, this file contains the mapping of common routing tables local,
+   main, and default as shown in the help output above:
+$> cat /etc/iproute2/rt_tables
+#
+# reserved values
+#
+255    local
+254    main
+253    default
+0      unspec
+
+   But what are these local, main, and default tables, and why are there different ones in the first
+   place?!
+
+IP rules and routing lookup
+   Contrary to intuition, the policy based routing framework, which can be used for fairly advanced
+   magic and trickery, is always in use, even when not doing anything fancy on your Linux system. By
+   default, Linux will set up three routing tables local, main, and default, which are evaluated in a
+   predefined order, as we can see by running ip rule.
+$> ip rule
+0:     from all lookup local
+32766: from all lookup main
+32767: from all lookup default
+
+   When a Linux system is doing a route lookup, it will check the local, main, and default tables in
+   that order, do a Longest-Prefix-Match lookup in each table, and will stop at the first match
+   found. So if a local route matches, it will be used. If not and if a route from the main table
+   matches it will be used, and last but not least, a match in the default table will be used. As
+   usually the main table contains a default route covering the whole IP space, the default table will
+   be rarely evaluated at all.
+
+   So what's happening here? The rules are evaluated in ascending order of their preference, meaning for
+   every route lookup, the Linux networking stack will check all rules until one matches.
+
+   To find out which path traffic towards a particular destination will take, you can do a manual route
+   lookup by running ip route get <dest IP>.
+$> ip r g 1.1.1.1
+1.1.1.1 via 192.0.2.1 dev wlan0 src 192.0.2.42 uid 2342
+    cache
+
+local table
+   The local table contains routes for any IP address configured locally on any interface (in the given
+   network namespace). On my laptop connected to a WiFi network and using a VPN, this looks like this:
+$> ip route show table local
+local 10.23.42.8 dev tun0 proto kernel scope host src 10.23.42.8
+broadcast 10.23.42.127 dev tun0 proto kernel scope host src 10.23.42.8
+local 127.0.0.0/8 dev lo proto kernel scope host src 127.0.0.1
+local 127.0.0.1 dev lo proto kernel scope host src 127.0.0.1
+broadcast 127.255.255.255 dev lo proto kernel scope link src 127.0.0.1
+local 192.0.2.42 dev wlan0 proto kernel scope host src 192.0.2.42
+broadcast 192.0.2.255 dev wlan0 proto kernel scope link src 192.0.2.42
+
+   We can see the configured IP address + prefix + broadcast address for the loopback interface, which
+   every device with a network stack has, as well as the IP + broadcast address of the WiFi and tunnel
+   interface.
+
+   Thinking about it, it makes sense that any traffic considered local to the current device should not
+   be sent out to the network but handled, well, locally. The broadcast routes are also special as they
+   are meant to sent traffic to all stations in a network instead of to a specific one - called unicast.
+
+   The preference of 0 ensures that these entries will be evaluated first for any given IP packet.
+
+main table
+   The main routing table is the one folks usually work with. It contains routes for unicast
+   destinations, usually the local subnet(s) the device is directly connected to, and a default route.
+
+   On my laptop this looks like this:
+$> ip r
+default via 192.0.2.1 dev wlan0 proto dhcp src 192.0.2.42
+10.0.0.0/8 via 10.23.42.1 dev tun0 proto static
+10.23.42.0/25 dev tun0 proto kernel scope link src 10.23.42.8
+192.0.2.0/24 dev wlan0 proto kernel scope link src 192.0.2.42
+
+   Note the proto kernel and proto static parameters on the routes. The former denotes that this route
+   has been added by the kernel itself, i.e. when an IP address has been configured on an interface and
+   the interface is up. The latter denotes a route which has been added manually by an operator or
+   script most likely using ip route add. Routes added by a routing daemon like bird for example usually
+   have a specific proto set, e.g. proto bird.
+
+   Note: Similar to the /etc/iproute2/rt_tables file mentioned above, there's also an
+   /etc/iproute2/rt_protos file containing the ID to name mapping for protocols. Thanks to
+   Christoph for the suggestion to add this.
+
+default table
+   By default, the default table does not contain any routes. I've never seen a setup where it would
+   have been used, and the only use case I could imagine would be a backup default route in case the
+   regular one goes away for any reason. I'd however rather use a 2nd default route with a higher metric
+   in the main table to follow the principle of least surprise.
+
+Special route types
+   By default, routes are of type unicast and provide a real path to the given prefix. Linux does
+   support some more route types, which come in especially handy on systems acting as routers within a
+   network or at its border.
+
+   I'd like to highlight the following three, showing their description from man ip-route(8) - see the
+   man-page for a complete list.
+
+unreachable - these destinations are unreachable. Packets are discarded and the ICMP message host unreachable
+              is generated. The local senders get an EHOSTUNREACH error.
+blackhole - these destinations are unreachable. Packets are discarded silently.  The local senders get an EINV
+            AL error.
+prohibit - these destinations are unreachable. Packets are discarded and the ICMP message communication
+           administratively prohibited is generated. The local senders get an EACCES error.
+
+   unreachable routes are usually used to set up so called pull-up routes for the aggregate network
+   prefixes within a network. This has two use cases:
+    1. A routing daemon, such as bird, can learn the route / prefix and advertise it to neighboring
+       routers or ASes and thereby make the network reachable to others.
+    2. Traffic towards any unallocated sub-network of the aggregate will be caught be the aggregate
+       route, will therefore not be forwarded by a default route, and the sender will be notified that
+       the destination IP is not reachable.
+
+   So let's say your network got the prefix 2001:db8::/32 assigned from the RIPE NCC and you are using
+   subnets of it inside your network, then you can - and should - create an unreachable route for it
+   using
+ip route add unreachable 2001:db8::/32
+
+   Ideally such a route is placed on the core routers and not the borders, so a border/edge router stops
+   learning and advertising it when connectivity to the internal network breaks.
+
+   An unreachable, blackhole, or prohibit route could also be used to render a specific subnet or IP
+   address unreachable, for example in case of a DDoS attack or any other case of abuse.
+
+What happens when a link is down?
+   By default, Linux will happily forward packets onto interfaces which are down, meaning the interface
+   does not have a carrier and packets could only be sent into a void.
+
+   This can be controlled by sysctl settings sys.net.ipv4.conf.<iface>.ignore_routes_with_linkdown and
+   sys.net.ipv6.conf.<iface>.ignore_routes_with_linkdown respectively which default to 0. When set to 1,
+   routes pointing towards this interface will be marked as dead and will not be used. See the following
+   example with a wired connection on the eth2 interface, which isn't connected:
+$> ip r
+default via 192.168.178.1 dev eth2
+192.168.178.0/24 dev eth2 proto kernel scope link src 192.168.178.42
+# echo 1 > /proc/sys/net/ipv4/conf/eth2/ignore_routes_with_linkdown
+
+$> ip r
+default via 192.168.178.1 dev eth2 dead linkdown
+192.168.178.0/24 dev eth2 proto kernel scope link src 192.168.178.42 dead linkdown
+
+$> ping 1.1.1.1
+connect: Network is unreachable
+
+
+---
+
