@@ -1,0 +1,380 @@
+filename: why-not-letting-use-genai-for-coding-5pp-20251222.txt
+https://lukeplant.me.uk/blog/posts/why-im-not-letting-the-juniors-use-genai-for-coding/
+
+Why I'm not letting the juniors use GenAI for coding
+July 26, 2025
+
+In my current project, I am training some junior developers - some of them pretty much brand new developers -
+and one of the first rules I gave them was "ensure that Copilot (or any other Generative AI assistant that
+will write code for you in your editor) is turned off". This post explains why. The long and short of it is
+this: it's because I want the junior developers to become senior developers, and I want them to enjoy
+programming as well.
+
+Other people might also be interested in my reasons, so I'm writing this as a blog post.
+
+I've read many, many other posts that are for and against, or just plain depressed, and some of this is about
+personal preference, but as I'm making rules for other people, I feel I ought to justify those rules just a
+little.
+
+I'm also attempting to write this up in a way that hopefully non-programmers can understand. I don't want to
+write a whole load of posts about this increasingly tedious subject, so I'm making one slightly broader one
+that I can just link to if anyone asks my opinion.
+
+Rather than talk generalities, I'll build my case using a single very concrete example of real output from an
+LLM on a real task.
+
+Contents
+  * The problem
+  * What I did
+  * How it went
+  * The main point
+  * So what?
+      - Scenario 1
+      - Scenario 2
+      - Scenario 3
+
+  * What about the mid-level programmer?
+  * And what about the senior programmer?
+
+The problem
+This example comes from a one-off problem I created when I accidentally ended up with data in two separate
+SQLite databases, when I wanted it in one. The data wasn't that important - it was all just test data for the
+project I'm currently working on - so I could have just thrown one of these databases away. But the data had
+some value to me, so I decided to see if I could use an LLM to quickly create a one-off script to merge the
+two databases.
+
+Merging databases sounds like something so common there would be a generic tool to do it, but in reality the
+devil is in the details, and every database schema has specifics that mean you need a custom solution.
+
+The specific databases in question were pretty small, with a pretty simple schema. The only big problem with
+the schema, common to many databases schemas, is how you deal with ID fields:
+
+This database schema has multiple tables, and records in one table are related to records in another table
+using an ID column, which in my case was just a unique number starting at one: 1, 2, 3 etc. To make it
+concrete, let's say my database stored a list of houses, and a list of rooms in each house (it didn't, but it
+works as an example).
+
+So you have a houses table:
+
+----------------
+id   address
+----------------
+1    45 Main St
+2    67 Mayfair
+3    2 Bag End
+...  ...
+----------------
+
+And a rooms table:
+
+------------------------------
+id    house_id     name
+------------------------------
+1     1            Dining room
+2     1            Living room
+3     2            The Library
+...   ...          ...
+------------------------------
+
+The house_id column above links each room with a specific house from the houses table. In the example above,
+the rooms with ids 1 and 2 both belong to house with ID 1, aka "45 Main St".
+
+Due to the database merge, we've got multiple instances of each of these tables, and they could very easily
+be using the same ID values to refer to different things. When I come to merge the tables:
+
+  * I've got to assign new values in the id columns for each table
+  * for the rooms table, I've got to remember the mapping of old-to-new IDs from the houses table and apply
+    the same mapping to the house_id column.
+
+If I get this wrong, the data will be horribly confused and corrupted.
+
+What I did
+I used aider.chat, which is a pretty good project with a good reputation, and one that I'm used to, to the
+point of being reasonably competent (although I can't claim I use any of these tools a massive amount). This
+was a while back, and I can't remember which LLM model I was using, but I think it was one of the best ones
+from Claude, or maybe DeepSeek-R1, both of which are (or were) well regarded.
+
+I fed it the database schema as a SQL file, then prompted it similar to below:
+    Write a script that takes a list of db files as command line args, and merges the contents. The output
+    will have a single 'metadata' table copied from one of the input files. The 'rooms' and 'houses' tables
+    will be merged, being careful to update 'id' and 'house_id' columns correctly, so that they refer to new
+    values.
+
+I'm not going to spend time arguing about whether this was the best possible tool/model/prompt, that's an
+endless time sink - I'm happy that I did a decent enough job on all fronts for my comments to be fair.
+
+How it went
+The results were basically great in most ways that most people would care about: the LLM created a mostly
+working script of a few hundred lines of code in a few minutes. If I remember correctly it was pretty much
+there on the first attempt.
+
+I did actually care about the data, so I carefully checked the script, especially the code that mapped the
+IDs.
+
+There was one bit of code that created the mapping, and a second bit of code that then used it. For this
+second part, correct code would have looked something like this:
+
+new_id = id_mapping[old_id]
+
+Here:
+  * id_mapping is a mapping (dictionary) that contains the "old ID" as keys, and the "new ID" as values
+  * old_id is a variable containing an old ID value.
+  * the brackets syntax [old_id] does a dictionary lookup and returns the value found - in other words, given
+    the old ID it returns the new ID.
+
+There is a crucial question with mappings like this: what happens if, for some reason, the mapping doesn't
+contain the old_id value? With the code as written above, the dictionary lookup will raise an exception,
+which will cause the code to abort at this point. This is a good thing - since somehow we are missing a
+value, there is nothing we can do with the current data, and obviously there is some serious problem with our
+code which means that aborting loudly is the best of our options, or at least the most sensible default.
+
+However, what the LLM actually wrote was like this:
+
+new_id = id_mapping.get(old_id, old_id)
+
+This code also does a dictionary lookup, but it uses the get method to supply a default value. If the lookup
+fails because the value is missing, the default is returned instead of raising an exception. The default
+given here is old_id, which is the original value. This is, of course, disastrously wrong. If, for whatever
+reason, the new ID value is missing, the old ID value is not a good enough fallback - that's just going to
+create horribly corrupted data. Worst of all, it will do so absolutely silently - it could just fill the
+output data with essentially garbage, with no warning that something had gone wrong.
+
+We might ask where this idea came from - the LLM has written extra code to produce a much worse result, why?
+The answer is most likely found, in part, in the way the LLM was trained - that is, on mediocre code.
+
+A better answer to "why" the AI wrote this is much more troubling, but I'll come back to that.
+
+We might also ask, "does it matter?"
+Part of the answer to that is context. For the project I'm currently working on, "silently wrong output" is
+one of the very worst things we can do. There are projects with different priorities, and there are even a
+few where quality barely matters at all, for which we really wouldn't care about things like this. There are
+also lots of projects where you might expect people would care about this, but they actually don't, which is
+fairly sad. Anyway, I'm glad not to be currently working on any projects like that - correct output matters,
+and I like that.
+
+In this case, there is a second reason you might say it doesn't matter: the rest of the code was actually
+correct. This meant that the mapping dictionary was complete, so the incorrect behaviour would never get
+triggered - the problem I've found is actually hypothetical. So what am I worrying about?
+
+The problem is that in real code, the hypothetical could become reality very quickly. For example:
+  * Some change to the code could introduce a bug which means that the mapping is now missing entries.
+  * A refactoring means the code gets used in a slightly different situation.
+  * There is some change to the context in which the code is used. For example, if other processes were
+    writing to one of these databases while the merge operation was happening, it would be entirely possible
+    for the mapping dictionary to be missing entries.
+
+So we find ourselves in an interesting situation:
+  * The code, as written by the LLM, appears on the one hand to be perfectly adequate, if measured according
+    to the metric of "does it work right now".
+  * On the other hand, the code is disastrously inadequate if measured by the standard of letting it go
+    anywhere near important data, or anything you would want to live long term in your code base.
+
+The main point
+Writing correct code is hard. The difference between correct and disastrously bad can be extremely subtle.
+These differences are easily missed by the untrained eye, and you might not even be able to come up with an
+example where the bad code fails, because in its initial context it does not.
+
+There are many, many other examples of this in programming, and there are many examples of LLMs tripping up
+like this. Often it is not what is present that is even the problem, but what is absent.
+
+So what?
+OK, so LLMs sometimes write horribly flawed code that appears to work. Couldn't we say the same about junior
+programmers?
+
+Yes, we could. I think the big difference comes when you think about what happens next, after this bad code
+is written. So, I'll think about this under 3 scenarios.
+
+Scenario 1
+In this scenario, I, as a senior developer, am the person who got the LLM to write the code, and I'm now
+tasked with code review in order to find potential flaws and time-bombs like the above.
+
+First, in this scenario, the temptation to not check carefully is very strong. The whole reason I'm tempted
+to use an LLM in the first place is that I don't want to devote much time to the task. For me this happens
+when:
+  * I can't justify much time, because I consider it's not that important - it's just something I need to do
+    to get back to the main thing I'm doing.
+  * I don't think I will enjoy spending that time.
+
+For both of these cases, the "must go faster" mindset means it's psychologically very hard to slow down and
+do the careful review needed.
+
+So, I'm unlikely to review this code as carefully as I should. For me, assuming that the code matters at all,
+this is a killer problem.
+
+Maybe someone else would review it and catch this? That's not good enough for me - I don't rely on other
+people reviewing my code. I'm a professional software developer who works on important projects. Sometimes I
+work alone, with no-one else doing effective review. My clients expect and deserve that I write code that
+actually works.
+
+Of course I also know that I'm far from perfect, and welcome any code review I can get. But even when I think
+there is review going on, I treat it as a backup, an extra safety measure, and not a reason to justify being
+sloppy and careless.
+
+Scenario 2
+In this scenario, the code was written by a junior developer. In contrast to the previous section, I don't
+expect junior developers to produce code that works. But I do expect them to learn to do so. And I hope that
+that I will be rightly suspicious and do a thorough review.
+
+Like Glyph, I actually quite enjoy doing code review for junior developers, as long as they actually have
+both the willingness and capacity to improve (which they usually do, but not always). Code review can be a
+great opportunity to actually train someone.
+
+So what happens in this scenario when I, hopefully, after careful review spot the flaw and point it out?
+
+If I have time to properly mentor a developer, the process would be a conversation (preferably in person or a
+video call) that starts something like this:
+    When you wrote new_id = old_id_to_new_id.get(old_id, old_id), can you explain what was going through your
+    mind? Why did you choose to write .get(old_id, old_id), rather than the simpler and shorter [old_id]?
+
+It's possible the reason was them thinking "doing something is better than crashing". We can then address
+that disastrously wrong (but quite common) mindset. This will hopefully be a very fruitful discussion,
+because it will actually correct the issue at the root, and so stop it happening again, or at least make it
+much less likely.
+
+In some cases, there isn't a reason "why" they wrote the code they did - sometimes junior developers just
+don't understand a lot of the code they are writing, they are just guessing until something seems to work. In
+that case, we can address that problem:
+
+The developer needs to go back to basics of things like assignments and function calls etc. The developer
+must reach the point where they can explain and justify every last jot and tittle of code they produce. It
+seems pretty obvious to me that the best way to achieve that is to make them write pretty much all their
+code, at least at the level of choosing each "token" that they add (e.g. choosing from a list of methods with
+auto-complete is OK, but not more than that). If I want them to be able to justify each token choice, it is
+essential to make them engage their brain and choose each token.
+
+Scenario 3
+The third scenario is again that the junior developer "produced" the code, and I'm now reviewing it, but it
+turns out they just prompted some LLM assistant.
+
+At this point, the first step in the root cause analysis - the question "what was your thought process in
+producing this code" - fails immediately.
+
+There is no real answer to the question "why" the LLM wrote the bad code in the first place. You can't ask it
+"what were you were thinking" and get a meaningful answer - it's pointless to ask so don't even try. It lacks
+the meta-cognition needed for self-improvement, and much of the time when it looks like it is reasoning, it
+is actually just pattern matching.
+
+The next problem is that the LLM basically can't learn, at least not deeply enough to make a significant
+difference. You can tell it "don't do that again", and it might partly work, but you can't really change how
+it thinks, just what the current instructions are.
+
+So we can't address the root cause.
+What about the junior developer learning from this, in this scenario - is there something they could take
+away which would prevent the mistake in the future?
+
+If their own mind wasn't engaged in making the mistake, I think it is quite unlikely that they will be able
+to effectively learn from the LLM's mistakes. For the junior dev, the possible take-aways about changes to
+their own behaviour are:
+  * Check the LLM's output more carefully. But I'm not convinced they are equipped at this point to really do
+    checking - they first need practice in the careful thinking about what correct code looks like, to gain
+    the trained eye that can spot subtle issues.
+  * Don't use LLMs to write code (which is what I'm arguing here)
+
+What about the mid-level programmer?
+At what point do I suggest the junior developers should start using LLMs for some of the more boring tasks?
+Once they are "mid-level" (whatever that means), is it appropriate?
+
+There is obviously a point at which you let people make their own decisions.
+
+For myself, I'm pretty firmly convinced that the software I've just recently created with 25+ years'
+professional experience, I simply couldn't have created with only 15 years experience. Not because I'm a poor
+programmer - I think I've got good reason to believe I'm significantly above average (for example, I taught
+myself machine code and assembly as a young teenager, and I've been part of the core team of top open-source
+projects). There is just a lot to learn, and always a lot further you could go.
+
+In this most recent project, we've seen a lot of success because of certain key architectural decisions that
+I made right at the beginning. Some of these used advanced patterns that 10 years I would not have
+instinctively reached for, or wouldn't even have known well enough to attempt them.
+
+For example, due to difficulties with manual testing of the output in my current project, we depend
+critically on regression tests that make heavy use of a version of the Command pattern or plan-execute
+pattern. In fact we use multiple levels of it, one level being essentially an embedded DSL that has both an
+evaluator and compiler. This code is not trivial, and it's also quite far from the simplest thing that you
+would think of, but it has proven critical to success.
+
+How did I know I needed these? Well, I can tell you one thing for sure: I would never have got the experience
+and judgement necessary if I hadn't been doing a lot of the coding myself over the past 25 years.
+
+In his video A tale of two problem solvers, youtuber 3Blue1Brown has a section that is hugely relevant here,
+especially from 36 minutes onwards. In it, he describes how practising mathematicians will often do hundreds
+of concrete examples in order to build up intuition and sharpen their skills so that they can tackle more
+general and harder problems. What particularly struck me was that famous mathematicians throughout history
+have done this - "they all have this seemingly infinite patience for doing tedious calculations".
+
+Computer programming may seem different, in that we deliberately don't do the tedious calculations, but teach
+the computer to do that. However, there are huge similarities. Programming, like mathematics, involves a
+formal notation and problem solving. In the case pf programming, the formal notation is aimed at a machine
+that will mechanically interpret it to produce a desired behaviour.
+
+Obviously we do avoid doing lots of long multiplication once we've taught the computer to do that. However,
+given the similarities of the mental processes involved in maths and programming, when it comes to any of the
+higher level things about how to structure programs, I think we are absolutely fooling ourselves if we think
+we can avoid doing all the "grunt work" of writing code, organising code bases, slowly improving code
+structure, etc. and still end up magically knowing all the patterns that we need to use, understanding their
+trade-offs, and all the reasons why certain architectures or patterns would or wouldn't be appropriate.
+
+If you ever want to progress beyond mid-level, I strongly suspect that offloading significant parts of
+programming to an LLM will greatly reduce your growth. You may be much faster at outputting things of a
+similar level to what you can currently handle, but I doubt you'll be able to tackle fundamentally harder
+projects in the future.
+
+While I'm talking about youtubers, the video The Expert Myth by Veritasium is also really helpful here. He
+describes how expertise requires the following ingredients:
+ 1. Valid environment
+ 2. Many repetitions
+ 3. Timely feedback
+ 4. Deliberate practice
+
+As far as I can see, heavy use of LLMs to write code for you will destroy points 2 and 3 - neither the
+repetitions nor the feedback are really happening if you don't actually write the code yourself. I doubt that
+the "deliberate practice and study, in an uncomfortable zone" is going to happen either if you never get
+happy with the manual bits of coding.
+
+And what about the senior programmer?
+To complete this post, we of course want to ask, should the "senior programmer" use LLMs to do a lot of the
+grunt programming? By senior, I do mean significantly more than the 5 years that many "seniors" have. Does
+there come a point where you have "arrived" and the arguments in the previous section no longer apply? A time
+when you basically don't need to do much more learning and sharpening of skills?
+
+My answer to that is "I hope not". Like others, I'm still hoping that by the end of my career I could be at
+least 10x faster than I am now (without an LLM writing the code for me), maybe even more. Computers are
+mental levers, so I don't think that's ridiculous. I'm hoping not just to be 10x faster, but 10x better in
+other ways - in terms of reliability, or in terms of being able to tackle problems that would just stump me
+today, or to which my solutions today would be massively inferior.
+
+Everything I know about learning says that outsourcing my actual thinking to LLMs is unlikely to produce that
+result.
+
+In addition, there are at least some people who, after actively using LLMs integrated into their editor (like
+Copilot and Cursor), have now stopped doing so because they noticed their skills were rusting.
+
+These arguments, plus the small amount of evidence I have, are enough that I don't feel the need to make a
+guinea pig out of myself to collect more data.
+
+So, for myself, I choose to use LLMs very rarely for actually writing code. Rarely enough that if they were
+to disappear completely, it would make little difference to me.
+
+But, aside from the practical arguments regarding becoming a better programmer, one of the big reasons for
+this is that I simply enjoy programming. I enjoy the challenge and the process of getting the computer to do
+exactly what I want it to do, in a reasonable amount of time, expressing myself both precisely and concisely.
+
+When you are programming at the optimal level of abstraction, it is actually much nicer to express yourself
+in code compared to English, and often much faster too. Natural language is truly horrible for times when you
+want precision. And in computer programming, you usually are able to create the abstractions you need, so you
+can often get close to that optimal level of abstraction.
+
+Obviously there are times when there is a bad fit between the abstractions you want and the abstractions you
+have, resulting in a lot of redundancy. You can't always rewrite everything to make it all as ideal as you
+want. But if I'm writing large amounts of code at the wrong abstraction level, that's bad, and I don't really
+want a system that helps me to write more and more code like that.
+
+The point of this section is really for the benefit of the junior developers that I'm forcing to do things
+"the hard way". What I'm saying is this: I'm not withholding some special treat that I reserve just for
+myself. I willingly code in exactly the same way as you, and I really enjoy it. I believe that I'm sparing
+you the miserable existence of never becoming good at programming, while you keep trying to cajole something
+that doesn't understand what it's doing into producing something you don't understand either. That just
+doesn't sound like my idea of fun.
+
+
+---
+
