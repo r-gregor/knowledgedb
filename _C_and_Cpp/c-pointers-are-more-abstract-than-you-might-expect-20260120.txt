@@ -1,0 +1,302 @@
+filename: c-pointers-are-more-abstract-than-you-might-expect-20260120.txt
+https://pvs-studio.com/en/blog/posts/cpp/0576/
+
+Pointers are more abstract than you might expect in C
+Jul 24 2018
+
+   A pointer references a location in memory and dereferencing a pointer refers to the lookup of the
+   value of the memory location the pointer references. The value of a pointer is a memory address. The
+   C standard does not define the representation of a memory address. This is crucial since not every
+   architecture makes use of the same memory addressing paradigm. Most modern architectures make use of
+   a linear address space or something similar. Still, even this is not precise enough since you might
+   want to talk about physical or virtual addresses. Some architectures make even use of non-numeric
+   addresses. For example, the Symbolics Lisp Machine makes use of tuples of the form (object, offset)
+   as addresses.
+
+   This article was originally published on stefansf.de. The original and translated versions are
+   posted on our website with the permission of the author.
+
+   The representation of a pointer is not defined by the C standard. However, operations involving
+   pointers are defined-at least more or less. In the following we will have a look at these operations
+   and how they are defined. Lets start with an introductory example:
+
+#include <stdio.h>
+
+int main(void) {
+	int a, b;
+	int *p = &a;
+	int *q = &b + 1;
+	printf("%p %p %d\n", (void *)p, (void *)q, p == q);
+	return 0;
+}
+
+   If compiled with GCC and optimization level 1, then a run of the program on a x86-64 Linux system
+   prints:
+0x7fff4a35b19c 0x7fff4a35b19c 0
+
+   Note that the pointers p and q point to the same memory address. Still the expression p == q
+   evaluates to false which is very surprising at first. Wouldn't one expect that if two pointers point
+   to the same memory address, then they should compare equal?
+
+   The C standard defines the behavior for comparing two pointers for equality as follows:
+
+     C11 6.5.9 paragraph 6
+     Two pointers compare equal if and only if both are null pointers, both are pointers to the same
+     object (including a pointer to an object and a subobject at its beginning) or function, both are
+     pointers to one past the last element of the same array object, or one is a pointer to one past
+     the end of one array object and the other is a pointer to the start of a different array object
+     that happens to immediately follow the first array object in the address space.
+
+   The first question which probably comes up is: What is an "object"? Since we consider the language C
+   it has certainly nothing to do with objects as known from object oriented programming languages like
+   C++. The C standard defines an object rather informally as:
+
+     C11 3.15
+     Object - region of data storage in the execution environment, the contents of which can represent
+     values
+
+     NOTE When referenced, an object may be interpreted as having a particular type; see 6.3.2.1.
+
+   Lets be nit-picky. A 16 bit integer variable in memory is a data storage and can represent 16 bit
+   integer values. Therefore it is an object. Should two pointers compare equal if the first pointer
+   points to the first byte of the integer and the second pointer to the second byte of the integer? Of
+   course this is not what the language committee intended. But at that point we should note that the
+   language is not formally defined and we have to start guessing what the intention of the language
+   committee was.
+
+When the Compiler Gets Into Your Way
+   Lets get back to our introductory example. Pointer p is derived from object a and pointer q is
+   derived from object b. The latter involves pointer arithmetics and this is defined for the operators
+   plus and minus as follows:
+
+     C11 6.5.6 paragraph 7
+     For the purposes of these operators, a pointer to an object that is not an element of an array
+     behaves the same as a pointer to the first element of an array of length one with the type of the
+     object as its element type.
+
+   Since every pointer which points to a non-array object is virtually lifted to a pointer of type array
+   of length one, the C standard only defines pointer arithmetics for pointers of array types which is
+   finally given in paragraph 8. The interesting part for our case is:
+
+     C11 6.5.6 paragraph 8
+     [...] if the expression P points to the last element of an array object, the expression (P)+1
+     points one past the last element of the array object [...] the evaluation shall not produce an
+     overflow [...]
+
+   That means, the expression &b + 1 should evaluate to an address without any problem. Hence p and q
+   should be valid pointers. Recap what the C standard defines for comparing two pointers: "Two pointers
+   compare equal if and only if [...] one is a pointer to one past the end of one array object and the
+   other is a pointer to the start of a different array object that happens to immediately follow the
+   first array object in the address space" (C11 6.5.9 paragraph 6). This is exactly the case in our
+   example. Pointer q points one past the end of object b which is immediately followed by object a to
+   which p points. Is this a bug in GCC? The finding has been reported in 2014 as bug #61502 and so
+   far the GCC people argue that this is not a bug and therefore won't fix it.
+
+   The Linux people ran into a similar problem in 2016. Consider the following code:
+extern int _start[];
+extern int _end[];
+
+void foo(void) {
+	for (int *i = _start; i != _end; ++i) { /* ... */ }
+}
+
+   The symbols _start and _end are used to span a memory region. Since the symbols are externalized, the
+   compiler does not know where the arrays are actually allocated in memory. Therefore, the compiler
+   must be conservative at this point and assume that they may be allocated next to each other in the
+   address space. Unfortunately GCC compiled the loop condition into the constant true rendering the
+   loop into an endless loop as described in this LKML post where they make use of a similar code
+   snippet. It looks like that GCC changed its behavior according to this problem. At least I couldn't
+   reconstruct the behavior with GCC version 7.3.1 on x86_64 Linux.
+
+Defect Report #260 to the Rescue?
+   Defect report #260 may apply in our case. The topic of the report is more about indeterminate
+   values, however, there is one interesting response from the committee:
+
+   Implementations [...] may also treat pointers based on different origins as distinct even though they
+   are bitwise identical.
+
+   If we take this literally, then it is sound that p == q evaluates to false, since p and q are derived
+   from distinct objects that are in no relation to each other. It looks like we are getting closer and
+   closer to the truth, or do we? So far we only considered operators for equality but what about
+   relational operators?
+
+Relational Operators to the Final Rescue?
+   An interesting point is made while defining the semantics of the relational operators <, <=, >, and
+   >=, in order to compare pointers:
+
+     C11 6.5.8 paragraph 5
+     When two pointers are compared, the result depends on the relative locations in the address space
+     of the objects pointed to. If two pointers to object types both point to the same object, or both
+     point one past the last element of the same array object, they compare equal. If the objects
+     pointed to are members of the same aggregate object, pointers to structure members declared later
+     compare greater than pointers to members declared earlier in the structure, and pointers to array
+     elements with larger subscript values compare greater than pointers to elements of the same array
+     with lower subscript values. All pointers to members of the same union object compare equal. If
+     the expression P points to an element of an array object and the expression Q points to the last
+     element of the same array object, the pointer expression Q+1 compares greater than P. In all other
+     cases, the behavior is undefined.
+
+   According to this definition comparing pointers is only defined behavior if the pointers are derived
+   from the same object. Lets demonstrate the idea of this by two examples.
+int *p = malloc(64 * sizeof(int));
+int *q = malloc(64 * sizeof(int));
+if (p < q) // undefined behavior
+{
+	foo();
+}
+
+   In this example the pointers p and q point into two different objects which are not related to each
+   other. Hence comparing them is undefined behavior. Whereas in the following example
+
+int *p = malloc(64 * sizeof(int));
+int *q = p + 42;
+if (p < q) {
+	foo();
+}
+
+   the pointer p and q point into the same object and are therefore related. Hence it is sound to
+   compare them-assuming that malloc does not return the null pointer.
+
+Storage Layout
+   So far we didn't examine the standard w. r. t. the storage layout of objects. Let's consider objects
+   of aggregate types first. An aggregate type is either a structure or an array type. The former is a
+   sequentially allocated nonempty set of member objects. The only guarantee we get for members of a
+   structure is that they are sequentially allocated in the given order. Thus, a compiler is not allowed
+   to reorder members. However, nothing is said about the space between adjacent members. There we have
+   that arbitrarily many padding bits may be added. For example, consider the following structure:
+   struct { char a; int b; } x;. On most modern architectures between members a and b several padding
+   bits are introduced-leaving it open how many these are since this depends on the alignment
+   requirements of the type int. Therefore, deriving pointers from x.a and x.b and comparing them for
+   equality results in undefined behavior whereas comparing them for relation as e.g. &x.a < &x.b
+   results in defined behavior.
+
+   For array types, we have that these describe a contiguously allocated nonempty set of objects. The
+   crucial point is that in contrast to structure members array members are contiguously allocated. Thus
+   not only the ordering of array members is defined but also that adjacent members are allocated
+   without space in-between. This enables us to finally perform pointer arithmetics in a well defined
+   manner on array members.
+
+   For all other types, i.e., non-aggregate types, we have that the standard does not define the
+   corresponding storage layout. Hence for our introductory example the storage layout of the variables
+   a and b is not defined. Therefore, deriving pointers from the variables and comparing them results in
+   undefined behavior. GCC exploits this fact and evaluates the expression p == q statically to false.
+   The assembler output for the introductory example is given as follows if compiled with optimization
+   level 1:
+.LC0:
+        .string "%p %p %d\n"
+main:
+        sub     rsp, 24
+        mov     ecx, 0
+        lea     rdx, [rsp+12]
+        mov     rsi, rdx
+        mov     edi, OFFSET FLAT:.LC0
+        mov     eax, 0
+        call    printf
+        mov     eax, 0
+        add     rsp, 24
+        ret
+
+   The expression p == q is compiled into the assembler instruction mov ecx, 0.
+
+Different Array Objects
+   It looks like we are getting closer and closer to the truth ;-) The most problematic part we stumbled
+   across so far was in 6.5.9 paragraph 6 where it is explicitly allowed to compare two pointers from
+   two different array objects. Let's be philosophical. What are different array objects? According to
+   the wording used in the standard each dimension of a multidimensional array is an array on itself. A
+   modified version of our introductory example containing a multidimensional array is given as follows:
+#include <stdio.h>
+
+int main(void) {
+	int x[2][1];
+	int *p = &x[0][1];
+	int *q = &x[1][0];
+	printf("%p %p %d\n", (void *)p, (void *)q, p == q);
+	return 0;
+}
+
+   Pointer p points one past the last element of an array object which is part of a multidimensional
+   array object. Pointer q points to the first element of an array object which is adjacent to the array
+   object from which p is derived from. Since both arrays are part of a multidimensional array it is
+   defined behavior to compare p and q for equality. Thus p == q always evaluates to true. GCC and Clang
+   evaluate the expression at compile time to true, i.e., emit the assembler instruction mov ecx, 1 for
+   all optimization levels but 0.
+
+   The important part in the example is that &x[0] points to a different array object than &x[1].
+   However, this is not explicitly stated in the C11 standard but is written between the lines.
+
+Wrap-up
+   We started with an innocent looking example and stumbled across several pitfalls which led to
+   undefined behavior. Our introductory example has the same problem as the example from the Linux
+   people: Comparing two pointers which are derived from two completely unrelated objects invokes
+   undefined behavior. It does not matter if the objects have external or internal linkage, or if they
+   have automatic storage duration or not.
+
+   The most problematic part was in 6.5.9 paragraph 6 where it is explicitly allowed to compare two
+   pointers from two different array objects. At this point in time I would have expected at least a
+   single sentence stating that both pointers must be derived from two arrays which are subaggregates of
+   the same multidimensional array. The wording became even more confusing in 6.5.8 paragraph 5 where
+   the relational operators are defined. There the standard only speaks of pointers to the same array
+   object.
+
+   In my humble opinion, speaking of different arrays for each dimension of a multidimensional array is
+   misleading. Philosophically speaking isn't an element of an array object which is a subaggregate of a
+   multidimensional array object also an element of the multidimensional array object? If so, then two
+   elements e1,e2 of two different array objects a1,a2 which are subaggregates of the same
+   multidimensional array object x are also two elements of the same multidimensional array object x.
+   Then two pointers p1,p2 pointing to the elements e1,e2 also point to different array objects a1,a2
+   and simultaneously to the same array object x. Thus, same and different become superfluous and
+   confuse more than help.
+
+   The overall feeling regarding the wording of the C11 standard is unsatisfactory w. r. t. the
+   presented problem. Since several people already stumbled across this, the question which is left is:
+   Why not make the wording more precise?
+
+   The takeaway message is that pointer arithmetic is only defined for pointers pointing into array
+   objects or one past the last element. Comparing pointers for equality is defined if both pointers are
+   derived from the same (multidimensional) array object. Thus, if two pointers point to different array
+   objects, then these array objects must be subaggregates of the same multidimensional array object in
+   order to compare them. Otherwise this leads to undefined behavior.
+
+   If you are interested in related work I can recommend this one: Clarifying the C memory object
+   model (n2012)
+
+Addendum. Pointers One Past the Last Element of an Array
+   If we lookup the C11 standard and read about pointer arithmetics and comparison we find exceptions
+   for pointers which point one past the last element of an array all over the place. Assume it wouldn't
+   be allowed to compare two pointers derived from the same array object where at least one pointer
+   points one element past of the array, then code like this
+
+const int num = 64;
+int x[num];
+
+for (int *i = x; i < &x[num]; ++i) { /* ... */ }
+
+   would not work. Via the loop we iterate over the array x consisting of 64 elements, i.e., the loop
+   body should be evaluated exactly 64 times. However, the loop condition gets evaluated 65 times-once
+   more than we have array elements. In the first 64 evaluations, the pointer i always points into the
+   array x whereas the expression &x[num] always points one element past the array. In the 65th
+   iteration the pointer i also points one element past the array x rendering the condition of the loop
+   false. This is a convenient way to iterate over an array which makes the exception for arrays
+   feasible. Note, the standard only defines the behavior of comparing such pointer-dereferencing
+   pointer is another topic.
+
+   Can we change the example such that no pointer points one past the last element of array x? Well, the
+   solution to that is not straight forward. We have to change the loop condition and also make sure
+   that at the end of the loop we do not increment i anymore.
+
+const int num = 64;
+int x[num];
+
+for (int *i = x; i <= &x[num-1]; ++i) {
+	/* ... */
+	if (i == &x[num-1]) break;
+}
+
+   This code is rather cluttered with technical details which we do not want to deal with and which
+   distracts us from the actual job we want to accomplish. Despite that it also contains one additional
+   branch inside the loop body. Hence, I think it is reasonable to have exceptions for pointers one past
+   the last element of an array.
+
+
+---
+

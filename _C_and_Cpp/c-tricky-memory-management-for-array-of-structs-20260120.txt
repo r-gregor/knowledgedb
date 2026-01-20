@@ -1,0 +1,155 @@
+filename: c-tricky-memory-management-for-array-of-structs-20260120.txt
+https://www.reddit.com/r/C_Programming/comments/ybnlg3/tricky_memory_management_for_an_array_of_structs/
+
+Tricky memory management for an array of structs
+October 23, 2022
+
+   I have a use case (albeit a little odd) where I need to allocate memory for an array of structs as a
+   single blob, rather than first allocating the pointers then allocating the individual
+   struct-pointers. The structs themselves have no dynamic memory-- each is an array of ints and a
+   counter of how many ints are currently in the array. I can allocate it easily-enough:
+
+Structure **ptr = (Structure **)calloc(N, sizeof(Structure));
+
+   But I don't think I can index/dereference ptr like an array at that point, because (I assume) each
+   index would be just the width of a pointer, not the width of Structure. I would need to be able to
+   access these structs via ptr[i].
+
+   The reason for this usage pattern, is that this program is one of many that comprise experiments for
+   my master's thesis research. Each program runs under a uniform framework and harness so that I can
+   gather data on memory usage, performance, and energy consumption. The framework calls two functions
+   (passed by pointers): an initializer and the algorithm being evaluated. The dynamic memory is being
+   allocated in the initializer, but needs to be freed prior to exit within the framework. The framework
+   just sees an array of void * pointers that it iterates over and passed to free. If this
+   array-of-Structure is an array of individually-allocated pointers, then free only frees the pointers,
+   not what each is pointing at. And part of the research is to examine the expressiveness of the
+   solutions given the condition that all factors are equal; this means all programs should have zero
+   memory leaks and zero memory unfreed at exit (this is verified with valgrind). Out of 5 different
+   algorithms in three compiled languages, only one of the C programs currently fails the valgrind test,
+   because of this structure.
+
+   (I also have a 2-dimensional array of integers that gets used, but that is easier to index as a
+   single alloc'd block, so I'm OK on that count.)
+
+
+***
+WHy are you using Structure**. You want just Structure*. This array is referenced by a pointer its first
+element. You alloc room for N structures.
+
+If you want an array of pointers to structures, then you need to do:
+Structure** array_of_ptrs = calloc(N, sizeof (Structure *));
+
+for(int i = 0; i < N; ++i) array_of_ptrs = malloc(sizeof (Structure));
+
+***
+what is you allocation goal?
+an array of pointers? or an array of structs?
+
+***
+An array of structs. I don't know the size at compile-time, so I have to allocate dynamically.
+
+***
+then this is wrong:
+Structure **ptr = (Structure **)calloc(N, sizeof(Structure));
+
+reason: first the variable you are declaring (ptr) is a pointer to an array of a pointers, in other words an
+array of pointers
+
+instead you want this:
+Structure *ptr = (Structure *)calloc(N, sizeof(Structure));
+
+you can then index ptr as needed, for example:
+
+Structure *pThing;
+
+for ( int x = 0 ; x < N ; x++) {
+	pThing = &ptr[x];
+}
+
+***
+Thanks. This is what I ended up with, based on some other comments as well. For the extent of these
+experiments, it works for my needs :-).
+
+***
+note if you have many of these you might not be able to allocate 1 giant array of bytes (64bit windows/linux
+can easily allocate megabytes, not gigabytes)
+
+if that is a problem as agian, in that case you will need to allocate an array of pointers, set all of them to
+null.
+
+then for each one allocate that one and save that pointer in that array of pointers
+
+***
+    But I don't think I can index/dereference ptr like an array at that point, because (I assume) each index
+    would be just the width of a pointer, not the width of Structure. I would need to be able to access these
+    structs via ptr[i].
+
+Actually, it does work this way luckily in that it will index via the width of the type.
+
+char *foo = calloc(10, sizeof(char));
+struct BigThing *bar = (struct BigThing *)foo;
+
+&foo[5] != &bar[5]
+
+Also, you can't do this with void *, you must use a char * for iterating individual bytes.
+
+*** (5pp)
+Your "easily-enough" allocation is wrong. Rather than
+Structure **ptr = (Structure **)calloc(N, sizeof(Structure));
+
+It should be
+Structure **ptr = (Structure **)calloc(N, sizeof(Structure *));
+
+Or even better:
+Structure **ptr = calloc(N, sizeof *ptr);
+
+***
+If one has N structures are the same size L, one can use a single-indirect pointer to an allocation of size
+N*L, and treat the pointer as though it is an array of structures.
+
+If one has N structures of potentially different sizes whose total size is T, one can create an allocation of
+size N*sizeof(void*)+T, which starts with a collection of N pointers to individual structure items. If one
+e.g. had an array of fixed-sized structures and wished to copy it to such a variable-length structure, the
+code might be something like:
+
+// Assume we have a function which, given a pointer to a struct foo, will
+// indicate its size, whether by using "length" field or other such means.
+
+size_t get_size_of_foo(struct foo *it);
+
+struct foo **make_packed_copy(struct foo *src, size_t n) {
+	size_t total_size = 0;
+	for (size_t i=0; i<n; i++) {
+		total_size += get_size_of_foo(src+i);
+	}
+	size_t header_size = n * sizeof (struct foo*);
+	unsigned char *dest = malloc(header_size + total_size);
+	if (!dest) {
+		FATAL_ERROR();
+	}
+	struct foo **headers = (struct foo**)dest;
+	dest += header_size;
+	for (size_t i=0; i<n; i++) {
+		size_t this_size = get_size_of_foo(src+i);
+		if (this_size > total_size) {
+			FATAL_ERROR();
+		}
+		memcpy(dest, src+i, this_size);
+		headers[i] = (struct foo*)dest;
+		dest += this_size;
+		total_size -= this_size;
+	}
+	return headers;
+}
+
+Note that while this approach will generate pointers to all of the individual items in the packed collection,
+there will only be one allocation that holds all of them, and so free() must only be called once for that
+allocation. Note also that "error handling" is limited to calling a FATAL_ERROR function. In some situations
+it will be necessary to recover cleanly from allocation failures or other such difficulties, but robust
+recovery code is often difficult, and in many scenarios a program won't be able to do anything useful if
+there's a problem building a collection of objects, and forcing a fatal error may be better than attempting to
+recover but leaving something in a corrupted state.
+
+
+---
+
