@@ -1,0 +1,244 @@
+filename: bash-error-handling-patterns-20260209.txt
+https://www.howtogeek.com/bash-error-handling-patterns-i-use-in-every-script/
+
+3 Bash error-handling patterns I use in every script
+Jan 31, 2026
+
+Exit scripts immediately upon encountering errors
+   The initial pattern I learned-and often the first recommended-is the [set -e] option. It simply makes
+   your script exit when it detects a non-zero exit code. For those unaware, an exit code is a
+   number returned by all programs on Linux, and when it's non-zero, it's an error. You can see the
+   exit code of the most recently exited process with [echo $?].
+
+   Let's look at a few examples.
+
+   When everything is okay:
+#!/usr/bin/env bash
+ls /
+echo Exit code: $?
+
+   A terminal window displays the contents of the root directory using the [ls] command. It's followed by
+   a message that shows an exit code of zero.
+
+   Here's an attempted listing of a non-existent directory (an error):
+#!/usr/bin/env bash
+ls /foo
+echo Exit code: $?
+
+output:
+ls: cannot access '/foo': No such file or directory
+Exit code: 2
+
+   See how it returns a non-zero error code?
+
+   Now let's use [set -e]:
+#!/usr/bin/env bash
+set -e
+ls /foo
+echo "Exits before this point."
+
+output:
+ls: cannot access '/foo': No such file or directory
+
+   We can see that the script never reaches the echo statement and only displays the "ls" error
+   message.
+
+   The "set -e" option is useful to halt execution when a step fails (similar to a postcondition
+   assertion), for example, moving a file that didn't download correctly or changing file permissions on
+   a directory that doesn't exist.
+
+   It often leads to cleaner scripts too, because you don't need to write conditions to check program
+   state:
+# Pseudocode
+if curl ...; then
+	if mv ...; then
+		if ! chmod ...; then
+			echo "Could not change file permissions."
+			exit 1
+		fi
+	else
+		echo "Could not move file."
+		exit 2
+	fi
+else
+	echo "Could not download foo."
+	exit 3
+fi
+
+   Instead, you can write:
+# Pseudocode
+set -e
+curl ...
+mv ...
+chmod ...
+
+   This is similar to the Never Nester pattern, where the goal is to flatten out conditional
+   branches. Or, you could see it as an implicit form of assertions, which enforces an acceptable
+   program state before continuing execution. Either way, it's less code, which is more readable, and
+   that's always a big win.
+
+Execute a function upon exit
+   Exiting upon errors is one thing, but what about cleaning up after you're finished? For example,
+   you've downloaded an archive, extracted it, and tried to move a single file from it, but the script
+   then exits because of an error. After execution completes, these unused files remain in your file
+   system, cluttering it.
+
+   To keep our script clean, we want to avoid noisy error-handling branches, and this is where traps
+   come in. A trap executes a function (or command) when an event occurs (called a signal):
+# Pseudocode
+set -e
+cd /tmp
+
+function cleanup() {
+	rm -rf foo.zip  # FYI: -f prevents failure if the file doesn't exist.
+	rm -rf foo/
+}
+trap cleanup ERR  # <-- Executes upon error.
+
+curl ... --output foo.zip
+unzip foo.zip
+mv foo/bar.csv /root/  # Permission denied error.
+
+   Signals include ERR, EXIT, INT (keyboard interrupt), and others. Use the "ERR" signal to catch only
+   errors, or "EXIT" to execute whenever the script stops (including an error).
+
+   These signals represent the most common ones, but you can view a complete list with [trap -l] in Bash.
+   Keep in mind that other shells may use different naming conventions-including or excluding a
+   "SIG" prefix (e.g., SIGINT). Bash is flexible because you can use both.
+
+   If you execute a command (with spaces), wrap it in quotes: trap "rm -rf foo.zip" ERR. You can also
+   specify multiple signals: trap foo ERR INT.
+
+Make functions, subshells, and process substitutions trigger traps
+   If you use the "set -e" option, functions, subshells, and command substitutions won't trigger
+   ERR traps:
+#!/usr/bin/env bash
+
+set -e
+trap "echo Trap executed." ERR
+
+foo() {
+	ls /bar
+	# Exits before this point.
+}
+
+foo
+echo "Exits before this point."
+
+output:
+ls: cannot access '/foo': No such file or directory
+
+   To make "ERR" traps work inside these constructs, use the "set -E" option:
+#!/usr/bin/env bash
+
+set -E
+trap "echo Trap executed." ERR
+
+foo() {
+	# Bash inherits traps from the top level because of "set -E."
+	ls /bar
+}
+
+foo
+echo "The script doesn't exit, so we shall see this message."
+
+output:
+ls: cannot access '/bar': No such file or directory
+Trap executed.
+Trap executed.
+The script doesn't exit, so we shall see this message.
+
+   Notice the trap executes twice? It's because the script doesn't exit upon encountering an error (set
+   -e). When the function returns a non-zero exit code ("ls /bar"), the top-level technically encounters
+   an error, and so it also executes the trap. We can remedy that by using [set -eE]:
+#!/usr/bin/env bash
+
+set -eE
+trap "echo Trap executed." ERR
+
+foo() {
+	ls /bar # Exits the script at this point.
+}
+
+foo
+echo "Exits before this point."
+
+output:
+ls: cannot access '/bar': No such file or directory
+Trap executed.
+
+   A potential footgun when using traps is managing the complexities of subshells. Look at this example:
+set -e
+trap "echo Trap executed." ERR
+
+(ls /foo)
+
+output:
+ls: cannot access '/foo': No such file or directory
+Trap executed.
+
+   You can see it executes the trap, which shouldn't happen because we haven't used [set -E]. So what's
+   happening here? I couldn't find anything concrete, but from what I can gather:
+    1. Subshells are child processes, which are forks (clones) of the calling process
+       (including the "set -e" option), so now, the subshell will also exit upon encountering an error.
+    2. Subshells (and others) don't inherit traps by default, so we know it's not executed by the
+       subshell.
+    3. "ls /foo" returns a non-zero value and causes the subshell to exit with that code.
+
+   Given all three points, it appears the subshell exits with a non-zero value, and because the parent
+   encounters that error, it triggers the trap.
+
+   Further proof:
+set -e
+trap "echo Trap executed." ERR
+
+(
+	set +e    # Will no longer exit upon error.
+	ls /foo   # Won't cause the subshell to exit with a non-zero exit code.
+	exit 0    # The caller no longer encounters an error.
+)
+
+output:
+ls: cannot access '/foo': No such file or directory
+
+   The rules governing trap behavior are complex, so I've created a cheat sheet built from my
+   observations. The experiments used [set -e] only (no set -E):
+
+   ----------------------------------------------------------------------------------
+   Top level set -e    Function encounters error    [set +e] in function   Trap fires
+   ----------------------------------------------------------------------------------
+   X                   V                            X                      V
+   V                   X                            X                      V
+   V                   V                            X                      X
+   V                   V                            V                      V
+   ----------------------------------------------------------------------------------
+   The first three columns define the context, and the fourth records the outcome.
+
+   Take the first row, for example: [set -e] isn't used, a function encounters an error, and it has
+   disabled [set -e] within the function scope.
+
+   The data suggests that when enabling [set -e] at the top level, the function inherits its value and
+   consequently exits immediately, but because it doesn't inherit traps (set -E), a trap isn't called.
+
+   When you use [set -E], functions (and other constructs) trigger their own inherited traps, and the
+   rules become more straightforward.
+
+   In most cases when setting a trap, use [set -E], because it greatly simplifies the rules. Just be aware
+   that subshells and process substitutions are forked processes, which come with their own
+   environmental weirdness.
+
+   Further, I always use the "set -e" option because continuing a script after encountering an error
+   typically isn't desirable. For edge cases, you can swallow errors with "|| true":
+set -e
+ls /foo || true
+echo 'This prints because "|| true" swallows the error.'
+
+output:
+ls: cannot access '/foo': No such file or directory
+This prints because "|| true" swallows the error.
+
+   In short, using [set -eE] is the most straightforward approach.
+
+
+---
+
