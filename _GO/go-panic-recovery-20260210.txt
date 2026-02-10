@@ -1,0 +1,286 @@
+gilename: go-panic-recovery-20260210.txt
+https:// www.dolthub.com/blog/2026-01-09-golang-panic-recovery/
+
+Golang Panic Recovery
+January 9, 2026
+
+The debate on the correct way to use panics and errors in Golang continues to rage on! This is one of
+the more frequently revisited design debates in the Go community. Here at DoltHub, we've taken a few
+stances on it. Many years ago, we put a stake in the ground and described how liberal usage of explicit
+panics in a codebase we inherited had caused a lot of maintenance issues for us, and we extolled the
+virtues of using errors instead of panics. A few years later, we evolved a more nuanced opinion and even
+demonstrated how panics can perform better than errors in certain scenarios.
+
+Even if your application never calls panic() and always prefers using errors, you're still going to
+want to know how to recover from panics, since panics can happen for many reasons other than the panic()
+function being called, such as an incorrect cast, dereferencing a nil pointer, or an out-of-bounds
+reference on a slice.
+
+In this blog post, we'll go over the basics of recovering from panics, explain a few gotchas with
+panic recovery that have bitten us in the past, and suggest some ways to avoid those in your projects.
+
+Time to Panic
+By default, when a goroutine panics, it crashes the Go application, spits out a stack trace, and the Go
+process returns a non-zero exit code. For a very simple command line tool, this may be an appropriate
+failure mode. However, for many other types of applications (e.g. long-running services, multi-tenant
+applications, background workers), completely crashing the application is not acceptable. In our case,
+we're building the Dolt database, and it would be a disaster if a single user could log into the database,
+run a buggy query, and bring down the entire server that other customers are using. Fortunately, it's
+been a while since we ran into one of these situations, thanks to proper panic recovery handling.
+
+Here's a simple Go program that uses the panic() built-in function to explicitly trigger a panic:
+
+package main
+
+func main() {
+	panic("🚨 time to panic! 🚨")
+}
+
+When this runs, we'll see output like this:
+panic: 🚨 time to panic! 🚨
+
+goroutine 1 [running]:
+main.main()
+	/Users/jason/Projects/GoPlayground/main.go:10 +0x2c
+
+Process finished with the exit code 2
+
+There's a few things to note in the output. First off, the panic message is printed out. The output also
+includes a stack trace (even though it's only a single stack frame for our super simple example). Last,
+but not least, the process exited with a non-zero exit code.
+
+Introducing the recover() Function
+The built-in recover() function allows you to recover from a panicking goroutine. Let's take a look
+at the simplest example of panic recovery:
+
+package main
+
+import "fmt"
+
+func main() {
+	defer func() {
+		if recoveredPanic := recover(); recoveredPanic != nil {
+			fmt.Printf("Recovered Panic: %v \n", recoveredPanic)
+		}
+	}()
+
+	panic("🚨 time to panic! 🚨")
+}
+
+When we run this code, we get this output:
+
+Recovered Panic: 🚨 time to panic! 🚨
+
+Process finished with the exit code 0
+
+This time around, our program executes very differently. Our panic recovery code prints out a message
+(including the original panic message), and we have a zero exit code, indicating that the process
+exited cleanly.
+
+This simple example does a good job illustrating the basic case of panic recovery, but there are a few
+important subtleties to understand if you want your code to execute as you intend.
+
+Panic Recovery in Detail
+Go's panic and recover mechanism is deceptively simple. At first glance, it resembles exception handling
+in other languages, but the resemblance is a bit superficial. For panic recovery code to work properly,
+there are two important rules to understand:
+
+  * recover() must be directly called by a deferred function (i.e. not indirectly through other function
+    calls)
+
+  * recover() must be called on the same goroutine where the panic occurred
+
+Misunderstanding those rules is the cause of most problems people hit with panic recovery, so let's
+take a closer look at what each of those mean.
+
+Must Be Directly Called by a Deferred Function
+From the documentation for the recover() function:
+    Executing a call to recover inside a deferred function (but not any function called by it) stops the
+    panicking sequence by restoring normal execution and retrieves the error value passed to the call of
+    panic. If recover is called outside the deferred function it will not stop a panicking sequence. In
+    this case, or when the goroutine is not panicking, recover returns nil.
+
+This is an important rule to understand. When you defer a function, you are scheduling code to run when
+the stack is unwinding. That deferred function MUST directly call the recover() function in order for
+your panic recovery code to work properly.
+
+Knowing this rule, let's take a look at another concrete example of using recover(). How do you think
+this code will execute?
+
+package main
+
+import "fmt"
+
+func main() {
+	defer func() { recoverAndLog() }()
+
+	panic("🚨 time to panic! 🚨")
+}
+
+func recoverAndLog() {
+	if recoveredPanic := recover(); recoveredPanic != nil {
+		fmt.Printf("Recovered Panic: %v \n", recoveredPanic)
+	}
+}
+
+If you guessed that this code would NOT recover the panic, you're correct! Here's what happens when
+we run this code:
+
+panic: 🚨 time to panic! 🚨
+
+goroutine 1 [running]:
+main.main()
+	/Users/jason/Projects/GoPlayground/main-lexical.go:8 +0x48
+
+Process finished with the exit code 2
+
+From the output (and the non-zero exit code), we see that this code did not recover from the panic and
+our app crashed.
+
+The rule is that recover() works only when it is called directly by a deferred function that is executing
+as part of panic unwinding. In the case above, the deferred function is an anonymous function that does
+NOT directly call recover() but instead calls a helper function that calls recover().
+
+Note that if we change this code to defer recoverAndLog(), then our panic recovery would work correctly. This
+is because, the deferred function is now the recoverAndLog() function, which does directly call the
+recover() function, so the recovered panic will be available to it.
+
+Must Be Called on the Same Goroutine
+Panic recovery must occur on the same goroutine in which the panic occurs. Each goroutine has its own
+call stack, and panics do NOT cross goroutine boundaries. This is one of the most common places people
+get confused about panic recovery.
+
+Take a look at the code below and guess how it will execute:
+
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	defer func() {
+		if recoveredPanic := recover(); recoveredPanic != nil {
+			fmt.Printf("Recovered Panic: %v \n", recoveredPanic)
+		}
+	}()
+
+	go func() {
+		panic("🚨 time to panic! 🚨")
+	}()
+
+	// Add a little sleep time to make sure the goroutine
+	// above executes before the main program exits.
+	time.Sleep(1 * time.Second)
+}
+
+If you guessed that this code will still panic, you're correct! The recover() function will only
+recover from panics that happen in the same goroutine. Because we spun up a new goroutine and that's
+where the panic occurred, our panic handler won't ever see it.
+
+Here's the output from this one:
+
+panic: 🚨 time to panic! 🚨
+
+goroutine 6 [running]:
+main.main.func2()
+	/Users/jason/Projects/GoPlayground/main-goroutine.go:16 +0x2c
+created by main.main in goroutine 1
+	/Users/jason/Projects/GoPlayground/main-goroutine.go:15 +0x40
+
+Process finished with the exit code 2
+
+This can be a sneaky place where panic recovery bugs can creep into your codebase. I recently hit this
+when one of our modules changed to spawn goroutines and run its logic concurrently to speed up query
+processing. In a different module that depended on that code, the panic recovery code suddenly stopped
+working when we picked up that new dependency version. The fix was to add panic recovery handling to
+the new goroutine being spawned so that we could still send back an error to the original caller.
+
+An Alternate Strategy
+How can you avoid getting bitten by these gotchas with panic recovery? It's easy to write correct
+code initially, but it's much harder to keep it running correctly as the surrounding code is changed
+by other developers.
+
+The example in the previous section illustrates one way this can happen. A developer adds concurrency
+to a part of the code base but doesn't add any panic recovery handling for those new goroutines. Any
+panic that was previously occurring was getting caught by a recovery handler, but after this change,
+the panic is coming from a different goroutine, so it doesn't get handled and the application crashes.
+
+One strategy is to avoid directly spawning new goroutines with go and through APIs like sync.WaitGroup
+and errgroup.Group, and instead use helper functions that ensure a correct panic recovery handler is
+always used for the spawned goroutine.
+
+Here's an example that is based on errgroup.Group. It recovers from a panic and converts the panic
+into an error that can then be retrieved by the caller when they call errgroup.Group.Wait():
+
+package errguard
+
+import (
+	"context"
+	"fmt"
+	"runtime/debug"
+	"golang.org/x/sync/errgroup"
+)
+
+// Go runs fn in the errgroup, converting any panic into an error, with
+// a stack trace, that is later returned by errgroup.Group.Wait().
+func Go(
+	ctx context.Context,
+	g *errgroup.Group,
+	fn func(ctx context.Context) error,
+) {
+	g.Go(func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panic recovered: %v\n%s", r, debug.Stack())
+			}
+		}()
+		return fn(ctx)
+	})
+}
+
+Here's an example of using this helper function:
+
+g, ctx := errgroup.WithContext(context.Background())
+
+errguard.Go(ctx, g, func(ctx context.Context) error {
+	// Any panic here becomes an error returned by g.Wait()
+	doSomethingRiskyAndCauseAPanic()
+	return nil
+})
+
+errguard.Go(ctx, g, func(ctx context.Context) error {
+	return runWorker(ctx)
+})
+
+if err := g.Wait(); err != nil {
+	// Includes panic-derived errors
+	log.Printf("errgroup failed: %v", err)
+}
+
+Having a consistent way to spawn goroutines that ensures correct panic recovery handling code is in place
+goes a long way, but how will all the developers on your team know to use that helper function? If you
+want to make this approach even stronger, you could add a linter rule that asserts goroutine spawning
+functions are only directly called from a list of allowed helper functions. This gives you an even
+stronger guarantee that your panic recovery handling is consistent across your application and won't
+change out from underneath you.
+
+Conclusion
+Panic recovery in Go relies on the low-level recover() function. Even though this function is simple to
+call, using it correctly requires understanding a few things about how panics and panic recovery work
+in Golang. Although the syntax can look similar to other languages, the behavior is not the same. When
+working with panic recovery code in Golang, it's important to remember:
+
+  * panic recovery is NOT the same as an exception handler
+  * panic recovery is NOT a global safety net
+  * panic recovery is NOT a dynamic catch mechanism
+
+Keep those in mind, and Golang's panic recovery behavior will make a lot more sense!
+
+If you want to discuss panic recovery or Golang further or are curious about version-controlled,
+relational databases, then stop by the DoltHub Discord and say hello!
+
+
+---
+
