@@ -1,0 +1,548 @@
+filename: bash-run-multiple-programs-parallel-from-script-20260303.txt
+https://www.quora.com/How-do-you-run-multiple-programs-in-parallel-from-a-bash-script
+
+How do you run multiple programs in parallel from a bash script?
+
+As simply as invoking a series of commands each put into the background with "&".
+
+A far better approach is to use GNU Parallel, a tool that I used heavily at Fermilab to do parallel
+invocations of shell activities. It can use multiple computers as well as a single machine (essentially the
+only way I ever used it). If you've ever used `find` piped into `xargs`, or constructions like "for f in
+*.xyz; do blah $f ; done" then Parallel will be very natural for you.
+
+***
+GNU Parallel
+
+GNU Parallel GNU parallel is a shell tool for executing jobs in parallel using one or more computers. A job
+can be a single command or a small script that has to be run for each of the lines in the input. The typical
+input is a list of files, a list of hosts, a list of users, a list of URLs, or a list of tables. A job can
+also be a command that reads from a pipe.
+
+GNU parallel can then split the input and pipe it into commands in parallel. For people who live life in the
+parallel lane If you use xargs and tee today you will find GNU parallel very easy to use as GNU parallel is
+written to have the same options as xargs. If you write loops in shell, you will find GNU parallel may be able
+to replace most of the loops and make them run faster by running several jobs in parallel. GNU parallel makes
+sure output from the commands is the same output as you would get had you run the commands sequentially. This
+makes it possible to use output from GNU parallel as input for other programs. For each line of input GNU
+parallel will execute command with the line as arguments. If no command is given, the line of input is
+executed. Several lines will be run in parallel.
+
+GNU parallel can often be used as a substitute for xargs or cat | bash . Download Stable source releases: They
+are available on the main GNU server ( HTTPS , HTTP , FTP ) and its mirrors ; please use a mirror if possible.
+Latest release Official packages , for: Community maintained packages: untested .deb/.rpm packages for Debian,
+CentOS, Arch, Fedora, Mandriva, RedHat, OpenSUSE, and xUbuntu at build.opensuse.org , packages for Solaris at
+Sun OpenCSW , .rpm packages for AIX at Perzl.org .  Documentation A lot of work has been put into making
+documentation for GNU parallel . GNU parallel includes the 4 types of documentation: Tutorial, How-To,
+Reference and Design Discussion.
+
+Tutorial If you prefer reading a book buy GNU Parallel 2018 at
+https://www.lulu.com/shop/ole-tange/gnu-parallel-2018/paperback/product-23558902.html or download it at:
+https://doi.org/10.5281/zenodo.1146014 ( source ) Read at least chapter 1+2. It should take you less than 20
+minutes.
+
+Otherwise start by watching the intro videos for a quick introduction:
+http://www.youtube.com/playlist?list=PL284C9FF2488BC6D1 If you want to dive deeper: spend a couple of hours
+walking through the tutorial ( man parallel_tutorial , HTML , PDF ). Your command line will love you for it.
+
+How-To You can find a lot of EXAMPLE s of use after the list of OPTIONS in man parallel (Use LESS=+/EXAMPLE:
+man parallel ) ( HTML , PDF ). That will give you an idea of what GNU parallel is capable of, and you may find
+a solution you can simply adapt to your situation. Reference If you need a one page printable cheat sheet you
+can find it on: https://www.gnu.org/software/parallel/parallel_cheat.pdf parallel --help shows you the most
+commonly used options.
+
+The man page is the reference for all options ( man parallel , HTML , PDF ). There are separate ma
+https://www.gnu.org/software/parallel/
+
+The "man" page is a great starting point as well.
+
+***
+So one time I was running simulations of something or other, and I had a few thousand cases.
+
+I wrote a shell script that was something like the following
+
+<code>
+for arg1 in a b c d e; do
+	for arg2 in 1 2 3 4 5; do
+		for arg3 in z y x w v u t; do
+		sbatch myprogram $arg1 $arg2 $arg3
+		done
+	done
+done
+</code>
+
+In this example, sbatch is a job queueing command from the SLURM job control system for supercomputers. It
+creates an entry in the job queue.
+
+The job scheduler then runs as many of the jobs in the queue at a time as it can without overcommitting the
+compute cluster. Could be 10, could be 10,000 depending on cluster size.
+
+You can do this without a job control system, but you wind up running everything at once and running out of
+resources like memory and the whole thing behaves badly. Much better to create jobs that are fed into a
+management system that knows how many to run at once.
+
+***
+My usual trick for running MIMD parallel programs in the shell is to:
+
+Set up a lockfile, if appropriate, for each child program to be launched. Spawn the child process(es) as
+background subshell(s). The subshell script(s) should not output to stdout or stderr. Before exiting, a
+subshell script should delete the lockfile assigned to it.  The parent shell continues processing, then tests
+the lockfile(s) before exiting itself, ensuring all of the child processes have completed. If the child
+processes are launched with the 'nohup' command, it is not necessary to wait or to use a lockfile.  If a
+lockfile exists, the only recourse for the shell to check it is a busy-wait loop, so I use the sleep command
+to block the loop for a second or two before checking again, to avoid overloading the CPU, possibly delaying
+completion of the child task.
+
+I've used this technique in interactive scripts where the next input is not dependent on the output of the
+previous input processing, so that the next input prompt is immediate and the user need not wait at a blank
+blinking cursor for the previous input to finish processing. This takes advantage of the fact that it takes
+much longer for the user to respond to a prompt and provide input than it does for the computer to complete
+even a fairly lengthy computation.
+
+As others have mentioned, the xargs command spawns parallel processes, but is only suitable for SIMD
+parallelism, running the same command multiple times on different arguments, exiting when all have completed.
+
+
+Example:
+
+$> more parallel.sh child1.sh child2.sh
+::::::::::::::
+parallel.sh
+::::::::::::::
+#!/bin/bash
+
+lock1="lock1-$$"
+lock2="lock2-$$"
+
+touch $lock1
+touch $lock2
+
+(./child1.sh $lock1) &
+(./child2.sh $lock2) &
+
+while [ -f $lock1 -o -f $lock2 ]; do
+	sleep 2
+done
+
+echo "Jobs complete"
+echo -n "Child1: "
+cat child1.sh.out
+echo -n "Child2: "
+cat child2.sh.out
+exit 0
+
+::::::::::::::
+child1.sh
+::::::::::::::
+#!/bin/bash
+
+lock=$1
+echo $$ > $0.out
+
+rm $lock
+exit 0
+
+::::::::::::::
+child2.sh
+::::::::::::::
+#!/bin/bash
+
+lock=$1
+echo $$ > $0.out
+
+rm $lock
+exit 0
+
+$ ./parallel.sh
+Jobs complete
+Child1: 122729
+Child2: 122730
+
+***
+Running multiple programs in parallel from a bash script can be done in several simple, robust ways depending
+on how you want to manage concurrency, collect results, and handle failures. Below are pragmatic patterns with
+examples and notes on use-cases.
+
+1) Background jobs with wait (simple, unlimited parallelism)
+Start each command with & to run in background, then use wait to block until all finish.  Exit status: wait
+returns last background job's status; capture each with $! and wait wzxhzdk:0 to get individual exit codes.
+
+Example:
+
+<code>
+cmd1 &
+p1=$!
+cmd2 &
+p2=$!
+cmd3 &
+p3=$!
+
+# wait for specific PIDs and capture statuses
+wait $p1; s1=$?
+wait $p2; s2=$?
+wait $p3; s3=$?
+
+echo "statuses: $s1 $s2 $s3"
+</code>
+
+When to use: quick scripts where you need all jobs started at once and can tolerate as many concurrent
+processes as commands.
+
+2) Run limited number of jobs (job pool / semaphore)
+Use a simple semaphore function to bound concurrency; safe for large lists.
+
+Example (N parallel workers):
+
+<code>
+max=4
+for job in "${jobs[@]}"; do
+	while (( $(jobs -rp | wc -l) >= max )); do
+		sleep 0.1
+	done
+	bash -c "$job" &
+done
+wait
+</code>
+
+Alternate semaphore using file descriptors (more robust):
+
+<code>
+max=4
+exec 3>&1
+for ((i=0;i<max;i++)); do printf '\n' >&3; done
+
+for job in "${jobs[@]}"; do
+	read -u 3
+	{
+		bash -c "$job"
+		printf '\n' >&3
+	} &
+done
+wait
+exec 3>&-
+</code>
+
+When to use: many tasks where you must limit CPU/IO contention.
+
+3) GNU parallel (recommended for complex batching)
+Install GNU parallel; it handles job distribution, retries, grouping output, job logs, and exit codes.
+Example:
+
+export JOBS=("cmd1" "cmd2" "cmd3")
+printf "%s\n" "${JOBS[@]}" | parallel -j 4
+
+Common options: -j N (jobs), --results, --halt (on-failure policies), --joblog.
+
+When to use: large-scale parallelism, complex input/output handling, logging, and robust failure control.
+
+4) xargs -P (simple parallel with streaming input)
+Use xargs -P to run N processes in parallel, useful for piping a list of arguments.
+
+Example:
+printf "%s\n" a b c | xargs -n1 -P4 -I{} bash -c 'process_item "{}"'
+
+When to use: parallelizing the same command over many inputs.
+
+5) Capturing output and exit codes
+Redirect outputs to per-job files or use GNU parallel/xargs grouping to avoid interleaved output.
+Example:
+
+cmd1 >out1.log 2>&1 & p1=$!
+cmd2 >out2.log 2>&1 & p2=$!
+wait $p1; rc1=$?
+wait $p2; rc2=$?
+
+6) Failure handling strategies
+Fail-fast: after starting jobs, poll PIDs and exit if any non-zero:
+
+for pid in "${pids[@]}"; do
+  wait "$pid" || { echo "job $pid failed"; kill "${pids[@]}"; exit 1; }
+done
+
+Collect all failures: record non-zero statuses and report at end.
+
+7) Signals and cleanup
+Trap signals to kill children and clean resources:
+trap 'kill $(jobs -pr) 2>/dev/null; exit 1' INT TERM
+
+8) Practical tips
+Prefer GNU parallel for reliability and features. Use xargs -P or simple &/wait for small scripts.  Avoid
+unbounded parallelism on long lists; limit with a semaphore or -P.  Use per-job logs or --results to prevent
+output interleaving and ease debugging.  Test on representative workloads to choose appropriate concurrency
+level relative to CPU, memory, and IO.
+
+Examples summary:
+
+Basic:                 cmdA & cmdB & wait
+Bounded concurrency:   jobs -rp loop or file-descriptor semaphore
+Advanced:              printf ... | parallel -j N
+
+Behavior and features described reflect tools and best practices current through May 2024.
+
+***
+You could just background a command by adding a & at the end of the command line. However, this can and will
+rapidly overload the CPU(s). A better practice is to become familiar with the xargs command. This will allow
+more control by implementing an impromptu processing queue with the -P <int> switch. That being said, -P 0 is
+not advisable.
+
+***
+The same way you run multiple commands on bash and of course you can use a bash script for that too:
+command1 & command2 & command3 & ...
+
+I can already see the nay-sayers scream: but this runs one after the other, not all of them simultaneously!
+Careful now... how many ampersands did I use? Did I use && or &?
+
+It's really bash basics. The double-ampersand waits until the former is finished. The single ampersand runs an
+executable in the background. Meaning, this one doesn't care, if the former ones have finished. It starts one
+after the other and puts it in the background. It starts all of them in a row.
+
+In case you don't believe it, try it with a lightweight application like say leafpad for example. Just try it.
+Does it open the next one after you close the former one or does it open all of them (more or less) at the
+same time?
+
+Note: it won't get any faster than that. Simultaneous start doesn't really exist, unless you are capable of
+actually telling your hardware to put them in separate CPU cores at the same time and even then you might run
+into other bottlenecks. So, this is not likely going to happen. Even less so with a shell script.
+
+***
+You can use & at the end of a command to put it into the background. IE
+
+tar zxf /tmp/backup1.tgz folder1 &
+pid1=$!
+
+tar zxf /tmp/backup2.tgz folder2 &
+pid2=$!
+
+If you want to pause the script until all the background processes have finished add "wait" at the end. You
+can also specify specific pids if you don't want to wait for everything (ie, if you just wanted to wait until
+pid1 finished use "wait $pid1")
+
+Note that if you close the terminal (or disconnect from the ssh session) then these commands may terminate
+without completing. For cases where that may happen you want to use nohup as Dave suggested. IE:
+
+nohup tar zxf /tmp/backup1.tgz folder1 >/dev/null >2&1 &
+nohup tar zxf /tmp/backup2.tgz folder2 >/dev/null >2&1 &
+
+***
+Depending on what you mean by "at once," there are several approaches to this:
+
+Write a script in an editor, with one command per line. Save the script (for example, as "myscript.sh"). You
+can now run the script, which contains several commands, by typing one of the following:
+
+$> source myscript.sh
+$> . myscript.sh
+$> bash myscript.sh
+
+The first two will read and execute the list of commands as if you had typed them in current environment. The
+third example will run the script in a new bash session, using the default environment plus any exported
+environment variables.
+
+You can also make your script executable by just typing the name or full path name, by making the first line
+of the script a "shebang line", with the magic number '#!' followed by the interpreter name:
+#!/bin/bash
+
+Then, make it executable:
+$> chmod u*x myscript.sh 
+
+Now you can use your script like any other system command
+
+If by "at once" you mean "concurrently", you can start a command in a subshell, in the background, in which
+case bash will read and execute the next command without waiting for the previous command to finish:
+
+Example: text in quotes is output from the respective commands/scripts, which are presumed to have different
+runtimes.
+
+$> (job1.sh) &
+"Job 1 is running"
+
+$> (job2.sh) &
+"Job 2 is running"
+
+$> job3.sh
+"Job 3 is running"
+"Job 2 is finished"
+"Job 1 is finished"
+"Job 3 is finished"
+$>
+
+Some additional care must be employed to keep track of running jobs to avoid exiting from a parent job before
+all the child jobs have finished, as they will be terminated if the parent exits first.
+
+***
+Suppose shell script number one is named s1.sh and script number two is named s2.sh
+
+Then you run both simultaneously, that is: in parallel, with the following command line:
+$> ./s1.sh & ./s2.sh &
+
+If your computer has more than one processor, chances are one will run on one processor and the other on an
+other processor. Anyhow, even with one processor, both will simultaneously be "scheduled for execution", that
+is: they will in turn be able to consume some CPU (and other) resources. And if they take approximately the
+same time to complete their work (e.g. they are actually the same script, one copied to the other) they will
+also finish their work at approximately the same time.
+
+***
+In Unix shells, you can run a command in background, by adding an unquoted & at the end of it. This returns
+you to the shell's prompt, and lets you use the same shell instance for other stuff while the command is
+running.
+
+If you have a whole bunch of them, and all of them take the same (or no) commandline arguments, you can use a
+simple loop:
+
+<code>
+for file in cmd1 cmd2 cmd3 cmd4; do
+	"$file" &
+done
+</code>
+
+Of course instead of listing each file to run like above, you can use wildcards, the contents of a file,
+output of another command, and so on.
+
+If you forgot to add the & and don't want to stop the process, you can interrupt it with ctrl+z and use "bg"
+fork it to background, this has the same effect. In either case, "fg" will put the process back in the shell's
+foreground - if there's many processes (bash calls them "jobs") you have to specify which one. Type man bash
+in a terminal window for (a lot) more info. In the manpage viewer, use / to search for a specific keyword or
+regexp.
+
+For splitting the same terminal/term window into different layers or sections, see Larye Parkins's answer. I
+use GNU Screen for this, it's very convenient for when you have a bunch of stuff running on a remote server
+for example. Some people prefer tmux, but screen does the job perfectly for my needs. Both of these also have
+the benefit that you can close the screen/tmux session and reconnect to it at any time without affecting
+the running process(es).
+
+***
+[The question is 5 years old as I write this, so the OP has probably already resolved this one way or another.
+However, no one has yet mentioned the simplest solution (at least for Linux), so here goes...]
+
+What are some good ways to make a bash script wait until another instance of the script has completed running?
+
+In two words: use flock. It's a standard command-line utility on every Linux distribution I've seen, and for
+your scenario, it sounds like it's as easy as invoking each instance of your script like this:
+
+flock /tmp/myscript.lock myscript arg1 arg2 ...
+
+This tells flock to acquire an exclusive lock on /tmp/myscript.lock before executing myscript, and that
+automatically serializes all instances. Read the flock(1) man page for other ways to use it, including how to
+embed it properly in your scripts so that every invocation of your script is automatically serialized.
+
+Note that if there are multiple scripts waiting on the lock at one time, the next instance that's allowed to
+run may not be the earliest one "queued":
+
+$> cat ./test.sh
+#!/bin/bash
+sleep 5
+echo "This is: $@"
+
+$> for i in {1..10}; do flock /tmp/t.lock ./test.sh $i & done
+This is: 7
+This is: 8
+This is: 10
+This is: 9
+This is: 1
+This is: 5
+This is: 6
+This is: 2
+This is: 3
+This is: 4
+
+If order of execution is important, you should probably use a proper job scheduler like Task Spooler. If you
+really want to roll your own solution, take a look at Tim Henderson's A Job Queue in BASH.
+
+***
+GNU Parallel allows for both multiple machines and single host. Watch the intro videos: http://pi.dk/1
+
+If your loop can generate the command lines to run, you can do this to run one jobs per CPU core:
+loop instructions | parallel -j+0
+
+If the loop is larger you may prefer:
+loop start
+	do stuff $var
+	do stuff
+	sem -j4 stuff $var
+done
+
+sem is an alias for parallel --semaphore and will create a counting semaphore with the count of 4. So GNU
+Parallel will run 4 jobs in the background and when it is started the 5th time, it will block and wait until
+one of the 4 is done. Instead of -j4 you can use -j+0 which means number of cores.
+
+If you intend to run sem from several scripts it is recommended that you give your semaphore a name:
+sem -j4 --id myname stuff $var
+
+Otherwise you risk the different sems will use the same semaphore to count on which will give unpredictable
+results.
+
+***
+Yes, it is possible, you can do something like
+
+<code>
+from multiprocessing import Pool
+
+def run_command(path):
+	command = "task.sh {}".format(path)
+	subprocess.Popen(command, shell=True)
+
+pool = Pool()
+pool.map(run_command, paths)
+</code>
+
+Here is more information about it: Parallelism in One Line
+Of course if you want to avoid using a library, you can just start multiple threads and run the command on
+each thread. Which is basically what this library is doing.
+
+***
+You can't, as Python language is not bash language.
+
+That said, you can make a Python script directly invokable from a Unix or Linux command line or Bash script -
+which is what I guess is the intent of the question - by doing this
+
+#!/usr/bin/env python
+(if you're using Python2) or
+
+#!/usr/bin/env python3
+(if you're using Python3)
+
+at the very first line of your mypython.py file, and making your mypython.py file executable. "/usr/bin/env"
+finds the Python interpreter in your path.
+
+This is called the the Shebang, and it tells Bash or other command-line interpreter where to find a program to
+launch a given script. This is the reason why Bash scripts themselves need
+#!/bin/bash
+
+as their first line.
+
+This will allow you to do stuff like
+$> ./mypython.py arg1 arg2 arg3
+
+which is what I guess the questioner wants to do.
+
+***
+Unix was designed for multitasking before the advent of Graphic user interface (Xwindows) . This is worth
+mentioning because most users will achieve what you need by opening a second, third ... window or a tab on the
+Xterminal.
+
+The "old" way of achieving the same is to lauch the program in background mode. This done by ending the
+command with an ampersand (&) and I could then do other things.
+
+Unfortunatly I never could predict ahead of time that this was a judicious choice, but there was salvation for
+air-heads like me:
+
+You interrupt the foreground process with a control-Z (^Z), the send it to the backgound with the bg command,
+and ulitmaly either call it back by doing a foreground (fg) command, or terminating it with a kill command.
+
+example:
+
+> somecmd 2>&1 >logfile
+^Z
+> bg
+> tail -f logfile
+....
+^C
+> fg
+
+line 1 - start a program with all output to logfile, however nothing happens.
+You don't want to kill the process so hangup, then background the process, and look at the logfile in
+continous mode, ... when you are happy it still works...
+
+This recipe can still be handy if you work through a ssh connection.
+
+
+---
+
