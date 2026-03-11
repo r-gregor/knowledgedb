@@ -1,0 +1,198 @@
+filename: bash-simple-habits-for-cleaner-more-readable-code-5p-20260311.txt
+https://www.howtogeek.com/simple-habits-that-instantly-transform-bash-scripts-into-cleaner-more-readable-code/
+
+4 simple habits that instantly transform Bash scripts into cleaner, more readable code
+Mar 4, 2026
+
+   Whether you´re a beginner or a hardened Bash-writing veteran, there´s always room for picking up new
+   tips. Some of the best ones take only moments to learn but are so transformative that they change
+   your entire approach. I have four that will unscramble your Bash spaghetti into a well-formatted work
+   of art.
+
+1 - Spread your pipelines over multiple lines
+   A pipeline is a sequence of commands joined by the "|" character. Each command processes the
+   output of the previous. Normally, people write pipelines like this:
+fd --type file --exec ls -l | awk '{print $3}' | grep --invert-match '^$' | sort | uniq --count \
+| sed --regexp -extended 's/(root|user)/\1-owned files/'
+
+   While functional, it lacks uniformity and is difficult to edit.
+
+   Note:
+   The previous command deeply scans the current directory and tallies up the number of different file
+   owners. It´s deliberately long to illustrate a pipeline. It´s not the most elegant or efficient
+   approach, because you can achieve the same result with find . -type f -printf '%u\n' | sort | uniq --count.
+
+   When scanning source code (or any text), we´re looking for patterns. In the example above, you likely
+   looked for the "|" character without thinking, which defines boundaries between commands. However,
+   because both commands and boundaries exist on the same horizontal axis, we must expend effort to
+   visually search for the pipes and comprehend the parts in between. That´s unnecessarily taxing, so to
+   free up our concentration, we can additionally use vertical space:
+fd --type file --exec ls -l \
+	| awk '{print $3}' \
+	| grep --invert-match '^$' \
+	| sort \
+	| uniq --count \
+	| sed --regexp-extended 's/(root|user)/\1-owned files/'
+
+   Our brains are very good at visual processing, and if we can leverage that directly, we can free up
+   our working memory to focus on intent. Instead of trying to work out where each command starts and
+   ends, we see a consistent vertical line of pipes.
+
+   This approach also makes it easier to edit in IDEs, because they often allow us to delete or move
+   entire lines.
+
+2 - Make your functions composable
+   Let´s break the previous command down to make it more readable and composable.
+
+   "Composable" code means we can assemble different things from fundamental elements (e.g.,
+   functions)-like composing a wall out of bricks.
+
+   First, we probably want a function that provides raw values, then we can build upon that in different
+   ways:
+file_stats() {
+	fd --type file --exec ls -l
+}
+
+   Then we want to pick something from the result:
+owner() {
+	awk '{print $3}'
+}
+
+   Then tally the outputs:
+tally() {
+	grep --invert-match '^$' \
+		| sort \
+		| uniq --count
+}
+
+   Lastly, modify the final message to make it clearer:
+clarify_ownership() {
+	sed --regexp-extended 's/(root|user)/\1-owned files/'
+}
+
+   Now we can construct a pipeline with these new elements:
+file_stats \
+	| owner \
+	| tally \
+	| clarify_ownership
+
+   A terminal window displays the output of the ownership script. It shows 54 root-owned files and 47
+   user-owned files:
+$> ./composable.sh ownership
+	54 root-owned files
+	47 user-owned files
+$>
+
+   Not only is it more readable, but we can change individual elements too. For example:
+clarify_date() {
+	# Replace a month (e.g., "Feb") with "files modified in <month>."
+	sed --regexp-extended 's/([[:alpha:]]+)/files modified in \1./'
+}
+
+mod_date() {
+	# Modification month column from "ls -l."
+	awk '{print $6}'
+}
+
+file_stats \
+	| mod_date \
+	| tally \
+	| clarify_date
+
+   A terminal window displays the output of the modification date script. It shows a tally of files
+   grouped by their modification month:
+$> composable.sh dates
+	 8 files modified in Apr.
+	 7 files modified in Aug.
+	 6 files modified in Dec.
+	19 files modified in Feb.
+	 8 files modified in Jan.
+	 5 files modified in Jul
+	11 files modified in Jun.
+	 6 files modified in Mar.
+	...
+$>
+
+   The "clarify_date" function uses regex and POSIX character classes.
+
+   My code is over-engineered, but it´s for illustrative purposes only. In the real world, you will
+   start with larger functions and break them down only when the need arises.
+
+3 - Prefer case statements over if-else blocks, especially when dispatching commands
+   I love switch (case) statements. If-else conditional branching looks untidy, but switches feel more
+   concise and focused. I normally use them at the foot of my script to match CLI arguments to functions
+   (aka dispatcher).
+
+   When we have a dispatcher with well-named, composable functions, we get a script with much clearer
+   intent:
+case "$1" in
+	dates)
+		file_stats \
+		| mod_date \
+		| tally \
+		| clarify_date;;
+	ownership)
+		file_stats \
+		| owner \
+		| tally \
+		| clarify_ownership;;
+esac
+
+   It´s not difficult to see what´s going on, and we need only to change a few lines to change the
+   result entirely.
+
+   I expand upon case dispatchers more in another article I wrote. It details the idiomatic (natural or
+   recommended) way to process CLI arguments. You can combine that advice with what you´ve read here
+   to make your dispatcher as neat as possible.
+
+4 - Use one-liners for short conditional branches
+   More code means more reading. The less you write, the better-as long as it´s easy to understand. If
+   statements are one culprit. When they litter our code to check program state (aka assertions),
+   they may look something like this:
+if [[ "$something" == "foo" ]]; then
+	exit 1
+fi
+
+if [[ "$something_else" == "bar" ]]; then
+	echo "'\$something_else' cannot be 'bar'"
+	exit 1
+fi
+
+if ! [[ -f "$file_path" ]]; then
+	echo "'\$file_path' must be a file path"
+	rxit 1
+fi
+
+   When you consider all the conditional branches throughout the rest of the script, the above code
+   feels like it´s creating readability issues. As implied earlier, I believe that code should be
+   visually scannable, and we can vary our style to help us achieve that. For instance, I often use the
+   following approach for assertions:
+[[ "$something" == "foo" ]] && exit 1
+[[ "$something_else" == "bar" ]] && { echo "'\$something_else' cannot be 'bar'"; exit 1; }
+[[ -f "$file_path" ]] || { echo "'\$file_path' must be a file path"; exit 1; }
+
+   You must include a ";" before a closing "}".
+
+   I use these at the top of my script and functions. When I see a one-liner like this, I know it´s an
+   assertion and not a conditional branch. It helps me quickly gauge what´s happening, without thinking
+   at all. I can understand what the code means from the error message, so I don´t need comments.
+
+   Consistency is key for readability. When we use repeating patterns for minor details, our minds can tune
+   them out and focus on the intent of the code.
+
+   Choosing how you write your code is a crucial factor, and it´s as much about visual aesthetics as it is
+   about functionality. That´s probably an unpopular opinion, but it´s rooted in science. Yes, I am asserting
+   that, because we can draw parallels between code aesthetics and user interfaces.
+
+   The science of user experience design[https://en.wikipedia.org/wiki/User_experience] (with regard to user
+   interfaces) is about encouraging users to interact with a product in a desired way. It involves using
+   whitespace, layout, and much more to influence their decisions. The general principle is to reduce the
+   cognitive burden on the user and send them clear signals. With aesthetically pleasing code, we aim for the
+   same thing, but for the reader instead.
+
+   Write consistent, straightforward code and distinguish elements through visual patterns—send the reader
+   clear signals, just like a well-designed user interface does.
+
+
+---
+
