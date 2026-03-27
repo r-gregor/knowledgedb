@@ -1,0 +1,321 @@
+filename: go-9-test-assertions-20260327.txt
+https://www.alexedwards.net/blog/the-9-go-test-assertions-i-use
+
+The 9 Go Test Assertions I Use (And Why)
+August 22, 2025
+
+Not sure how to structure your Go web application?
+   My new book guides you through the start-to-finish build of a real world web application in Go -
+   covering topics like how to structure your code, manage dependencies, create dynamic database-driven
+   pages, and how to authenticate and authorize users securely.
+
+   A few weeks ago Anton Zhiyanov published the blog post Expressive tests without testify/assert.
+   It´s a good and well thought-out post, and I recommend giving it a read if you haven´t already. In
+   the post, Anton makes the argument for not using packages like testify/assert for your test
+   assertions, and instead creating your own minimal set of assertion helpers to use in your tests. In
+   fact, so minimal that there are only 3 helpers he uses: AssertEqual, AssertErr and AssertTrue.
+
+   There are some people who would argue that even this is too much, and that you shouldn´t use
+   assertion functions in your tests at all. In fact, the Go Code Review Comments for Tests states
+   that using assert packages should be avoided, which we´ll talk about in more detail at the end of
+   this post.
+
+   But I agree with the general direction of Anton´s thinking. I do use assertion functions - and I´ve
+   always preferred to write my own rather than using a third-party package. Over time I´ve whittled
+   them down to a standard collection of nine basic functions that I use:
+
+--------------------------------------------------------------------------------------------------------
+Assertion                       What it checks
+--------------------------------------------------------------------------------------------------------
+Equal(got, want)                Checks that got and want are equal
+NotEqual(got, want)             Checks that got and want are not equal
+True(got)                       Checks that got is true
+False(got)                      Checks that got is false
+Nil(got)                        Checks that got is nil
+NotNil(got)                     Checks that got is not nil
+ErrorIs(got, want)              Checks that got is an error that wraps or equals want
+ErrorAs(got, target)            Checks that got is an error that can be assigned to target via errors.As
+MatchesRegexp(got, pattern)     Checks that got matches the regex pattern
+--------------------------------------------------------------------------------------------------------
+
+   Between these nine functions, I´m able to easily do the vast majority of the checks that I want in my
+   tests. Here are some examples from a web application that I´m currently working on:
+
+assert.Equal(t, w.StatusCode, http.StatusTeapot)
+assert.Equal(t, w.Header().Get("X-Custom-Header"), "custom-value")
+assert.NotEqual(t, updatedSession.token, originalSession.token)
+assert.True(t, defaultShutdownPeriod > defaultWriteTimeout)
+assert.True(t, strings.Contains(buf.String(), "level=ERROR"))
+assert.False(t, strings.Contains(string(decodedCookieValue), "this is a test value"))
+assert.Nil(t, err)
+assert.ErrorIs(t, err, sql.ErrNoRows)
+assert.MatchesRegexp(t, user.HashedPassword, `^\$2a\$12\$[./0-9A-Za-z]{53}$`)
+
+   From the perspective of someone reading the code, I think it´s quite easy to understand what these
+   assertions are checking - even if you´ve never seen them before. And this might be personal
+   preference, but when writing tests I actually prefer having only a small number of basic assertion
+   functions to remember and pick from, rather than lots of very specific ones.
+
+   If there is a complex check, which can´t be done in a single line as part of the function call, I
+   normally create an additional function and use it in conjunction with the True or False assertions.
+   For example, when testing a web application, I will sometimes want to check if an HTML response body
+   contains a specific HTML node (based on a [https://css-tricks.com/css-selectors/]CSS selector), so I will
+   make a containsHTMLNode() function and then use it in my tests like this:
+
+assert.True(t, containsHTMLNode(t, res.Body, `meta[name="page"][content="home"]`))
+assert.True(t, containsHTMLNode(t, res.Body, `form[method="POST"][action="/login"]`))
+
+   In theory, these assertion helpers could be reduced further. For example, the Nil(got) and
+   NotNil(got) functions could be dropped in favour of using Equal(got, nil) and NotEqual(got, nil). Or
+   MatchesRegexp(got, pattern) could be dropped in favour of using True() to check that a got value
+   matches a specific regexp pattern. But these are checks I use often enough that I like having a
+   specific assertion function for them.
+
+   Go back to Anton´s post for a moment, he effectively combines the assert.Nil(), assert.NotNil(),
+   assert.ErrorIs() and assert.ErrorAs() functions that I have into a single AssertErr() function. The
+   exact kind of check that is carried out by AssertErr() depends on what arguments you pass, or don´t
+   pass, to it.
+
+   However, I prefer assertion functions to be responsible for checking one specific thing. I think it´s
+   less prone to mistakes, as well as clearer for a reader exactly what is being checked. Overall, I´m
+   happy to have a few more assertion functions in exchange for some extra convenience, clarity and
+   precision.
+
+   Here´s the complete code that I´m currently using for those functions:
+
+package assert
+
+import (
+	"errors"
+	"reflect"
+	"regexp"
+	"testing"
+)
+
+func Equal[T any](t *testing.T, got, want T) {
+	t.Helper()
+	if !isEqual(got, want) {
+		t.Errorf("got: %v; want: %v", got, want)
+	}
+}
+
+func NotEqual[T any](t *testing.T, got, want T) {
+	t.Helper()
+	if isEqual(got, want) {
+		t.Errorf("got: %v; expected values to be different", got)
+	}
+}
+
+func True(t *testing.T, got bool) {
+	t.Helper()
+	if !got {
+		t.Errorf("got: false; want: true")
+	}
+}
+
+func False(t *testing.T, got bool) {
+	t.Helper()
+	if got {
+		t.Errorf("got: true; want: false")
+	}
+}
+
+func Nil(t *testing.T, got any) {
+	t.Helper()
+	if !isNil(got) {
+		t.Errorf("got: %v; want: nil", got)
+	}
+}
+
+func NotNil(t *testing.T, got any) {
+	t.Helper()
+	if isNil(got) {
+		t.Errorf("got: nil; want: non-nil")
+	}
+}
+
+func ErrorIs(t *testing.T, got, want error) {
+	t.Helper()
+	if !errors.Is(got, want) {
+		t.Errorf("got: %v; want: %v", got, want)
+	}
+}
+
+func ErrorAs(t *testing.T, got error, target any) {
+	t.Helper()
+	if got == nil {
+		t.Errorf("got: nil; want assignable to: %T", target)
+		return
+	}
+	if !errors.As(got, target) {
+		t.Errorf("got: %v; want assignable to: %T", got, target)
+	}
+}
+
+func MatchesRegexp(t *testing.T, got, pattern string) {
+	t.Helper()
+	matched, err := regexp.MatchString(pattern, got)
+	if err != nil {
+		t.Fatalf("unable to parse regexp pattern %s: %s", pattern, err.Error())
+		return
+	}
+	if !matched {
+		t.Errorf("got: %q; want to match %q", got, pattern)
+	}
+}
+
+func isEqual[T any](got, want T) bool {
+	if isNil(got) && isNil(want) {
+		return true
+	}
+	if equalable, ok := any(got).(interface{ Equal(T) bool }); ok {
+		return equalable.Equal(want)
+	}
+	return reflect.DeepEqual(got, want)
+}
+
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return rv.IsNil()
+	}
+	return false
+}
+
+Are assertion functions an anti-pattern?
+   As I mentioned at the start of this post, the [https://go.dev/wiki/TestComments#assert-libraries]Go Wiki
+   says that using assert packages should be avoided. It starts with this example of some 'bad' test code:
+
+assert.IsNotNil(t, "obj", obj)
+assert.StringEq(t, "obj.Type", obj.Type, "blogPost")
+assert.IntEq(t, "obj.Comments", obj.Comments, 2)
+assert.StringNotEq(t, "obj.Body", obj.Body, "")
+
+   And suggests this as a 'good' alternative:
+
+if obj == nil || obj.Type != "blogPost" || obj.Comments != 2 || obj.Body == "" {
+	t.Errorf("AddPost() = %+v", obj)
+}
+
+   Let´s quickly run through the arguments in the Go Wiki for these approaches being good and bad.
+
+     [The bad code] either stops the test early (if assert calls t.Fatalf or panic) or omits
+     interesting information about what the test got right
+
+   There are packages out there (such as testify/require) that will stop a test early on the first
+   assertion failure, and when they do you lose information about what subsequent checks would have
+   passed. But not all of them do this, and if you make your own helpers for test assertions, you
+   control what they do. You can call t.Errorf() to record the failure and continue the test if you want
+   to.
+
+     [The bad code] also forces the assert package to create a whole new sub-language instead of
+     reusing the existing programming language (Go itself)
+
+   I think this is a valid point and worth keeping in mind. Sometimes it can be frustrating to have to
+   learn how a third-party package works, and to remember its API and syntax. And if the package is used
+   in a project that lots of people work on, you´re forcing all of them to spend the time to learn it.
+   Sometimes it´s easier to just read and write Go code that uses the standard library - even if it
+   means you end up with more lines of code.
+
+   But that said, I´m not sure that having a small number of basic assertion functions adds that much
+   overhead... even for new people working on a codebase. Does having 3 assertion helpers like Anton, or
+   9 like me, really count as creating a whole new sub-language? Even if you argue that it does, it´s a
+   very small sub-language.
+
+     Assert libraries make it too easy to write imprecise tests
+
+   I think this is a good point in some - but not all - cases. If you´re using a package that does
+   different kinds of assertion checks in the same function (e.g. depending on the type of the argument
+   passed to it, or the presence or not of a variadic argument) then yes, it´s possible to see how it
+   potentially increases the risk of bugs or a loss of precision in your tests. But if the assertion
+   function checks one thing and one thing only, I don´t see how it would be less precise.
+
+   The assert.Equal() function that I use is a good example of this. It´s imprecise because it checks
+   whether both values are nil or whether both are the same based on an Equals() method or they are
+   equal according to reflect.DeepEqual(). The ors introduce a subtle loss of precision that wouldn´t
+   exist if we were only checking one of those things.
+
+   However, the go-cmp/cmp.Equal function, which the Go Wiki goes on to recommend using for equality
+   checks, is imprecise in a similar way. I´m not sure that the assert.Equal() code above is really any
+   worse in this sense.
+
+     [Assert libraries] inevitably end up duplicating features already in the language, like expression
+     evaluation, comparisons, sometimes even more.
+
+   Yes. And I think this is why my preference is to use a small set of very basic assertions, like
+   assert.Equal() and assert.True(). It means that I can write assertions like assert.True(t,
+   len(mySlice) > 3) or assert.False(t, strings.Contains(name, "admin")) using the normal Go functions
+   and operators. I don´t get stuck down a rabbit hole implementing helpers like
+   assert.SliceLengthGreaterThan() or assert.StringDoesNotContain() for every kind of check I need to
+   do.
+
+   On the flip side, the Go Wiki doesn´t provide balance and mention the upsides of using assertion
+   helpers, which is a shame. In terms of developer experience, I suspect that even the most hardened
+   Gopher would agree that writing three lines of code like this:
+
+assert.Equal(t, w.StatusCode, http.StatusTeapot)
+assert.ErrorIs(t, err, sql.ErrNoRows)
+assert.True(t, defaultShutdownPeriod > defaultWriteTimeout)
+
+   Is a faster and more enjoyable experience than writing the equivalent code like this:
+
+if w.StatusCode != http.StatusTeapot {
+	t.Errorf("got %d; want %d", w.StatusCode, http.StatusTeapot)
+}
+
+if !errors.Is(err, sql.ErrNoRows) {
+	t.Errorf("got error %q; want error to be or wrap %q", err.String(), sql.ErrNoRows)
+}
+
+if defaultShutdownPeriod <= defaultWriteTimeout {
+	t.Errorf("default shutdown period %s must be greater than default write timeout %s", \
+	defaultShutdownPeriod, defaultWriteTimeout)
+}
+
+   Not only is the code shorter, but it takes away the cognitive overhead of having to write a failure
+   message for each check. Which is both good and bad.
+
+   I find it good because it frees up my brain to focus on arguably the most important thing - which is
+   the logic of the test and what is being tested. When I´m thinking about test logic, I don´t want to
+   get distracted trying to craft a perfect failure message, or having to look up for the 100th time
+   whether it is got before want or want before got. Being able to type out assertions quickly,
+   without losing my train of thought, is something that I really value and appreciate.
+
+   And it´s bad, because having useful and thoughtful failure messages can make debugging a problem
+   easier. Getting a failure message that reads like this:
+
+--- FAIL: TestServerConfiguration (0.00s)
+   - FAIL: TestServerConfiguration/Default_timeouts_are_reasonable (0.00s)
+        server_test.go:24: default shutdown period 5s must be greater than default write timeout 10s
+
+   Is much better than using an assert.True() helper and getting a failure message like this:
+--- FAIL: TestServerConfiguration (0.00s)
+   - FAIL: TestServerConfiguration/Default_timeouts_are_reasonable (0.00s)
+        server_test.go:22: got: false; want: true
+
+   In this second example, all you have to go on to start debugging the failure is the file name and
+   line number of the check - it doesn´t even include the value that caused the check to fail. I do
+   think this, in particular, is a genuine downside of the assert.True() and assert.False() helpers that
+   I use.
+
+Summary
+   I´ve found that the nine assertion helpers I shared above have worked well for me in a variety of
+   projects - and they might work well for you too. But ultimately whether they are the right fit
+   depends on your preferences, your team members, and the specific project.
+
+   If you use a small collection of basic assertion functions like this, rather than a large third-party
+   package, then I think that most of the criticisms that the Go Wiki makes of assert packages don´t
+   really apply. But you still need to accept that the failure messages printed by assertion functions
+   may not be as helpful as a tailored, specific, failure message would be.
+
+   On the plus side, they make for a good developer experience when writing tests. I particularly
+   appreciate that they are quick to write and allow my mind to stay focused on the logic of what I´m
+   testing. And on balance, anything that encourages me to write more tests is probably a good thing : )
+
+
+---
+

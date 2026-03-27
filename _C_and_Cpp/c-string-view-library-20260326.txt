@@ -1,0 +1,955 @@
+filename: c-string-view-library-20260326.txt
+https://codereview.stackexchange.com/questions/291242/a-string-view-library-in-c
+
+A String View Library in C
+
+   I was recently working through the PintOS projects and became curious if there was a better way
+   to do some string processing in C. Specifically, instead of strtok_r, I wanted to know if robust
+   read-only tokenizer alternatives existed. I could not find any so I made my own and ended up creating
+   some string searching functionality as well.
+
+   I modeled the c-str-view library directly after std::string_view in C++, which I have found to be
+   helpful in the past. I will include the interface I am considering below. Would this library help
+   other C programmers as it helped me, or should I shelve it as a fun side project/exercise? For
+   context, I don´t have extensive experience with C and am open to learn based on feedback. My
+   questions are as follows regarding the proposed API.
+     * What further functionality and documentation would a user expect to actually consider using this
+       library? Should anything already present in the interface be changed or deleted? My goal is to
+       make the first step of string handling as simple and robust as possible. Then if a user decides
+       they need dynamic string management they can hopefully use these read-only views to make that job
+       easier as they manage their own memory.
+     * The str_view type is treated as pass-by-value throughout most of the interface to provide
+       flexible syntax and a more functional style if desired. Is this justifiable in C where that
+       probably means 16 byte copies on 64-bit platforms?
+     * If this library is worth pursuing further, I am a little confused on how to approach Unicode.
+       Right now the library only handles const char * data. Should it do more? How would you approach
+       expanding the interface to cover Unicode as well?
+
+   Feel free to look at the code in the linked repository, but that is definitely not required for these
+   questions (though it would of course be appreciated!). I am most curious about how viable this
+   library is and how to best design the interface if it would be useful to others.
+
+#ifndef STR_VIEW
+#define STR_VIEW
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+
+/* A str_view is a read-only view of string data in C. It is modeled after
+   the C++ std::string_view. It consists of a pointer to const char data
+   and a size_t field. Therefore, the exact size of this type may be platform
+   dependent but it is small enough that one should prefer to use the provided
+   functions when manupulating views. Try to avoid accessing struct fields.
+   A str_view is a cheap, copyable type in all functions but swap. */
+typedef struct {
+	const char *s;
+	size_t sz;
+} str_view;
+
+/* Standard three way comparison type in C. See the comparison
+   functions for how to interpret the comparison results. ERR
+   is returned if bad input is provided to any comparison. */
+typedef enum {
+	LES = -1,
+	EQL = 0,
+	GRT = 1,
+	ERR,
+} sv_threeway_cmp;
+
+/*==========================  Construction  ================================*/
+
+/* A macro provided to obtain the length of string literals. Best used with
+   the macro below, but perhaps has uses on its own.
+
+      static const str_view prefix = {.s = "test_", .sz = SVLEN("test_")};
+
+   At runtime, prefer the provided functions for all other str_view needs. */
+#define SVLEN(str) ((sizeof((str)) / sizeof((str)[0])) - sizeof((str)[0]))
+
+/* A macro to reduce the chance for errors in repeating oneself when
+   constructing an inline or const str_view. The input must be a string
+   literal. For example, the above example becomes:
+
+      static const str_view prefix = SV("test_");
+
+   One can even use this in code when string literals are used rather than
+   saved constants to avoid errors in str_view constructions.
+
+       for (str_view cur = sv_begin_tok(ref, SV(" "));
+            !sv_end_tok(ref_view, cur);
+            cur = sv_next_tok(ref_view, cur, SV(" "))
+       {}
+
+   However saving the str_view in a constant may be more convenient. */
+#define SV(str) ((str_view){(str), SVLEN((str))})
+
+/* Constructs and returns a string view from a NULL TERMINATED string.
+   It is undefined to construct a str_view from a non terminated string. */
+str_view sv(const char *str);
+
+/* Constructs and returns a string view from a sequence of valid n bytes
+   or string length, whichever comes first. The resulting str_view may
+   or may not be null terminated at the index of its size. */
+str_view sv_n(const char *str, size_t n);
+
+/* Constructs and returns a string view from a NULL TERMINATED string
+   broken on the first ocurrence of delimeter if found or null
+   terminator if delim cannot be found. This constructor will also
+   skip the delimeter if that delimeter starts the string. This is similar
+   to the tokenizing function in the iteration section. */
+str_view sv_delim(const char *str, const char *delim);
+
+/* Creates the substring from position pos for count length. The count is
+   the minimum value between count and (str_view.sz - pos). If an invalid
+   position is given greater than str_view length an empty view is returned
+   positioned at the end of str_view. This position may or may not hold the
+   null terminator. */
+str_view sv_substr(str_view sv, size_t pos, size_t count);
+
+/* A sentinel empty string. Safely dereferenced to view a null terminator.
+   This may be returned from various functions when bad input is given
+   such as NULL as the underlying str_view string pointer. */
+const char *sv_null(void);
+
+/* The end of a str_view guaranted to be greater than or equal to size.
+   May be used for the idiomatic check for most string searching function
+   return values when something is not found. If a size is returned from
+   a searching function it is possible to check it against npos. */
+size_t sv_npos(str_view sv);
+
+/* Returns true if the provided str_view is empty, false otherwise.
+   This is a useful function to check for str_view searches that yeild
+   an empty view at the end of a str_view when an element cannot be
+   found. See sv_svsv or sv_rsvsv as an example. */
+bool sv_empty(str_view sv);
+
+/* Returns the length of the str_view in O(1) time. */
+size_t sv_len(str_view sv);
+
+/* Returns the bytes of str_view including null terminator. Note that
+   string views may not actually be null terminated but the position at
+   str_view[str_view.sz] is interpreted as the null terminator and thus
+   counts towards the byte count. */
+size_t sv_bytes(str_view sv);
+
+/* Returns the size of the null terminated string O(n) */
+size_t sv_strlen(const char *str);
+
+/* Returns the bytes of the string pointer to, null terminator included. */
+size_t sv_strbytes(const char *str);
+
+/* Swaps the contents of a and b. Becuase these are read only views
+   only pointers and sizes are exchanged. */
+void sv_swap(str_view *a, str_view *b);
+
+/* Copies the max of str_sz or src_str length into a view, whichever
+   ends first. This is the same as sv_n. */
+str_view sv_copy(const char *src_str, size_t str_sz);
+
+/* Fills the destination buffer with the minimum between
+   destination size and source view size, null terminating
+   the string. This may cut off src data if dest_sz < src.sz.
+   Returns how many bytes were written to the buffer. */
+size_t sv_fill(char *dest_buf, size_t dest_sz, str_view src);
+
+/* Returns a str_view of the entirety of the underlying string, starting
+   at the current view pointer position. This guarantees that the str_view
+   returned ends at the null terminator of the underlying string as all
+   strings used with str_views are assumed to be null terminated. It is
+   undefined behavior to provide non null terminated strings to any
+   str_view code. */
+str_view sv_extend(str_view sv);
+
+/*============================  Comparison  ================================*/
+
+/* Returns the standard C threeway comparison between cmp(lhs, rhs)
+   between two string views.
+   lhs LES( -1  ) rhs (lhs is less than rhs)
+   lhs EQL(  0  ) rhs (lhs is equal to rhs)
+   lhs GRT(  1  ) rhs (lhs is greater than rhs).
+   Comparison is bounded by the shorter str_view length. ERR is
+   returned if bad input is provided such as a str_view with a
+   NULL pointer field. */
+sv_threeway_cmp sv_cmp(str_view lhs, str_view rhs);
+
+/* Returns the standard C threeway comparison between cmp(lhs, rhs)
+   between a str_view and a c-string.
+   str_view LES( -1  ) rhs (str_view is less than str)
+   str_view EQL(  0  ) rhs (str_view is equal to str)
+   str_view GRT(  1  ) rhs (str_view is greater than str)
+   Comparison is bounded by the shorter str_view length. ERR is
+   returned if bad input is provided such as a str_view with a
+   NULL pointer field. */
+sv_threeway_cmp sv_strcmp(str_view lhs, const char *rhs);
+
+/* Returns the standard C threeway comparison between cmp(lhs, rhs)
+   between a str_view and the first n bytes (inclusive) of str
+   or stops at the null terminator if that is encountered first.
+   str_view LES( -1  ) rhs (str_view is less than str)
+   str_view EQL(  0  ) rhs (str_view is equal to str)
+   str_view GRT(  1  ) rhs (str_view is greater than str)
+   Comparison is bounded by the shorter str_view length. ERR is
+   returned if bad input is provided such as a str_view with a
+   NULL pointer field. */
+sv_threeway_cmp sv_strncmp(str_view lhs, const char *rhs, size_t n);
+
+/* Returns the minimum between the string size vs n bytes. */
+size_t sv_minlen(const char *str, size_t n);
+
+/*============================  Iteration  ==================================*/
+
+/* For the forward and reverse tokenization use the idiomatic for loop
+   to acheive the desired tokenization.
+
+      for (str_view tok = sv_begin_tok(src, delim);
+           !sv_end_tok(src, tok),
+           tok = sv_next_tok(src, tok, delim))
+      {}
+
+      for (str_view tok = sv_rbegin_tok(src, delim);
+           !sv_rend_tok(src, tok),
+           tok = sv_rnext_tok(src, tok, delim))
+      {}
+
+   Other patterns are possible but this is recommended for tokenization.
+   The same applies to character iteration.
+
+      for (const char *i = sv_begin(src); i != sv_end(src); i = sv_next(i))
+      {}
+
+      for (const char *i = sv_rbegin(src); i != sv_rend(src); i = sv_rnext(i))
+      {}
+
+   For character iteration, it is undefined behavior to change the str_view
+   being iterated through before the loop terminates. */
+
+/* Finds the first tokenized position in the string view given any length
+   delim str_view. Skips leading delimeters in construction. If the
+   str_view to be searched stores NULL than the sv_null() is returned. If
+   delim stores NULL, that is interpreted as a search for the null terminating
+   character or empty string and the size zero substring at the final position
+   in the str_view is returned wich may or may not be the null termiator. If no
+   delim is found the entire str_view is returned. */
+str_view sv_begin_tok(str_view src, str_view delim);
+
+/* Returns true if no further tokes are found and position is at the end
+   position, meaning a call to sv_next_tok has yielded a size 0 str_view
+   that points at the end of the src str_view which may or may not be null
+   terminated. */
+bool sv_end_tok(str_view src, str_view tok);
+
+/* Advances to the next token in the remaining view seperated by the delim.
+   Repeating delimter patterns will be skipped until the next token or end
+   of string is found. If str_view stores NULL the sv_null() placeholder
+   is returned. If delim stores NULL the end position of the str_view
+   is returned which may or may not be the null terminator. The tok is
+   bounded by the length of the view between two delimeters or the length
+   from a delimeter to the end of src, whichever comes first. */
+str_view sv_next_tok(str_view src, str_view tok, str_view delim);
+
+/* Obtains the last token in a string in preparation for reverse tokenized
+   iteration. Any delimeters that end the string are skipped, as in the
+   forward version. If src is NULL sv_null is returned. If delim is null
+   the entire src view is returned. Though the str_view is tokenized in
+   reverse, the token view will start at the first character and be the
+   length of the token found. */
+str_view sv_rbegin_tok(str_view src, str_view delim);
+
+/* Given the current str_view being iterated through and the current token
+   in the iteration returns true if the ending state of a reverse tokenization
+   has been reached, false otherwise. */
+bool sv_rend_tok(str_view src, str_view tok);
+
+/* Advances the token in src to the next token between two delimeters provided
+   by delim. Repeating delimiters are skipped until the next token is found.
+   If no further tokens can be found an empty str_view is returned with its
+   pointer set to the start of the src string being iterated through. Note
+   that a multicharacter delimiter may yeild different tokens in reverse
+   than in the forward direction when partial matches occur and some portion
+   of the delimeter is in a token. This is because the string is now being
+   parsed from right to left. However, the token returned starts at the first
+   character and is read from left to right between two delimeters as is
+   in the forward tokenization.  */
+str_view sv_rnext_tok(str_view src, str_view tok, str_view delim);
+
+/* Returns a read only pointer to the beginning of the string view,
+   the first valid character in the view. If the view stores NULL,
+   the placeholder sv_null() is returned. */
+const char *sv_begin(str_view sv);
+
+/* Returns a read only pointer to the end of the string view. This
+   may or may not be a null terminated character depending on the
+   view. If the view stores NULL, the placeholder sv_null() is returned. */
+const char *sv_end(str_view sv);
+
+/* Advances the pointer from its previous position. If NULL is provided
+   sv_null() is returned. */
+const char *sv_next(const char *c);
+
+/* Returns the reverse iterator beginning, the last character of the
+   current view. If the view is null sv_null() is returned. If the
+   view is sized zero with a valid pointer that pointer in the
+   view is returned. */
+const char *sv_rbegin(str_view sv);
+
+/* The ending position of a reverse iteration. It is undefined
+   behavior to access or use rend. It is undefined behavior to
+   pass in any str_view not being iterated through as started
+   with rbegin. */
+const char *sv_rend(str_view sv);
+
+/* Advances the iterator to the next character in the str_view
+   being iterated through in reverse. It is undefined behavior
+   to change the str_view one is iterating through during
+   iteration. If the char pointer is null, sv_null() is returned. */
+const char *sv_rnext(const char *c);
+
+/* Returns the character pointer at the minimum between the indicated
+   position and the end of the string view. If NULL is stored by the
+   str_view then sv_null() is returned. */
+const char *sv_pos(str_view sv, size_t i);
+
+/* The characer in the string at position i with bounds checking.
+   If i is greater than or equal to the size of str_view the null
+   terminator character is returned. */
+char sv_at(str_view sv, size_t i);
+
+/* The character at the first position of str_view. An empty
+   str_view or NULL pointer is valid and will return '\0'. */
+char sv_front(str_view sv);
+
+/* The character at the last position of str_view. An empty
+   str_view or NULL pointer is valid and will return '\0'. */
+char sv_back(str_view sv);
+
+/*============================  Searching  =================================*/
+
+/* Searches for needle in hay starting from pos. If the needle
+   is larger than the hay, or position is greater than hay length,
+   then hay length is returned. */
+size_t sv_find(str_view hay, size_t pos, str_view needle);
+
+/* Searches for the last occurence of needle in hay starting from pos
+   from right to left. If found the starting position of the string
+   is returned, the same as find. If not found hay size is returned.
+   The only difference from find is the search direction. If needle
+   is larger than hay, hay length is returned. If the position is
+   larger than the hay, the entire hay is searched. */
+size_t sv_rfind(str_view hay, size_t pos, str_view needle);
+
+/* Returns true if the needle is found in the hay, false otherwise. */
+bool sv_contains(str_view hay, str_view needle);
+
+/* Returns a view of the needle found in hay at the first found
+   position. If the needle cannot be found the empty view at the
+   hay length position is returned. This may or may not be null
+   terminated at that position. If needle is greater than
+   hay length an empty view at the end of hay is returned. If
+   hay is NULL, sv_null is returned (modeled after strstr). */
+str_view sv_svsv(str_view hay, str_view needle);
+
+/* Returns a view of the needle found in hay at the last found
+   position. If the needle cannot be found the empty view at the
+   hay length position is returned. This may or may not be null
+   terminated at that position. If needle is greater than
+   hay length an empty view at hay size is returned. If hay is
+   NULL, sv_null is returned (modeled after strstr). */
+str_view sv_rsvsv(str_view hay, str_view needle);
+
+/* Returns true if a prefix shorter than or equal in length to
+   the str_view is present, false otherwise. */
+bool sv_starts_with(str_view sv, str_view prefix);
+
+/* Removes the minimum between str_view length and n from the start
+   of the str_view. It is safe to provide n larger than str_view
+   size as that will result in a size 0 view to the end of the
+   current view which may or may not be the null terminator. */
+str_view sv_remove_prefix(str_view sv, size_t n);
+
+/* Returns true if a suffix less or equal in length to str_view is
+   present, false otherwise. */
+bool sv_ends_with(str_view sv, str_view suffix);
+
+/* Removes the minimum between str_view length and n from the end. It
+   is safe to provide n larger than str_view and that will result in
+   a size 0 view to the end of the current view which may or may not
+   be the null terminator. */
+str_view sv_remove_suffix(str_view sv, size_t n);
+
+/* Finds the first position of an occurence of any character in set.
+   If no occurence is found hay size is returned. An empty set (NULL)
+   is valid and will return position at hay size. An empty hay
+   returns 0. */
+size_t sv_find_first_of(str_view hay, str_view set);
+
+/* Finds the first position at which no characters in set can be found.
+   If the string is all characters in set hay length is returned.
+   An empty set (NULL) is valid and will return position 0. An empty
+   hay returns 0. */
+size_t sv_find_first_not_of(str_view hay, str_view set);
+
+/* Finds the last position of any character in set in hay. If
+   no position is found hay size is returned. An empty set (NULL)
+   is valid and returns hay size. An empty hay returns 0. */
+size_t sv_find_last_of(str_view hay, str_view set);
+
+/* Finds the last position at which no character in set can be found.
+   An empty set (NULL) is valid and will return the final character
+   in the str_view. An empty hay will return 0. */
+size_t sv_find_last_not_of(str_view hay, str_view set);
+
+/*============================  Printing  ==================================*/
+
+/* Writes all characters in str_view to specified file such as stdout. */
+void sv_print(FILE *f, str_view sv);
+
+#endif /* STR_VIEW */
+
+***
+Only include the header files that are required:
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+
+   It is useless to include both stddef.h and stdio.h for size_t. Remove stdio.h.
+
+The value of each subsequent enumerator is one greater than the previous enumerator:
+
+   So you can just do:
+typedef enum {
+	LES = -1,
+	EQL,
+	GRT,
+	ERR,
+} sv_threeway_cmp;
+
+   instead of:
+typedef enum {
+	LES = -1,
+	EQL = 0,
+	GRT = 1,
+	ERR,
+} sv_threeway_cmp;
+
+   They should also be prefixed with SV_, similar to how all the functions are prefixed with sv_.
+
+Functions that receive pointers should use array syntax and distinguish different cases:
+
+   The function declarations aren´t as self-descriptive as they could be. C (since C99, or about 25
+   years) has a method for declaring a pointer parameter that must not be null. This is done by the
+   rarely used syntax of putting the static keyword inside the parameter declaration:
+
+void func(char arg[static 1]) {
+	....
+}
+
+   This says that arg must point to the first element of an array of at least one element, per C
+   2011 [N1570] 6.7.6.3 7, which means that it can not be null.
+
+   Now I will present 3 ways this syntax can be utilized to distinguish different cases:
+    1. A pointer to a single object of type char:
+void func(char arg[static 1]);
+
+    2. A pointer to a collection of objects of known numbers of type char:
+void func(char arg[static 256]);
+
+    3. A pointer to a collection of objects of unknown numbers of type char:
+void func(size_t n, char arg[static n]);
+
+   And of course, without the array syntax:
+
+    4. A pointer to a single object of type char or a null pointer:
+void func(char *arg);
+
+   (The above are my notes from the book Modern C by Jens Gustedt. It is a great read, and a new C2X
+   version has been released recently.)
+
+   Now after learning this, we can rewrite these two function declarations:
+/* Constructs and returns a string view from a NULL TERMINATED string.
+   It is undefined to construct a str_view from a non terminated string. */
+str_view sv(const char *str);
+
+/* Constructs and returns a string view from a sequence of valid n bytes
+   or string length, whichever comes first. The resulting str_view may
+   or may not be null terminated at the index of its size. */
+str_view sv_n(const char *str, size_t n);
+
+   as:
+/* Constructs and returns a string view from a NULL TERMINATED string.
+   It is undefined to construct a str_view from a non terminated string. */
+str_view sv(const char str[static 1]);
+
+/* Constructs and returns a string view from a sequence of valid n bytes
+   or string length, whichever comes first. The resulting str_view may
+   or may not be null terminated at the index of its size. */
+str_view sv_n(size_t n, const char str[static n]);
+
+   Note that you can also use [https://gcc.gnu.org/onlinedocs/gcc/Function-Attributes.html]GNU C´s function
+   attributes, namely __attribute((nonnull))__ and __attribute((null_terminated_string_arg))__. I´d also
+   suggest looking into pure, const, malloc, et cetera as I see benefit in using them in your library. For
+   instance, sv_strbytes(), sv_len(), and sv_strlen() are pure functions, and sv_len() is also a constant
+   function.
+
+   See my code [https://github.com/Melkor-1/utils/blob/main/attrib.h]here for some idea on how to use them
+   portably. They are supported by GCC, Clang, and Intel´s compiler. Or this short example:
+
+#include <stdio.h>
+#include <string.h>
+
+#if defined(__GNUC__) || defined(__clang__) || defined(__INTEL_LLVM_COMPILER)
+    #define ATTRIB_NONNULL(...)             __attribute__((nonnull(__VA_ARGS__)))
+#else
+    #define ATTRIB_NONNULL(...)             /**/
+#endif
+
+static size_t my_strlen(const char s[static 1]) {
+	return strlen(s);
+}
+
+ATTRIB_NONNULL(1) static size_t my_strlen1(const char *s) {
+	return strlen(s);
+}
+
+int main(void) {
+	return my_strlen(NULL), my_strlen1(NULL);
+}
+
+   And the output it produced (make null_diagnostic):
+null_diagnostic.c: In function 'main':
+null_diagnostic.c:22:29: warning: argument 1 null where non-null expected [-Wnonnull]
+   22 |     return my_strlen(NULL), my_strlen1(NULL);
+      |                             ^~~~~~~~~~
+null_diagnostic.c:15:33: note: in a call to function 'my_strlen1' declared 'nonnull'
+   15 | ATTRIB_NONNULL(1) static size_t my_strlen1(const char *s)
+      |                                 ^~~~~~~~~~
+null_diagnostic.c:22:12: warning: argument 1 to 'char[static 1]' is null where non-null expected [-Wnonnull]
+   22 |     return my_strlen(NULL), my_strlen1(NULL);
+      |            ^~~~~~~~~~~~~~~
+null_diagnostic.c:10:15: note: in a call to function 'my_strlen'
+   10 | static size_t my_strlen(const char s[static 1])
+      |               ^~~~~~~~~
+
+   See @Lundin´s answer here for all the use-cases of the keyword static: What does the static
+   keyword do in C?
+
+Do not obfuscate macro definitions:
+
+/* At runtime, prefer the provided functions for all other str_view needs. */
+#define SVLEN(str) ((sizeof((str)) / sizeof((str)[0])) - sizeof((str)[0]))
+
+   Since str is supposed to be a string literal, this is simply:
+#define SVLEN(str) (sizeof(str) - 1)
+
+Use "" "" to force a macro argument to be a string literal:
+
+   Currently, SV() and SVLEN() function-like macros allow more than just string literals. If we have:
+#define SV(str)    (sizeof(str) - 1)
+
+int main(void) {
+	static const char *const s = "hello";
+	char word[] = "hello";
+	double a = 0.0f;
+	double *d = &a;
+
+	printf("%zu\n", SV(NULL));
+	printf("%zu\n", SV(word));
+	printf("%zu\n", SV(d));
+	printf("%zu\n", SV(s));
+
+	return 0;
+}
+
+   The code compiles correctly and issues no errors or warnings, and the output is:
+7
+5
+7
+7
+
+   But that wouldn´t be the case if you were to use the weird empty string literals in its expansion ""
+   str "" to ensure that SV() is always called with a string literal (this works because consecutive
+   string literals are concatenated):
+#define SV(str)         (sizeof("" str "") - 1)
+
+int main(void) {
+	static const char *const s = "hello";
+	char word[] = "hello";
+	double a = 0.0f;
+	double *d = &a;
+
+	printf("%zu\n", SV(NULL));
+	printf("%zu\n", SV(word));
+	printf("%zu\n", SV(d));
+	printf("%zu\n", SV(s));
+
+	return 0;
+}
+
+
+   Now if we compile this, we get:
+macro_str.c: In function 'main':
+macro_str.c:4:33: error: called object is not a function or function pointer
+    4 | #define SV(str)         (sizeof("" str "") - 1)
+      |                                 ^~
+macro_str.c:19:21: note: in expansion of macro 'SV'
+   19 |     printf("%zu\n", SV(NULL));
+      |                     ^~
+macro_str.c:4:40: error: expected ')' before string constant
+    4 | #define SV(str)         (sizeof("" str "") - 1)
+      |                                ~       ^~
+macro_str.c:19:21: note: in expansion of macro 'SV'
+   19 |     printf("%zu\n", SV(NULL));
+      |                     ^~
+macro_str.c:20:24: error: expected ')' before 'word'
+   20 |     printf("%zu\n", SV(word));
+      |                        ^~~~
+macro_str.c:4:36: note: in definition of macro 'SV'
+    4 | #define SV(str)         (sizeof("" str "") - 1)
+      |                                    ^~~
+macro_str.c:4:32: note: to match this '('
+    4 | #define SV(str)         (sizeof("" str "") - 1)
+      |                                ^
+macro_str.c:20:21: note: in expansion of macro 'SV'
+   20 |     printf("%zu\n", SV(word));
+      |                     ^~
+macro_str.c:21:24: error: expected ')' before 'd'
+   21 |     printf("%zu\n", SV(d));
+      |                        ^
+macro_str.c:4:36: note: in definition of macro 'SV'
+    4 | #define SV(str)         (sizeof("" str "") - 1)
+      |                                    ^~~
+macro_str.c:4:32: note: to match this '('
+    4 | #define SV(str)         (sizeof("" str "") - 1)
+      |                                ^
+macro_str.c:21:21: note: in expansion of macro 'SV'
+   21 |     printf("%zu\n", SV(d));
+      |                     ^~
+macro_str.c:22:24: error: expected ')' before 's'
+   22 |     printf("%zu\n", SV(s));
+      |                        ^
+macro_str.c:4:36: note: in definition of macro 'SV'
+    4 | #define SV(str)         (sizeof("" str "") - 1)
+      |                                    ^~~
+macro_str.c:4:32: note: to match this '('
+    4 | #define SV(str)         (sizeof("" str "") - 1)
+      |                                ^
+macro_str.c:22:21: note: in expansion of macro 'SV'
+   22 |     printf("%zu\n", SV(s));
+      |                     ^~
+make: *** [<builtin>: macro_str] Error 1
+
+   It could be made more robust with extra expressions:
+#define SV(str)    ("" str "", (str)[0], sizeof(str) - 1)
+
+// Credit: @n. m. could be an AI
+
+   This would also fail for:
+SV()
+SV(/*comment*/)
+SV(-)
+SV("abc" - "def")
+
+   Note that the value of a comma operation will always be the value of the last expression.
+
+str_view should be an opaque pointer type:
+   The definition of str_view is not needed in the header file. The header should only contain a forward
+   declaration and the corresponding source file should contain the definition.
+
+   But if for some reason the type needs to be in the header file, and it is desired that the compiler
+   should raise a warning any time a client tries to access the internal members of the struct, we can
+   use C2X´s new [[deprecated]] attribute, which isn´t solely for marking a function as obsolete. But
+   instead of paraphrasing a whole article here, I suggest you read Jenn´s article yourself: The
+   deprecated attribute in C23 does much more than marking obsolescence.
+
+   Minor:
+
+   In the documentation for sv_empty(), "yeild" should be "yield".
+
+   size_t sv_strlen(const char *str); doesn´t work on str_views, so why has it been defined? Is it
+   perchance more efficient than strlen(). I see no reason to use this instead of the standard strlen().
+
+/* Returns the bytes of the string pointer to, null terminator included. */
+size_t sv_strbytes(const char *str);
+
+   To me, sv_strbytes() would make more sense as sv_strsize() or similar.
+   But I do not see why we have a sv_strbytes() function that doesn´t even work on str_views.
+   sv_strbytes(s) is just strlen(s) + 1, but didn´t we already define sv_strlen()? One is sure to get
+   confused by 4 separate length/size functions. I´d simply elide it.
+
+/* Returns a view of the needle found in hay at the first found
+   position. If the needle cannot be found the empty view at the
+   hay length position is returned. This may or may not be null
+   terminated at that position. If needle is greater than
+   hay length an empty view at the end of hay is returned. If
+   hay is NULL, sv_null is returned (modeled after strstr). */
+str_view sv_svsv(str_view hay, str_view needle);
+
+   sv_svsv(), seriously? I am certain this can be named better. Same goes for sv_rsvsv().
+   ^
+   A pure function is a function with basically no side effects. The return value is solely bases on
+   given parameters and global memory, but cannot affect the value of any other global variable. The
+   memory pointed to by a parameter is not considered a parameter, but global memory. strlen() is an
+   example of a pure function. A counter-example of a non-pure function is called the strcpy() function.
+
+   A special case of pure functions is constant functions. A pure function that does not access global
+   memory, but only its parameters, is called a constant function. A constant function can handle
+   pointers as both parameters and return value only if they´re never dereferenced. These requirements
+   also recursively applies to all the functions it calls.
+
+***
+   Late review:
+
+     What further functionality and documentation would a user expect to actually consider using this
+     library?
+
+   Spelling
+   10+ spelling errors noted. Use a spell checker to help make a good 1st impression.
+
+   String compare
+   Note that strcmp(a, b) compares as if the strings were made of unsigned char even if char is signed.
+   Make certain your function implementations follow that.
+
+   Name-space scattering
+   Code scatters usage across the name space risking collisions with other code.
+
+   Code defines:
+STR_VIEW
+str_view
+LES
+EQL
+GRT
+ERR
+sv_threeway_cmp
+SVLEN
+SV
+sv
+sv_...(dozens of functions)
+
+   I recommend all these begin with sv_ or SV_ (or is sv) including the file name.
+
+   field vs. member
+
+   "It consists of a pointer to const char data and a size_t field." --> C spec calls .s and .sz of
+   str_view members.
+
+   Design
+   Its not a 3-way, but 4.
+
+   Rather than return 1 of 4 values for compares consider 1) returning 3 as int with -1, 0, 1 and a
+   defined result for NULL arguments (recommended) or 2) return a 4-bit mask for each <, ==, >,
+   incomparable.
+
+   The point of enumeration is abstraction. The -1,0,1,2 is trying to have apply meaning to the
+   abstract. Choose one (enum 0,1,2,3) or the other (int).
+
+***
+   The accepted answer has done a fine job of reviewing the posted code. This answer will focus on
+   the macros in this code.
+
+   In summary: the OP code should remove the SVLEN macro altogether and at least rewrite SV to improve
+   type safety. There is discussion below about problems with SVLEN, why it should be removed, and
+   suggestions for ways to improve SV.
+
+   It would be worth the OP´s time to review whether SV needs to be a macro at all. Maybe it would be
+   better to use a make_sv function that returns a str_view struct, allowing the caller to determine
+   whether a string is backed by string literal storage or some other storage for which the caller is
+   responsible. I would probably favor that direction.
+
+   As a minor nitpick: the str_view struct should use len instead of sz for the name of the field
+   indicating the length of the string(view) in question. sz indicates a "size" and this is confusing
+   nomenclature given that the size of the array backing a string and the length of that string are two
+   different things.
+
+Macros Should Be as Simple as Possible
+
+   The OP code defines two macros:
+#define SVLEN(str) ((sizeof((str)) / sizeof((str)[0])) - sizeof((str)[0]))
+
+#define SV(str) ((str_view){(str), SVLEN((str))})
+
+   The SVLEN macro can be made much simpler:
+#define SVLEN_SIMPLE(str) (sizeof(str) - 1)
+
+   This SVLEN_SIMPLE version takes advantage of the fact that sizeof (char) is guaranteed to be 1 by the
+   C Standard. Note that this implementation would not work for wide string literals, but the OP code is
+   using pointers to char to access the string content so this seems fine here.
+
+   This use of sizeof to find the length of a string relies on the fact that as expressions string
+   literals are array types, so sizeof yields the size of the array, not the size of the pointer to
+   which the string literal would decay in most expressions. So SVLEN_SIMPLE("some string") would yield
+   the length of "some string". But this would not work as desired:
+
+char *some_string = "some string";
+printf("%zu\n", SVLEN_SIMPLE(some_string));
+
+   It might be nice to do some rudimentary type-checking in this macro. A C compiler will concatenate
+   adjacent string literal tokens during the translation phases, and you can take advantage of this by
+   concatenating the macro argument provided by a caller with the empty string literal. If the caller
+   provides something other than a string literal the compiler will complain.
+
+#define SVLEN_SAFE(str) (sizeof(str "") - 1)
+
+   This version returns 0 when no argument is provided, i.e., SVLEN_SAFE() yields 0. This may or may not
+   be desired behavior.
+
+   One might be tempted to surround the macro argument with empty string literals: #define
+   SVLEN_DONT(str) (sizeof ("" str "") - 1). Don´t do this: keep the macro as simple as possible. You
+   only need one string literal and one non-string literal in the attempted concatenation to trigger a
+   compiler error, and adding the second "" here even adds a new failure mode. With, e.g., SVLEN_DONT(-)
+   there will be no error because "" - "" is a legal expression with integer type.
+
+   It is still possible to break the SVLEN_SAFE macro, e.g., SVLEN("this" - "that") would complete the
+   concatenation with the empty string literal, and the expression "this" - "that" is a legal expression
+   with integer type. If you feel like you need to handle this sort of bad input you can use the comma
+   operator in the macro to check whether the input is an array.
+
+#define SVLEN_QUESTIONABLE(str) ("" str "", (str)[0], sizeof(str) - 1)
+
+   The SVLEN_QUESTIONABLE macro expands to a sequence that first may fail to compile if str is not a
+   string literal. Since this check does not catch all cases of bad input, a second check in the
+   sequence attempts to access the first element of str, which may or may not be an array. If str is in
+   fact a string literal then this compiles and the final part of the sequence computes the length of
+   the string and that value is the final result of the sequence.
+
+   There at least one minor problem here. Using SVLEN_QUESTIONABLE can trigger compiler warnings since
+   the left-hand operands of the comma expressions have no discernible effects. GCC issues these
+   warnings when compiling with -Wall. Clang doesn´t seem to mind at -Wall. These warnings are just
+   added noise at compile time, and you might not want to disable -Wunused-value just for this since it
+   is useful elsewhere. For those who like to compile with -Werror enabled this is a nuisance.
+
+   I´m not convinced that SVLEN_QUESTIONABLE is bullet-proof; it is at least slightly more robust than
+   SVLEN_SAFE above, but is the added robustness worth the added complexity? Not in my opinion.
+   SVLEN_SAFE does what we want, which is to enforce that the macro argument is a string literal in
+   reasonable cases.
+
+Or, Just Don´t Use a Macro
+   But really, what is the point of SVLEN in the first place? Code should generally use strlen to find
+   the length of strings. String literals are a special case for which it is sometimes useful to use the
+   sizeof "something" - 1 idiom, but I don´t see that making a macro to do this brings any real
+   benefits; it just brings added complexity.
+
+   In my opinion, the SVLEN macro should not exist at all.
+
+Improving the SV Macro
+   With SVLEN removed from the code, SV needs to be rewritten. The simple version would be:
+
+#define SV_SIMPLE(str) ((str_view){(str), sizeof(str) - 1})
+
+   This version has the same type safety problems as the previous SVLEN_SIMPLE, i.e., a caller may
+   provide something other than a string literal argument leading to unhappy results. As before, the
+   situation can be improved by taking advantage of string literal concatenation.
+
+   Also note that rare unicorn platforms may exist where size_t is narrower than int. To guard against
+   potential problems which may arise when a caller expects an unsigned result, unsigned math can be
+   ensured by subtracting an unsigned integer constant from the result of sizeof. (@Davislor)
+
+#define SV_SAFE(str) ((str_view){(str ""), sizeof(str) - 1U})
+
+   This usually fails to compile when the caller fails to provide a string literal argument. In fact,
+   when I used GCC 14.2 to compile test cases with this macro, all cases that attempted to call SV_SAFE
+   with anything other than a string literal argument failed to compile. One test case, SV_SAFE("abc" -
+   "def") failed to compile in this test, but some compilers might compile it with a warning; use
+   -Werror or similar to force compiler errors here.
+
+   The previous SVLEN_SAFE() yielded 0, while SV_SAFE() is rejected outright. If you wanted to obtain
+   similar behavior for SV_SAFE you could write:
+
+#define SV_SAFE_ZERO(str) ((str_view){(str ""), sizeof(str "") - 1U})
+
+   SV_SAFE_ZERO() will yield a str_view struct initialized with a pointer to the empty string and the
+   len field set to 0.
+
+Test Program
+   Here is a test program to verify that SV_SAFE works and that it fails to compile for unwanted inputs.
+   Failing tests are commented out. It may be possible to break this macro, but it appears to guard
+   against non-string-literal inputs reasonably well. Failing tests are commented out.
+
+   I have also included an implementation of make_sv which I alluded to earlier in this answer. make_sv
+   is a function which takes a pointer argument instead of a string literal. This has several
+   advantages, one of which is much better error messages. Since it takes a pointer instead of a string
+   literal you could use it with dynamically created strings or with arrays containing strings.
+
+   The compiler errors shown in comments to the right of test cases were generated by GCC 14.2 with the
+   invocation gcc string_view_tests.c. This compiled in the default gnu17 mode, with no warnings
+   enabled.
+
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+	const char *s;
+	size_t len;
+} str_view;
+
+#define SV_SAFE(str) ((str_view){(str ""), sizeof(str) - 1U})
+
+// Do we really need an `SV` macro at all?
+// `make_sv` returns an empty `str_view` if it receives a null pointer argument.
+str_view make_sv(const char *s) {
+	if (s) {
+		return (str_view){ .s = s,
+			.len = strlen(s)};
+	}
+	return (str_view){ .s = "",
+		.len = 0};
+}
+
+int main(void) {
+	const char *s = "hello";
+	char word[] = "hello";
+	double a = 0.0f;
+	double *d = &a;
+
+	puts("testing SV_SAFE macro:");
+	str_view this = SV_SAFE("this macro");
+	printf("%s: .len = %zu\n", this.s, this.len);
+
+	// Some tests that should fail:
+	// str_view test = SV_SAFE(NULL);  //--> error: expected ')' before string constant
+	// str_view test = SV_SAFE(word);  //--> error: expected ')' before string constant
+	// str_view test = SV_SAFE(d);  //--> error: expected ')' before string constant
+	// str_view test = SV_SAFE(s);  //--> error: expected ')' before string constant
+	// str_view test = SV_SAFE(a);  //--> error: expected ')' before string constant
+	// str_view test = SV_SAFE(x);  //--> error: expected ')' before string constant
+	// str_view test = SV_SAFE(-);  //--> error: wrong type argument to unary minus
+	// str_view test = SV_SAFE();  //--> error: expected expression before ')' token
+
+	// Some implementations might compile this test with a warning.
+	// Use `-Werror` or similar to force an error.
+	// str_view test = SV_SAFE("abc" - "def");  //--> error: initialization of 'const char *'
+	// from 'long long int' makes pointer from integer without a cast [-Wint-conversion]
+
+	puts("\ntesting make_sv function:");
+	str_view that = make_sv("that function");
+	printf("%s: .len = %zu\n", that.s, that.len);
+
+	puts("\ntesting make_sv(NULL):");
+	str_view null_test = make_sv(NULL);
+	printf("%s: .len = %zu\n", null_test.s, null_test.len);
+
+	puts("\ntesting make_sv(word):");
+	str_view word_test = make_sv(word);
+	printf("%s: .len = %zu\n", word_test.s, word_test.len);
+
+	puts("\ntesting make_sv(s):");
+	str_view s_test = make_sv(s);
+	printf("%s: .len = %zu\n", s_test.s, s_test.len);
+
+	// Some tests that should fail:
+	// str_view test = make_sv(NULL);  // no longer failing
+	// str_view test = make_sv(word);  // no longer failing
+	// str_view test = make_sv(d);  //--> error: passing argument 1 of 'make_sv'
+	//		from incompatible pointer type [-Wincompatible-pointer-types]
+	// str_view test = make_sv(s);  // no longer failing
+	// str_view test = make_sv(a);  //--> error: incompatible type for argument 1 of 'make_sv'
+	// str_view test = make_sv(x);  //--> error: 'x' undeclared (first use in this function)
+	// str_view test = make_sv(-);  //--> error: expected expression before ')' token
+	// str_view test = make_sv();  //--> error: too few arguments to function 'make_sv'
+	// str_view test = make_sv("abc" - "def");  //--> error: passing argument 1 of 'make_sv'
+	//		makes pointer from integer without a cast [-Wint-conversion]
+}
+
+
+---
+
