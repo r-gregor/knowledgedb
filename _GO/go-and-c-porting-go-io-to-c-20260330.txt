@@ -1,0 +1,431 @@
+filename: go-and-c-porting-go-io-to-c-20260330.txt
+https://antonz.org/porting-go-io/
+
+Porting Go´s io package to C
+
+   Creating a subset of Go that translates to C was never my end goal. I liked writing C code with
+   Go, but without the standard library it felt pretty limited. So, the next logical step was to port
+   Go´s stdlib to C.
+
+   Of course, this isn´t something I could do all at once. So I started with the standard library
+   packages that had the fewest dependencies, and one of them was the io package. This post is about how
+   that went.
+
+The io package
+   io is one of the core Go packages. It introduces the concepts of readers and writers, which are also
+   common in other programming languages.
+
+   In Go, a reader is anything that can read some raw data (bytes) from a source into a slice:
+
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+
+   A writer is anything that can take some raw data from a slice and write it to a destination:
+
+type Writer interface {
+	Write(p []byte) (n int, err error)
+}
+
+   The io package defines many other interfaces, like Seeker and Closer, as well as combinations like
+   ReadWriter and WriteCloser. It also provides several functions, the most well-known being Copy, which
+   copies all data from a source (represented by a reader) to a destination (represented by a writer):
+
+func Copy(dst Writer, src Reader) (written int64, err error)
+
+   C, of course, doesn´t have interfaces. But before I get into that, I had to make several other design
+   decisions.
+
+Slices
+   In general, a slice is a linear container that holds N elements of type T. Typically, a slice is a
+   view of some underlying data. In Go, a slice consists of a pointer to a block of allocated memory, a
+   length (the number of elements in the slice), and a capacity (the total number of elements that can
+   fit in the backing memory before the runtime needs to re-allocate):
+
+type slice struct {
+	array unsafe.Pointer
+	len   int
+	cap   int
+}
+
+   Interfaces in the io package work with fixed-length slices (readers and writers should never append
+   to a slice), and they only use byte slices. So, the simplest way to represent this in C could be:
+
+typedef struct {
+	uint8_t *ptr;
+	size_t len;
+} Bytes;
+
+   But since I needed a general-purpose slice type, I decided to do it the Go way instead:
+
+typedef struct {
+	void *ptr;
+	size_t len;
+	size_t cap;
+} so_Slice;
+
+   Plus a bound-checking helper to access slice elements:
+
+#define so_at(T, s, i) (*so_at_ptr(T, s, i))
+#define so_at_ptr(T, s, i) ({            \
+	so_Slice _s_at = (s);                \
+	size_t _i = (size_t)(i);             \
+	if (_i >= _s_at.len)                 \
+		so_panic("index out of bounds"); \
+	(T*)_s_at.ptr + _i;                  \
+})
+
+   Usage example:
+// go
+nums := make([]int, 3)
+nums[0] = 11
+nums[1] = 22
+nums[2] = 33
+n1 := nums[1]
+
+// c
+so_Slice nums = so_make_slice(int, 3, 3);
+so_at(int, nums, 0) = 11;
+so_at(int, nums, 1) = 22;
+so_at(int, nums, 2) = 33;
+so_int n1 = so_at(int, nums, 1);
+
+   So far, so good.
+
+Multiple returns
+   Let´s look at the Read method again:
+Read(p []byte) (n int, err error)
+
+   It returns two values: an int and an error. C functions can only return one value, so I needed to
+   figure out how to handle this.
+
+   The classic approach would be to pass output parameters by pointer, like read(p, &n, &err) or n =
+   read(p, &err). But that doesn´t compose well and looks nothing like Go. Instead, I went with a result
+   struct:
+
+typedef union {
+	bool as_bool;
+	so_int as_int;
+	int64_t as_i64;
+	so_String as_string;
+	so_Slice as_slice;
+	void *as_ptr;
+	// ... other types
+} so_Value;
+
+typedef struct {
+	so_Value val;
+	so_Error err;
+} so_Result;
+
+   The so_Value union can store any primitive type, as well as strings, slices, and pointers. The
+   so_Result type combines a value with an error. So, our Read method (let´s assume it´s just a regular
+   function for now):
+
+func Read(p []byte) (n int, err error)
+
+   Translates to:
+so_Result Read(so_Slice p);
+
+   And the caller can access the result like this:
+
+so_Result res = Read(p);
+if (res.err) {
+	so_panic(res.err->msg);
+}
+so_println("read", res.val.as_int, "bytes");
+
+Errors
+   For the error type itself, I went with a simple pointer to an immutable string:
+
+struct so_Error_ {
+	const char *msg;
+};
+typedef struct so_Error_ *so_Error;
+
+   Plus a constructor macro:
+#define errors_New(s) (&(struct so_Error_){s})
+
+   I wanted to avoid heap allocations as much as possible, so decided not to support dynamic errors.
+   Only sentinel errors are used, and they´re defined at the file level like this:
+so_Error io_EOF = errors_New("EOF");
+so_Error io_ErrOffset = errors_New("io: invalid offset");
+
+   Errors are compared by pointer identity (==), not by string content - just like sentinel errors in
+   Go. A nil error is a NULL pointer. This keeps error handling cheap and straightforward.
+
+Interfaces
+   This was the big one. In Go, an interface is a type that specifies a set of methods. Any concrete
+   type that implements those methods satisfies the interface - no explicit declaration needed. In C,
+   there´s no such mechanism.
+
+   For interfaces, I decided to use "fat" structs with function pointers. That way, Go´s io.Reader:
+
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+
+   Becomes an io_Reader struct in C:
+typedef struct {
+	void *self;
+	so_Result (*Read)(void *self, so_Slice p);
+} io_Reader;
+
+   The self pointer holds the concrete value, and each method becomes a function pointer that takes self
+   as its first argument. This is less efficient than using a static method table, especially if the
+   interface has a lot of methods, but it´s simpler. So I decided it was good enough for the first
+   version.
+
+   Now functions can work with interfaces without knowing the specific implementation:
+
+// ReadFull reads exactly len(buf) bytes from r into buf.
+so_Result io_ReadFull(io_Reader r, so_Slice buf) {
+	so_int n = 0;
+	so_Error err = NULL;
+	for (; n < so_len(buf) && err == NULL;) {
+		so_Slice curBuf = so_slice(so_byte, buf, n, buf.len);
+		so_Result res = r.Read(r.self, curBuf);
+		err = res.err;
+		n += res.val.as_int;
+	}
+	// ...
+}
+
+// A custom reader.
+typedef struct {
+	so_Slice b;
+} reader;
+
+static so_Result reader_Read(void *self, so_Slice p) {
+	// ...
+}
+
+int main(void) {
+	// We´ll read from a string literal.
+	so_String str = so_str("hello world");
+	reader rdr = (reader){.b = so_string_bytes(str)};
+
+	// Wrap the specific reader into an interface.
+	io_Reader r = (io_Reader){
+		.self = &rdr,
+		.Read = reader_Read,
+	};
+
+	// Read the first 4 bytes from the string into a buffer.
+	so_Slice buf = so_make_slice(so_byte, 4, 4);
+	// ReadFull doesn´t care about the specific reader implementation -
+	// it could read from a file, the network, or anything else.
+	so_Result res = io_ReadFull(r, buf);
+}
+
+   Calling a method on the interface just goes through the function pointer:
+
+// r.Read(buf) becomes:
+r.Read(r.self, buf);
+
+Type assertion
+   Go´s interface is more than just a value wrapper with a method table. It also stores type information
+   about the value it holds:
+
+type iface struct {
+	tab  *itab
+	data unsafe.Pointer  // specific value
+}
+
+type itab struct {
+	Inter *InterfaceType // method table
+	Type  *Type          // type information
+	// ...
+}
+
+   Since the runtime knows the exact type inside the interface, it can try to "upgrade" the interface
+   (for example, a regular Reader) to another interface (like WriterTo) using a type assertion:
+
+// copyBuffer copies from src to dst using the provided buffer
+// until either EOF is reached on src or an error occurs.
+func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
+	// If the reader has a WriteTo method, use it to do the copy.
+	if wt, ok := src.(WriterTo); ok {  // try "upgrading" to WriterTo
+		return wt.WriteTo(dst)
+	}
+	// src is not a WriterTo, proceed with the default copy implementation.
+
+   The last thing I wanted to do was reinvent Go´s dynamic type system in C, so dropping this feature
+   was an easy decision.
+
+   There´s another kind of type assertion, though - when we unwrap the interface to get the value of a
+   specific type:
+
+// Does r (a Reader) hold a pointer to a value of concrete type LimitedReader?
+// If true, lr will get the unwrapped pointer.
+lr, ok := r.(*LimitedReader)
+
+   And this kind of assertion is quite possible in C. All we have to do is compare function pointers:
+
+// Are r.Read and LimitedReader_Read the same function?
+bool ok = (r.Read == LimitedReader_Read);
+if (ok) {
+	io_LimitedReader *lr = r.self;
+}
+
+   If two different types happened to share the same method implementation, this would break. In
+   practice, each concrete type has its own methods, so the function pointer serves as a reliable type
+   tag.
+
+Specialized readers
+   After I decided on the interface approach, porting the actual io types was pretty easy. For example,
+   LimitedReader wraps a reader and stops with EOF after reading N bytes:
+
+type LimitedReader struct {
+	R Reader
+	N int64
+}
+
+func (l *LimitedReader) Read(p []byte) (int, error) {
+	if l.N <= 0 {
+		return 0, EOF
+	}
+	if int64(len(p)) > l.N {
+		p = p[0:l.N]
+	}
+	n, err := l.R.Read(p)
+	l.N -= int64(n)
+	return n, err
+}
+
+   The logic is straightforward: if there are no bytes left, return EOF. Otherwise, if the buffer is
+   bigger than the remaining size, shorten it. Then, call the underlying reader, and decrease the
+   remaining size.
+
+   Here´s what the ported C code looks like:
+
+typedef struct {
+	io_Reader R;
+	int64_t N;
+} io_LimitedReader;
+
+so_Result io_LimitedReader_Read(void *self, so_Slice p) {
+	io_LimitedReader *l = self;
+	if (l->N <= 0) {
+		return (so_Result){.val.as_int = 0, .err = io_EOF};
+	}
+	if ((int64_t)(so_len(p)) > l->N) {
+		p = so_slice(so_byte, p, 0, l->N);
+	}
+	so_Result res = l->R.Read(l->R.self, p);
+	so_int n = res.val.as_int;
+	l->N -= (int64_t)(n);
+	return (so_Result){.val.as_int = n, .err = res.err};
+}
+
+   A bit more verbose, but nothing special. The multiple return values, the interface call with
+   l.R.Read, and the slice handling are all implemented as described in previous sections.
+
+Copy
+   Copy is where everything comes together. Here´s the simplified Go version:
+
+// Copy copies from src to dst until either
+// EOF is reached on src or an error occurs.
+func Copy(dst Writer, src Reader) (written int64, err error) {
+	// Allocate a temporary buffer for copying.
+	size := 32 * 1024
+	buf := make([]byte, size)
+	// Copy from src to dst using the buffer.
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			written += int64(nw)
+			if ew != nil {
+				err = ew
+				break
+			}
+		}
+		if er != nil {
+			if er != EOF {
+				err = er
+			}
+			break
+		}
+	}
+	return written, err
+}
+
+   In Go, Copy allocates its buffer on the heap with make([]byte, size). I could take a similar approach
+   in C - make Copy take an allocator and use it to create the buffer like this:
+
+so_Result io_Copy(mem_Allocator a, io_Writer dst, io_Reader src) {
+	so_int size = 32 * 1024;
+	so_Slice buf = mem_AllocSlice(so_byte, a, size, size);
+	// ...
+}
+
+   But since this is just a temporary buffer that only exists during the function call, I decided stack
+   allocation was a better choice:
+
+so_Result io_Copy(io_Writer dst, io_Reader src) {
+	so_int size = 8 * 1024;
+	so_Slice buf = so_make_slice(so_byte, size, size);
+	// ...
+}
+
+   so_make_slice allocates memory on a stack with a bounds-checking macro that wraps C´s alloca. It
+   moves the stack pointer and gives you a chunk of memory that´s automatically freed when the function
+   returns.
+
+   People often avoid using alloca because it can cause a stack overflow, but using a bounds-checking
+   wrapper fixes this issue. Another common concern with alloca is that it´s not block-scoped - the
+   memory stays allocated until the function exits. However, since we only allocate once, this isn´t a
+   problem.
+
+   Here´s the simplified C version of Copy:
+
+so_Result io_Copy(io_Writer dst, io_Reader src) {
+	so_int size = 8 * 1024; // smaller buffer, 8 KiB
+	so_Slice buf = so_make_slice(so_byte, size, size);
+	int64_t written = 0;
+	so_Error err = NULL;
+	for (;;) {
+		so_Result resr = src.Read(src.self, buf);
+		so_int nr = resr.val.as_int;
+		if (nr > 0) {
+			so_Result resw = dst.Write(dst.self, so_slice(so_byte, buf, 0, nr));
+			so_int nw = resw.val.as_int;
+			written += (int64_t)(nw);
+			if (resw.err != NULL) {
+				err = resw.err;
+				break;
+			}
+		}
+		if (resr.err != NULL) {
+			if (resr.err != io_EOF) {
+				err = resr.err;
+			}
+			break;
+		}
+	}
+	return (so_Result){.val.as_i64 = written, .err = err};
+}
+
+   Here, you can see all the parts from this post working together: a function accepting interfaces,
+   slices passed to interface methods, a result type wrapping multiple return values, error sentinels
+   compared by identity, and a stack-allocated buffer used for the copy.
+
+Wrapping up
+   Porting Go´s io package to C meant solving a few problems: representing slices, handling multiple
+   return values, modeling errors, and implementing interfaces using function pointers. None of this
+   needed anything fancy - just structs, unions, functions, and some macros. The resulting C code is
+   more verbose than Go, but it´s structurally similar, easy enough to read, and this approach should
+   work well for other Go packages too.
+
+   The io package isn´t very useful on its own - it mainly defines interfaces and doesn´t provide
+   concrete implementations. So, the next two packages to port were naturally bytes and strings - I´ll
+   talk about those in the next post.
+
+   In the meantime, if you´d like to write Go that translates to C - with no runtime and manual memory
+   management - I invite you to try [https://github.com/solod-dev/solod]Solod. The io package is included, of
+   course.
+
+
+---
+

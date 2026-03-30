@@ -1,0 +1,1588 @@
+filename: four-part-series-about-doing-weird-things-in-early-Linux-boot-multif-20260330.txt
+https://astrid.tech/2026/03/24/0/curl-to-dev-sda/
+
+curl > /dev/sda
+2026-03-24
+
+   How I made a Linux distro that runs 'wget | dd'
+
+   This is part 0 of a four-part series about doing weird things in early Linux boot.
+
+   To replace your Linux installation with a new OS, you can download a pre-prepared disk image directly
+   to your disk by running a command like this:
+
+$> curl https://something.example/foo.img > /dev/sda # (or whatever your disk is called)
+
+   No need to save it anywhere first, just pipe it directly to the disk. Then you can reboot into that
+   OS, and congratulations, you´ve installed a new OS. This works even for most EFI machines without any
+   further efibootmgr commands because EFI firmware automatically discovers the new EFI system
+   partition!
+
+Why?
+   This command is possible because /dev/sdX, /dev/nvmeX, and other such disks can be directly accessed
+   from the filesystem, following the ancient Unix concept of "everything is a file." You can write to
+   the /dev/sdX file, and that directly writes to the disk!
+
+No, like, why would you want to do this instead of installing Linux any other normal way?
+
+   Okay, so the reason I initially did this was because I didn´t want to pay Contabo an extra $1.50/mo
+   to have object storage just to be able to spawn VPSes from premade disk images.
+
+   I thought it was a neat trick, a funny shitpost that riffs on the eternal curl | sh debate. I could
+   write a blog post about it, I tell you about how you can do it yourself, one thousand words, I learn
+   something, you learn something, I get internet points, win win.
+
+   The problem is that it didn´t stop there. I kept asking one more question. I kept peeling one more
+   layer off the onion. I kept turning one more page in the grimoire... and before I knew it, I ended up
+   with a four part blog series that doesn´t end where you expect it to end.
+
+   Why don´t we start from the beginning?
+
+How to flash a Raspberry Pi the cool way
+   Nowadays, the Raspberry Pi Foundation gives you a piece of software that they built that does
+   everything automatically, but back in my day, you had to do it this way.
+
+   There´s a [https://raspberrypi.stackexchange.com/a/932]Stack Exchange answer that lists the exact series of
+   steps.
+    1. First, you go to the website in your web browser.
+    2. Then, you click on the button to download the image.
+    3. Then, quoting directly from that answer:
+
+     Copy the contents of the image file onto the SD card by running
+
+$> sudo dd bs=1M if=your_image_file_name.img of=/dev/sdx
+
+   Yeah, they also said to sha256sum the image, but let´s be honest, nobody fucking does that, not even
+   Caligula users.
+
+lazier?
+   Now, a logical first improvement to this step is, rather than navigating through the web browser, you
+   can just wget or curl that file from the command line to begin with if you already know the URL. So,
+   you can run:
+
+$> wget -O disk.img https://www.raspberrypi.com/whatever
+$> sudo dd bs=1M if=disk.img of=/dev/sdx
+
+lazier.
+   But of course, nothing says you have to download it to a file first. dd will read from stdin if you
+   don´t give it an if= argument. So you can pipe into dd and that achieves the same effect without
+   writing any intermediate files.
+
+$> curl https://www.raspberrypi.com/whatever | sudo dd bs=1M of=/dev/sdx
+
+lazier!
+   But of course, nothing says you have to use dd. That just makes your writes to the disk more
+   efficient because of block alignment and caching nonsense. You can just redirect stdout like so:
+
+$> sudo -i
+$> curl https://www.raspberrypi.com/whatever > /dev/sdx
+
+   And congratulations, you have derived the initial shitpost premise from first principles.
+
+it was compressed oops
+   I glossed over the fact that the Stack Exchange article also tells you that the disk image comes as a
+   zip file that you need to unzip first. But that´s a nice segue, because it turns out there are plenty
+   of other variations on this:
+
+# You may need to unzip your thing
+$> curl https://something.example/foo.img.gz | gunzip | dd bs=1M of=/dev/sda status=progress
+
+# You can use wget
+$> wget -O- https://something.example/foo.iso | dd bs=1M of=/dev/sda status=progress
+
+# You can upload via SSH
+$> gzip -vc disk.img | ssh my-server.example -- sh -c 'gunzip -vc | dd bs=1M of=/dev/sda status=progress'
+
+   I mean frankly, there´s an infinite number of ways to write directly from the network to the
+   disk!
+
+sillier?
+   Okay, so now, let´s say you have a VM running in Contabo, booted off of /dev/sda, that you wanted to
+   reimage with your own OS image. What do we need to do to adapt this method to that?
+
+Making your own bootable OS image
+   Of course, you do need to figure out how to make such an OS image first. Luckily, you can do this for
+   any OS (even Windows!) by installing it in a VM first, and then using the raw disk image that results
+   from that.
+
+   To do that with QEMU, you need to first make a raw disk, preferably of a fairly small size (you
+   should be able to expand it once you´ve copied it).
+
+$> truncate 10G disk.img
+
+   Then, you can run your OS with installer like so:
+
+$> qemu-system-x86_64 \
+        -hda ./disk.qcow2 \
+        -m 2G \
+        -enable-kvm \
+        -nic user \
+        -serial mon:stdio
+
+   Go through all the setup steps, and you´re done. You can now send disk.img off to your webserver.
+
+   Of course, I use NixOS btw so this entire process was automated! I just did import
+   <nixpkgs/nixos/lib/make-disk-image.nix> and that got me a disk image. If you use Nix as well, you can
+   learn how to use it by reading its documented source code.
+
+Unmounting the disk
+   Now that we´ve made the disk image, we need to unmount the victim disk. This is a very easy process.
+   You just type in umount /dev/sdwhatever or umount /dev/nvmewhatever, like
+
+root@localhost:~# umount /dev/sda1
+umount: /: target is busy.
+
+   Oh. Right. The disk we´re trying to replace is the OS´s main disk. The one the OS is running off of.
+
+   Well, what can we try instead?
+
+write to the mounted disk anyways. fuck you
+   The OS may stop you from unmounting /dev/sda1, but it won´t stop you from writing to /dev/sda1 or
+   /dev/sda even if there´s something mounted! How do you think parted, gparted, and fdisk work on live
+   systems?
+
+   I ran the following command to upload, and typed in my password:
+astrid@chungus infra $> gzip -vc result/nixos.img | ssh root@myhost.example -- bash -c 'gunzip -vc > /dev/sda'
+root@myhost.example´s password:
+
+   Now, I tried this out expecting that it probably wouldn´t work. Sure, programs have to get loaded
+   into memory to run, so maybe this might work. But also, given that a whole bunch of other things are
+   happening on the machine at the same time besides the rewrite, doing this may cause those other
+   processes to trigger a kernel panic.
+
+   But theory means nothing in the face of practice.
+
+   The command had no output, but iftop was indicating that something was happening:
+
+     954Mb      191Mb          381Mb                  572Mb           763Mb            954Mb
+|---------------|--------------|----------------------|---------------|---------------------
+chungus.lan                   => myhost.example.                      32.9Mb  22.3Mb  16.6Mb
+                              <=                                       424Kb   302Kb   228Kb
+
+   After waiting for a little while, the program terminated with the following output:
+
+astrid@chungus infra $> gzip -vc result/nixos.img | ssh root@myhost.example -- bash -c 'gunzip -vc > /dev/sda'
+root@myhost.example´s password:
+ 77.8% -- replaced with stdout
+
+   What happened here?
+   Well, we tried to overwrite the OS while it was in use, and that caused it to crash 77.8% of the way
+   through! A whole bunch of things could have happened, and the exact crash detail could be
+   interesting, but the sum of it is that we did something stupid and caused something stupid.
+
+   Maybe it´s a good idea to unmount the device before writing to it after all.
+
+   Still, though, we have to think about the implications here. How do you unmount your OS´s disk while
+   keeping the OS running to be able to overwrite itself?
+
+   This may sound like some kind of paradoxical Buddhist meditation riddle, but the solution is actually
+   quite simple: just boot into a new OS where the old one isn´t mounted!
+
+Rescue images to the rescue
+   Most Linux distros´ installers have all the requisite programs preinstalled, along with networking.
+   Arch and NixOS installers are perfect for this purpose! Fedora installer can even be used for this
+   too. You can piggyback off of them without even running the actual installer included with them! As
+   long as you have networking and terminal access, you can run curl > /dev/sda to your heart´s content.
+
+   This was, in fact, the option I went with to overwrite my Contabo VMs. Contabo lets you boot into a
+   Debian-based rescue image instead of whatever´s installed on the disk they give you, so I booted into
+   that, and managed to wget -O- > /dev/sda and get my new OS installed!
+
+   I did this once, and I was happy.
+
+   Then I did it a second time, and thought, "isn´t there a way to automate this?"
+
+Also, do we really need a second disk?
+   No really, just think about it. All of the utilities needed to overwrite the disk already exist on
+   the disk before you overwrite it. In theory, you could just copy all of those utilities into RAM,
+   unmount everything else, and overwrite the disk from RAM to achieve an in-place swap.
+
+   Disks and boot can´t possibly be that magical... can they?
+    1. Accomplishing this using other common file transfer protocols like gopher, BitTorrent, SMTP,
+       magic-wormhole, NFS, RFC 1149, or FCC Part 97 are left as an exercise for the reader.
+    2. - can be passed into various Linux command flags as a means to say "please read from stdin" or
+       "please write to stdout." Now of course, this begs the question: how do you tell utilities like
+       this "please literally refer to the file named - located in my current working directory?" The
+       answer is quite silly, you just pass in ./-.
+
+
+---
+https://astrid.tech/2026/03/24/1/swap-out-the-root-before-boot/
+
+Swap out the root before boot
+2026-03-24
+
+   Learn about the Linux boot process by making it boot something else
+
+   This is part 1 of a four-part article series about how to reimage disks in-place.
+
+   Did you know that when Linux boots, it doesn´t actually mount your root disk at first? It actually
+   runs a mini-me OS that finds the real root disk and becomes it.
+
+   The official name for this mini-me is the initramfs (Initial RAM File System), which some people
+   still call the initrd (Initial RAM Disk). I´ll be using both terms interchangeably to mean the same
+   thing. As the name suggests, it´s a filesystem that lives purely in RAM.
+
+   If this all seems very abstract, that´s because it is. Let´s look inside a Debian VM and see how it
+   fits together in practice!
+
+Crack open a cold one
+   For this article, I´m using QEMU to boot into a premade Debian 13 nocloud VM image. You can
+   follow along at home by running the VM like so:
+
+# If you don´t use x86, you can probably figure out how to adapt this.
+$> qemu-system-x86_64 \
+        -hda ./disk.qcow2 \
+        -m 2G \
+        -enable-kvm \
+        -nic user \
+        -serial mon:stdio
+
+   If you´re running a Linux system, though, you can actually inspect your system´s real initrd!
+
+   Usually, the kernel image, bootloader, and initrd are all located in the /boot folder on your
+   machine, on their own FAT partition. Here´s how it looks inside a Debian VM:
+
+root@localhost:~# ls -l /boot
+total 47040
+-rw-r--r-- 1 root root       83 Feb 17 05:47 System.map-6.12.73+deb13-amd64
+-rw-r--r-- 1 root root   283277 Feb 17 05:47 config-6.12.73+deb13-amd64
+drwx------ 3 root root    16384 Jan  1  1970 efi
+drwxr-xr-x 6 root root     4096 Feb 20 05:37 grub
+-rw-r--r-- 1 root root 35742063 Feb 20 05:37 initrd.img-6.12.73+deb13-amd64
+-rw-r--r-- 1 root root 12109760 Feb 17 05:47 vmlinuz-6.12.73+deb13-amd64
+
+   grub is GRUB, the bootloader; vmlinuz is your Linux kernel image; and initrd is your initramfs,
+   because we still call it that despite having moved on decades ago.
+
+   Now, how do we open it up? The initramfs, it turns out, is just a cpio archive, which the kernel will
+   unpack into a RAM filesystem during boot. (And if you´re not familiar with cpio archives, they´re a
+   bit like tarballs in that they contain a big bundle of files stored at various paths.)
+
+   You can actually inspect what´s on the initrd by opening it up!
+
+root@localhost:~# mkdir initrd
+root@localhost:~# cd initrd
+root@localhost:~/initrd# cpio -idm < /boot/initrd.img-6.12.73+deb13-amd64
+50564 blocks
+root@localhost:~/initrd# dd skip=50564 if=/boot/initrd.img-6.12.73+deb13-amd64 | unzstd | cpio -idm
+19244+1 records in
+19244+1 records out
+9853295 bytes (9.9 MB, 9.4 MiB) copied, 0.1218 s, 80.9 MB/s
+68807 blocks
+
+root@localhost:~/initrd# ls -lF
+total 28
+lrwxrwxrwx 1 root root    7 Feb 20 05:37 bin -> usr/bin/
+drwxr-xr-x 3 root root 4096 Mar 17 15:50 conf/
+drwxr-xr-x 5 root root 4096 Mar 17 15:50 etc/
+-rwxr-xr-x 1 root root 6787 May 13  2025 init*
+lrwxrwxrwx 1 root root    7 Feb 20 05:37 lib -> usr/lib/
+lrwxrwxrwx 1 root root    9 Feb 20 05:37 lib64 -> usr/lib64/
+drwxr-xr-x 2 root root 4096 Feb 20 05:37 run/
+lrwxrwxrwx 1 root root    8 Feb 20 05:37 sbin -> usr/sbin/
+drwxr-xr-x 5 root root 4096 Mar 17 15:50 scripts/
+drwxr-xr-x 6 root root 4096 Mar 17 15:50 usr/
+
+   You might think this looks a bit like a normal Linux root filesystem. In fact, it is! But there is
+   one special file that makes everything work: /init.
+
+   This /init script is executed by the kernel after all the environmental stuff is set up and the
+   initramfs is unpacked into a filesystem. It is the first, and only process that the kernel will ever
+   execute on its own. All other processes will be spawned by /init.
+
+   If we peek at that /init file, you´ll notice that it´s a shell script.
+
+root@localhost:~/initrd# head init
+#!/bin/sh
+
+# Default PATH differs between shells, and is not automatically exported
+# by klibc dash.  Make it consistent.
+export PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+[ -d /dev ]  || mkdir -m 0755 /dev
+[ -d /root ] || mkdir -m 0700 /root
+[ -d /sys ]  || mkdir /sys
+[ -d /proc ] || mkdir /proc
+
+   There´s a whole bunch of logic in this script that you don´t have to worry about, but at the bottom,
+   it eventually execs the init process that actually lives on the actual disk.
+root@localhost:~/initrd# grep -n exec init
+...
+340:exec run-init ${drop_caps} "${rootmnt}" "${init}" "$@" <"${rootmnt}/dev/console" >"${rootmnt}/dev/console" 2>&1
+
+Putting it all together
+   With all of this together, the process from bootloader to init process looks something like this:
+    1. Bootloader loads kernel and initramfs into memory
+    2. Bootloader executes the kernel, passing the initramfs in as an argument
+    3. Kernel sets up environmental things like interrupts and memory management
+    4. Kernel unpacks the initramfs into a tmpfs, then executes the init process at /init with PID 1
+    5. The init process loads drivers needed to mount filesystems
+    6. The init process mounts an actual disk, and changes its root directory into that disk
+    7. The init process uses exec to become the actual, full init process located on the disk
+
+   If you think this is stupid and convoluted, wait until you hear what they used to do.
+
+   Armed with this knowledge, let´s stop Debian´s bog standard default boot process at step 4 to swap
+   out the disk under the OS´s feet.
+
+Let´s not mount the root filesystem, actually
+
+   Still inside that Debian 13 VM, I rebooted, and went into GRUB.
+                            GNU GRUB  version 2.12-9
+
+ +----------------------------------------------------------------------------+
+ |d-2e12f75e0e9d                                                              |^
+ |                else                                                        |
+ |                  search --no-floppy --fs-uuid --set=root 92cad97f-ed1a-4b2\|
+ |d-86ad-2e12f75e0e9d                                                         |
+ |                fi                                                          |
+ |                echo        'Loading Linux 6.12.73+deb13-amd64 ...'         |
+ |                linux        /boot/vmlinuz-6.12.73+deb13-amd64 root=PARTUUI\|
+ |D=ee7feeef-aee7-4010-9c05-1cdbb4f8cc1b ro single dis_ucode_ldr console=tty0\|
+ | console=ttyS0,115200 earlyprintk=ttyS0,115200 consoleblank=0               |
+ |                echo        'Loading initial ramdisk ...'                   |
+ |                initrd        /boot/initrd.img-6.12.73+deb13-amd64          |
+ |                                                                            |
+ +----------------------------------------------------------------------------+
+
+      Minimum Emacs-like screen editing is supported. TAB lists
+      completions. Press Ctrl-x or F10 to boot, Ctrl-c or F2 for
+      a command-line or ESC to discard edits and return to the GRUB menu.
+
+   My hunch was root= seems to tell the initramfs "find the partition that looks like this and mount
+   that as your eventual root." So if you delete it, it won´t have a root to mount, so it will just drop
+   you into a shell.
+
+   I did that, then I hit Ctrl-x to boot, and it successfully booted into this shell in initramfs where
+   nothing is mounted.
+[    1.588813] sr 1:0:0:0: [sr0] scsi3-mmc drive: 4x/4x cd/rw xa/form2 tray
+...
+Begin: Loading essential drivers ... done.
+Begin: Running /scripts/init-premount ... done.
+Begin: Mounting root file system ... Begin: Running /scripts/local-top ... done.
+Begin: Running /scripts/local-premount ... done.
+No root device specified. Boot arguments must include a root= parameter.
+(initramfs)
+
+   But unfortunately, this initramfs doesn´t have any of the required utilities. It lacks curl and wget
+   and almost all other networking things... though it does seem to have ipconfig.
+
+   Yes, ipconfig, not ifconfig. Google was confused by that too.
+
+   It clearly does not work the same way as the Windows one:
+(initramfs) ipconfig
+ipconfig: no devices to configure
+
+   ip=dhcp supposedly makes it do DHCP-ing. I tried it... and it seems to have worked?
+(initramfs) ipconfig "ip=dhcp"
+IP-Config: ens3 hardware address 52:54:00:12:34:56 mtu 1500 DHCP RARP
+[ 1295.952616] e1000: ens3 NIC Link is Up 1000 Mbps Full Duplex, Flow Control: RX
+IP-Config: ens3 guessed broadcast address 10.0.2.255
+IP-Config: ens3 complete (dhcp from 10.0.2.2):
+ address: 10.0.2.15        broadcast: 10.0.2.255       netmask: 255.255.255.0
+ gateway: 10.0.2.2         dns0     : 10.0.2.3         dns1   : 0.0.0.0
+ rootserver: 10.0.2.2 rootpath:
+ filename  :
+
+   The nfsmount command exists in this initramfs as well. So I guess nothing stops you from acquiring
+   your image from NFS! That, however, is left as an exercise for the reader.
+
+The self-induced CTF
+   I was originally going to just end this investigation thread here, and let some other nerd reading my
+   article figure out the NFS thing.
+
+   But then I was watching TV, specifically Romance of the Three Kingdoms (1994), which adapts
+   the Chinese epic novel to the screen. I was thinking of an episode I had seen earlier, in which
+   Zhuge Liang "borrows" a hundred thousand arrows from his enemy Cao Cao by baiting Cao Cao´s men
+   into firing arrows at his thatched boats. He then went home and pulled them all out, and a few days
+   later, his armies would use those arrows on Cao Cao to great success.
+
+   That was when it hit me - the disk I´m overwriting does in fact have curl on it. If there´s a curl on
+   the disk, why can´t I "borrow" it into the initramfs as well?
+
+Copying curl into RAM
+   I first mounted the victim disk.
+(initramfs) mkdir /mnt
+(initramfs) mount -t ext4 /dev/sda1 /mnt
+[   91.218815] EXT4-fs (sda1): mounted filesystem 92cad97f-ed1a-4b2d-86ad-2e12f75e0e9d r/w with ordered data mode. Quota mode: none.
+
+   Of course, because curl expects its libraries to be located in /lib, you can´t execute it directly.
+(initramfs) mnt/bin/curl
+mnt/bin/curl: error while loading shared libraries: libcurl.so.4: cannot open shared object file: No such file
+ or directory
+
+   That´s fine. Let´s try copying curl and its libraries into initramfs.
+(initramfs) cp mnt/bin/curl bin/curl
+sh: 18: cp: not found
+
+   Oh. I guess we don´t even have that. Let´s try a different thing.
+(initramfs) cat mnt/bin/curl > /bin/curl
+(initramfs) /bin/curl
+sh: 20: /bin/curl: Permission denied
+(initramfs) chmod +x /bin/curl
+sh: 21: chmod: not found
+
+   Okay, well this fucking sucks. The initramfs is so minimal we don´t even have cp or chmod! How do you
+   borrow curl without those?
+
+Desperate times from stupid games
+   I tried a number of different things after this.
+(initramfs) ln -s /bin /mnt/test # can we cp stuff via symlink?
+(initramfs) chroot mnt bash
+bash: cannot set terminal process group (-1): Inappropriate ioctl for device
+bash: no job control in this shell
+root@(none):/# ls test
+'['                                   nsenter
+ aa-enabled                           nstat
+ aa-exec                              numfmt
+ aa-features-abi                      od
+... # nope -- it was disk´s /bin, not initramfs´s /bin!
+
+(initramfs) cpio
+Usage: cpio [-V] -i [< archive]
+(initramfs) chroot mnt bash
+root@(none):/# # time for an absolutely gnarly one-liner that cpios curl and all of its deps
+root@(none):/# (echo /usr/bin/curl; ldd /usr/bin/curl | awk '{print $3}' | awk 'NF' | while read -r l; do echo $l; readlink -f $l; done) | cpio -o > curl.cpio
+63251 blocks
+root@(none):/# exit
+exit
+(initramfs) cpio -i < /mnt/curl.cpio
+cpio: premature end of file
+
+   Nothing worked!
+   I tried brainstorming other things, but I couldn´t think past a certain wall: how do I transmit
+   things past that annoying chroot boundary? Now, in retrospect, there were so many options available
+   to me that I hadn´t thought of at the time. To name a few:
+     * I could have actually run mnt/bin/curl and overriden the LD_LIBRARY_PATH environment variable.
+     * I could have either bind-mounted or remounted the initramfs to be accessible inside /mnt.
+     * I could have just tried mounting /dev inside /mnt anyways.
+
+   Instead, a stupid idea struck me, and I felt stupider after realizing it.
+
+   chroot´s usage looks like this:
+(initramfs) chroot
+Usage: chroot newroot command...
+
+   It´s just a normal command. And the command argument is also just a normal command. I´ve been putting
+   shells in the command position this whole time. Nothing about it requires that you only put shells
+   there.
+
+Desperate measures for stupid prizes
+   I first mounted the victim disk as read-only (so that ext4 doesn´t accidentally commit any changes
+   after we finish overwriting it).
+(initramfs) mkdir /mnt
+(initramfs) mount -t ext4 -o ro /dev/sda1 /mnt
+[   91.218815] EXT4-fs (sda1): mounted filesystem 92cad97f-ed1a-4b2d-86ad-2e12f75e0e9d r/w with ordered data mode. Quota mode: none.
+
+   Then, I ran this command.
+(initramfs) chroot /mnt curl -v http://10.0.2.2:8000/result/idiot.img > /dev/sda
+
+   curl is being run in chroot, but the > /dev/sda is not, allowing us to traverse the chroot boundary.
+
+   And it... all... works.
+(initramfs) chroot /mnt curl -v http://10.0.2.2:8000/result/idiot.img > /dev/sda
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 10.0.2.2:8000...
+* Connected to 10.0.2.2 (10.0.2.2) port 8000
+* using HTTP/1.x
+
+...
+
+<
+{ [47520 bytes data]
+* Request completely sent off
+{ [102400 bytes data]
+[  144.301186] random: crng init done
+100 3275M  100 3275M    0     0  82.4M      0  0:00:39  0:00:39 --:--:--  179M
+* shutting down connection #0
+
+   I rebooted, and ended up in a brand new system, and became the first and only winner of the CTF known
+   as Debian 13 default nocloud VM initramfs.
+(initramfs) reboot
+[  434.452133] sd 0:0:0:0: [sda] Synchronizing SCSI cache
+[  434.538469] ACPI: PM: Preparing to enter system sleep state S5
+[  434.539977] reboot: Restarting system
+[  434.540715] reboot: machine restart
+
+BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+
+Booting initrd of NixOS 26.05 (Yarara) (Initrd).
+[  OK  ] Created slice Slice /system/modprobe.
+[  OK  ] Started Dispatch Password Requests to Console Directory Watch.
+         Expecting device /dev/disk/by-uuid/67f14184-9305-4de6-accb-ad89928a5d99...
+[  OK  ] Reached target Path Units.
+[  OK  ] Reached target Slice Units.
+[  OK  ] Reached target Swaps.
+...
+
+Wait, you overwrote it while it was mounted? Why did it work this time?
+
+   As mentioned in the last article, when you execute code, it has to get copied into memory first. So
+   even though we overwrote the curl on disk, the curl in memory could still go on and destroy the
+   original.
+
+   ... Well, okay, except there´s even a little wrinkle there.
+
+   Linux actually loads code into memory lazily - only grab the chunks of code (pages) from the disk
+   when someone asks for them. The technical term for this is Demand Paging. It´s likely that, by
+   the time curl is in its "download bytes/write bytes" loop, all of the requisite pages have been paged
+   in, so we don´t run into issues.
+
+   Another reason it may have worked this time is probably because nothing else was using that disk. In
+   the last article, when I tried it, the OS was probably running a lot of services. This time, the only
+   thing using it is curl before it gets fully paged in.
+
+Conclusion
+   In conclusion, I have successfully demonstrated how easy it is to trick you into learning how actual
+   initramfses work in real life.
+
+   I didn´t actually do this. I went straight to the stupider option.
+
+   When your computer reboots, the firmware clears the RAM so that the new OS can´t read secrets out of
+   the old OS. I figured out a way to make an initramfs dodge that.
+    1. I lied very slightly when I said that it´s "just" a cpio. The reason the extraction is weird like
+       this is because of a thing called microcode prepending. Google it if you´re interested.
+    2. Technically, this process uses switch_root, which is like if chroot also deleted the initramfs.
+    3. Rather than having an initrd tell it to mount stuff, the kernel actually used to mount the
+       root FS itself by having hardcoded major and minor device numbers! There was a program, rdev,
+       that let you change those hardcoded values without recompiling!
+    4. I´ll be completely honest, I don´t know what this ip=dhcp construct is. It comes from an AI
+       summary, which in turn cites this Medium article and this Arch wiki article, neither of
+       which actually explain why that works. I only figured out that ipconfig comes from the
+       mkinitcpio-nfs-utils package from searching for it on search.nixos.org. There is no website
+       for that package, and there are no manpages. The only actual official documentation I´ve found
+       has been the READMEs in the literal sourcecode itself, which is available from
+       sources.archlinux.org. Both READMEs appear to have been hastily compiled in the 2010s, and
+       neither even mention this ip=dhcp construct as a possibility. By the time you read this, this
+       post may end up becoming the biggest hit for ip=dhcp!
+    5. Despite its age (and length), it´s a really good show. It has epic subject matter and insanely
+       deep scheming while also having very cheesy fight choreography and acting. There´s a good English
+       fansub you can get here: https://gentlemenofthehan.wordpress.com/
+    6. It was only later, after writing all this up and recreating the process, that I realized I needed
+       to append -H newc to the disk´s cpio command, because the initramfs cpio only supports
+       SVR4-format archives.
+    7. Full disclosure: I was unable to get DNS working here. Got curl: (6) Could not resolve host:
+       google.com. Still, the fact that everything else worked is impressive.
+
+
+---
+https://astrid.tech/2026/03/24/2/how-to-pass-secrets-between-reboots/
+
+How to pass secrets in RAM between reboots
+2026-03-24
+
+   This happens in production all the time
+
+   This is part 2 of a four-part article series about how to reimage a disk in-place, and how to do
+   weird things in initrd.
+
+   At a high level, when a Linux machine reboots, the following things end up happening:
+    1. Init process shuts down all other processes and all writes are flushed to disk
+    2. The init process requests that the kernel reboot, so the kernel sends an ACPI reset to the
+       machine
+    3. The firmware on the machine needs to POST (power-on self test), and it also needs to clear the
+       RAM so that the next OS doesn´t steal data from the previous OS
+    4. Once POST is over, the firmware executes the bootloader
+    5. The bootloader executes the kernel
+    6. Kernel and initrd will then meow meow meow meow meow meow go read the last part
+    7. Successfully rebooted, yay!
+
+   Step 3 is absolutely terrible for you if you are a server owner and have to apply kernel updates,
+   because servers can sometimes take an entire fucking hour to POST.
+
+   What´s the solution to this ridiculous problem? Obviously, something more ridiculous.
+
+Enter kexec
+   kexec stands for Kernel Execute. This is a command that tells the current kernel to replace itself
+   with a new kernel.
+
+   kexec is used in two phases:
+    1. Load the kernel, initrd, and kernel command line args into memory
+    2. Execute it
+
+   Here´s step 1:
+$> kexec \
+    --load=/path/to/vmlinuz/or/whatever \
+    --initrd=/path/to/initrd/or/whatever \
+    --command-line="arg=foo bar=spam"
+
+   And here´s step 2:
+$> kexec --exec
+
+   What does it look like when you use kexec to accelerate your reboots? It looks something like this:
+    1. All other processes are shut down by the init process and all writes are flushed to disk
+    2. The init process calls kexec to request the kernel to load and execute the new kernel
+    3. Kernel and initrd will then meow meow meow meow meow meow go read the last part
+    4. Successfully rebooted, yay!
+
+   By using kexec, you are able to shave an entire hour off of your downtime every time you apply kernel
+   updates! It´s trusted by Google and a whole bunch of other big companies to dodge long POSTs!
+
+What is it really doing?
+   No, really. Think about what´s actually happening for a second. Isn´t a little too convenient that
+   you can skip all those steps and everything works?
+
+   When you ran kexec --load, you packaged a couple of things from the current system into RAM, in the
+   form of an initramfs.
+
+   And then when you ran kexec --exec, you didn´t send any ACPI signals.
+
+   You didn´t go back into the bootloader, you didn´t even go back into the firmware, you didn´t have
+   the firmware POST...
+
+   ... and you didn´t have the firmware clear RAM.
+
+   Instead, you replaced your current kernel with a new kernel, and told it "please execute these things
+   that I left in my RAM here."
+
+   You´re using RAM to transmit data between boots, without ever letting the firmware know that you
+   rebooted.
+
+   "Reboot" is a social construct that the firmware never needed to be involved in. You never left "OS
+   mode" on your computer.
+
+   kexec-ing an initramfs is a way that you can pass curl to the next system without the firmware
+   clearing it.
+
+Introducing: curlingiron
+   If you´ll recall from the last part, initramfs is literally just a bunch of binaries, libraries, and
+   an init script shoved inside a cpio archive. You might be wondering, "how hard could it be to make my
+   own?"
+
+   That´s what I wondered, and as it turns out, it´s really not that hard.
+
+   You download both https://astrid.tech/curlingiron.initrd and
+   https://astrid.tech/curlingiron.vmlinuz.
+
+   Then, you run the following command:
+$> kexec \
+        --load /path/to/curlingiron.vmlinuz \
+        --initrd /path/to/curlingiron.initrd \
+        --command-line "console=ttyS0 curlingiron.src=https://something.example/foobar.img \
+            curlingiron.dst=/dev/sda"
+$> kexec --exec
+
+   and this will send the data inside the initramfs into the next boot, depositing 12 bitcoins into your
+   wallet.
+
+   Look, here´s me using it to make a Raspberry Pi flash itself!
+
+What´s actually inside?
+   It´s an extremely straightforward program! curlingiron is just a wrapper around wget | dd:
+
+# Read src and dst from kernel params
+kernel_params="$(cat /proc/cmdline)"
+src="$(echo "$kernel_params" | sed -n 's/.*curlingiron.src=\([^ ]*\).*/\1/p')"
+dst="$(echo "$kernel_params" | sed -n 's/.*curlingiron.dst=\([^ ]*\).*/\1/p')"
+
+echo "Writing $src to $dst"
+
+# Actually download it
+wget -O- "$src" | dd bs=1M of="$dst"
+
+echo "Done, rebooting!"
+sync
+reboot -f
+
+   (The wget implementation doesn´t actually check SSL certs. Whatever, who cares, proof of concept,
+   we´ll get to that later!)
+
+   You pass in the following kernel command line args:
+     * curlingiron.src= is an HTTP URL (i.e. https://somewhere.example/foobar.img)
+     * curlingiron.dst= is the destination to write to (i.e. /dev/sda)
+
+   and it does the writing, then it syncs changes to disk, and reboots, and boom, new system!
+
+   Simple, right?
+
+And now for the boilerplate
+   Okay, so that was the meat of of my script. Here´s the entire thing. Turns out getting this to work
+   was just a bit more complicated than that.
+
+#!/bin/sh
+
+# Mount the very important directories
+mkdir -p /dev /proc /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t proc procfs /proc
+mount -t sysfs sysfs /sys
+
+# load core bus drivers first
+modprobe pci_hotplug 2>/dev/null
+modprobe usbcore 2>/dev/null
+modprobe xhci_hcd 2>/dev/null
+modprobe ehci_hcd 2>/dev/null
+
+# then scan all devices
+for f in /sys/bus/pci/devices/*/modalias; do
+	modprobe -b "$(cat $f)" 2>/dev/null
+done
+
+# USB devices won´t appear until USB host loaded, rescan
+for f in /sys/bus/usb/devices/*/modalias; do
+	modprobe -b "$(cat $f)" 2>/dev/null
+done
+
+# SCSI disk layer (doesn´t come from modalias)
+modprobe sd_mod 2>/dev/null
+modprobe sr_mod 2>/dev/null
+
+# The kernel packaged with Nix apparently doesn´t do this???
+modprobe af_packet 2>/dev/null
+
+# Turn on network interface and DHCP clients
+ip link set eth0 up
+udhcpc --background --script /etc/dhcpevent.sh &
+udhcpc6 --background --script /etc/dhcpevent.sh &
+
+# Read src and dst from kernel params
+kernel_params="$(cat /proc/cmdline)"
+src="$(echo "$kernel_params" | sed -n 's/.*curlingiron.src=\([^ ]*\).*/\1/p')"
+dst="$(echo "$kernel_params" | sed -n 's/.*curlingiron.dst=\([^ ]*\).*/\1/p')"
+
+echo "Writing $src to $dst"
+
+# Wait until we have any amount of connectivity. This is because
+# DHCP might not be up by the time we get here, so we have to wait.
+until wget --spider "$src"; do
+	echo "Connection failed, waiting until we have connectivity"
+	sleep 5
+done
+
+# Actually download it
+wget -O- "$src" | dd bs=1M of="$dst"
+
+echo "Done, rebooting!"
+sync
+reboot -f
+
+And now for the gore
+   Okay, that´s not the entire thing either.
+
+   If that´s a shell script, it has to run a bunch of binaries and load a bunch of kernel modules. Where
+   does it load those from?
+
+   Well, it´s just an initramfs, which is just a cpio, so why don´t we unpack it and see what´s inside?
+
+astrid@chungus /tmp/curlingiron $> unzstd < ../../curlingiron.initrd | cpio -i
+
+   CW: nix jumpscare
+astrid@chungus /tmp/curlingiron $> tree -L 3 -F
+./
++-- bin -> /nix/store/2qzl4hvvsgl0l39wi34w66j0kwmrwprc-installed/bin/
++-- etc/
+|	+-- dhcpevent.sh -> /nix/store/l9np9nak71bmzx8s04npk58sy2x6hr14-dhcpevent.sh*
++-- init -> /nix/store/0yfym6sgyyw02ycmx0xyrlmm189krn1j-init*
++-- lib -> /nix/store/5i01v0wrpwxzy1kck92p72g1q16ydpda-linux-6.18.15-shrunk/lib/
++-- nix/
+|	+-- store/
+|		+-- 0yfym6sgyyw02ycmx0xyrlmm189krn1j-init*
+|		+-- 2qzl4hvvsgl0l39wi34w66j0kwmrwprc-installed/
+|		+-- 4dd2451gimsjq0v2i1s8zrh5w2b72qrw-busybox-1.37.0/
+|		+-- 5i01v0wrpwxzy1kck92p72g1q16ydpda-linux-6.18.15-shrunk/
+|		+-- l0l2ll1lmylczj1ihqn351af2kyp5x19-glibc-2.42-51/
+|		+-- l9np9nak71bmzx8s04npk58sy2x6hr14-dhcpevent.sh*
++-- run/
++-- sbin -> /nix/store/2qzl4hvvsgl0l39wi34w66j0kwmrwprc-installed/sbin/
++-- tmp/
++-- var/
+	+-- empty/
+	+-- run -> ../../run/
+
+16 directories, 4 files
+
+   Yes, that´s a Nix store.
+
+   I can explain!
+    1. This is due to having to do a lot more checks during POST. I unfortunately couldn´t find any good
+       authoritative sources listing all of the things they do, but just ask anyone who owns or operates
+       server hardware and they will complain about this to you.
+    2. If you actually use kexec in production you should run systemctl kexec or equivalent for your
+       init system to properly shut down your services first. Just running it raw is the equivalent of
+       resetting your system without hitting ACPI reset.
+    3. Imagining what this would look like is an exercise left for the reader. Also it wouldn´t work
+       anyway because I compiled these for x86.
+
+
+---
+https://astrid.tech/2026/03/24/3/chicken-shed/
+
+The little chicken shed that could
+2026-03-24
+
+   The bikeshed of the bikeshed that became too important
+
+   This is the third and final part of a four-part article series about how to reimage a disk in-place,
+   how to do weird things in initrd, and... well, now I guess it´s about how to build your own Linux
+   distro.
+
+   Some of you are about to angrily comment or email something like "grrrr! NixOS Anywhere already
+   does that kexec technique you were describing in part 2 and you STOLE it from them! grrrrrrr!"
+
+   I would like to respond with a correction, which is that I did not just steal their technique, but I
+   stole their entire system.
+
+   No, really - where do you think that Nix store comes from?
+
+Dropshipping NixOS Anywhere
+   First, I wrote a bash script, curlingiron.sh:
+
+#!/usr/bin/env bash
+
+kernel_params="$(cat /proc/cmdline)"
+
+src="$(echo "$kernel_params" | sed -n 's/.*curlingiron.src=\([^ ]*\).*/\1/p')"
+dst="$(echo "$kernel_params" | sed -n 's/.*curlingiron.dst=\([^ ]*\).*/\1/p')"
+
+curl -L "$src" | dd bs=1M of="$dst"
+
+   Then, with the attitude of someone building a plywood chicken shed onto the first house they saw, I
+   put this systemd service into a NixOS config that was almost completely ripped off from theirs:
+
+# A systemd service that runs the actual curlingiron script
+systemd.services.curlingiron = {
+	script = builtins.readFile ./curlingiron.sh;
+	serviceConfig = {
+		# Need to set up restarting because network-online doesn´t actually
+		# mean "we can talk to the internet".
+		# For more info, see https://systemd.io/NETWORK_ONLINE/
+		Restart = "on-failure";
+		RestartSec = 5;
+	};
+	requires = [ "network-online.target" ];
+	wantedBy = [ "multi-user.target" ];
+};
+
+   I hacked on it, got the kexec chain working, and I was very happy and did a silly little dance.
+
+   The next day, I started working on the outlines of parts 1-3 and wrote down that I should put in a
+   "go download my funny initrd" section.
+
+   Now, most initrds are fairly small. Debian´s is 35MB, my NixOS daily driver´s is 19MB. Wanna know how
+   big this one was?
+
+astrid@chungus curlsda $> ls -lhLF result/curlingiron/
+total 490M
+-r--r--r-- 2 root root  14M Dec 31  1969 bzImage
+-r--r--r-- 2 root root 477M Dec 31  1969 initrd.gz
+-r-xr-xr-x 2 root root  585 Dec 31  1969 kexec-boot*
+
+   Horror dawned on me as I realized that the house I had built my chicken shed onto wasn´t just a
+   house, it was a 477MB nuclear power plant! Oh god, I can´t just go around handing those out! People
+   would be angry, and worse, GitHub Pages would throttle me!
+
+Desperately trimming the fat
+   I used nix-tree to browse curlingiron´s dependency closure, and found some obvious things to axe.
+   For example, we don´t need ntfs3g, ZFS, sshfs, NetworkManager, nixos-install, nixos-enter, or
+   nixos-generate-config!
+
+   If you´re thinking "hey wait a minute, these sound like things that installers need," that´s because
+   NixOS Anywhere is a fully-featured unattended installer!
+
+   I tore a bunch of those out and got... 441MB (-36MB). Not great, not terrible.
+
+Desperately trimming the walls
+   I proceeded to madly run around its nix-tree with a sledgehammer, searching for literally
+   dependencies to pull off, and found some really funny ones.
+
+Delete Nix
+   Did you know that you can disable Nix on the OS famous for using Nix as its package manager and
+   configuration language?
+nix.enable = false;
+
+   Doing so took out a whopping 121MB, bringing me down to 320MB.
+
+Delete bloat
+   sudo, vim, nano, and other useless things like those seem to be included in
+   environment.systemPackages by default. How do you remove them?
+
+   Thank god for lib.mkForce.
+environment.systemPackages = with pkgs; lib.mkForce [ bash ];
+
+   Doing this took out 28MB down to 292MB. So much progress, yet still not enough!
+
+Desperately trimming the nuclear reactor
+   No matter what I did, I kept running into the 170MB elephant in the room - systemd. Jade (of .fyi
+   fame) suggested I try using the systemd minimal variant packaged with nixpkgs.
+
+   What´s the size delta? ~100MB?
+
+astrid@chungus curlsda $> nix path-info -Sh nixpkgs#systemd nixpkgs#systemdMinimal
+/nix/store/1vs3gbz4w3wrqs76z8iay5cidwrv2hy6-systemd-258.3                171.8M
+/nix/store/83ihzry3x75f469s4gj44nlqn94fncc3-systemd-minimal-258.3         66.9M
+/nix/store/hksy4h7mxnbc66a5g3kb9pdh4ggjiqm1-systemd-minimal-258.3-man      1.2M
+/nix/store/iz73qi2sbgg8yfnm4r10xy4k89mpbc86-systemd-258.3-man              1.8M
+
+   Eh, why not.
+
+Let´s get rid of some control rods!
+   By convention, most NixOS config nodes provide a .package option that you can use to override the
+   package. This is useful if, say, you want to compile a package in a certain way, or use one of its
+   drop-in replacements. Conveniently enough, systemd provides one too, so I tried dropping it in.
+systemd.package = pkgs.systemdMinimal;
+
+   nix build resulted in an error.
+astrid@chungus curlsda $> nix build .#nixosConfigurations.curlingiron.config.system.build.kexecTree
+warning: Git tree '/home/astrid/Documents/curlsda' is dirty
+error: builder for '/nix/store/5hl4z4j7zkl411d8g2li7hy7vhfjxcwx-initrd-units.drv' failed with exit code 1;
+       last 1 log lines:
+       > missing /nix/store/g5kvz35643fp9yhxnkwcnwkkrhyj6d71-systemd-minimal-259/example/systemd/system/system
+d-bsod.service
+...
+
+   So I proceeded to go on a mad get-error-search-nixpkgs-disable-option-new-error loop.
+# that bsod thing from above
+boot.initrd.systemd.suppressedUnits = [
+	"systemd-bsod.service"
+];
+boot.initrd.systemd.suppressedStorePaths = [
+	"${pkgs.systemdMinimal}/lib/systemd/systemd-bsod"
+];
+
+   I was making progress! I was pulling out the control rods! It was finally coming down!
+services.timesyncd.enable = false;
+systemd.oomd.enable = false;
+services.udev.enable = false;
+systemd.coredump.enable = false;
+
+   Then I got to systemd-logind and readied my sledgehammer. I opened up its module, excitedly
+   searching around for the off switch... and found that it does not have one.
+
+Bargaining with the Nuclear Regulatory Commission
+   Okay. It´s hardcoded, but that doesn´t have to be the end, right? I could submit a patch, or at least
+   make a private fork of nixpkgs. It could be as easy as adding a systemd.logind.enable flag!
+
+   ...but it could also spiral out of control if it turns out to be more involved than that...
+
+   I could try somehow manually removing all 10-ish of those config nodes that it defines! I´m sure
+   there´s ways!
+
+   ...though they probably all involve arcane lib functions that I don´t feel like searching for...
+
+   I took a step back and saw that what I had left wasn´t a chicken shed hacked onto an nuclear elephant
+   - it had already exploded, and I was left with just the elephant´s foot.
+
+   Remember that curl > /dev/sda thing, that initial chicken shed that I was talking about way back in
+   part 1? It really only needs to read from the internet and write to a disk, and I didn´t need NixOS
+   to do that.
+
+Building a standalone chicken shed
+   When people want to make tiny Linux distros, the tools that usually come to mind are Buildroot and
+   Yocto. I did some cursory research, and then remembered something - I don´t need to learn another
+   toolchain for this stuff, Nix already has all the components I need!
+
+   It can´t be too hard to build your own initramfs from scratch.
+
+   Right?
+
+Building the frame
+   While spelunking NixOS, I encountered a function called pkgs.makeInitrdNG that does exactly what you
+   think it does, which is build an initramfs, not an initrd. You can learn how to use it by reading
+   its documented source code.
+
+   Of course, that only gave me the frame, which I kept kicking at angrily because I kept running into
+   this kernel panic.
+[    1.908619] List of all partitions:
+[    1.908854] No filesystem could mount root, tried:
+[    1.908869]
+[    1.909479] Kernel panic - not syncing: VFS: Unable to mount root fs on "" or unknown-block(0,0)
+[    1.910078] CPU: 0 UID: 0 PID: 1 Comm: swapper/0 Not tainted 6.18.15 #1-NixOS PREEMPT(voluntary)
+[    1.910410] Hardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS rel-1.17.0-0-gb52ca86e094d-prebuilt.qemu.org 04/01/2014
+[    1.910878] Call Trace:
+[    1.911022]  <TASK>
+[    1.911336]  dump_stack_lvl+0x5d/0x80
+[    1.911681]  vpanic+0xdb/0x2d0
+[    1.911774]  panic+0x6b/0x6b
+[    1.911854]  mount_root_generic+0x293/0x2b0
+[    1.911984]  prepare_namespace+0x1dc/0x230
+[    1.912086]  kernel_init_freeable+0x27c/0x290
+[    1.912186]  ? __pfx_kernel_init+0x10/0x10
+[    1.912300]  kernel_init+0x1a/0x130
+[    1.912394]  ret_from_fork+0x1cb/0x200
+[    1.912500]  ? __pfx_kernel_init+0x10/0x10
+[    1.912618]  ret_from_fork_asm+0x1a/0x30
+[    1.912775]  </TASK>
+[    1.913296] Kernel Offset: 0x21400000 from 0xffffffff81000000 (relocation range: 0xffffffff80000000-0xffffffffbfffffff)
+[    1.913803] ---[ end Kernel panic - not syncing: VFS: Unable to mount root fs on "" or unknown-block(0,0) ]
+---
+QEMU: Terminated
+
+   Can you figure out what´s wrong here, and what Unable to mount root fs on "" or unknown-block(0,0)
+   means?
+
+   Obviously, it has nothing to do with mounting anything. It meant my Nix config accidentally pointed
+   /init to a directory.
+
+Special filesystems
+   You may be familiar with /dev, /proc, and /sys being magic directories that contain information about
+   the OS itself.
+
+   Well, did you know that they´re not there by default, and that the init process has to actually mount
+   them itself? I was reminded of that the hard way.
+
+# Mount the very important directories
+$> mkdir -p /dev /proc /sys
+$> mount -t devtmpfs devtmpfs /dev
+$> mount -t proc procfs /proc
+$> mount -t sysfs sysfs /sys
+
+Always thank your bus drivers
+   On most normal Linux systems, udev will find all of your peripherals and run modprobe with the
+   correct kernel driver. We don´t have that luxury, and I was too lazy to figure out how to stick udev
+   rules into this thing, so I had to manually run modprobe myself.
+
+# load core bus drivers first
+$> modprobe pci_hotplug 2>/dev/null
+$> modprobe usbcore 2>/dev/null
+$> modprobe xhci_hcd 2>/dev/null
+$> modprobe ehci_hcd 2>/dev/null
+
+# then scan all devices
+for f in /sys/bus/pci/devices/*/modalias; do
+	modprobe -b "$(cat $f)" 2>/dev/null
+done
+
+# USB devices won´t appear until USB host loaded, rescan
+for f in /sys/bus/usb/devices/*/modalias; do
+	modprobe -b "$(cat $f)" 2>/dev/null
+done
+
+   What´s in those modaliases? Fuck if I know!
+pci:v00008086d000024DBsv0000103Csd0000006Abc01sc01i8A
+
+   I don´t know or care how modprobe turns this incomprehensible string into a kernel module, but if you
+   do, Arch Wiki has an explanation.
+
+who need they SCSI ate
+   I learned that the sd in /dev/sda stands "SCSI Disk" after several rounds of failing to find
+   /dev/sda.
+
+# SCSI disk layer (doesn´t come from modalias)
+$> modprobe sd_mod 2>/dev/null
+$> modprobe sr_mod 2>/dev/null
+
+Networking
+   Do you think the Linux kernel just gives you internet access? Of course not. DHCP is a userspace
+   thing, but luckily Busybox gives that to you.
+# Turn on network interface and DHCP clients
+$> ip link set eth0 up
+$> udhcpc --script /etc/dhcpevent.sh &
+$> udhcpc6 --script /etc/dhcpevent.sh &
+
+she af on my _ till i packet
+   Except actually, I had to add this line before the DHCP shit because the Linux kernel in Nixpkgs
+   doesn´t have it enabled by default???
+# The kernel packaged with Nix apparently doesn´t do this???
+$> modprobe af_packet 2>/dev/null
+
+ugh
+# Wait until we have any amount of connectivity. This is because
+# DHCP might not be up by the time we get here, so we have to wait.
+until wget --spider "$src"; do
+	echo "Connection failed, waiting until we have connectivity"
+	sleep 5
+done
+
+fuck my life
+$> reboot -f # needs -f because Init Shenanigans
+
+The final result
+   There is a parable about a committee arguing about bikeshed at a nuclear power plant. Even though the
+   nuclear power plant is clearly the more important thing, the committee spends more time talking about
+   the bike shed than the power plant.
+
+   The solution to bikeshedding is that you focus on the nuclear power plant and drop the bike shed.
+
+   I guess you could call what I did "chickenshedding": I dropped the nuclear power plant and only
+   shipped the chicken shed.
+astrid@chungus ~ $> du -sh /tmp/curlingiron.initrd
+6.1M    /tmp/curlingiron.initrd
+
+   From a 292MB initramfs, we now have a 6.1MB initramfs, smaller than almost every other distro´s
+   initramfs and made entirely to run busybox wget | dd.
+
+   It doesn´t check SSL certs because the default Busybox wget provided by Nixpkgs doesn´t check SSL
+   certs.
+
+   And it´s a full OS built in Nix, but because I don´t use the NixOS module system whatsoever, it´s not
+   a NixOS.
+
+   Oh, and remember when I hinted that writing about the curl > /dev/sda trick would lead me to build a
+   Linux distro?
+
+   This is it. This is the distro.
+
+   The distro isn´t the argument to curl > /dev/sda. It´s the fucking operator.
+
+   I leave you with one more mystery:
+$> curl https://astrid.tech/rkx.gz | gunzip | sudo sh
+
+   What function this serves is left as an exercise for the reader.
+
+   Or, of course, you can watch me open it up in part 5, the addendum I added later on.
+    1. Similarly, CD-ROMs are named things like /dev/sr0, and that´s because sr stands for SCSI ROM.
+    2. And unlike NixOS, this one follows FHS! Just look at the tree output in part 2. /bin and
+       /lib are symlinks, but they´re also symlinks on Debian due to UsrMerge. You can´t win. Nobody
+       can win.
+    3. It comes with a kernel, userspace, and package manager! You just run the package manager before
+       boot, not after.
+
+
+---
+https://astrid.tech/2026/03/28/0/linux-is-an-interpreter/
+
+Linux is an interpreter
+2026-03-28
+
+   And why you would want to exec a cpio
+
+   This is a standalone addendum to an earlier four-part series. Reading the previous parts is not
+   required.
+
+   Links to previous parts, if you are interested:
+     * Part 0: curl > /dev/sda
+     * Part 1: Swap out the root before boot
+     * Part 2: How to pass secrets between reboots
+     * The 3rd and final part: The little chicken shed that could
+     * Part 5: you are here
+
+   In a previous article, I left you with this mysterious command.
+$> curl https://astrid.tech/rkx.gz | gunzip | sudo sh
+
+   What does it do? This can´t possibly be safe to run, can it? Am I distributing malware to you?
+
+   Fine, fine, I´ll open it up and show you what´s inside.
+
+Reverse engineering rkx.gz
+   First, we download it.
+astrid@chungus /tmp $> curl https://astrid.tech/rkx.gz | gunzip > rkx
+  % Total    % Received % Xferd  Average Speed  Time    Time    Time   Current
+                                 Dload  Upload  Total   Spent   Left   Speed
+100 14.31M 100 14.31M   0      0 28.16M      0                              0
+
+   What kind of a file is it?
+astrid@chungus /tmp $> file rkx
+rkx: POSIX shell script, ASCII text executable
+
+   Well, I guess I tell you to pipe it to sh, so it´s only expected it´s a shell script.
+
+   Let´s see what it runs.
+astrid@chungus /tmp $> cat rkx
+...
+Hr7vfOuMr610ygifa2yphI4pZCRAPHzf+dYZX1vplBE+19hSCR1TyECAePi+860zvrbSKSN8rrGl
+EjqmkHEA8fB951tnfG2lU0b4XGNLJXRMIcMA4uH7zrfO+NpKp4zwucaWSuiYQkYBSimllFJKKaWU
+vnXG11Y6ZYTPNbZUQscUMmYgHr7vfOuMr610ygifa2yphI4pZMhAPHzf+dYZX1vplBE+19hSCR1T
+yIiBePi+860zvrbSKSN8rrGlEjqmkAED8fB951tnfG2lU0b4XGNLJXRMIeMFa6211lprrbXWWmut
+KqFjChlIEA/fd751xtdWOmWEzzW2VELHFDKOIB6+73zrjK+tdMoIn2tsqYSOKWQYQTx83/nWGV9b
+...
+
+   Oops, that´s a lot of base64 junk! I guess that´s only to be expected given that it´s a 20 megabyte
+   shell script.
+astrid@chungus /tmp/r $> du -sh ../rkx.gz --apparent-size # i have a compressed disk so this flag tells you actual uncompressed size
+20M     ../rkx.gz
+
+   Well, if it´s a shell script, it has to be legible. Let´s just peek at its head and tail.
+astrid@chungus /tmp $> head rkx -n 15
+astrid@chungus /tmp $> tail rkx
+
+#!/bin/sh
+
+set -x
+if [ "$(id -u)" -ne 0 ]; then
+	echo "Please ensure you are running as root/sudo"
+	exit 1
+fi
+
+if ! command -v kexec && command -v base64 && command -v cpio 2>&1 >/dev/null ; then
+	echo "Please ensure kexec-tools, base64, and cpio are installed"
+	exit 1
+fi
+
+base64 -d <<912367yuiogrjklhsdijlslksdawuil234ui > r
+MDcwNzAxMDAwQjI0MDkwMDAwNDE2RDAwMDBGRkZFMDAwMEZGRkUwMDAwMDAwMzAwMDAwMDAxMDAw
+...
+AAAAAAAAAAAAAA==
+912367yuiogrjklhsdijlslksdawuil234ui
+
+cpio -uidv < r "k" > k
+
+kexec --load k --initrd r --reuse-cmdline
+kexec --exec
+
+   Altogether, what does this do?
+    1. Ensure that the user is running as root
+    2. Ensure that the user has kexec, base64, and cpio installed
+    3. Turn 20MB of base64 into a cpio named "r"
+    4. Treat "r" as a cpio and pull out a file named "k"
+    5. Run kexec with "k" as a kernel and "r" as a ramdisk
+
+   So this piece of malware writes an OS to "k" and "r" and replaces the current OS with that OS. Got
+   it.
+
+carve out that base64 and decode his ass
+astrid@chungus /tmp $> tail -n +15 < rkx | head -n -6 | base64 -d > r.cpio
+
+astrid@chungus /tmp $> file r.cpio
+r.cpio: ASCII cpio archive (SVR4 with no CRC)
+
+   Given that it treats this file as a ramdisk, it´s no surprise that it´s a valid cpio.
+
+   What´s it look like inside?
+astrid@chungus /tmp/r $> cpio -i < ../r.cpio
+30314 blocks
+
+astrid@chungus /tmp/r $> tree --filelimit 10 -a
+.
++-- bin  [398 entries exceeds filelimit, not opening dir]
++-- init
++-- k
+
+2 directories, 2 files
+
+   A /bin, and /init, and some file named k.
+
+   k is the kernel image it was extracting earlier:
+astrid@chungus /tmp/r $> file k
+k: Linux kernel x86 boot executable bzImage, version 6.18.18 (nixbld@localhost) #1-NixOS SMP PREEMPT_DYNAMIC F
+ri Mar 13 16:23:30 UTC 2026, RO-rootFS, swap_dev 0XC, Normal VGA
+
+   And init is a shell script, which is expectable:
+astrid@chungus /tmp/r $> file init
+init: POSIX shell script, ASCII text executable
+
+So, what´s inside /init?
+   Well, first, it mounts /proc.
+
+#!/bin/sh
+mkdir -p /proc
+mount -t proc proc /proc
+
+   Then, it makes a cpio at /r containing everything except /proc and /r.
+find / | grep -v /r | grep -v /proc | cpio -vo -H newc > /r
+
+   And... well, it kexecs /k with /r.
+kexec --load /k --initrd /r --reuse-cmdline
+kexec --exec
+
+   Altogether now:
+#!/bin/sh
+mkdir -p /proc
+mount -t proc proc /proc
+
+find / | grep -v /r | grep -v /proc | cpio -vo -H newc > /r
+
+kexec --load /k --initrd /r --reuse-cmdline
+kexec --exec
+
+   And once you get there, the kernel be replaced with a new one, then run /init inside /r, which
+   happens to be this /init itself, which will replace the kernel with a new one...
+
+   ... so in other words, this is a Linux distro that recursively calls kexec on itself! Isn´t that so
+   cute?
+
+So what really is this thing?
+   In the previous article series, I made an initramfs that literally just runs curl > /dev/sda and
+   reboots. It´s technically an OS, but it also might as well just be an executable file.
+
+   But think about how you run this executable file. You always have to pass it into Linux, whether
+   you´re doing it from a bootloader, a VM, or kexec.
+
+   This feels strangely reminiscent of something that already exists. It feels like the way you executed
+   that initial payload with curl | sh, or sh myscript.sh, or even python3 myscript.py.
+
+   In all of these cases, you´re passing the program into another program that actually interprets and
+   runs the instructions inside.
+
+   Yes, that´s right.
+
+   Initrds are programs, and Linux kernels are interpreter programs for initrds.
+
+Chasing your own tail
+   There´s a weird thing happening in this malware, which is that using kexec for recursion is a very
+   strange form of recursion.
+
+   The CS 101 example of a recursive Fibonacci function is a very standard form of recursion. You´re
+   taught not to do things like this because the professor will put 1001 in and you´ll hit Python´s
+   1000-frame stack limit.
+
+def fib(n):
+	match n:
+		case 1: return 1
+		case 2: return 1
+		case n: return fib(n-1) + fib(n-2)
+
+   The program I gave you will never hit that stack limit.
+
+   There is no stack.
+
+   You´re not nesting Linux kernels inside each other. You´re replacing each Linux kernel with a new
+   one. But your new stack frame doesn´t overwrite the old stack frame whatsoever - it builds up a new
+   Linux interpreter stack frame in a different part of memory, and executes that stack frame, leaving
+   the old one behind.
+
+   This initrd is a tail-call-optimized recursive function. Stack frame replacement works by copying
+   the program data to a new chunk of memory, and executing that new chunk of memory. It´s
+   copy-on-write by necessity because the old program is actively executing while the new program is
+   being constructed.
+
+     "Now, here, you see, it takes all the running you can do, to keep in the same place. If you want
+     to get somewhere else, you must run at least twice as fast as that!" - The Red Queen, from Alice
+     in Wonderland
+
+Let me fix that for you
+   There´s this concept of a Quine, which is a self-contained program that prints out a copy of
+   itself.
+
+   As an example, here is this Python program (taken from the Wikipedia page):
+a: str = 'a: str = {}{}{}; print(a.format(chr(39), a, chr(39)))'; print(a.format(chr(39), a, chr(39)))
+
+   When piped into Python, it prints a copy of itself.
+astrid@chungus ~ $> echo "a: str = 'a: str = {}{}{}; print(a.format(chr(39), a, chr(39)))'; print(a.format(chr
+(39), a, chr(39)))" | python3
+a: str = 'a: str = {}{}{}; print(a.format(chr(39), a, chr(39)))'; print(a.format(chr(39), a, chr(39)))
+
+   Okay, so remember that init process from above?
+
+   If I had made it do something else at the end, maybe something like cat /r, that would have made it
+   spit out the cpio it´s about to execute.
+
+   Which is the same exact cpio as itself.
+
+   If the /init looked like this, I would have given you a quine of the Linux initrd interpreter.
+#!/bin/sh
+mkdir -p /proc
+mount -t proc proc /proc
+
+find / | grep -v /r | grep -v /proc | cpio -vo -H newc > /r
+
+cat /r
+
+   You may object that this program clearly performs I/O by reading files to execute them.
+
+   No it doesn´t.
+
+   These files are all in RAM.
+
+   Everything is a file, but these files are variables. No actual I/O is ever being performed to read
+   these files off a disk. When the script asks for them, the kernel is just reading them off of a
+   tmpfs!
+
+   This is a quine in the way as a C++ binary that scans through all its memory and dumps out all of its
+   in-memory program contents is.
+
+   Exercise for the reader: The malware I gave you had a 15M cpio. How small is the smallest initrd
+   that, when executed in a Linux kernel, outputs itself? In other words, what is the smallest initrd
+   quine?
+
+Interpret it a different way
+   If the Linux kernel is an interpreter, who interprets the Linux kernel interpreter? What does it mean
+   for a programming language to be interpreted?
+
+   Let´s think about how conventional interpreters work first. In the example of Python and Bash, you
+   give them a string, they parse the string, and carry out the instructions written in the string.
+
+   But those scripts aren´t machine code! How is it possible for the Linux kernel to execute my shell
+   script when I run ./foo.sh?
+
+   The shebang at the top (like #!/bin/sh or #!/usr/bin/env python3) basically tells Linux "execute me
+   by passing me to the thing after the #!.
+
+   Therefore, these two commands do exactly the same thing:
+$> /bin/sh mything.sh
+$> ./mything.sh
+
+   Not all executable files have this header, though. For example, /bin/sh itself actually has an ELF
+   header, \x7fELF, indicating that it´s a binary executable file:
+astrid@chungus rekexec $> cat /bin/sh | xxd | head -n 2
+00000000: 7f45 4c46 0201 0100 0000 0000 0000 0000  .ELF............
+00000010: 0300 3e00 0100 0000 c08f 0200 0000 0000  ..>.............
+
+   That makes a lot of sense. /bin/sh is a compiled binary. Even file on my NixOS install confirms this.
+astrid@chungus rekexec $> file -L /bin/sh
+/bin/sh: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /nix/store/vr7ds8vwbl2fz7pr221d5y0f8n9a5wda-glibc-2.40-218/lib/ld-linux-x86-64.so.2, BuildID[sha1]=56923a72980631c2b23a5824f853b1c57b1f5f20, for GNU/Linux 3.10.0, not strid
+
+   Hang on.
+
+     interpreter /nix/store/vr7ds8vwbl2fz7pr221d5y0f8n9a5wda-glibc-2.40-218/lib/ld-linux-x86-64.so.2
+
+   Interpreter? ELF files are interpreted too?
+
+Who interprets the interpreter?
+   Well it turns out that from the kernel´s perspective, the actual program being run is
+   ld-linux-x86-64.so.2! The ELF doesn´t do dynamic library management on its own, that ld program does!
+
+   So the process is something like:
+    1. Execute ld.so
+    2. ld.so reads the /bin/sh ELF
+    3. ld.so finds the imported dynamic libraries of the ELF
+    4. ld.so loads them into memory
+    5. ld.so executes the program data from /bin/sh
+
+   You know what, I guess if you can imagine the existence of a Python or Bash script that imports stuff
+   and then runs raw machine code instructions, then ELFs are kind of an interpreted language too!
+
+   And if you pass /bin/sh into that ld-linux-x86-64.so.2, does that work?
+astrid@chungus rekexec $> /nix/store/vr7ds8vwbl2fz7pr221d5y0f8n9a5wda-glibc-2.40-218/lib/ld-linux-x86-64.so.2 /
+bin/sh
+sh-5.3$
+exit
+
+   Yes it does!
+
+   ...
+
+   Hang on.
+
+   If /bin/sh interprets shell scripts, and ld.so interprets /bin/sh... who interprets ld.so?
+
+   It can´t possibly interpret itself, can it?
+astrid@chungus astrid.tech-content $> file /nix/store/vr7ds8vwbl2fz7pr221d5y0f8n9a5wda-glibc-2.40-218/lib/ld-linux-x86-64.so.2
+/nix/store/vr7ds8vwbl2fz7pr221d5y0f8n9a5wda-glibc-2.40-218/lib/ld-linux-x86-64.so.2: ELF 64-bit LSB shared object, x86-64, version 1 (GNU/Linux), static-pie linked, BuildID[sha1]=bd51a42f77a79acd5bd1c787dee61dbd1bbe1d58,not stripped
+
+   Phew! Turns out that it´s statically linked, so the Linux kernel itself, which has ELF interpretation
+   facilities, can interpret it! Linux only needs to delegate ELF files to ld.so when there´s dynamic
+   linking. We now have a base case! No infinite recursion here!
+
+   Now, what happens when you chmod +x something that doesn´t make sense to be executed? Like this
+   archive here?
+astrid@chungus ~ $> chmod +x r
+astrid@chungus rekexec $> file r
+r: ASCII cpio archive (SVR4 with no CRC)
+
+   What´s the result of ./r?
+astrid@chungus ~ $> ./r
+zsh: exec format error: ./r
+
+   Okay, so this "ASCII cpio archive (SVR4 with no CRC)" has the magic string \x30\x37\x30\x37\x30\x31
+   at its head. Therefore, even if you chmod +x´d a cpio file, you wouldn´t be able to execute it!
+
+   After all, it wouldn´t make any sense! How exactly does one execute a cpio file as a program?
+
+   That would be ludicrous.
+
+it´s executable, trust me bro
+   If you´ve ever installed Mono or Wine, you´ll suddenly find yourself able to execute EXE files. This
+   is because they configure a kernel module called binfmt_misc, which lets you tell the kernel "files
+   with this magic string can be interpreted using this interpreter."
+
+   And of course, if Linux can execute EXE files, it´s definitely possible for it to execute cpio files.
+
+   This QEMU command can act as an initrd interpreter by hosting a virtualized Linux OS:
+
+#!/bin/sh
+
+set -x # print executed commands
+
+exec qemu-system-x86_64 \
+    -kernel /path/to/my/kernel \
+    -initrd $1 \
+    -append "console=ttyS0" \
+    -nographic \
+    -m 2G \
+    -no-reboot
+
+   Put that script somewhere on your system, and you can register it in binfmt like so:
+echo ':cpio:M::\x30\x37\x30\x37\x30\x31::/path/to/my/script.sh:' \
+    > /proc/sys/fs/binfmt_misc/register
+
+   And with that, you can execute initrds that have the executable bit set.
+astrid@chungus rekexec $> file i
+i: ASCII cpio archive (SVR4 with no CRC)
+astrid@chungus rekexec $> chmod +x i
+astrid@chungus rekexec $> ./i
++ exec qemu-system-x86_64 -kernel /boot/kernels/5ngwg33rxpwc476b3bfixdqg4kx9qs62-linux-6.12.69-bzImage -initrd ./i -append console=ttyS0 -nographic -m 2G -no-reboot
+SeaBIOS (version rel-1.17.0-0-gb52ca86e094d-prebuilt.qemu.org)
+
+iPXE (http://ipxe.org) 00:03.0 CA00 PCI2.10 PnP PMM+7EFD1C90+7EF31C90 CA00
+
+Booting from ROM...
+Probing EDD (edd=off to disable)... o
+[    0.000000] Linux version 6.12.69 (nixbld@localhost) (gcc (GCC) 14.3.0, GNU ld (GNU Binutils) 2.44) #1-NixOS SMP PREEMPT_DYNAMIC 6
+[    0.000000] Command line: console=ttyS0
+[    0.000000] BIOS-provided physical RAM map:
+[    0.000000] BIOS-e820: [mem 0x0000000000000000-0x000000000009fbff] usable
+[    0.000000] BIOS-e820: [mem 0x000000000009fc00-0x000000000009ffff] reserved
+[    0.000000] BIOS-e820: [mem 0x00000000000f0000-0x00000000000fffff] reserved
+[    0.000000] BIOS-e820: [mem 0x0000000000100000-0x000000007ffdffff] usable
+[    0.000000] BIOS-e820: [mem 0x000000007ffe0000-0x000000007fffffff] reserved
+[    0.000000] BIOS-e820: [mem 0x00000000fffc0000-0x00000000ffffffff] reserved
+[    0.000000] BIOS-e820: [mem 0x000000fd00000000-0x000000ffffffffff] reserved
+[    0.000000] NX (Execute Disable) protection: active
+[    0.000000] APIC: Static calls initialized
+[    0.000000] SMBIOS 2.8 present.
+[    0.000000] DMI: QEMU Standard PC (i440FX + PIIX, 1996), BIOS rel-1.17.0-0-gb52ca86e094d-prebuilt.qemu.org 04/01/2014
+[    0.000000] DMI: Memory slots populated: 1/1
+[    0.000000] tsc: Fast TSC calibration using PIT
+[    0.000000] tsc: Detected 3393.648 MHz processor
+[    0.014905] last_pfn = 0x7ffe0 max_arch_pfn = 0x400000000
+[    0.015525] MTRR map: 4 entries (3 fixed + 1 variable; max 19), built from 8 variable MTRRs
+
+   The interpreter for CPIO files is the kernel of a virtual OS.
+
+   The interpreter of that kernel is QEMU, virtualizing a computer on the OS you ran it from.
+
+The strangest loop
+   Our QEMU interpreter script can be thought of as creating a new stack frame of the Linux environment.
+   You´re having your Linux distro calls another Linux distro in a VM. This stack can tower infinitely
+   large and make us hit the stack frame limit of how big our memory is.
+
+   Let´s apply a tail call optimization.
+
+   Here is a new interpreter:
+#!/bin/sh
+
+kexec --load /k --initrd $1 --reuse-cmdline
+kexec --exec
+
+   Then let´s put it in that piece of malware I gave you at /bin/cpio-interpreter, and update the /init
+   in the initramfs to register it as a binfmt handler:
+
+#!/bin/sh
+mkdir -p /proc
+mount -t proc proc /proc
+mount -t binfmt_misc none /proc/sys/fs/binfmt_misc
+
+echo ':cpio:M::\x30\x37\x30\x37\x30\x31::/bin/cpio-interpreter:' \
+  > /proc/sys/fs/binfmt_misc/register
+
+find / | grep -v /r | grep -v /proc | cpio -vo -H newc > /r
+
+chmod +x /r
+exec /r
+
+   Now we have an initrd that derives the real init process, which is of cpio format! Then it execs it
+   at the end, all in the nice and convenient POSIXLY_CORRECT way that initramfses on most distros do!
+
+A last little thing
+   Besides the obvious, there´s something else that´s deeply wrong with what we´ve done.
+
+   In most cases, using binfmt to execute scripts has to bottom out. Your #!/bin/sh script has to be
+   interpreted by /bin/sh which has to be interpreted by ld.so which has to be interpreted directly by
+   the kernel.
+
+   I´ve made a binfmt interpreter that runs a CPIO using another kernel and never bottoms out.
+
+   The interpreter for CPIO files on this system is the kernel of its next reboot.
+
+   The interpreter of that kernel is the computer itself.
+
+Conclusion
+   We learned what an initrd is in part 1 and used it to kill God in part 5.
+
+   Anyways, here´s the [https://github.com/ifd3f/rekexec/]source code. kthxbai :3
+
+    1. For the functional programmers among you, quines are often called the fixed points of their
+       runtime environments. So this is a fixed point of the Linux interpreter as a program that
+       executes initrds.
+    2. This statement approximately says "if you are asked to execute a file beginning with byte string
+       \x30\x37\x30\x37\x30\x31, use /path/to/my/script.sh to handle it. For the other fields, see docs
+       at https://docs.kernel.org/admin-guide/binfmt-misc.html for what they mean."
+    3. Oh yeah, it was a Nix package. It turns out Nix is also capable of building OSes that don´t have
+       a Nix store in them!
+
+
+---
+
