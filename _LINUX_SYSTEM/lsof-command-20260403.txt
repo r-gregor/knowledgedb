@@ -1,0 +1,221 @@
+filename: lsof-command-20260403.txt
+https://linuxize.com/post/lsof-command-in-linux/
+
+lsof Command in Linux: List Open Files and Network Connections
+Apr 1, 2026
+
+Using the lsof command to list open files and network connections in Linux
+When you delete a file but the disk space does not come back, or a port appears occupied and you cannot
+tell what is using it, the lsof command gives you the answer. lsof stands for "list open files."
+In Linux, many resources are represented as files, so lsof can show regular files, directories, pipes,
+sockets, and network connections.
+
+This guide explains how to use lsof to inspect open files, trace network connections, and identify which
+processes hold resources on your system.
+lsof [OPTIONS] [FILE]
+
+When called without arguments, lsof attempts to list every open file visible to the current user. That
+output is usually thousands of lines long, so in practice you will almost always combine it with a filter
+or run it with sudo when you need a full system-wide view.
+Understanding the Output
+
+Running lsof without arguments produces output like this:
+$> sudo lsof | head -5
+
+output
+
+COMMAND   PID   USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+systemd     1   root  cwd    DIR    8,1     4096    2 /
+systemd     1   root  rtd    DIR    8,1     4096    2 /
+nginx    1234   root    6u  IPv4  28743      0t0  TCP *:http (LISTEN)
+bash     5678   john   1u   REG    8,1   102400  789 /home/john/log.txt
+
+Each column tells you something specific:
+
+  * COMMAND - the name of the process
+  * PID - process ID
+  * USER - the user running the process
+  * FD - file descriptor (cwd is the current working directory, txt is the program executable, a number like
+    4u is an open file handle where r means read, w means write, and u means read and write)
+  * TYPE - type of file (REG for a regular file, DIR for a directory, IPv4/IPv6 for network sockets, unix for
+    Unix domain sockets)
+  * SIZE/OFF - file size or current offset
+  * NAME - the file path or network address
+
+Find What Is Using a Port
+The most common use for lsof is finding which process is listening on a given port. For that, use numeric
+output, limit the search to TCP, and filter to the LISTEN state:
+$> sudo lsof -nP -iTCP:80 -sTCP:LISTEN
+
+output
+
+COMMAND   PID      USER    FD   TYPE   DEVICE   SIZE/OFF   NODE   NAME
+nginx    1234      root    6u   IPv4    34120        0t0    TCP   *:80 (LISTEN)
+nginx    1235  www-data    6u   IPv4    34120        0t0    TCP   *:80 (LISTEN)
+
+The output shows that nginx is listening on port 80. The PID column gives you the process ID if you need
+to stop or restart it. The -nP options keep addresses and port numbers numeric, which makes the output
+easier to read in scripts and troubleshooting sessions.
+
+To filter by both protocol and port number, specify the protocol before the port:
+$> sudo lsof -nP -iTCP:443 -sTCP:LISTEN
+
+This is useful when both TCP and UDP services share the same port number and you want to narrow the
+results to listening TCP sockets only.
+List All Network Connections
+
+To see all open network connections on the system, pass -i without a port:
+$> sudo lsof -i
+
+To narrow the results to a specific protocol, add TCP or UDP:
+$> sudo lsof -i TCP
+
+output
+
+COMMAND   PID  USER  FD   TYPE  DEVICE  SIZE/OFF  NODE  NAME
+nginx    1234  root  6u   IPv4   34120       0t0   TCP  *:http (LISTEN)
+sshd     2345  root  3u   IPv4   39210       0t0   TCP  *:ssh (LISTEN)
+curl     5678  john  5u   IPv4   56789       0t0   TCP  workstation:54321->93.184.216.34:http (ESTABLISHED)
+
+Listening services show an asterisk for the address. Established connections show the remote address
+and port.
+
+List Files Opened by a Process
+To see all files opened by a specific process, pass the process ID with -p:
+$> sudo lsof -p 1234
+
+To exclude a process instead, prefix the PID with ^:
+$> sudo lsof -p ^1234
+
+You can also filter by process name with -c. This matches any running process whose name starts with
+the given string:
+$> sudo lsof -c nginx
+
+List Files Opened by a User
+To see all files a particular user has open, use -u followed by the username:
+$> lsof -u john
+
+To see files opened by everyone except that user, prefix the username with ^:
+$> sudo lsof -u ^john
+
+This is useful on multi-user systems when you want to audit what a specific account is accessing.
+
+Find Which Process Has a File Open
+Pass a file path directly to lsof to see which processes currently have it open:
+$> lsof /var/log/nginx/access.log
+
+output
+
+COMMAND  PID      USER    FD   TYPE  DEVICE  SIZE/OFF    NODE  NAME
+nginx   1234      root    5w   REG      8,1    249856  654321  /var/log/nginx/access.log
+nginx   1235  www-data    5w   REG      8,1    249856  654321  /var/log/nginx/access.log
+
+This works for any file, including device files, sockets, and named pipes.
+
+List All Open Files in a Directory
+To list all files open within a directory and its subdirectories, use +D:
+$> sudo lsof +D /var/log
+
+For a non-recursive listing (top-level only), use lowercase +d:
+$> sudo lsof +d /var/log
+
++D is especially useful before unmounting a filesystem. If any process has a file open inside the mount
+point, umount will refuse to proceed. Running lsof +D /mountpoint tells you exactly which process is
+blocking it.
+
+Find Deleted Files Still Holding Disk Space
+When you delete a file that a running process still has open, the kernel keeps the data on disk until
+the process closes the file descriptor or exits. This is a common cause of the "disk is full but I
+cannot find any large files" problem.
+
+To find these held-open deleted files, use +L1:
+$> sudo lsof +L1
+
+output
+
+COMMAND   PID  USER    FD   TYPE  DEVICE  SIZE/OFF  NLINK  NODE  NAME
+python3  4567  john    3r   REG      8,1   2097152      0   456  /tmp/data.bin (deleted)
+
+The NLINK column shows 0, meaning the file has no directory entry left but is still open. Restarting
+the process listed under COMMAND will release the space. For more ways to find large files on Linux ,
+including files that are still visible on disk, see that dedicated guide.
+
+Get Only Process IDs
+The -t option outputs only process IDs, with no headers or other columns. This is designed for scripting:
+$> sudo lsof -t -iTCP:8080 -sTCP:LISTEN
+
+output
+
+3456
+
+A common pattern is to stop the process listening on a port:
+$> kill $(sudo lsof -t -iTCP:8080 -sTCP:LISTEN)
+
+Verify the process first with sudo lsof -nP -iTCP:8080 -sTCP:LISTEN before killing it, so you know what
+you are stopping.
+
+Combining Filters
+By default, lsof treats multiple options as OR logic: the output includes files matching any of the
+conditions. To switch to AND logic (a result must satisfy all conditions), add -a:
+$> sudo lsof -a -u john -i TCP
+
+Without -a, this command would return all TCP connections on the system plus all files opened by john. With
+-a, it returns only TCP connections that belong specifically to john.
+
+Quick Reference
+For a printable quick reference, see the [https://linuxize.com/cheatsheet/lsof/]lsof cheatsheet.
+
+Command Description
+---------------------------------------------------------------------------------
+lsof                               List all open files
+---------------------------------------------------------------------------------
+lsof -nP -iTCP:PORT -sTCP:LISTEN   Find what is listening on a TCP port
+lsof -i TCP                        List all TCP connections
+lsof -nP -iTCP:443 -sTCP:LISTEN    Filter by protocol and port
+lsof -p PID                        Files opened by a process
+lsof -c nginx                      Files opened by processes named nginx
+lsof -u john                       Files opened by a user
+lsof /path/to/file                 Processes that have a specific file open
+lsof +D /dir                       All open files in a directory (recursive)
+lsof +L1                           Deleted files still held open
+lsof -t -iTCP:PORT -sTCP:LISTEN    Output only PIDs listening on a TCP port
+lsof -a -u john -i TCP             AND logic: TCP connections for a specific user
+---------------------------------------------------------------------------------
+
+FAQ
+Why does lsof require sudo?
+Without root privileges, lsof can only show files opened by your own processes. Running it with sudo
+gives you visibility into all processes on the system. Some distributions also restrict access to /proc
+for non-root users, which limits what lsof can read without elevated permissions.
+
+What is the difference between lsof and ss?
+lsof covers the full range of open files: regular files, directories, pipes, devices, and network sockets
+in a single view. The ss command is purpose-built for network sockets and provides more detail about
+socket states and statistics. Use lsof when you want to tie a network connection back to a specific file
+or see everything a process has open. Use ss when you need to inspect socket state in detail.
+
+How do I find which process is using a port?
+Run sudo lsof -nP -iTCP:PORT -sTCP:LISTEN, replacing PORT with the number you want to check. The ss
+command with ss -tlnp is another approach covered in the guide on how to check listening ports .
+
+Can I monitor file access in real time with lsof?
+No. lsof takes a snapshot at the moment you run it. For real-time filesystem event monitoring, use
+inotifywait from the inotify-tools package.
+
+lsof shows a file path ending in (deleted). What does that mean?
+The file was removed from the directory while a process still had it open. The data remains on disk
+until the process releases the file descriptor. This is the cause of the "disk full but no large files
+visible" problem described in the section above. Use lsof +L1 to list all such files and restart the
+holding process to free the space.
+
+Conclusion
+lsof is one of the most practical diagnostic tools available on Linux. Whether you are tracking down a
+port conflict, auditing which files a user has open, or recovering disk space from deleted but held-open
+files, it gives you a direct view into what every process is accessing at any moment.
+
+For related tools, see the ps command guide for process inspection and the ss command guide for dedicated
+network socket statistics.
+
+
+---
+
