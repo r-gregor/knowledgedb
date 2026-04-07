@@ -1,0 +1,175 @@
+sgilename: go-data-oriented-design-contiguous-memory-5pp-20260407.txt
+https://lorbic.com/data-oriented-design-go-contiguous-memory/
+
+Part 1: Data-Oriented Design in Go: Why [][]Tile Destroyed My Game Engine
+Date Apr 5, 2026
+
+   The textbook answer for a 2D grid in Go is a slice of slices. In a systems-level game engine running
+   at 60 FPS, this innocent data structure becomes a performance landmine. This post explores pointer
+   chasing, CPU cache lines, and how flattening a 2D map into contiguous memory creates massive
+   performance gains through Data-Oriented Design.
+
+   Reading part 1 of [https://lorbic.com/series/building-a-game-engine-in-pure-go]Building a Game Engine in
+   Pure Go
+
+   Most game development stories start the same way: install Unity, drag some sprites onto a canvas, and
+   press Play.
+
+   I wanted to understand the metal. I set out to build Derelict Facility, a systems-level game
+   engine from scratch in pure Go. No SDL, no OpenGL wrappers, no Ebiten. The goal wasn´t just to ship a
+   game; the goal was to learn the memory layouts and I/O pipelines that modern engines hide behind
+   friendly APIs.
+
+   The very first decision you face when building a grid-based simulation is how to represent the map in
+   memory. The textbook answer looks obvious:
+
+// The obvious approach: a slice of slices
+type Map struct {
+	Grid [][]Tile
+}
+
+   In standard application code, this is perfectly fine. In systems programming, where you are rendering
+   a 120x30 grid 60 times a second and running A* pathfinding algorithms across thousands of nodes, this
+   data structure is a performance landmine.
+
+The Problem: Pointer Chasing
+   To understand why [][]Tile fails at scale, you have to look at how Go allocates memory on the heap.
+
+   A slice in Go is a small struct containing a pointer to an underlying array, a length, and a
+   capacity. Therefore, a "slice of slices" is actually a list of pointers. Each inner slice (Grid[y])
+   is a separate heap allocation pointing to a block of memory located somewhere else.
+
+   But "somewhere" is the problem. These inner arrays are scattered randomly across the heap.
+
+   When the CPU tries to iterate over the grid row by row to render the map or calculate Field of View
+   (FOV), it has to chase a pointer to a completely new memory address for every single row. Each jump
+   is a potential cache miss. The CPU stalls while it waits to fetch data from main RAM instead of the
+   blazing-fast L1/L2 cache sitting next to the core.
+
+   On a tight 16ms frame budget, those memory stalls compound into visible frame drops.
+
+The Solution: Contiguous Memory
+   In Data-Oriented Design, the primary rule is: respect the CPU cache. CPUs do not read memory one byte
+   at a time; they read chunks of memory (cache lines, usually 64 bytes) at once. If your data is laid
+   out sequentially, the CPU will automatically prefetch the next items before your code even asks for
+   them.
+
+   I re-architected the Derelict Facility map as a single, flat, contiguous 1D block of memory:
+   go internal/world/map.go
+
+ttype Map struct {
+	Tiles []Tile // Size = Width \* Height (one contiguous block)
+	Width int
+	Height int
+	Rooms []Rect
+}
+
+func NewMap(width, height int) *Map {
+	return &Map{
+		Width: width,
+		Height: height,
+		// One single allocation for the entire world
+		Tiles: make([]Tile, width*height),
+	}
+}
+
+   Instead of allocating memory Height times, we allocate exactly once. The entire map lives in one
+   unbroken block of RAM.
+
+Stride Math (O(1) Access)
+   If the map is a flat 1D array, how do we access a specific (x, y) coordinate? We use stride math: a
+   simple formula you´ll find at the core of every framebuffer, texture map, and video decoder on Earth:
+Index = X + (Y * Width)
+
+go internal/world/map.go
+
+func (m *Map) GetTile(x, y int) *Tile {
+	// Bounds checking
+	if x < 0 || x >= m.Width || y < 0 || y >= m.Height {
+		return nil
+	}
+
+	// O(1) mathematical lookup
+	return &m.Tiles[x + y*m.Width]
+
+}
+
+   There is zero pointer chasing. The CPU calculates the exact memory offset instantly. When our Raylib
+   renderer scans across the map from left to right, the CPU aggressively prefetches the Tile structs
+   because it knows exactly where they are.
+
+Shrinking the Struct
+   Contiguous memory is only half the battle; the other half is data density. The smaller the struct,
+   the more of them fit into a single 64-byte L1 cache line.
+
+   If I had defined my Tile struct with strings for colors or complex interfaces, the memory footprint
+   would bloat. Instead, I kept it as small as physically possible:
+   go internal/world/tile.go
+
+type TileType uint8
+
+const (
+	TileTypeEmpty TileType = iota
+	TileTypeWall
+	TileTypeFloor
+)
+
+type Tile struct {
+	Type TileType // 1 byte
+	Walkable bool // 1 byte
+	Visible bool // 1 byte
+	Explored bool // 1 byte
+}
+
+   This struct packs perfectly into 4 bytes.
+
+   Do the math: A 120x30 map contains 3,600 tiles. At 4 bytes per tile, the entire map of the Derelict
+   Facility fits into exactly 14.4 KB of RAM.
+
+   A modern CPU L1 data cache is typically 32 KB or 64 KB. This means the engine can load the entire
+   physical game world into the absolute fastest layer of CPU memory simultaneously.
+
+The Trade-offs
+   Is a contiguous 1D array always the right answer? No.
+    1. Immutability of Size: A flat slice is brilliant for a fixed-size grid (like a game map or an
+       image matrix). If your map needs to dynamically grow or shrink in unpredictable directions during
+       runtime, managing a massive contiguous reallocation is expensive. You would need to implement a
+       chunking system (like Minecraft).
+    2. Cognitive Overhead: Grid[y][x] is undeniably easier to read and write than m.Tiles[x +
+       y*m.Width]. You must abstract the math behind reliable helper functions (like GetTile) to prevent
+       developers from messing up the index calculations.
+
+   Before you write a single line of business logic or rendering code, your data layout is already
+   dictating your system´s performance ceiling.
+
+   By flattening our 2D structures, leaning on simple mathematical strides, and ruthlessly stripping our
+   structs of heap-allocated pointers, we stop fighting the Go garbage collector and start working in
+   harmony with the CPU cache. In systems engineering, mechanical sympathy is everything.
+
+Further Reading
+   If you want to dive deeper into Data-Oriented Design and Engine Architecture, these are the
+   foundational resources that shaped my approach to Derelict Facility:
+
+   Books:
+     * "Game Engine Architecture" by Jason Gregory
+     * "Game Programming Patterns" by Robert Nystrom (specifically the
+	   [https://gameprogrammingpatterns.com/data-locality.html]Data Locality chapter)
+     * "Data-Oriented Design" by Richard Fabian
+
+   Lectures & Talks:
+     * "Data-Oriented Design and C++" by Mike Acton (GDC 2014)
+     * "A Practical Guide to Applying Data-Oriented Design" by Andrew Kelley
+
+   Online Resources:
+     * [https://github.com/dbartolini/data-oriented-design]The dbartolini/data-oriented-design GitHub
+       Repository
+     * Unity DOTS (Data-Oriented Technology Stack) Documentation
+     ________________________________________________________________________________________________
+
+   This is Part 1 of the [https://lorbic.com/series/game-development/]Building a Game Engine in Pure Go
+   series. The full source code for Derelict Facility is available on
+   [https://github.com/vikash-paf/derelict-facility]GitHub.
+
+
+---
+
