@@ -1,0 +1,636 @@
+filename: bash-complex-option-parsing-20260507.txt
+https://mywiki.wooledge.org/ComplexOptionParsing
+
+Complex Option Parsing
+
+   This page is a split-off from [**1][https://mywiki.wooledge.org/BashFAQ/035]Bash FAQ 35. It holds all of
+   the crazy nonstandard ideas that people have come up with to write option-parsing code. These ideas tend to
+   be over-engineered, half-baked, inefficient, unreliable, unsafe, or downright insane, or any combination of
+   the above.  Use at your own risk.
+
+   If you find yourself writing a bash script which is so large that you think you need a third-party
+   option-processing module, then you are writing in the wrong language.
+
+util-linux´s special getopt
+   Traditional Unix systems have a program named getopt(1). This is a massively broken tool. You should
+   never use it.
+
+   The purpose of getopt was to rewrite a script´s command arguments into a normalized form, splitting
+   single-letter options apart (e.g. -abc to -a -b -c), and separating an option and its argument into
+   two arguments (-ffile to -f file), so that a Bourne shell script could write a reasonable option
+   parsing loop. Unfortunately, getopt was written in the Days Of Olde, when shells didn´t have arrays,
+   lists were stored in strings, and it was all fine and dandy because filenames didn´t have spaces
+   either.
+
+   In the real world, filenames (and even non-filename arguments like CFLAGS="-g -O") contain spaces,
+   and empty arguments are used, and both of these cause getopt to fail. The failure is so inextricably
+   baked into the design of getopt that it cannot be fixed (see example below). Every Unix system which
+   still ships getopt includes warnings in its man page telling you not to use it.
+
+   And then... there´s Linux.
+
+   Linux is so special that its developers decided to rewrite getopt. They made one that handles
+   arguments with spaces in them, and empty arguments, and they did so by breaking compatibility with
+   the Unix getopt program. But they did not change the name. So now there are two completely
+   incompatible programs in the world, both named getopt, and one of them is a live minefield.
+
+   The most reasonable response to this situation would be to avoid using getopt completely. Right?
+   Well, not if you´re a Linux-head. There are a few people in the world who apparently love their
+   util-linux version of getopt so much that they are incapable of heeding the standard advice. They
+   have to use it. They have to tell other people to use it, at every opportunity.
+
+   I got so sick of trying to remove util-linux getopt propaganda from the Bash FAQ in a respectful
+   manner that I finally gave up and banned it from the FAQ, and wrote this rant.
+
+   So, this is your spot, util-linux zealots. Here´s where you can tell the whole world how great getopt
+   is on your one operating system, and how it can save you oodles of work writing your option parsing
+   loops. Go for it.
+
+   To get you started, here is an example of the Unix getopt failing to do its job:
+
+#!/bin/sh
+
+# Do NOT use this.  This example is historical only.
+
+if args=`getopt abo: $*`; then
+	:
+else
+	echo "usage: ..." >&2
+	exit 1
+fi
+
+set -- $args
+a=0
+b=0
+out=default.out
+
+while [ $# -gt 0 ]; do
+	case $1 in
+		-a) a=1;;
+		-b) b=1;;
+		-o) out="$2"; shift;;
+		--) shift; break;;
+		*)  break;;
+	esac
+	shift
+done
+
+   As you can see, this code will fail completely when you feed it any arguments that contain
+   whitespace, or which are empty strings. They get split or dropped by the several layers of false
+   assumptions.
+
+   Now, here´s the same option set, using the util-linux version of getopt:
+
+#!/bin/bash
+
+getopt -T >/dev/null 2>&1
+if (($? != 4)); then
+	echo "util-linux getopt is not installed.  Aborting." >&2
+	exit 2
+fi
+
+a=0
+b=0
+out=default.out
+
+eval set -- "$(getopt -o abo: -- "$@")"
+
+while (($# > 0)); do
+	case $1 in
+		-a) a=1;;
+		-b) b=1;;
+		-o) out="$2"; shift;;
+		--) shift; break;;
+		*) break;;
+	esac
+	shift
+done
+
+   I´ll let the util-linux fans explain why this is worthy of such dedicated fervor.
+
+getopts long option trickery
+
+*** IMPORTANT NOTE BEFORE YOU READ ANY FURTHER AND TRY TO APPLY THIS TO YOUR SCRIPT ***
+
+   Suppose that you want to check for --hello and --world and for -a, -b and -c. You pass this optspec
+   to getopts: :abc-:, and then you check if $OPTARG is hello or world.
+
+   This will be parsed as correct: ./myscript -a --hello -b --world -c but so will this:
+   ./myscript -ab-hello -c- world
+
+      DO YOU REALLY WANT THAT?
+
+   Sure, you can work around this thing by doing triple backflips with $OPTIND, but please stop using
+   this blindly and posting it on the internet where uninformed noobs will read it.
+
+   Here is an example which claims to parse long options with getopts. The basic idea is quite simple:
+   just put "-:" into the optstring. This trick requires a shell which permits the option-argument (i.e.
+   the filename in "-f filename") to be concatenated to the option (as in "-ffilename") as POSIX
+   requires. The POSIX standard says you should pass arguments to options as separate options (to
+   avoid problems with empty arguments) but requires getopts to handle the case where the argument is
+   stuck to the option in the same argument. However, POSIX leaves the behaviour unspecified when an
+   option is not alpha-numerical, so POSIX does not guarantee this to work. However, it should work in
+   all of bash, dash, yash, zsh and all implementations of ksh, the only exception reported so far being
+   posh.
+
+#!/bin/bash --
+# Uses bash extensions.  Not portable as written.
+
+usage() {
+	echo "Usage:"
+	echo " $0 [ --loglevel=<value> | --loglevel <value> | -l <value> ] [ --range <beginning> <end> ] [--] [non-option-argument]..."
+	echo " $0 [ --help | -h ]"
+	echo
+	echo "Default loglevel is 0. Default range is 0 to 0"
+}
+
+# set defaults
+loglevel=0
+r1=0 # beginning of range
+r2=0 # end of range
+
+i=$(($# + 1)) # index of the first non-existing argument
+declare -A longoptspec
+# Use associative array to declare how many arguments a long option
+# expects. In this case we declare that loglevel expects/has one
+# argument and range has two. Long options that aren´t listed in this
+# way will have zero arguments by default.
+longoptspec=( [loglevel]=1 [range]=2 )
+optspec=":l:h-:"
+while getopts "$optspec" opt; do
+	while true; do
+		case "${opt}" in
+			-) #OPTARG is name-of-long-option or name-of-long-option=value
+				if [[ ${OPTARG} =~ .*=.* ]] # with this --key=value format only one argument is possible
+				then
+					opt=${OPTARG/=*/}
+					((${#opt} <= 1)) && {
+						echo "Syntax error: Invalid long option '$opt'" >&2
+						exit 2
+					}
+					if ((longoptspec[\$opt] != 1))
+					then
+						echo "Syntax error: Option '$opt' does not support this syntax." >&2
+						exit 2
+					fi
+					OPTARG=${OPTARG#*=}
+				else #with this --key value1 value2 format multiple arguments are possible
+					opt="$OPTARG"
+					((${#opt} <= 1)) && {
+						echo "Syntax error: Invalid long option '$opt'" >&2
+						exit 2
+					}
+					OPTARG=("${@:OPTIND:longoptspec[\$opt]}")
+					((OPTIND+=longoptspec[\$opt]))
+					echo "$OPTIND"
+					((OPTIND > i)) && {
+						echo "Syntax error: Not all required arguments for option '$opt' are given." >&2
+						exit 3
+					}
+				fi
+
+				continue #now that opt/OPTARG are set we can process them as
+				# if getopts would´ve given us long options
+				;;
+			l|loglevel)
+				loglevel=$OPTARG
+				;;
+			range)
+				r1=${OPTARG[0]}
+				r2=${OPTARG[1]}
+				;;
+			h|help)
+				usage
+				exit 0
+				;;
+			?)
+				echo "Syntax error: Unknown short option '$OPTARG'" >&2
+				exit 2
+				;;
+			*)
+				echo "Syntax error: Unknown long option '$opt'" >&2
+				exit 2
+				;;
+		esac
+		break
+	done
+done
+
+echo "Loglevel: $loglevel"
+echo "Range: $r1 to $r2"
+echo "First non-option-argument (if exists): ${!OPTIND-}"
+
+# End of file
+
+   With this version you can have long and short options side by side and you shouldn´t need to modify
+   the code from line 25 to 59. This solution can also handle multiple arguments for long options, just
+   use ${OPTARG} or ${OPTARG[0]} for the first argument, ${OPTARG[1]} for the second argument,
+   ${OPTARG[2]} for the third argument and so on. It has the same disadvantage of its predecessor in not
+   being portable and specific to bash. Additionally, it breaks arguments with whitespace (line 48) for
+   long options, when given using the syntax that does not include equal sign (=).
+
+Silly repeated brute-force scanning
+   Another approach is to check options with if statements "on demand". A function like this one may be
+   useful:
+
+#!/bin/bash
+
+HaveOpt () {
+	local needle=$1
+	shift
+
+	while [[ $1 == -* ]]; do
+		# By convention, "--" means end of options.
+		case "$1" in
+			--)      return 1 ;;
+			$needle) return 0 ;;
+		esac
+
+		shift
+	done
+
+	return 1
+}
+
+HaveOpt --quick "$@" && echo "Option quick is set"
+
+# End of file
+
+   and it will work if script is run as:
+     * YES: ./script --quick
+     * YES: ./script -other --quick
+
+   but will stop on first argument with no "-" in front (or on --):
+     * NO: ./script -bar foo --quick
+     * NO: ./script -bar -- --quick
+
+   Of course, this approach (iterating over the argument list every time you want to check for one) is
+   far less efficient than just iterating once and setting flag variables.
+
+   It also spreads the options throughout the program. The literal option --quick may appear a hundred
+   lines down inside the main body of the program, nowhere near any other option name. This is a
+   nightmare for maintenance.
+
+Complex nonstandard add-on utilities
+  process-getopt
+   Deprecation warning
+   This utility is reported to be deprecated in favour of [https://sourceforge.net/projects/argpsh/]argp.sh
+
+   bhepple suggests the use of [http://sourceforge.net/projects/process-getopt/]process-getopt (GPL licensed)
+   and offers this example code:
+
+PROG=$(basename $0)
+VERSION='1.2'
+USAGE="A tiny example using process-getopt(1)"
+
+# call process-getopt functions to define some options:
+source process-getopt
+
+SLOT=""
+SLOT_func()   { [ "${1:-""}" ] && SLOT="yes"; }      # callback for SLOT option
+add_opt SLOT "boolean option" s "" slot
+
+TOKEN=""
+TOKEN_func()  { [ "${1:-""}" ] && TOKEN="$2"; }      # callback for TOKEN option
+add_opt TOKEN "this option takes a value" t n token number
+
+add_std_opts     # define the standard options --help etc:
+
+TEMP=$(call_getopt "$@") || exit 1
+eval set -- "$TEMP" # just as with getopt(1)
+
+# remove the options from the command line
+process_opts "$@" || shift "$?"
+
+echo "SLOT=$SLOT"
+echo "TOKEN=$TOKEN"
+echo "args=$@"
+
+   Here, all information about each option is defined in one place making for much easier authoring and
+   maintenance. A lot of the dirty work is handled automatically and standards are obeyed as in
+   getopt(1) - because it calls getopt for you.
+     * Actually, what the author forgot to say was that it´s actually using getopts semantics, rather
+       than getopt. I ran this test:
+ ~/process-getopt-1.6$ set -- one 'rm -rf /' 'foo;bar' "'"
+ ~/process-getopt-1.6$ call_getopt "$@"
+  -- 'rm -rf /' 'foo;bar' ''\'''
+     * It appears to be intelligent enough to handle null options, whitespace-containing options, and
+       single-quote-containing options in a manner that makes the eval not blow up in your face.
+       But this is not an endorsement of the process-getopt software overall; I don´t know it well
+       enough.
+
+   It´s written and tested on Linux where getopt(1) supports long options. For portability, it tests the
+   local getopt(1) at runtime and if it finds an non-GNU one (ie one that does not return 4 for
+   getopt --test) it only processes short options. It does not use the bash builtin getopts(1) command.
+
+  Argbash
+   [https://github.com/matejak/argbash]Argbash is a simple-to-use yet feature-rich code generator that can
+   either generate the parsing code for your script, tailor-made. The project features extensive
+   documentation. Argbash can be downloaded and installed locally, or one can try a script
+   generator online.
+
+   The sample project from above (script accepting a -f|--file|--verbose|...) would use the following
+   template:
+
+#!/bin/bash
+
+# ARG_OPTIONAL_SINGLE([file],[f],[input file])
+# ARG_VERBOSE()
+# ARG_POSITIONAL_DOUBLEDASH()
+# ARG_LEFTOVERS([other args])
+# ARGBASH_GO()
+
+# [ <-- needed because of Argbash
+
+if [ "$_arg_verbose" -gt 0 ]; then
+	echo "Input file: $_arg_file"
+	echo "Other args: ${_arg_leftovers[*]}"
+fi
+
+# ] <-- needed because of Argbash
+
+   Then, executing the result script as ./script.sh -f my-file --verbose -- one two three --file foo
+   would yield
+
+    Input file: my-file
+    other args: one two three --file foo
+
+   The project also features a quickstart utility that can generate a minimal template for you like
+   this:
+   argbash-init --opt file --pos arg-positional | argbash - -o basic_script.sh && ./basic_script.sh -h
+
+<The general help message of my script>
+Usage: ./basic_script.sh [--file <arg>] [-h|--help] <arg-positional>
+        <arg-positional>: <arg-positional´s help message goes here>
+        --file: <file´s help message goes here> (no default)
+        -h,--help: Prints help
+
+   One can then just fine-tune the template and get a script with argument parsing capabilities with
+   little effort.
+
+Rearranging arguments
+   If you want to mix flags and arguments here´s a function to rearrange all options to place flags
+   first. Use before doing your normal getopts parsing.
+
+arrange_opts() {
+	local flags args optstr=$1
+	shift
+
+	while (($#)); do
+		case $1 in
+			--) args+=("$@")
+				break;
+				;;
+			-*) flags+=("$1")
+				if [[ $optstr == *"${1: -1}:"* ]]; then
+					flags+=("$2")
+					shift
+				fi
+				;;
+			* ) args+=("$1")
+				;;
+		esac
+		shift
+	done
+	OPTARR=("${flags[@]}" "${args[@]}")
+}
+
+example() {
+	local OPTIND OPTARR optstring=ab:cd
+
+	printf 'before arrange:'
+	printf '<%s>' "$@"
+	echo
+
+	arrange_opts "$optstring" "$@"
+	set -- "${OPTARR[@]}"
+
+	printf 'after  arrange:'
+	printf '<%s>' "$@"
+	printf \\n\\n
+
+	printf flag:arg\\n
+
+	OPTIND=1
+	while getopts "$optstring" opt; do
+		case $opt in
+			a|c|d) printf        %s\\n "$opt"    ;;
+			b    ) printf      b:%s\\n "$OPTARG" ;;
+			\?   ) printf badopt:%s\\n "$OPTARG" ;;
+			:    ) printf  noarg:%s\\n "$OPTARG" ;;
+			*    ) printf    wtf:%s\\n "$opt"    ;;
+		esac
+	done
+	shift $((OPTIND-1))
+
+	printf \\nargs:
+	printf '<%s>' "$@"
+	echo
+}
+
+example -ad foo -b bar baz
+
+
+---
+[**1]https://mywiki.wooledge.org/BashFAQ/035
+
+BashFAQ/035
+
+How can I handle command-line options and arguments in my script easily?
+
+   Well, that depends a great deal on what you want to do with them. There are two standard approaches,
+   each with its strengths and weaknesses.
+
+
+  Overview
+   A Unix command generally has an argument syntax like this:
+$> tar -x -f archive.tar -v -- file1 file2 file3
+
+   Please note the conventions and the ordering here, because they are important. They actually matter.
+   This command has some arguments (file1, file2, file3), and some options (-x -f archive.tar -v), as
+   well as the traditional end of options indicator "--".
+
+   The options appear before the non-option arguments. They do not appear afterward. They do not appear
+   at just any old random place in the command.
+
+   Some options (-x, -v) are standalones. They are either present, or not. Some options (-f) take an
+   argument of their own.
+
+   In all cases, option processing involves writing a loop. Ideally, this loop will make one pass over
+   the argument list, examining each argument in turn, and setting appropriate shell variables so that
+   the script remembers which options are in effect. Ultimately, it will discard all of the options, so
+   that the argument list is left holding only the non-option arguments (file1 file2 file3). The rest of
+   the script, then, can simply begin processing those, referring as needed to the variables that were
+   set up by the option processor.
+
+   The option processor recognizes the end of options when it finds a -- argument, or when it finds an
+   argument that doesn´t start with a hyphen. (The option argument archive.tar does not signal the end
+   of options, because it is processed along with the -f option.)
+
+   There are two basic approaches to writing an option processing loop: either write the loop yourself
+   from scratch (we´ll call this a "manual loop"), or use the shell´s getopts command to assist with
+   option splitting. We´ll cover both of these cases.
+
+   Do not use getopt(1). Do not even discuss getopt on this page. Go to ComplexOptionParsing to
+   learn more about it.
+
+  Manual loop
+   Manually parsing options is the most flexible approach. It is the best way, really, because it allows
+   you to do anything you like: you can handle both single-letter and long options, with or without
+   option arguments. That´s why we´re showing it first.
+
+   If you want to handle GNU-style --long-options or Tcl-style -longopts, a manual loop is your only
+   choice. getopts does not support these.
+
+   In this example, notice how both --file FILE and --file=FILE are handled.
+
+#!/bin/sh
+# POSIX
+
+die() {
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+
+# Initialize all the option variables.
+# This ensures we are not contaminated by variables from the environment.
+file=
+verbose=0
+
+while :; do
+	case $1 in
+		-h|-\?|--help)
+			show_help    # Display a usage synopsis.
+			exit
+			;;
+		-f|--file)       # Takes an option argument; ensure it has been specified.
+			if [ "$2" ]; then
+				file=$2
+				shift
+			else
+				die 'ERROR: "--file" requires a non-empty option argument.'
+			fi
+			;;
+		--file=?*)
+			file=${1#*=} # Delete everything up to "=" and assign the remainder.
+			;;
+		--file=)         # Handle the case of an empty --file=
+			die 'ERROR: "--file" requires a non-empty option argument.'
+			;;
+		-v|--verbose)
+			verbose=$((verbose + 1))  # Each -v adds 1 to verbosity.
+			;;
+		--)              # End of all options.
+			shift
+			break
+			;;
+		-?*)
+			printf 'WARN: Unknown option (ignored): %s\n' "$1" >&2
+			;;
+		*)               # Default case: No more options, so break out of the loop.
+			break
+	esac
+
+	shift
+done
+
+# if --file was provided, open it for writing, else duplicate stdout
+if [ "$file" ]; then
+	exec 3> "$file"
+else
+	exec 3>&1
+fi
+
+# Rest of the program here.
+# If there are input files (for example) that follow the options, they
+# will remain in the "$@" positional parameters.
+
+   This parser does not handle single-letter options concatenated together (like -xvf being understood
+   as -x -v -f). This could be added with effort, but it´s left as an exercise for the reader. In
+   practice, it´s exceptionally rare for shell scripts that handle long options to handle single-letter
+   option splitting as well. It´s simply not worth the effort.
+
+   For the most part, shell scripts that you write will not need to worry about single-letter option
+   splitting, because you are the only person using them. Fancy option processing is only desirable if
+   you are releasing the program for general use, and that is almost never going to be the case in real
+   life. Single-letter option combining also precludes the use of Tcl-style long arguments (-foo), which
+   some commands like find(1), gcc(1) and star(1) use.
+
+  getopts
+   The main benefit of getopts is to allow single-letter option splitting (-xvf handled as -x -v -f).
+   The trade-off for this is that you cannot use long arguments of any kind (GNU-style --foo or
+   Tcl-style -foo), or options with an optional argument (like mysql´s -p[password] option).
+
+   getopts is suitable for simple scripts. The more complex your option parsing needs are, the less
+   likely it is that you´ll be able to make use of getopts.
+
+   Here is a getopts example:
+
+#!/bin/sh
+
+# Usage info
+show_help() {
+cat << EOF
+Usage: ${0##*/} [-hv] [-f OUTFILE] [FILE]...
+Do stuff with FILE and write the result to standard output. With no FILE
+ or when FILE is -, read standard input.
+
+     -h          display this help and exit
+     -f OUTFILE  write the result to OUTFILE instead of standard output.
+     -v          verbose mode. Can be used multiple times for increased
+                 verbosity.
+ EOF
+ }
+
+ # Initialize our own variables:
+ output_file=""
+ verbose=0
+
+ OPTIND=1
+ # Resetting OPTIND is necessary if getopts was used previously in the script.
+ # It is a good idea to make OPTIND local if you process options in a function.
+
+ while getopts hvf: opt; do
+	 case $opt in
+		 h)
+			 show_help
+			 exit 0
+			 ;;
+		 v)  verbose=$((verbose+1))
+			 ;;
+		 f)  output_file=$OPTARG
+			 ;;
+		 *)
+			 show_help >&2
+			 exit 1
+			 ;;
+	 esac
+ done
+ shift "$((OPTIND-1))"   # Discard the options and sentinel --
+
+ # Everything that´s left in "$@" is a non-option.  In our case, a FILE to process.
+ printf 'verbose=<%d>\noutput_file=<%s>\nLeftovers:\n' "$verbose" "$output_file"
+ printf '<%s>\n' "$@"
+
+ # End of file
+
+   There is a getopts tutorial which explains what all of the syntax and variables mean. In bash,
+   there is also help getopts.
+
+   The advantages of getopts over a manual loop:
+    1. It can handle things like -xvf filename in the expected Unix way, automatically.
+    2. It makes sure options are parsed like any standard command (lowest common denominator), avoiding
+       surprises.
+    3. With some implementations, the error messages will be localised in the language of the user.
+
+   The disadvantages of getopts:
+    1. (Except for ksh93) it can only handle short options (-h, not --help).
+    2. It cannot handle options with optional arguments like mysql´s -p[password].
+    3. It doesn´t exist in the Bourne shell.
+    4. It only allows options to be parsed in the "standard way" (lowest common denominator).
+    5. Options are coded in at least 2, probably 3 places -- in the call to getopts, in the case
+       statement that processes them, and in the help/usage message that documents them.
+
+
+---
+
