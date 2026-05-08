@@ -1,0 +1,997 @@
+filename: bash-load-csv-data-into-associative-array-multif-20260508.txt
+https://stackoverflow.com/questions/57199260/how-do-i-convert-csv-data-into-an-associative-array-using-bash-4
+
+How do I convert CSV data into an associative array using Bash 4?
+September, 2025
+
+   The CSV file will always have headers ... but might contain a different number of fields:
+id,title,url,description
+1,foo name,foo.io,a cool foo site
+2,bar title,http://bar.io,a great bar site
+3,baz heading,https://baz.io,some description
+
+   In either case, I want to convert my CSV data into an array of associative arrays ...
+
+What I need
+   So, I want a Bash 4.3 function that takes CSV as piped input and sends the array to stdout:
+
+[/tmp/file.csv]
+name,age,gender
+bob,21,m
+jane,32,f
+
+   It needs to be used in my templating system, like this:
+
+   {{foo | csv_to_array | foo2}}
+
+   ^ this is a fixed API, I must use that syntax ... foo2 must receive the array as standard input.
+
+   The csv_to_array func must do it´s thing, so that afterwards I can do this:
+$> declare -p row1; declare -p row2; declare -p new_array;
+
+   and it would give me this:
+declare -A row1=([gender]="m" [name]="bob" [age]="21" )
+declare -A row2=([gender]="f" [name]="jane" [age]="32" )
+declare -a new_array=([0]="row1" [1]="row2")
+
+   ... Once I have this array structure (an indexed array of associative array names), I have a
+   shell-based templating system to access them, like so:
+{{#new_array}}
+	Hi {{item.name}}, you are {{item.age}} years old.
+{{/new_array}}
+
+   But I´m struggling to generate the arrays I need..
+
+Things I tried:
+   I have already tried using this as a starting point to get the array structure I need:
+
+while IFS=',' read -r -a my_array; do
+	echo ${my_array[0]} ${my_array[1]} ${my_array[2]}
+done <<< $(cat /tmp/file.csv)
+
+   (from [https://stackoverflow.com/questions/52704255/shell-csv-to-array?answertab=votes#tab-top]Shell: CSV
+   to array)
+
+   ... and also this:
+
+cat /tmp/file.csv | while read line; do
+	line=( ${line//,/ } )
+	echo "0: ${line[0]}, 1: ${line[1]}, all: ${line[@]}"
+done
+
+(from https://www.reddit.com/r/commandline/comments/1kym4i/bash_create_array_from_one_line_in_csv/cbu9o2o/)
+
+   but I didn´t really make any progress in getting what I want out the other end ...
+
+EDIT:
+   Accepted the 2nd answer, but I had to hack the library I am using to make either solution work ...
+
+   I´ll be happy to look at other answers, which do not export the declare commands as strings, to be
+   run in the current env, but instead somehow hoist the resultant arrays of the declare commands to the
+   current env (the current env is wherever the function is run from).
+
+   Example:
+$> cat file.csv | csv_to_array
+$> declare -p row2 # gives the data
+
+   So, to be clear, if the above ^ works in a terminal, it´ll work in the library I´m using without the
+   hacks I had to add (which involved grepping STDIN for ^declare -a and using source <(cat); eval
+   $STDIN ... in other functions) ...
+
+   See my comments on the 2nd answer for more info.
+
+***
+   The approach is straightforward:
+     * Read the column headers into an array
+     * Read the file line by line, in each line ...
+      + Create a new associative array and register its name in the array of array names
+      + Read the fields and assign them according to the column headers
+
+   [In the last step we cannot use read -a, mapfile, or things like these since they only create regular
+   arrays with numbers as indices, but we want an associative array instead, so we have to create the
+   array manually.]
+
+   However, the implementation is a bit convoluted because of bash´s quirks.
+
+   The following function parses stdin and creates arrays accordingly. I took the liberty to rename your
+   array new_array to rowNames.
+
+#! /bin/bash
+
+csvToArrays() {
+	IFS=, read -ra header
+	rowIndex=0
+	while IFS= read -r line; do
+		((rowIndex++))
+		rowName="row$rowIndex"
+		declare -Ag "$rowName"
+		IFS=, read -ra fields <<< "$line"
+		fieldIndex=0
+		for field in "${fields[@]}"; do
+			printf -v quotedFieldHeader %q "${header[fieldIndex++]}"
+			printf -v "$rowName[$quotedFieldHeader]" %s "$field"
+		done
+		rowNames+=("$rowName")
+	done
+	declare -p "${rowNames[@]}" rowNames
+}
+
+   Calling the function in a pipe has no effect. Bash executes the commands in a pipe in a subshell,
+   therefore you won´t have access to the arrays created by someCommand | csvToArrays. Instead, call the
+   function as either one of the following:
+
+csvToArrays < <(someCommand) # when input comes from a command, except "cat file"
+csvToArrays < someFile       # when input comes from a file
+
+   Bash scripts like these tend to be very slow. That´s the reason why I didn´t bother to extract printf
+   -v quotedFieldHeader ... from the inner loop even though it will do the same work over and over again.
+   I think the whole templating thing and everything related would be way easier to program and faster
+   to execute in languages like python, perl, or something like that.
+
+***
+   Thanks so much ... I am so close ... Sorry to be a pain but I need it working from inside a function.
+   And I can´t seem to make it work inside a function, piping the CSV to it, which is what I need. I
+   need to call it like so: cat /tmp/file.csv | csv_to_array But it wont work - when I change the CSV
+   file, re-run the func, the output of declare -p doesn´t change... See example: ``` # cat
+   /tmp/file.csv | csv_to_Array row1 row2 # declare -p row2 bash: declare: row2: not found ``` Any
+   ideas? (And sorry, stupid SE wont let me add the func I´m using, too long)
+
+***
+   That´s because the right-hand side of pipe runs in a subshell (and because my script expects a file,
+   but you used stdin). The arrays only exist inside that subshell. After csv_to_array finishes the
+   subshell is closed and all variables are lost. There is no way for the subshell to modify its parent.
+   Here´s a solution: Pack my script into a function and change the first assignment to file="$1". Then
+   call csv_to_array /tmp/file.csv. That´s it. No need for a useless use of cat.
+
+***
+   The following script:
+
+csv_to_array() {
+	local -a values
+	local -a headers
+	local counter
+
+	IFS=, read -r -a headers
+	declare -a new_array=()
+	counter=1
+	while IFS=, read -r -a values; do
+		new_array+=( row$counter )
+		declare -A "row$counter=($(
+			paste -d '' <(
+				printf "[%s]=\n" "${headers[@]}"
+			) <(
+				printf "%q\n" "${values[@]}"
+			)
+		))"
+		(( counter++ ))
+	done
+	declare -p new_array ${!row*}
+}
+
+foo2() {
+	source <(cat)
+	declare -p new_array ${!row*} |
+	sed 's/^/foo2: /'
+}
+
+echo "==> TEST 1 <=="
+
+cat <<EOF |
+id,title,url,description
+1,foo name,foo.io,a cool foo site
+2,bar title,http://bar.io,a great bar site
+3,baz heading,https://baz.io,some description
+EOF
+csv_to_array |
+foo2
+
+echo "==> TEST 2 <=="
+
+cat <<EOF |
+name,age,gender
+bob,21,m
+jane,32,f
+EOF
+csv_to_array |
+foo2
+
+   will output:
+==> TEST 1 <==
+foo2: declare -a new_array=([0]="row1" [1]="row2" [2]="row3")
+foo2: declare -A row1=([url]="foo.io" [description]="a cool foo site" [id]="1" [title]="foo name" )
+foo2: declare -A row2=([url]="http://bar.io" [description]="a great bar site" [id]="2" [title]="bar title" )
+foo2: declare -A row3=([url]="https://baz.io" [description]="some description" [id]="3" [title]="baz heading"
+)
+==> TEST 2 <==
+foo2: declare -a new_array=([0]="row1" [1]="row2")
+foo2: declare -A row1=([gender]="m" [name]="bob" [age]="21" )
+foo2: declare -A row2=([gender]="f" [name]="jane" [age]="32" )
+
+   The output comes from foo2 function.
+
+   The csv_to_array function first reads the headaers. Then for each read line it adds new element into
+   new_array array and also creates a new associative array with the name row$index with elements
+   created from joining the headers names with values read from the line. On the end the output from
+   declare -p is outputted from the function.
+
+   The foo2 function sources the standard input, so the arrays come into scope for it. It outputs then
+   those values again, prepending each line with foo2:.
+
+
+---
+https://unix.stackexchange.com/questions/222480/loop-over-columns-and-store-values-to-associative-arrays
+
+Loop over columns and store values to associative arrays
+
+   I´ve got a text file containing two columns, like so:
+26 0.000342231
+27 0.000342231
+28 0.000684463
+29 0.00136893
+30 0.00102669
+31 0.00308008
+32 0.00308008
+33 0.00444901
+34 0.00718686
+35 0.00718686
+36 0.0109514
+37 0.0123203
+...
+
+   I´d like to loop over the text file and store each columns value to an associative array - something
+   like a dictionary. If possible I´d like to keep data types of values in each column (int and float).
+
+   For a calculation I then need to sum up 2nd column´s values for a particular interval till the end of
+   the file, e.g. "sum up 29's (1st column) associated value (0.00136893) down to the last associated
+   value"
+
+   What´s the best way to do so? Bash and python solutions are most welcome!
+
+***
+   edit, I misread the question and answered something you weren´t asking. Did you want the column
+   entries to be the dictionary keys? So you can check for duplicates when more data arrives? If not,
+   you don´t need an associative array, just normal indexed. That will let you start from wherever.
+
+   Bash doesn´t do FP math at all, so having the data in a bash array isn´t useful. >.<
+
+   If you want integer indices, and the indices can´t be negative, then you should use an indexed array,
+   not an associative (string-indexed) array.
+
+   Use a 'while read' loop to parse the input into two variables, then set an array with them.
+
+declare -a arr
+# declare -A arr  # associative
+
+while read c1 c2 leftovers; do
+	arr[c1]=$c2;
+done < file.txt
+
+echo "arr[4] == ${arr[4]}"
+
+   You don´t actually need declare -a, you can just start using it. Also note that "${#arr}" is the
+   number of set element in the array, not necessarily the last index. (use arr[-1] to access the last
+   element.) "${!arr[@]}" is the list of indices (keys).
+
+   All the other things from the bash manual work, too, of course.
+
+***
+   with bash:
+arr1=( $( cut -d' ' -f1 file ) )
+arr2=( $( cut -d' ' -f2 file ) )
+
+   i.e. cut -field 1 (or 2) using space as -delimiter and assign the output to an array.
+   bash does not distinguish data types in variables, the first index number for any array is 0.
+
+   Sum with bash and bc:
+
+echo ${arr2[@]} | sed 's/ /+/g' | bc -l
+
+   i.e. print all array elements (with space as separators), replace spaces with '+', send to bc -l for
+   doing the actual math operation.
+
+
+---
+https://www.linuxquestions.org/questions/linux-general-1/creating-bash-arrays-from-a-csv-file-4175746893/
+
+Creating bash arrays from a .csv file
+
+I have a .csv file of nearly 300 lines.
+Each line comprises a 6 character string, a ',' separator, followed by a variable length string.
+I want to use the ',' as a separator to create 2 bash arrays, one being the string before the ',' and the
+other being the string after the separator.
+No matter how i 'bash' it, 'cat' it, 'cut' it, 'split' it, 'echo' it, I cannot achieve my aim.
+I seek inspiration...
+
+***
+would be nice to show exactly what did you try.
+
+while IFS=, read -r a b; do
+	arrA+=(a)
+	arrB+=(b)
+done < input
+
+I would try something like that (not tested)
+
+***
+This worked for one test case. AI generated.
+
+#!/bin/bash
+
+# Initialize empty arrays
+array1=()
+array2=()
+
+# Read from the CSV file with adjusted read command
+while IFS=',' read -r part1 part2 _ || [ -n "$part1" ]; do
+	# Append to the first array
+	array1+=("$part1")
+
+	# Append to the second array
+	array2+=("$part2")
+done < Test.txt
+
+# Print arrays to verify
+echo "Array 1:"
+printf '%s\n' "${array1[@]}"
+echo "Array 2:"
+printf '%s\n' "${array2[@]}"
+
+[Test.txt]
+123456,12345
+abcdef,4321
+ghijkl,123654789
+
+Results:
+"Array 1:
+123456
+abcdef
+ghijkl
+Array 2:
+12345
+4321
+123654789"
+
+***
+csv file handling is a nightmare, you can´t rely on the ',' always being a separator and have to take in to
+account the use (or not) of quotes and how quotes within quotes are delimited.
+
+For example:
+1,2,3,4
+1,"2,3",3,4
+1,"\"2,3\"",3,4
+
+I remember long ago having to deal with csv files in bash and I´m sure I had to use another program to
+do the
+heavy lifting.
+
+***
+As stated it depends on the "structure" of the csv file. csvkit is a suite of utilities to manipulate csv
+files. The csvcut utility is able to work with quoted strings as well as embedded commas.
+
+***
+[un]fortunately the command read a b will look only for the first comma, everything will be put in b after
+that. There is no need to complicate it.  Otherwise yes, you are right, the result may depend on the input,
+bash cannot parse csv properly, in general.
+
+***
+I´ve managed to reduce my problem to a very simple script:
+
+#! /usr/bin/bash
+for i in $(seq 1 1 2); do
+	cut -d ',' -f $i TBBT.csv >file-$i
+	declare -a array-$i
+	while read -r line; do
+		array-$i+=$line
+	done <file-$i
+done
+
+except that it complains:
+./TBBT.sh: line 4: declare: `array-1`: not a valid identifier
+
+and same for array-2!
+By my reading of man bash this looks valid, but seemingly not so!!!
+
+***
+With bash 4+ the readarray command makes it even simpler.
+
+#!/bin/bash
+ readarray -t array1 < <(cut -d ',' -f 1 TBBT.csv)
+ readarray -t array2 < <(cut -d ',' -f 2 TBBT.csv)
+
+However, as posted above it depends.
+
+***
+I don´t think 'man bash' is very explicit about this, I think you are left to glean it from the following...
+and experience.
+
+Follow the advice at post #10 and you should get better results.
+
+https://www.gnu.org/software/bash/manual/bash.html
+
+2 Definitions
+name
+A word consisting solely of letters, numbers, and underscores, and beginning with a letter or underscore.
+Names are used as shell variable and function names. Also referred to as an identifier.
+
+6.11 Bash POSIX Mode
+15. Function names must be valid shell names. That is, they may not contain characters other than letters,
+digits, and underscores, and may not start with a digit. Declaring a function with an invalid name causes a
+fatal syntax error in non-interactive shells.
+
+***
+Originally Posted by pan64 View Post
+would be nice to show exactly what did you try.
+Code:
+
+while IFS=, read -r a b; do
+	arrA+=(a)
+	arrB+=(b)
+done < input
+
+I would try something like that (not tested)
+Of course it must be
+
+	arrA+=( "$a" )
+	arrB+=( "$b" )
+
+Only in a number context you may omit the $
+
+a=1; b=2; echo $(( a + b + 1 ))
+a=1; echo "${arrA[a - 1]}"
+
+
+---
+https://linuxopsys.com/read-csv-file-in-bash
+
+How to Read CSV File in Bash
+May 1, 2023
+
+   The file represents data in a plain text format, where each row is a record and columns are separated
+   by commas. Since CSV files are simple and compatible, they are used across various applications,
+   programming languages, and platforms. In this tutorial, we´ll learn how to parse values from
+   Comma-Separated Values (CSV) file in Bash.
+
+Bash: Reading CSV File
+   There are two popular ways. Either using a loop to process each line or using the IFS (Internal Field
+   Separator) to separate fields in the CSV file and store them in an array. By mastering these
+   techniques, you will become adept at reading and processing CSV files efficiently using Bash.
+
+with a Loop
+   One of the methods for reading a CSV file is by using a loop. This method is very simple, using a
+   while loop to iterate through each line of the CSV file and store them in an array.
+
+   Let us use the following CSV file named "sample.csv".
+Name, Residence, Phone
+John Smith, USA, 987456321
+Alice Zona, Mexico, 687239245
+Negev Adom, Israel, 065483432
+
+   Now, we should write a Bash script with a loop that allows us to store each line of the file in an
+   array.
+
+[read_csv.sh]
+#!/bin/bash
+
+# Creation of variable containing the filename
+FILE="sample.csv"
+
+# Creation of the empty array
+ARRAY=()
+
+# Definition of the while loop to read a CSV file (by default:line-by-line)
+while read -r line; do
+	# To append a line to the array
+	ARRAY+=("$line")
+
+# The end of the loop, redirection of the content of FILE
+done < "$FILE"
+
+# Definition of the for loop to print out the content of ARRAY
+for line in "${ARRAY[@]}"; do
+	# To print out the content of the line
+	echo "$line"
+done
+
+OUTPUt:
+$> ./read_csv.sh
+Name, Residence, Phone
+John Smith, USA, 987456321
+Alice Zona, Mexico, 687239245
+Negev Adom, Israel, 065483432
+
+
+with IFS
+   IFS stands for Internal Field Separator, which is a special variable in Bash scripting which splits a
+   string into an array based on a specific delimiter. When we use IFS, we can interact with a separate
+   value within each line. It is a main difference between these two methods of processing a CSV file.
+   This approach is useful when we want to access specific values within each CSV file line.
+
+   Now, we will consider the example of the Bash script that uses IFS:
+
+[read_csv_ifs.sh]
+#!/bin/bash
+
+# Creation of variable containing the filename
+FILE="sample.scv"
+
+# Creation of the empty array
+ARRAY=()
+
+# Definition of the while loop to read a CSV file (delimiter is comma)
+while IFS=, read -ra line; do
+	ARRAY+=("$line")
+done < "$FILE"
+
+for record in "${ARRAY[@]}"; do
+	echo "$record"
+done
+
+   This bash script is almost the same as the previous one, but as you can see, IFS environmental
+   variable with a value comma was added.
+
+OUTPUT:
+$> ./read_csv_ifs.sh
+Name
+John Smith
+Alice Zona
+Negev Adom
+
+   The read command read the input till it reaches the comma separator, so the second loop prints out
+   all values that are in the first column. If we want to extract the whole line, then we can remove the
+   comma.
+
+while IFS= read -ra line; do
+	ARRAY+=("$line")
+done < "$FILE"
+
+   And we get again the output like it was without IFS.
+
+OUTPUT:
+$> ./read_csv_ifs.sh
+Name, Residence, Phone
+John Smith, USA, 987456321
+Alice Zona, Mexico, 687239245
+Negev Adom, Israel, 065483432
+
+   The loop method is straightforward and allows us to store each line of the file in an array, whereas
+   the IFS method provides more flexibility by allowing us to interact with individual values within
+   each line, based on a specific delimiter.
+
+Example 2
+   Let´s look into a Bash script that can help to read CSV files containing server data into arrays.
+
+   The CSV file contains the following server metrics:
+
+[server_metrics.csv]
+Timestamp,CPU Usage,Memory Usage,Disk Usage
+2023-04-12T10:00:00,25,45,60
+2023-04-12T10:05:00,30,50,65
+2023-04-12T10:10:00,28,47,63
+2023-04-12T10:15:00,32,52,68
+2023-04-12T10:20:00,24,44,59
+2023-04-12T10:25:00,26,46,61
+
+[read_server_metrics.sh]
+#!/bin/bash
+
+# Declare an associative array to store server metrics
+declare -A server_metrics
+
+# Read the CSV file line by line
+while IFS=, read -r timestamp cpu_usage memory_usage disk_usage; do
+	# Skip the header line
+	if [[ "$timestamp" != "Timestamp" ]]; then
+		# Store the metrics in the associative array using the timestamp as the key
+		server_metrics["$timestamp"]="CPU: $cpu_usage%, Memory: $memory_usage%, Disk: $disk_usage%"
+	fi
+done < server_metrics.csv
+
+# Print the server metrics
+for key in "${!server_metrics[@]}"; do
+	echo "Timestamp: $key, Metrics: ${server_metrics[$key]}"
+done
+
+OUTPUT:
+$> ./read_server_metrics.sh
+Timestamp: 2023-04-12T10:05:00, Metrics: CPU: 30%, Memory: 50%, Disk: 65%
+Timestamp: 2023-04-12T10:00:00, Metrics: CPU: 25%, Memory: 45%, Disk: 60%
+Timestamp: 2023-04-12T10:25:00, Metrics: CPU: 26%, Memory: 46%, Disk: 61%
+Timestamp: 2023-04-12T10:10:00, Metrics: CPU: 28%, Memory: 47%, Disk: 63%
+Timestamp: 2023-04-12T10:20:00, Metrics: CPU: 24%, Memory: 44%, Disk: 59%
+Timestamp: 2023-04-12T10:15:00, Metrics: CPU: 32%, Memory: 52%, Disk: 68%
+
+
+Handling Special Characters
+   Special characters (commas, quotes, newlines) can cause different issues during working with CVS
+   files. To correctly read and process these files, we need to handle these special characters
+   properly.
+
+   Now, we consider two other approaches to handling special characters. For instance, we have the
+   following CSV file:
+
+[input.csv]
+Name, Residence, Phone
+"John Smith", "USA", 987456321
+"Alice Zona", "Mexico", 687239245
+"Negev Adom", "Israel", 065483432
+
+   To remove double quotes in my output, we may utilize two text processing tools sed or awk.
+
+   Added one sed command to the script that removes the double quotes from the output.
+
+[read_csv_ifs_v2.sh]
+#!/bin/bash
+
+FILE="input.csv"
+
+ARRAY=()
+
+while read -r line; do
+      # it allows me to format a line, in this case to replace
+      # by empty space
+      line=$(echo "$line" | sed 's/"//g')
+      ARRAY+=("$line")
+done < "$FILE"
+
+for line in "${ARRAY[@]}"; do
+      echo "$line"
+done
+
+OUTPUT:
+$> ./read_csv_ifs_v2.sh
+Name, Residence, Phone
+John Smith, USA, 987456321
+Alice Zona, Mexico, 687239245
+Negev Adom, Israel, 065483432
+
+   After adding the 8th line, the output looks the following way:
+   csv removed double quotes csv removed double quotes
+
+   In the following script, we have used the awk command to remove double quotes.
+
+[read_csv_ifs_awk.sh]
+#!/bin/bash
+
+FILE="input.csv"
+
+ARRAY=()
+
+# the second way to replace " by empty space
+awk '{ gsub(/"/, ""); print }' sample.csv > $FILE
+
+while read -r line; do
+	ARRAY+=("$line")
+done < "$FILE"
+
+for line in "${ARRAY[@]}"; do
+	echo "$line"
+done
+
+OUTPUT:
+$> ./read_csv_ifs_awk.sh
+Name, Residence, Phone
+John Smith, USA, 987456321
+Alice Zona, Mexico, 687239245
+Negev Adom, Israel, 065483432
+
+Read specific columns
+   This section will consider how it is possible to handle columns when reading CSV files. Working with
+   columns in CSV files is one of the common tasks during processing data and a comprehensive
+   understanding of how to manipulate and extract specific columns is important.
+
+   The cut command is a utility that can be used to select specific columns from a CSV file. It reaches
+   out via a delimiter and a list of field numbers. Here´s an example:
+sample.csv
+Name,Residence,Phone
+John Smith, USA, 987456321
+Alice Zona, Mexico, 687239245
+Negev Adom, Israel, 065483432
+
+   For instance, it is necessary to extract the first column, then the script should look the following
+   way:
+
+[read_first_column.sh]
+#!/bin/bash
+
+FILE="sample.csv"
+
+while read -r line; do
+	fst=$(echo "$line" | cut -d ',' -f 1)
+	echo "$fst"
+done < "$FILE"
+
+OUTPUT:
+$> ./read_first_column.sh
+Name
+John Smith
+Alice Zona
+Negev Adom
+
+   The script above is flexible since it allows to extract different columns from the file, in order to
+   get, for example, the last 2 columns, then just to change the value denoted columns.
+
+[read_diff_column.sh]
+#!/bin/bash
+
+FILE="sample.csv"
+
+while read -r line; do
+	fst=$(echo "$line" | cut -d ',' -f 2,3)
+	echo "$fst"
+done < "$FILE"
+
+OUTPUT:
+$> ./read_diff_column.sh
+Residence,Phone
+ USA, 987456321
+ Mexico, 687239245
+ Israel, 065483432
+
+   Let´s suppose there is a task to extract the column with names and phones. Fortunately, awk is a
+   powerful text-processing tool that is able to solve the challenge, the script will be such:
+
+[read_mcol_awk.sh]
+#!/bin/bash
+
+FILE="sample.csv"
+
+while read -r line; do
+	fst=$(echo "$line" | awk -F ',' '{ print $1 "," $3 }')
+	echo "$fst"
+done < "$FILE"
+
+OUTPUT:
+$> ./read_mcol_awk.sh
+Name,Phone
+John Smith, 987456321
+Alice Zona, 687239245
+Negev Adom, 065483432
+
+   Another method, possibly, is the simplest way since it is straightforward and does not require
+   specific syntax.
+
+[read_mcol_ifs.sh]
+#!/bin/bash
+
+FILE="sample.csv"
+
+while IFS=, read -r name residence phone ; do
+	echo "$name" "$phone"
+done < "$FILE"
+
+OUTPUT:
+$> ./read_mcol_ifs.sh
+Name Phone
+John Smith  987456321
+Alice Zona  687239245
+Negev Adom  065483432
+
+   In this example, also the task was to extract the columns name and phone. It was specified delimiter
+   comma in IFS variable and listed all columns from the file.
+
+   As you see, the result is correct, the script extracted specified columns.
+
+Conclusion
+     * There are two methods of processing CSV files: using a loop or using IFS (Internal Filed
+       Separator)
+     * A loop approach is straightforward allowing to store whole line.
+     * An IFS approach helps to work with each value within a line separately.
+     * There are tools to handle different special characters that it grants an opportunity to process
+       files more flexibly.
+     * The provided example described the real-world application of Bash scripts relative to CSV files.
+
+
+---
+https://community.unix.com/t/associative-array-with-more-than-one-item-per-entry/335164
+
+Associative Array with more than one item per entry (Shell Programming and Scripting)
+October 7, 2013
+
+   Hi all
+   I have a problem where i have a large list ( up to 1000 of items) and need to have 2 items pulled
+   from it into variables in a bash script
+
+   my list is like the following and I could have it as an array or possibly an external text file
+   maintained separately. Every line is different and will be up to 500 lines, and is rather static
+   content, so could easily be a CSV or similar.
+15, Hills District,HIL
+53,Kings Langley, KIN
+76,Winston Hills,WIN
+
+   My script has the first term, (the number) as a variable and needs to use this to fined the
+   corresponding entries on that line, and write them to 2 new variables.
+
+   if $Cnum = 56 then it will return
+   $cname = Kings Langley
+   $csname = KIN
+
+   I could build and array at run time for 1 variable, but how could I do it and return the 2 varaibles?
+
+   TIA
+   Ken
+
+***
+while read line; do
+	Cnum=$( echo $line | cut --delimiter="," -f1 )
+	cname=$( echo $line | cut --delimiter="," -f2 )
+	csname=$( echo $line | cut --delimiter="," -f3 )
+	echo -e "Cnum: $Cnum\ncname: $cname\ncsname: $csname"
+done < file.txt
+
+   Hope this helps
+
+   or
+for AR in "${ARRAY[@]}"; do
+	...
+done
+
+***
+   This could be done much more efficiently as:
+
+while IFS="," read Cnum came csname; do
+	echo -e "Cnum: $Cnum\ncname: $cname\ncsname: $csname"
+done < file.txt
+
+   Note also that echo -e is not portable to systems conforming to the POSIX standards nor to the Single
+   UNIX Specifications.
+
+   For maximum portability, it could be written as:
+
+while IFS="," read Cnum came csname; do
+	printf "Cnum: %s\ncname: %s\ncsname: %s\n" "$Cnum" "$cname" "$csname"
+done < file.txt
+
+***
+   This may be what the requestor wants his bash script to do:
+
+CNum=76
+IFS="," read X cname csname < <(grep "^${CNum}," file); echo $CNum,$cname,$csname
+
+OUTPUT:
+76,Winston Hills,WIN
+
+   EDIT: Or, if you insist on arrays: either use two arrays with a common index, or concatenate the two
+   values into one with a unique separator (which then, on retrieval, you would need to separate again).
+
+
+---
+https://www.claudiokuenzler.com/blog/1451/how-to-create-associative-array-comma-separated-string-key-value-pair-shell
+
+How to create associative array from a comma separated string with key/value pairs in Bash script
+November 5th 2024
+
+   Was looking for a way to read an input string which contains multiple keys and values and then
+   compare the values with another lookup, based on the key (name).
+
+Which input format?
+   At first I thought about declaring the input string as a classic array, which by default ([15]$IFS)
+   is space separated:
+
+$> declare -a input=( "key1=value1" "key2=value2" "key3=value3" )
+
+   This list works fine when manually declared inside the script. However my goal was to have a user
+   entering the input string with a getopts/parameter. Having spaces between double-quoted key/value
+   pairs often leads to users doing mistakes. Yep, I´m talking from experience  ^_^.
+
+   A better way to enter a list of key value pairs is to comma-separate them. I´ve seen in other scripts
+   (such as monitoring-plugins) that users make less typos and is better readable (for me personally at
+   least).
+
+   So I decided to move to a comma-separated input:
+
+$> declare -a input=( key1=value1,key2=value2,key3=value3 )
+
+The IFS separator
+   In Bash you can use a [16]while read or a for loop to go through an array and do additional parsing.
+   However, as mentioned above, the Bash-internal IFS variable is by default set to " " (a space) to
+   separate array entries.
+
+   For my comma-separated array $input I need to temporarily set IFS to a comma, followed by a very
+   simple loop through the whole array:
+
+$> declare -a input=( key1=value1,key2=value2,key3=value3 )
+$> OIFS="$IFS"
+$> IFS=","
+$> for pair in ${input[*]}; do echo $pair; done
+key1=value1
+key2=value2
+key3=value3
+
+$> IFS="$OIFS"
+
+   Note: I´ve reset IFS back to the original value right after handling the comma-separated array.
+
+Create associative array from key value pairs
+   The next step was to create an [17]associative array from these key/value pairs.
+
+   Usually arrays would have a "variable  name" with an index (number) to access single values within an
+   array ($array[0]), but an associative array is perfect for handling key/value pairs because the "key
+   can be used as array index" (hope this explanation makes sense).
+   [https://www.claudiokuenzler.com/graph/news/1451-bash-associative-array-key-value.png]Associative array
+   using key from key/value pair
+
+   The array itself is called expected_value and each key is used to add a new entry to the array,
+   identifiable with the key:
+
+$> declare -a input=( key1=value1,key2=value2,key3=value3 )
+$> declare -A expected_value
+$> OIFS="$IFS"
+$> IFS=","
+$> for pair in ${input[*]}; do
+> k=$(echo $pair  | awk -F'=' '{print $1}')
+> v=$(echo $pair  | awk -F'=' '{print $2}')
+> echo "Key is $k and value is $v"
+> expected_value[${k}]=${v}
+> done
+Key is key1 and value is value1
+Key is key2 and value is value2
+Key is key3 and value is value3
+$> IFS="$OIFS"
+
+   Now that each key/value pair is stored in its own associative array, we can retrieve the value of a
+   wanted entry. Let´s use "key2" for example:
+
+$> echo ${expected_value[key2]}
+value2
+
+Sweet!
+
+Using associative array in another loop for value comparison
+   Now I can use the array in another for loop and compare the live values (e.g. from an API) to the
+   expected values. Let´s use the Salesforce Status API, which I´ve used in a recent article showing
+   [19]how to extract the keys from a JSON output:
+
+$> apicall=$(curl -s "https://api.status.salesforce.com/v1/instances/CS110/status")
+$> declare -a api_keys=( $(echo "${apicall}" | jq -r '.Services[].key' | tr "\n" " ") )
+$> declare -a api_values=( $(echo "${apicall}" | jq -r '.Services[].isCore' | tr "\n" " ") )
+$> declare -a input=( coreService=true,liveAgent=true,EinsteinBots=false,Communities=false,search=true )
+$> declare -A expected
+$> OIFS="$IFS"
+$> IFS=","
+$> for pair in ${input[*]}; do
+> k=$(echo $pair  | awk -F'=' '{print $1}')
+> v=$(echo $pair  | awk -F'=' '{print $2}')
+> echo "Key is $k and value is $v"
+> expected[${k}]=${v}
+> done
+Key is coreService and value is true
+Key is liveAgent and value is true
+Key is EinsteinBots and value is false
+Key is Communities and value is false
+Key is search and value is true
+$> IFS="$OIFS"
+$> n=0
+$> for service in ${api_keys[*]}; do
+> echo "Handling ${service}"
+> currentstatus=$(echo ${api_values[${n}]})
+> expectedstatus=${expected[${service}]}
+> if [[ -n ${expectedstatus} && ${currentstatus} != ${expectedstatus} ]]; then
+> echo "Oh no! ${service} is ${currentstatus} but should be ${expectedstatus}"
+> fi
+> let n++
+> done
+Handling coreService
+Oh no! coreService is false but should be true
+Handling liveAgent
+Oh no! liveAgent is false but should be true
+Handling EinsteinBots
+Handling Communities
+Handling search
+Oh no! search is false but should be true
+Handling Customer360Audiences
+Handling analytics
+Handling CPQandBilling
+Handling ServiceCloudVoice
+Handling SalesforceCMS
+Handling SALESFORCEORDERMANAGEMENT
+Handling B2BCommerce
+Handling B2B2CCommerce
+Handling SalesforceUnifiedMessaging
+Handling ServiceCloudMessagingChannels
+
+   And this is basically how I can now do a value comparison from expected values (from the user input)
+   to live values (from the API).
+
+
+---
+
