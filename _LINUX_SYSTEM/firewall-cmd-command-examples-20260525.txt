@@ -1,0 +1,508 @@
+filename: firewall-cmd-command-examples-20260525.txt
+https://linuxcapable.com/firewall-cmd-command-examples/
+
+firewall-cmd Command Examples for Firewalld
+May 20, 2026
+
+   The firewall-cmd command is where Firewalld becomes practical: zones decide where traffic policy
+   applies, services and ports decide what a zone allows, and the runtime versus permanent split decides
+   whether a change survives reloads. These firewall-cmd command examples focus on safe rule changes,
+   verification output, and the warnings that matter most on Fedora and RHEL-compatible systems.
+
+   Firewalld is common on Fedora, CentOS Stream, RHEL, Rocky Linux, and similar enterprise Linux
+   systems. Debian, Ubuntu, Arch Linux, and openSUSE also package Firewalld, but their default firewall
+   frontend can differ, so always verify the daemon and active zone before applying any rule.
+
+Understand firewall-cmd and Firewalld Defaults
+   Firewalld manages the kernel packet filter through named objects. You normally edit a zone, add a
+   service or port to that zone, then confirm the exact rule you intended. The official firewall-cmd
+   manual is the full option reference; daily administration usually starts with narrower patterns:
+   choose a zone, add one rule, verify the result, and keep a matching rollback command.
+
+-------------------------------------------------------------------------------------------------------------
+Distro family   What to expect                                                             First check
+-------------------------------------------------------------------------------------------------------------
+                Firewalld is the default firewall manager. Current Fedora releases use     sudo firewall-cmd
+Fedora          DNF5 behind the dnf command, and Workstation commonly starts in the        --get-active-zones
+                FedoraWorkstation zone.
+-------------------------------------------------------------------------------------------------------------
+RHEL-compatible RHEL-compatible systems such as Rocky Linux normally use Firewalld with    systemctl
+systems         DNF4 or YUM-family behavior. Minimal and cloud images can omit or disable  is-active
+                the service.                                                               firewalld
+-------------------------------------------------------------------------------------------------------------
+CentOS Stream   CentOS Stream uses the same Firewalld model as the RHEL family and         sudo firewall-cmd
+                currently uses DNF4 in normal scope.                                       --state
+-------------------------------------------------------------------------------------------------------------
+Debian and      Firewalld is packaged, but it is not the default firewall frontend on      command -v
+Ubuntu          fresh installs. Use it only when you deliberately choose the Firewalld     firewall-cmd
+                workflow.
+-------------------------------------------------------------------------------------------------------------
+                Arch packages Firewalld but does not enable a firewall service by default. systemctl
+Arch Linux      Install and enable the service before relying on these commands.           is-enabled
+                                                                                           firewalld
+-------------------------------------------------------------------------------------------------------------
+
+   If firewall-cmd is missing, use the distro-specific setup path first: install Firewalld on
+   Fedora, install Firewalld on CentOS Stream, install Firewalld on Debian, or install
+   Firewalld on Arch Linux.
+
+Verify firewall-cmd and the Firewalld Daemon
+   Check the client command, daemon state, service state, and installed Firewalld version before
+   changing rules:
+$> command -v firewall-cmd
+$> sudo firewall-cmd --state
+$> sudo firewall-cmd --version
+$> systemctl is-active firewalld
+$> systemctl is-enabled firewalld
+
+   Expected output on a running, boot-enabled system looks like this. The version number changes by
+   distribution and update level:
+$> /usr/bin/firewall-cmd
+running
+2.4.0
+active
+enabled
+
+     Use sudo for Firewalld checks in remote shells. Some local desktop sessions can authorize
+     read-only firewall-cmd queries through polkit, but SSH sessions often return an authorization
+     error unless the command runs with root privileges.
+
+Find the Active Firewalld Zone
+   Identify the default zone and every active zone before opening a service or port:
+$> sudo firewall-cmd --get-default-zone
+$> sudo firewall-cmd --get-active-zones
+
+   Example output on Fedora Workstation commonly uses the FedoraWorkstation zone:
+FedoraWorkstation
+FedoraWorkstation (default)
+  interfaces: ens160
+
+   Example output on many RHEL-compatible servers uses the public zone:
+public
+public
+  interfaces: ens160
+
+   Store the zone you plan to edit in a variable so add, verify, and remove commands stay aligned:
+zone=public
+sudo firewall-cmd --zone="$zone" --list-all
+
+   Relevant output includes the zone target, attached interfaces or sources, allowed services, ports,
+   and rich rules:
+public (active)
+  target: default
+  interfaces: ens160
+  sources:
+  services: ssh dhcpv6-client
+  ports:
+  rich rules:
+
+     Do not assume the default zone is the zone carrying your SSH, web, or application traffic.
+     Interfaces and source networks can be bound to explicit zones, and a rule added to the wrong zone
+     may do nothing for the connection you are trying to protect.
+
+Use Runtime and Permanent Firewalld Rules
+   A normal firewall-cmd --add-... rule changes only the runtime configuration. Runtime rules are useful
+   for testing because a reload removes them unless you also save the rule permanently.
+$> zone=public
+$> sudo firewall-cmd --zone="$zone" --add-service=http
+$> sudo firewall-cmd --zone="$zone" --query-service=http
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-service=http
+
+   The runtime rule exists before the reload and disappears afterward:
+success
+yes
+success
+no
+
+   Use --permanent when the rule should survive reloads and reboots, then reload Firewalld so the
+   runtime ruleset matches the saved configuration:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --add-service=http
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-service=http
+
+   Expected output confirms the saved rule is active after reload:
+success
+success
+yes
+
+   Remove the same permanent service rule when the workload no longer needs inbound HTTP:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --remove-service=http
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-service=http
+success
+success
+no
+
+     Use sudo firewall-cmd --runtime-to-permanent only after reviewing the full runtime firewall state.
+     That command saves every current runtime change, including unrelated temporary rules from
+     troubleshooting or another administrator.
+
+Open Services with firewall-cmd
+   Service names are easier to audit than raw ports because the rule describes the workload. List
+   service definitions when you need the exact Firewalld name:
+$> sudo firewall-cmd --get-services | tr ' ' '\n' | grep -E '^(http|https|ssh)$'
+http
+https
+ssh
+
+   Allow HTTPS through the selected zone and verify the exact service:
+zone=public
+sudo firewall-cmd --permanent --zone="$zone" --add-service=https
+sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-service=https
+success
+success
+yes
+
+   Remove the service with the matching --remove-service form:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --remove-service=https
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-service=https
+success
+success
+no
+
+Open and Close Ports with firewall-cmd
+   Use direct port rules when no built-in service definition matches the application. Include the
+   protocol every time; 8443/tcp and 8443/udp are different firewall rules.
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --add-port=8443/tcp
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-port=8443/tcp
+success
+success
+yes
+
+   Close the same port with the matching remove command:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --remove-port=8443/tcp
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-port=8443/tcp
+success
+success
+no
+
+   Port ranges use the same syntax with a dash:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --add-port=5000-5010/tcp
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-port=5000-5010/tcp
+success
+success
+yes
+
+   Remove the range when the test or temporary service is gone:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --remove-port=5000-5010/tcp
+$> sudo firewall-cmd --reload
+success
+success
+
+Create Custom Firewalld Services
+   A custom service definition is cleaner than repeating the same raw port across multiple zones. Create
+   the service permanently, add one or more ports, reload, then use the service name like any built-in
+   definition.
+$> sudo firewall-cmd --permanent --new-service=example-api
+$> sudo firewall-cmd --permanent --service=example-api --set-short="Example API"
+$> sudo firewall-cmd --permanent --service=example-api --set-description="Example API on TCP 8443"
+$> sudo firewall-cmd --permanent --service=example-api --add-port=8443/tcp
+$> sudo firewall-cmd --check-config
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --permanent --service=example-api --get-ports
+
+   Expected output ends with the port assigned to the custom service:
+success
+success
+success
+success
+success
+success
+8443/tcp
+
+   Add the custom service to a zone and verify it:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --add-service=example-api
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-service=example-api
+success
+success
+yes
+
+   Remove the zone reference before deleting the custom service definition:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --remove-service=example-api
+$> sudo firewall-cmd --permanent --delete-service=example-api
+$> sudo firewall-cmd --reload
+success
+success
+success
+
+Use Source Zones and Rich Rules
+   Source-based zones are safer than piling source rules into a broad public zone. The example uses
+   documentation-only addresses; replace them with your real management network only after you confirm
+   the correct CIDR range.
+$> sudo firewall-cmd --permanent --new-zone=admin-access
+$> sudo firewall-cmd --permanent --zone=admin-access --add-source=192.0.2.0/24
+$> sudo firewall-cmd --permanent --zone=admin-access --add-service=ssh
+$> sudo firewall-cmd --check-config
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone=admin-access --list-all
+
+   Relevant output shows the source range and allowed service in the dedicated zone:
+success
+success
+success
+success
+success
+admin-access (active)
+  target: default
+  sources: 192.0.2.0/24
+  services: ssh
+  ports:
+
+   Remove the demonstration zone if you only created it to test the source-zone pattern:
+$> sudo firewall-cmd --permanent --delete-zone=admin-access
+$> sudo firewall-cmd --reload
+success
+success
+
+   Rich rules let you combine source, service, port, protocol, logging, rate limiting, and actions in
+   one rule. This example allows one documentation address to reach TCP port 8443:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --add-rich-rule='rule family="ipv4" source \
+   address="192.0.2.55" port port="8443" protocol="tcp" accept'
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-rich-rule='rule family="ipv4" source address="192.0.2.55" \
+   port port="8443" protocol="tcp" accept'
+success
+success
+yes
+
+     A source-scoped rich rule is additive. It does not restrict access if the same service or port is
+     already open broadly in that zone. Query the broad service or port rule before describing a rich
+     rule as restrictive.
+
+   Remove the rich rule with the exact same rule text:
+$> zone=publi
+$> sudo firewall-cmd --permanent --zone="$zone" --remove-rich-rule='rule family="ipv4" \
+   source address="192.0.2.55" port port="8443" protocol="tcp" accept'
+$> sudo firewall-cmd --reload
+success
+success
+
+Manage IP Sets with firewall-cmd
+   IP sets keep larger allowlists easier to maintain than many separate rich rules. Create the set, add
+   entries, reload, and inspect the stored addresses:
+$> sudo firewall-cmd --permanent --new-ipset=admin-hosts --type=hash:ip
+$> sudo firewall-cmd --permanent --ipset=admin-hosts --add-entry=192.0.2.55
+$> sudo firewall-cmd --permanent --ipset=admin-hosts --add-entry=192.0.2.56
+$> sudo firewall-cmd --check-config
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --ipset=admin-hosts --get-entries
+success
+success
+success
+success
+success
+192.0.2.55
+192.0.2.56
+
+   Use the IP set in a rich rule when those hosts should reach one service:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --add-rich-rule='rule family="ipv4" source \
+   ipset="admin-hosts" service name="ssh" accept'
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-rich-rule='rule family="ipv4" source ipset="admin-hosts" \
+   service name="ssh" accept'
+success
+success
+yes
+
+   Remove the rule before deleting the IP set:
+zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --remove-rich-rule='rule family="ipv4" \
+   source ipset="admin-hosts" service name="ssh" accept'
+$> sudo firewall-cmd --permanent --delete-ipset=admin-hosts
+$> sudo firewall-cmd --reload
+success
+success
+success
+
+Forward Ports and Enable Masquerading
+   Port forwarding and masquerading belong on router, gateway, lab, or virtualization hosts. They are
+   not needed for a normal application that only listens locally on one server. The built-in external
+   zone often already has masquerading enabled, so query it before adding or removing masquerade rules.
+$> zone=external
+$> sudo firewall-cmd --zone="$zone" --query-masquerade
+yes
+
+   If the query returns no and the host is meant to route traffic for another network, enable
+   masquerading deliberately:
+$> zone=external
+$> sudo firewall-cmd --permanent --zone="$zone" --add-masquerade
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-masquerade
+success
+success
+yes
+
+   Add and verify a forward-port rule after the gateway zone has the NAT behavior you intend:
+$> zone=external
+$> sudo firewall-cmd --permanent --zone="$zone" --add-forward-port=port=8080:proto=tcp:toport=80
+$> sudo firewall-cmd --check-config
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-forward-port=port=8080:proto=tcp:toport=80
+$> sudo firewall-cmd --zone="$zone" --list-forward-ports
+success
+success
+success
+yes
+port=8080:proto=tcp:toport=80:toaddr=
+
+   Remove the forward-port rule when the path is no longer required:
+$> zone=external
+$> sudo firewall-cmd --permanent --zone="$zone" --remove-forward-port=port=8080:proto=tcp:toport=80
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-forward-port=port=8080:proto=tcp:toport=80
+success
+success
+no
+
+   Remove masquerading only when you enabled it for this gateway and no other forwarding, container,
+   virtualization, or router workflow still depends on it:
+$> zone=external
+$> sudo firewall-cmd --permanent --zone="$zone" --remove-masquerade
+$> sudo firewall-cmd --reload
+success
+success
+
+Use firewall-cmd Safely over SSH
+   Remote firewall work needs a recovery path. Keep your current SSH session open, allow the new access
+   path, test a second login, then remove the old rule only after the new path works.
+$> zone=public
+$> sudo firewall-cmd --zone="$zone" --query-service=ssh
+
+   A yes response means the standard SSH service is allowed in that zone:
+yes
+
+   If SSH listens on a custom port, allow and verify the new port before removing the old service:
+$> zone=public
+$> ssh_port=2222
+$> sudo firewall-cmd --permanent --zone="$zone" --add-port="${ssh_port}/tcp"
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-port="${ssh_port}/tcp"
+success
+success
+yes
+
+   Use a second terminal to test the new connection with the SSH command in Linux. Do not close the
+   working session until the second login succeeds.
+
+   If the custom SSH port was only a test, remove it after you confirm the host still has the access
+   path you intend to keep:
+$> zone=public
+$> ssh_port=2222
+$> sudo firewall-cmd --permanent --zone="$zone" --remove-port="${ssh_port}/tcp"
+$> sudo firewall-cmd --reload
+success
+success
+
+   Check panic mode before diagnosing a sudden loss of all inbound traffic:
+$> sudo firewall-cmd --query-panic
+no
+
+     Do not enable panic mode over SSH unless you have console, out-of-band, or hypervisor access.
+     Panic mode drops traffic immediately and can disconnect the session you need to recover the host.
+
+Troubleshoot Common firewall-cmd Errors
+Authorization Failed in a Remote Shell
+   A non-root remote shell can fail because no graphical polkit agent is available to approve the
+   Firewalld D-Bus request:
+$> firewall-cmd --state
+Authorization failed.
+
+    Make sure polkit agent is running or run the application as superuser.
+
+   Run the same check with root privileges:
+$> sudo firewall-cmd --state
+running
+
+Firewalld Is Installed but Not Running
+   If firewall-cmd exists but cannot reach the daemon, check the systemd service first:
+$> systemctl is-active firewalld
+inactive
+
+   Start and enable the service, then confirm the daemon is reachable:
+$> sudo systemctl enable --now firewalld
+$> sudo firewall-cmd --state
+
+   Relevant output from the final state check is:
+running
+
+Rule Added but the Service Is Still Unreachable
+   Firewall rules do not prove that an application is listening. Check the exact zone rule, then confirm
+   the local listener and any security policy that applies to the service:
+$> zone=public
+$> sudo firewall-cmd --zone="$zone" --query-port=8443/tcp
+$> sudo firewall-cmd --zone="$zone" --list-all
+$> sudo ss -ltnp
+
+   If the firewall query says yes but no listener owns the port, start or reconfigure the application.
+   On Fedora and RHEL-compatible systems, SELinux can also block a service that moves to a nonstandard
+   port or path; fix the label, port type, or boolean rather than disabling SELinux as a shortcut.
+
+Permanent Rule Does Not Show in Runtime Queries
+   A permanent rule is saved on disk but does not affect the running ruleset until reload:
+$> zone=public
+$> sudo firewall-cmd --permanent --zone="$zone" --query-service=https
+$> sudo firewall-cmd --zone="$zone" --query-service=https
+$> sudo firewall-cmd --reload
+$> sudo firewall-cmd --zone="$zone" --query-service=https
+yes
+no
+success
+yes
+
+INVALID_ZONE Means the Zone Name Is Wrong or Missing
+   List known zones before editing one by name:
+$> sudo firewall-cmd --get-zones
+block dmz drop external home internal public trusted work
+
+   If the zone should exist, create it permanently and reload before adding rules:
+sudo firewall-cmd --permanent --new-zone=app-zone
+sudo firewall-cmd --reload
+$> sudo firewall-cmd --get-zones | tr ' ' '\n' | grep -Fx app-zone
+success
+success
+app-zone
+
+   Delete temporary zones after testing so future audits do not mistake them for production policy:
+$> sudo firewall-cmd --permanent --delete-zone=app-zone
+$> sudo firewall-cmd --reload
+success
+success
+
+Source-Restricted Rules Still Allow Broad Access
+   Check for a broader service or port rule in the same zone before trusting a rich rule as an
+   allowlist:
+$> zone=public
+$> sudo firewall-cmd --zone="$zone" --query-service=https
+$> sudo firewall-cmd --zone="$zone" --query-port=8443/tcp
+$> sudo firewall-cmd --zone="$zone" --list-rich-rules
+
+   If a broad query returns yes, remove that broad rule or move the restricted access into a dedicated
+   source zone. A rich rule cannot narrow traffic that another rule already allows.
+
+Conclusion
+   Firewalld is easier to audit when each change starts with the active zone, uses service definitions
+   where possible, verifies the exact rule, and treats runtime and permanent state separately. After
+   opening access, use controlled Nmap scans only on systems you own, and consider Fail2Ban with
+   Firewalld on Fedora when repeated login attempts need automatic bans.
+
+
+---
+
