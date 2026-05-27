@@ -1,0 +1,403 @@
+filename: go-what-is-git-made-of-20260527.txt
+https://zserge.com/posts/git/
+
+What is Git made of?
+
+   Git can be confusing. Git can be scary. Git CLI may be the least intuitive tool you have to use on a
+   daily basis.
+
+   But also Git is a wonderfully simple and cleverly designed version control system that definitely
+   deserves its popularity.
+
+   To prove this point I invite you to implement your own tiny Git that would be able to create a local
+   repository, commit a single file to it, view commit logs and checkout a certain revision of that
+   file.
+
+   It won´t be more than a couple hundred lines of code, we´ll try to keep things as simple as we can.
+   Code examples would be in Go, but any other language is suitable for this tutorial, too.
+
+git init
+   What turns an empty directory into an empty Git repository? You probably have noticed that Git stores
+   all its internal data in a hidden directory .git. In fact, there are only a few special files/folder
+   there that have to be created to let Git CLI treat it as a perfectly valid, empty repository:
+
+$> mkdir -p .git/objects/info .git/objects/pack .git/refs/heads .git/refs/tags
+$> echo "ref: refs/heads/main" > .git/HEAD
+$> tree .git
+.git
++-- HEAD
++-- objects
+|   +-- info
+|   +-- pack
++-- refs
+    +-- heads
+    +-- tags
+
+$> git symbolic-ref --short HEAD
+main
+
+$> git log
+fatal: your current branch 'main' does not have any commits yet
+
+   By using a couple of shell commands we´ve tricked Git into recognising our empty repository with a
+   single main branch and no commits. But what is stored in these directories we´ve created?
+
+objects
+   Almost everything in Git is stored as an object: every source file that you commit becomes a blob
+   object, every commit itself is an object, tags are objects, too.
+
+   For example, we have committed a file.txt with the contents hello\n (6 bytes). This would create 3
+   objects: a blob (actual file contents), a tree (a list of file names and permissions), and a commit
+   (a reference to the committed tree with some information about the committer, timestamp etc).
+
+   For every object Git stores its object type ("blob", "tree" or "commit") and a length in bytes. So
+   our hello\n content would actually become blob 6\0hello\n object data. Additionally, Git uses
+   compression to save disk space, so our object data will be compressed using zlib algorithm before
+   being written to disk as a special file inside .git/objects.
+
+hashes
+   Before we dive into the details of writing objects let´s talk about Git hashes.
+
+   Every object is uniquely identified inside a Git repo by the SHA hash of its contents. Originally Git
+   was using SHA-1 hashing algorithm, but recent versions of switched to SHA-256 to reduce hash
+   collisions. However, SHA-1 is still widely used in many modern Git setups, and we´ll be using it here
+   as well.
+
+   Let´s get back to our file.txt with hello\n content. After being compressed the contents of that blob
+   object could look like this (using a simple python one-liner for zlib compression):
+
+$> python3 -c 'import sys,zlib; sys.stdout.buffer.write(zlib.compress(b"blob 6\0hello\n",6))' | hexdump -C
+00000000  78 9c 4b ca c9 4f 52 30  63 c8 48 cd c9 c9 e7 02  |x.K..OR0c.H.....|
+00000010  00 1d c5 04 14                                    |.....|
+00000015
+
+   In practice various zlib implementations may use different compression levels and settings, so
+   resulting encoded content may look different. However the SHA-1 hash is calculated from the
+   uncompressed raw data of an object and would always be the same:
+$> printf "blob 6\0hello\n" | sha1sum
+ce013625030ba8dba906f756967f9e9ca394464a  -
+
+   Now let´s compare that with Git CLI results in some dummy repo:
+$> mkdir hello
+$> cd hello
+$> git init
+$> echo "hello" > file.txt
+$> git ci -m 'initial commit' file.txt
+$> git cat-file blob ce013625
+hello
+
+$> hexdump -C .git/objects/ce/013625030ba8dba906f756967f9e9ca394464a
+00000000  78 01 4b ca c9 4f 52 30  63 c8 48 cd c9 c9 e7 02  |x.K..OR0c.H.....|
+00000010  00 1d c5 04 14                                    |.....|
+00000015
+
+   Git uses a little optimisation when it stores objects: the first two digits of a hash become the
+   subdirectory name and the rest becomes the file name where the compressed object data is stored.
+   Let´s reproduce this behaviour:
+
+$> mkdir -p .git/objects/3a # first two digits: "3a"
+$> printf "\x78\x9c\x4b\xca\xc9\x4f\x52\x30\x63\xc8\x48\xcd\xc9\xc9\xe7\x02\x00\x1d\xc5\x04\x14" \
+  > .git/objects/3a/3cca74450ee8a0245e7c564ac9e68f8233b1e8 # rest of the hash
+# Now, can Git CLI read our blob?
+$> git cat-file blob 3a3cca
+hello
+
+Writing objects
+   First of all let´s introduce a Git "class" that would be a main entry point to work with out repo. We
+   will also need a Hash type that would handle hash encoding/decoding:
+
+type Git struct {
+	Dir    string // where `.git` is located
+	Branch string // current branch, i.e. "main"
+	...
+}
+
+type Hash []byte // hashes in Git are presented in hexadecimal form
+
+func NewHash(b []byte) (Hash, error) {
+	dec, err := hex.DecodeString(strings.TrimSpace(string(b)))
+		if err != nil {
+			return nil, err
+		}
+	return Hash(dec), nil
+}
+
+func (h Hash) String() string { return hex.EncodeToString(h) }
+
+   Since all of the content in Git should be compressed - we can start implementing two utility
+   functions that perform compression and decompression:
+
+func zip(content []byte) ([]byte, error) {
+	b := &bytes.Buffer{}
+	zw := zlib.NewWriter(b)
+	if _, err := zw.Write(content); err != nil {
+		return nil, err
+	}
+
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func unzip(content []byte) ([]byte, error) {
+	zw, err := zlib.NewReader(bytes.NewBuffer(content))
+	if err != nil {
+		return nil, err
+	}
+	defer zw.Close()
+	return io.ReadAll(zw)
+}
+
+   Now we can write a helper method that writes an object into the Git repo:
+
+// this would be shorter than using fmt.Sprintf all the time, and we would need it a lot
+func (g *Git) fmt(format string, args ...any) []byte { return []byte(fmt.Sprintf(format, args...)) }
+
+// this writes an object of the given type with the given raw content into .git
+//   g := &Git{Dir: ".git", Branch: "main"}
+//   hash, err := g.write("blob", []byte("hello\n"))
+func (g *Git) write(objType string, b []byte) (Hash, error) {
+	b = append(g.fmt("%s %d\x00", objType, len(b)), b...)
+	bz, err := zip(b)
+
+	if err != nil {
+		return nil, err
+	}
+
+	sum := sha1.Sum(b)
+	hash := hex.EncodeToString(sum[:])
+	dir := filepath.Join(g.Dir, "objects", hash[:2])
+	obj := filepath.Join(dir, hash[2:])
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+
+	return sum[:], os.WriteFile(obj, bz, 0644)
+}
+
+   If we call g.write("blob", []byte("hello\n")) - it would create a blob object with a checksum we´ve
+   calculated before, that we could later read by using git cat-file blob <hash>.
+
+Initial commit
+   Time to go further and make our first commit into the new repository. We know that commits refer to a
+   tree object, and tree objects refer to the blob objects they contain. To create a blob object seems
+   to be fairly obvious:
+
+func (g *Git) AddBlob(data []byte) (Hash, error) {
+	return g.write("blob", data)
+}
+
+   Tree data consists of the file permissions (like 100644 for normal files), file names and hashes of
+   their content blob objects. This makes writing a tree object with a single file in it quite easy,
+   too:
+
+func (g *Git) AddTree(filename string, filedata []byte) (Hash, error) {
+	hash, err := g.AddBlob(filedata)
+
+	if err != nil {
+		return nil, err
+	}
+
+	content := append(g.fmt("100644 %s\x00", filename), hash...)
+	return g.write("tree", content)
+}
+
+   Finally the last piece of a puzzle - the commit object. Commits usually have a tree reference (tree
+   <sha-1 hash>), some author and committer information (author John <john@example.com> <time> +0000)
+   and a commit message:
+
+func (g *Git) AddCommit(filename string, data []byte, parentHash Hash, msg string) (Hash, error) {
+	hash, err := g.AddTree(filename, data)
+
+	if err != nil {
+		return nil, err
+	}
+	parent := ""
+
+	if parentHash != nil {
+		parent = fmt.Sprintf("parent %s\n", parentHash.String())
+	}
+
+	t := time.Now().Unix()
+	content := g.fmt("tree %s\n%sauthor %s <%s> %d +0000\ncommitter %s <%s> %d +0000\n\n%s\n",
+			hash, parent, g.User, g.Email, t, g.User, g.Email, t, msg)
+	b, err := g.write("commit", content)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return b, g.SetHead(b)
+}
+
+func (g *Git) SetHead(h Hash) error { return os.WriteFile(filepath.Join(g.Dir, "refs", "heads", g.Branch), \
+	[]byte(h.String()), 0644) }
+
+   At the end of the AddCommit method we set the current branch head to the resulting commit hash.
+
+   Now if we try making a commit using this code - Git CLI would be able to show it in git log. But
+   without a proper parentHash the next AddCommit call would overwrite the previous commit and there
+   will always be only one commit in the history. Let´s fix it.
+
+History
+   Commits are chained. To create the second commit we should read the contents of .git/refs/heads/main
+   and use that hash as a parentHash of the new commit:
+
+func (g *Git) Head() (Hash, error) {
+	b, err := os.ReadFile(filepath.Join(g.Dir, "refs", "heads", g.Branch))
+
+	if err != nil {
+		return nil, err
+	}
+
+	return NewHash(b)
+}
+
+   Now this enables us to read the objects back and iterate from the most latest commit (tip of the
+   branch) to the initial commit (with no parent). Of course, in a "real" Git repo commits may have more
+   than one parent (i.e. after a merge) but we only consider here a very simple, single-branch
+   single-file repository.
+
+   To read an object by the given hash we shall implement a reverse procedure to our write() method:
+
+func (g *Git) read(objType string, hash Hash) ([]byte, error) {
+	h := hash.String()
+	dir := filepath.Join(g.Dir, "objects", h[:2])
+	obj := filepath.Join(dir, h[2:])
+	b, err := os.ReadFile(obj)
+
+	if err != nil {
+		return nil, err
+	}
+
+	b, err = unzip(b)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if !bytes.HasPrefix(b, []byte(objType+" ")) {
+		return nil, fmt.Errorf("not a %s object", objType)
+	}
+
+	n := bytes.IndexByte(b, 0)
+
+	if n < 0 {
+		return nil, fmt.Errorf("invalid %s", objType)
+	}
+
+	return b[n+1:], nil
+}
+
+   We read a file from .git/objects/<first two chars>/<rest of the hash>, check the object type, skip
+   object length and return the remaining object content. What´s left is to parse different content
+   types to handle blobs, trees and commits.
+
+   Reading blobs is trivial, as there´s nothing to parse:
+
+func (g *Git) Blob(hash []byte) ([]byte, error) { return g.read("blob", hash) }
+
+   Reading trees is slightly more complex, if we want to consider multiple files per tree:
+
+type Tree struct {
+	Blobs []Blob
+	Hash  Hash
+}
+
+type Blob struct {
+	Name string
+	Hash Hash
+}
+
+func (g *Git) Tree(hash []byte) (tree *Tree, err error) {
+	b, err := g.read("tree", hash)
+	if err != nil {
+		return nil, err
+	}
+
+	tree = &Tree{Hash: hash}
+	for {
+		parts := bytes.SplitN(b, []byte{0}, 2)
+		fields := bytes.SplitN(parts[0], []byte{' '}, 2)
+		tree.Blobs = append(tree.Blobs, Blob{Name: string(fields[1]), Hash: parts[1][0:20]})
+		b = parts[1][20:]
+
+		if len(parts[1]) == 20 {
+			break
+		}
+	}
+
+	return tree, nil
+}
+
+   Here we parse tree content in a loop and create blob records. We don´t read blobs themselves, but
+   only store their filenames and hashes.
+
+   What´s left is to read the commit object by its hash and we would be able to implement git log!
+
+   Commit parser is very similar to the tree parser, it iterates over the content line by line, and
+   depending on the line prefix fulfils the information about the commit:
+
+type Commit struct {
+	Msg    string
+	Parent Hash
+	Tree   Hash
+	Hash   Hash
+}
+
+func (g *Git) Commit(hash []byte) (ci Commit, err error) {
+	ci = Commit{Hash: hash}
+	b, err := g.read("commit", hash)
+	if err != nil {
+		return ci, err
+	}
+
+	lines := bytes.Split(b, []byte{'\n'})
+	for i, line := range lines {
+		if len(line) == 0 {
+			ci.Msg = string(bytes.Join(append(lines[i+1:]), []byte{'\n'}))
+				return ci, nil
+		}
+		parts := bytes.SplitN(line, []byte{' '}, 2)
+
+		switch string(parts[0]) {
+			case "tree":
+				ci.Tree, err = hex.DecodeString(string(parts[1]))
+				if err != nil {
+					return ci, err
+				}
+			case "parent":
+				ci.Parent, err = hex.DecodeString(string(parts[1]))
+				if err != nil {
+					return ci, err
+				}
+		}
+	}
+	return ci, nil
+}
+
+   Despite the simplicity this should work even with complex Git repos, but it will only follow a single
+   branch and will ignore merges. To support multiple parent commits one would have to append parent
+   hashes into the slice.
+
+   Another exercise to try is to implement tags. Tags are similar to heads (branches) - they are text
+   files inside .git/refs/tags and contain hashes of the tag objects.
+
+   The storage mechanism we´ve just implemented is known as "loose objects". But there is an
+   alternative, more efficient (and more complex) storage known as "packfiles". Pack file is an archive
+   of objects, similar to a tarball, where some objects can be stored as deltas (differences) from
+   another object in the pack. Parsing packfiles is well documented and is not that difficult, but it´s
+   time to wrap up our Git story.
+
+   A full example of nanogit.go that implements git init, git commit, git checkout, and git log is
+   available as a gist. In under ~300LOC it covers most of the fundamental Git concepts: references,
+   objects, hashes and storage system. With a bit of effort it can be improved to support tags, multiple
+   files, multiple parent commits and eventually end up being a small Git library for the programming
+   language of your interest.
+
+
+---
+
