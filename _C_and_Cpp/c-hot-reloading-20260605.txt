@@ -1,0 +1,238 @@
+filename: c-hot-reloading-20260605.txt
+https://www.bytesbeneath.com/p/hot-reloading-in-c
+
+Hot Reloading in C
+Feb 17, 2024
+
+How to save 260 hours of your time, every year.
+
+Hot reloading
+   This week´s newsletter is about being able to recompile and reload code to see the changes in
+   real-time - without restarting the application.
+
+   The way I learnt to develop software was using the compile-link-execute cycle. Depending on your
+   setup, this may be more or less ergonomic.
+
+   In my setup, I used to:
+    1. Edit and save the file.
+    2. Press Alt-M to run my build (compile & link) script.
+    3. Win-2 to switch to my debugger, press F10 to start stepping through my program or F5 to just run
+       it.
+    4. Do whatever in the program, set break points, analyse variables, etc.
+    5. Close the program.
+    6. Make changes to the code.
+    7. Start the process again.
+
+   It´s pretty inefficient.
+
+   Now, I do this:
+    1. Edit and save the file.
+    2. Press Alt-M to run my build script.
+    3. Alt-Tab back to the program, that was still running, and has all the state from before I made
+       changes.
+    4. That´s it - the code has been updated in the background!
+
+My Journey to Discovering Hot Reloading
+   I knew about "hot module reloading" from my career as a front end web developer. It was amazing to
+   have instant changes in real-time after updating some code.
+
+   What I didn´t know, is that this functionality has been available since the 1980s for compiled
+   programs!
+
+   On Windows, we can load .dll (Dynamic Link Library) files. On Linux they are called .so (Shared
+   Object) files.
+
+   These files can be loaded at run-time of a program and contain code and data, like an executable.
+
+   Join me on this adventure to figure out how to get hot reloading working in a simple Win32 C program.
+   If you don´t use Windows, don´t fret - the code is simple and the structure will apply to Linux/MacOS
+   just as well.
+
+Understanding Hot Reloading: Application Code and Cradle
+   Hot reloading is a concept used in software development that allows programmers to immediately see
+   changes made in the code without closing and re-opening the running program.
+
+   This is exactly the functionality we need to reduce the time between idea and execution.
+
+   How this can be done for our purposes is we split the code into two sections - the application code
+   and the cradle.
+
+   Our application code is the dynamically linked code. The code we are updating. In the case of games -
+   it´s our gameplay and perhaps a lot of the engine code, too.
+
+   Our cradle is the compiled executable that loads the application code and provides it with memory. It
+   is important that the memory we use comes from the cradle as when the DLL is reloaded, the DLL´s
+   memory is refreshed.
+
+Implementing Hot Reloading: A Step-by-Step Guide
+   Now that we know what we are doing, let´s look at how to actually do it.
+
+   On Windows, there is a function called LoadLibrary, on Unix-like systems the equivalent is dlopen.
+
+   Let´s write a simple win32 layer that achieves the goal of hot reloading.
+
+[main.c]
+   Our cradle will be a simple program that loops every second, reloading the DLL regardless of whether
+   it has been changed or not.
+
+   In my experience, reloading every second is good enough for a long time during development.
+
+#include <windows.h>
+#include <stdio.h>
+#include <string.h>
+
+#define MEMORY_SIZE 256
+
+typedef void (*HotReloadedFunction)(char *memory, size_t *size);
+
+int main(void) {
+	HINSTANCE dll = 0;
+	HotReloadedFunction fn;
+	char memory[MEMORY_SIZE] = {0};
+
+	while (1) {
+		if (dll) {
+			FreeLibrary(dll);
+		}
+
+		CopyFile("application.dll", "_application.dll", 0);
+		dll = LoadLibrary("_application.dll");
+		if (!dll) {
+			printf("Failed to load DLL.\\n");
+			return 1;
+		}
+
+		fn = (HotReloadedFunction)GetProcAddress(dll, "hot_reloaded_function");
+		if (!fn) {
+			printf("Failed to find function in DLL.\\n");
+			return 1;
+		}
+
+		fn(memory, MEMORY_SIZE);
+
+		Sleep(1000);
+	}
+
+	return 0;
+}
+
+   We are copying our application.dll file to a new _application.dll file so that the file isn´t in use
+   when we try to compile a new one.
+
+   We provide some memory to our function - this would be where you´d store all your game state in a
+   game, or all your application state in some other application.
+
+   We then load the copied DLL file and use GetProcAddress. GetProcAddress gets the procedure (function)
+   address of a function. This function will de defined in the application code.
+
+   Then we call the function, passing in the memory and memory size.
+
+   Finally, we just sleep for a second. In a game this could be waiting until you hit 16.67 ms (for 60
+   FPS).
+
+   In most real-time cases, you probably want to use either a timer or watch the file for changes to
+   reload the DLL.
+
+[application.c]
+   Our application is dynamically loaded at run-time.
+
+   We must be careful about what kind of data we store in it.
+
+   In this case whatever_string is a static string that will be stored in the DLL and not changed.
+
+   However, counter is incremented in the hot_reloaded_function . Let´s see what happens.
+
+#include <windows.h>
+#include <string.h>
+#include <stdio.h>
+
+char *whatever_string = "This can change at run time, even though the memory address doesn´t!";
+int counter = 0;
+
+__declspec(dllexport) void hot_reloaded_function(char *memory, size_t size) {
+	printf("memory size: %zu, address: %p\\n", size, memory);
+	sprintf(memory, "%s", whatever_string);
+	printf("%s\\n", memory);
+	printf("counter: %d\\n", counter);
+	counter += 1;
+}
+
+BOOL WINAPI DllMain(HMODULE inst, DWORD reason, LPVOID reserved) {
+	(void)inst; (void)reason; (void)reserved;
+	return 1;
+}
+
+[build.bat]
+@echo off
+cl /c /Zi /nologo application.c /Foapplication.obj
+link /nologo /DLL /DEBUG /OUT:application.dll application.obj
+
+[build_exe.bat]
+@echo off
+cl /Zi /nologo main.c
+
+output
+   We´ll assume we managed to change the contents of whatever_string between runs to "For example,
+   here!".
+memory size: 256, address: 00000097917DFC00
+This can change at run time, even though the memory address doesn´t!
+counter: 0
+memory size: 256, address: 00000097917DFC00
+For example, here!
+counter: 0
+     * Memory address is unchanged - that´s good!
+     * String is updated successfully - that´s good!
+     * Counter is not incrementing! Why? ...
+
+   The answer is what I was alluding to earlier.
+
+   Each time the DLL is recompiled and reloaded, the memory of any variables inside the DLL are reset.
+
+   That´s why passing in memory that you want to persist from the cradle is so important.
+
+   Pass in memory you need to for your entire application from the cradle, then it will keep state
+   across DLL reloads.
+
+The Impact of Hot Reloading on Your Programming Efficiency
+   Using hot reloading allows the programmer to reduce the time between idea and execution.
+
+   You can press jump in your game, see how it feels, then change some values in the program, compile -
+   press jump again.
+
+   It removes the (sometimes very lengthy) process of opening the program and getting back to the state
+   you were in before.
+
+   Imagine you are testing some boss battle and you have to run back to the boss between each tweak of
+   it´s attributes.
+
+   If closing your game, compiling, running, and getting back to the same state takes let´s say 3.6
+   seconds...
+
+   And, you may want to tweak things hundreds or thousands of times in one day...
+360 / 60 = 6 minutes
+* 10 for 1000 is 1 hour
+
+   That´s a saving of between 6 minutes and one hour per day.
+
+   What could you do with an extra 260 hours per year? Probably, a lot of neat stuff.
+
+   If you found this useful and want to read more newsletters like this, subscribe today - it´s free!
+
+Hot Loading in the Future?
+   Once I saw how easy it was to implement, I wondered why we don´t all use hot reloading all the time.
+
+   In the future, I think we may see this built in to languages and IDEs.
+
+   However, given it´s been essentially this easy for going on 40 years now... I can´t be certain of
+   that.
+
+   I can be certain that I´ll be using it for the rest of my career, and I hope to have helped you
+   decide to give it a try.
+
+   If you enjoy this newsletter and want to go deeper, with more structure, I made
+   [https://programvideogames.com/?src=newsletter_0007]Program Video
+   Games for you. Transform your game ideas into working systems from first principles.
+
+
+---
+

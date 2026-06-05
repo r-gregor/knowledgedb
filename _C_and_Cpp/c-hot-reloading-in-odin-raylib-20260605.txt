@@ -1,0 +1,162 @@
+filename: c-hot-reloading-in-odin-raylib-20260605.txt
+https://www.bytesbeneath.com/p/hot-reloading-in-odin-raylib
+
+Hot Reloading in Odin + Raylib
+Oct 07, 2025
+
+Change Code - Instantly See Results In-Game
+   You change one line of code. Compile. Wait. Run. Test. Repeat 47 times. There goes your afternoon.
+
+   In this newsletter:
+    1. Why the compile-restart destroys your productivity
+    2. How to hot reload in Odin + Raylib without losing state
+    3. The affordance that´s unlocked when you use hot reloading
+
+1. The Manual Feedback Loop Tax
+   Every second between "I have a cool idea" and having the implementation working in your game to see
+   if it works is friction.
+
+   Whether you´re tweaking the main character´s jump height, or modifying the colours of a background
+   piece of art, or modifying the pitch of a sound effect, one thing is clear: You want to observe the
+   change as quickly as possible.
+
+   With the default setup, you tweak, compile, get back to the correct state, then you can test. This
+   can take from seconds to minutes, depending on your game and what you´re testing. And then, you have
+   to do it again because the first change is invariably not the last.
+
+   One of the most common reasons cited for embedding slow scripting languages into most game engines is
+   to be able to change things while the game is running. But, what if you don´t want to, or aren´t
+   using a scripting language?
+
+2. Dynamic Libraries to the Rescue
+   Odin can compile your code as a dynamic library (.dll/.so/.dylib) that loads at runtime
+
+   The trick: split your code into two parts. The terminology is borrowed from Casey Muratori´s
+   excellent Handmade Hero series.
+    1. The Cradle: This part of the program handles OS and platform code. It owns all the memory, and it
+       calls into the dynamic library.
+    2. The Game: A dynamic library that contains only game code. Any state that is required across
+       reloads must live in the memory that´s passed from the Cradle.
+
+   For this example, I have a third component: A raylib_api package that provides runtime procedure
+   bindings for raylib. This keeps the build process simple - less moving parts.
+
+   The code below is to get the gist, full source code is linked at the end.
+// main.odin - The Cradle
+main :: proc() {
+	rl_api := raylib_api.init()
+	game_api: Game_API
+	game_api_reload(&game_api)
+
+	rl.InitWindow(800, 600, "Hot Reloading")
+	defer rl.CloseWindow()
+
+	// Ask the Game how much memory it needs
+	game_memory_buffer := make([]u8, game_api.game_memory_size())
+	game_memory_pointer := raw_data(game_memory_buffer)
+
+	game_api.game_init(game_memory_pointer, &rl_api)
+
+	for !rl.WindowShouldClose() {
+		// Check if the DLL changed on disk
+		if dll_write_time, err := os.last_write_time_by_name(DLL_PATH_FULL); err == nil {
+			if dll_write_time != game_api.last_write_time {
+				game_api_reload(&game_api)  // Hot reload!
+			}
+		}
+
+		game_api.game_update(game_memory_pointer, &rl_api)
+
+		rl.BeginDrawing()
+		game_api.game_render(game_memory_pointer, &rl_api)
+		rl.EndDrawing()
+	}
+}
+
+// game.odin - The Game
+
+import rl "vendor:raylib"
+import "raylib_api"
+
+// Types and constants from raylib are safe to use
+Vec2 :: rl.Vector2
+
+Game_State :: struct {
+	positions: [dynamic]Vec2,
+	sizes: [dynamic]Vec2,
+	colors: [dynamic]rl.Color,
+}
+
+@export
+game_memory_size :: proc() -> int {
+	return size_of(Game_State)
+}
+
+@export
+game_init :: proc(gs: ^Game_State, rl: ^raylib_api.Raylib_API) { // ...
+
+// other procedures follow the same structure ...
+
+   The Cradle is compiled as your main application - your .exe on Windows. It then loads the Game at
+   runtime and binds the procedures to an API that can be called. Once bound, the Cradle can then call
+   into the loaded procedures, passing in the required memory to keep the game running.
+
+   +--------------------------------------------------------------------+
+   |                                                                    |
+   |                                              [ Cradle ]            |
+   |                                                  |                 |
+   | Old versions may contain static             Provides Memory and    |
+   | data that´s still pointed to                Calls Procedures from  |
+   |                                                  |                 |
+   |                                                  V                 |
+   | [ Game_v1 ]         [ Game_v3 ]            [ Game_v3 ]             |
+   | [ DLL     ]         [ DLL     ]            [ DLL     ]             |
+   |     \                 /      \                 /                   |
+   |      `+--> Reload --+´        `+--> Reload --+´                    |
+   |                                                                    |
+   +--------------------------------------------------------------------+
+   Recompiling the Game will trigger a reload and rebind the procedures - changing gameplay code in real
+   time.
+
+3. The Affordances Hot Reloading Unlocks
+   Hot reloading doesn´t just save time. It changes the possibility space.
+
+   With instant feedback, you entirely remove the friction of making changes, and avoid the tendency to
+   batch a bunch of small changes together. Bonus points if you put a build hotkey in your code editor.
+
+   You can sculpt the game feel in real-time, for example:
+
+   Tune character feel in real time: Adjust jump heights, animation lengths, sound effects, damage
+   numbers.
+
+   Design levels live: Move platforms, resize enemies or hitboxes, adjust spawns.
+
+   Iterate on juice: Modify screen shake, particle effects, camera movement - until it feels great.
+
+   I don´t know about you, but I´ve found myself getting distracted if I have to wait more than a couple
+   of seconds. That means that every compile-restart cycle is a potential distraction point in the day.
+
+   Plus, without the cost of restarting each time, you can have the confidence to tweak anything and
+   everything. No more hesitation and doing math in your head to calculate if you´ve changed enough
+   lines to justify a restart.
+
+   You unlock designer mode. As a programmer, I find it very appealing to be able to expand into that
+   other mode without friction and go from Change -> Compile -> Test to Observe -> Adjust -> Observe.
+
+Key Insights
+    1. Less Friction Means More Focus - Focus is about removing distractions. Every time you wait for a
+       compile, your brain will start to look for other things to do - even if it´s just a couple of
+       seconds.
+    2. Dynamic Libraries let you reload code without restarting - Split into Cradle (persistent
+       memory/platform) and Game (hot-reloadable logic).
+    3. Enable Designer Mode - With hot reloading, you get to switch into designer mode and tweak ->
+       observe -> tweak -> observe. No break of flow getting back to the same state.
+
+   P.S. Want structured guidance on building games from first principles? Program Video Games gives
+   you the full system - Odin + Raylib, no engines, complete control.
+
+   Code: [https://gist.github.com/Falconerd/35e7fa827dc572d18ef20bef527c5a6a]GitHub Gist (click here)
+
+
+---
+

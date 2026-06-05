@@ -1,0 +1,162 @@
+filename: c-25-lines-of-code-that-glue-systems-20260605.txt
+https://www.bytesbeneath.com/p/25-lines-of-code-that-glue-systems
+
+25 Lines of Code that Glue Systems Together (Events)
+Sep 08, 2025
+
+Used in games like Skyrim and Fallout. Drop it in your engine this afternoon.
+
+   Hard-coding everything works, until it doesn´t. Friction increases, hair gets pulled out, projects
+   get "refactored" - another game abandoned.
+
+   That´s where event systems shine. Keep your systems separate, and keep communication open.
+
+   What you´ll learn:
+     * Events decouple systems
+     * Every major game uses them
+     * How to build one in 25 lines of code
+
+Events Decouple Systems
+   An event system is a mail service between systems. One system sends a message, others receive it and
+   respond. The response is a procedure - a callback - that consumes the event state and produces
+   side-effects. Without this mail service, your code risks becoming 99% spaghetti, making you want to
+   quit programming forever.
+
+   Imagine you´re playing a game, running around, picking up items, and you pick up a gemstone. You
+   receive a notification: Quest Started - The Missing Link (1/20 collected). Without events, you´d have
+   either every item checked on pick-up if it should start a quest. Every sword, shield and bow dropped
+   by bandits would have a bunch of code to check whether they are quest starters. With events, you have
+   the item system announce "Special Gem Collected" and the quest system responds - no coupling
+   required. The quest system doesn´t even have to know the item system exists.
+
+// Without events
+on_item_pickup :: proc(item: Item) {
+	if item.type == .Special_Gem {
+		if !quest_is_active(.Collect_Special_Gems) {
+			quest_start(.Collect_Special_Gems)
+		}
+
+		quest_progress_increment(.Collect_Special_Gems)
+	}
+}
+
+// With events
+on_item_pickup :: proc(item: Item) {
+	event_publish(.Item_Collected, ItemCollectedPayload{item})
+}
+
+   At first glance, the example without events looks better. It´s explicit about what´s going on. The
+   version with events is abstract. The trade-off is that now any system can listen for the
+   Item_Collected event and respond. The UI system can show a little notification, the quest system can
+   update/start a quest, the sound system can play the "pick up item" sound, etc.
+
+   This is why major studios rely on event systems - they scale with your systems. Let´s look at how
+   Fallout used event systems.
+
+Major Games Use Them
+     I´ve been using these [event systems] for decades in my games... designers like it, programmers
+     like it, my guess is artists like it too
+
+     * Timothy Cain, Lead Designer of Fallout
+
+   Timothy Cain has a video about event systems on his YouTube channel. He describes how in Fallout,
+   when a player picks a lock, the Skill System publishes an event and the AI System checks if nearby
+   guards "saw" anything. The AI System and Skill System communicate without being coupled - they don´t
+   know about each other.
+
+   Another example covered is that a follower may get angry when the player kills too many "cystypigs"
+   (a gross looking pig in the world of Fallout). This demonstrates the Companion System and Combat
+   System working together without being coupled.
+
+Simple Implementation
+   A simple event system may have types setup something like this:
+EventType :: enum {
+	Invalid,
+	TextUpdate,
+	PositionChange,
+}
+
+EventPayloadTextUpdate :: struct {
+	text: string,
+	// some relevant data..
+}
+
+EventPayloadPositionChange :: struct {
+	pos: 32,
+}
+
+EventPayload :: union {
+	EventPayloadTextUpdate,
+	EventPayloadPositionChange,
+}
+
+Event :: struct {
+	type: EventType,
+	payload: EventPayload,
+}
+
+   To put the types into context, you´ll want some variables - stored here as globals to make things
+   simple:
+
+// Event callback type
+EventCallbackProc :: proc(event: Event)
+
+event_listeners: map[EventType][dynamic]EventCallbackProc
+event_queue: queue.Queue(Event)
+
+   To push an event onto the queue, you´ll want to create a wrapper so you don´t pollute your call-sites
+   with implementation details:
+
+event_publish :: proc(type: EventType, payload: EventPayload) {
+	queue.enqueue(&event_queue, Event{
+		type = type,
+		payload = payload,
+	})
+}
+
+   To subscribe to an event, you can link a callback procedure with an event type:
+
+event_type_subscribe :: proc(type: EventType, callback: EventCallbackProc) {
+	if type not_in event_listeners {
+		event_listeners[type] = make([dynamic]EventCallbackProc)
+	}
+
+	append(&event_listeners[type], callback)
+}
+
+   In your main loop, you can add a call to something like this:
+
+process_events :: proc() {
+	for queue.len(event_queue) > 0 {
+		event := queue.dequeue(&event_queue)
+
+		if listeners, ok := event_listeners[event.type]; ok {
+			for callback in listeners {
+				callback(event)
+			}
+		}
+	}
+}
+
+   This is a very simple event system that takes events off the queue every update and has no conditions
+   to determine whether the event is "ready".
+
+   I´ve included an example with timed events in the code. There are other types of conditions that
+   may be useful, such as:
+     * Priority Events: Events have a priority score, higher priority are always checked first, low
+       priority can be checked every so often
+     * Conditional Events: Attach a callback to an event that returns a boolean. If the callback returns
+       true - which could be a game state lookup - consume the event.
+     * Filters: Location, Specific Entities, Game Modes - basically anything can be a filter.
+     * Persistent: Events that need to be saved and loaded when the game is saved and loaded.
+     * Sequences: Events that publish events when conditions are met.
+       ... and much more!
+
+Key Takeaways
+     * Use events to keep systems decoupled, where performance is not the priority
+     * Events are used in major games, and written the same way or similar, for decades
+     * Events can be extended for increased capabilities
+
+
+---
+
