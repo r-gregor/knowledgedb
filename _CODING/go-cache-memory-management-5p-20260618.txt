@@ -1,0 +1,218 @@
+filename: go-cache-memory-management-5p-20260618.txt
+https:// lorbic.com/love-letter-to-the-l1-cache/
+
+A Love Letter to the L1 Cache
+
+Why reordering two struct fields made my loop 30% faster, and what it taught me about how CPUs actually work.
+
+I recently spent four hours staring at a benchmark that didn´t make sense.
+
+It started while working on Derelict Facility, my grid-based game engine in Go. I was trying to tighten the
+main update loop, specifically the part that iterates over every entity on the map each frame. I pulled out a
+small benchmark to isolate the cost, and something looked wrong.
+
+I had two Go structs. They held the exact same data: two booleans and a 64-bit integer. I was iterating over
+a slice of 10 million of these structs, doing a simple addition. They should have been identical in
+performance.
+
+They weren´t.
+
+Struct A was consistently 30% slower than Struct B. Struct A was also 50% larger in memory.
+
+In high-level languages, we are taught to think of memory as a simple, uniform resource. You ask for some
+bytes, you get them. But when you start caring about nanoseconds, you find out that memory is not uniform at
+all. Getting a value from RAM takes real time, and your CPU has no choice but to sit and wait for it.
+
+This post is about that wait.
+
+The code ...
+
+Here is what started it.
+
+type BadStruct struct {
+	A bool  // 1 byte
+	B int64 // 8 bytes
+	C bool  // 1 byte
+}
+
+type GoodStruct struct {
+	B int64 // 8 bytes
+	A bool  // 1 byte
+	C bool  // 1 byte
+}
+
+If you use unsafe.Sizeof(), you will find that BadStruct occupies 24 bytes, while GoodStruct only takes 16
+bytes.
+
+Why? Because the CPU reads memory in fixed-size chunks called "words". On a 64-bit machine, a word is 8
+bytes. To make reading fast, the compiler adds "padding" (empty bytes) to make sure that 8-byte values like
+int64 start at an address that is a multiple of 8.
+
+Glossary // Padding and Alignment
+
+Alignment: CPUs fetch data in fixed-size chunks. If an 8-byte integer starts at byte 3 instead of byte 8, the
+CPU may need two fetches to read it instead of one.
+
+Padding: To avoid misalignment, the compiler inserts empty bytes between fields. In BadStruct, it adds 7
+bytes after the first bool so the int64 can start at byte 8. It then adds 7 more bytes at the end to keep the
+struct aligned for the next element in a slice.
+
+But the size difference is only half the story. The real reason BadStruct is slower is that it wastes cache
+space.
+
+Why RAM is slow
+To understand why 8 bytes of padding matter, you need to know how the memory hierarchy works.
+
+RAM is not fast. Relative to a CPU running at 4GHz, it is very slow. Here is a way to think about it: if one
+CPU cycle took one second, a round trip to main memory would take about four minutes.
+
+To deal with this, CPUs have a hierarchy of caches. Each layer is smaller, faster, and closer to the
+processor.
+
+Glossary // SRAM vs DRAM
+SRAM (Static RAM): Used for CPU caches (L1, L2, L3). It is fast because each bit stays set without any
+refreshing. It uses more transistors per bit, so it is expensive and takes more space on the chip.
+
+DRAM (Dynamic RAM): Used for main memory (your 16GB or 32GB sticks). It is cheaper and denser, but each bit
+has to be constantly refreshed. This is what makes it slower.
+
+The latency ladder
+  * L1 Cache:    ~1 nanosecond. Sits directly on the CPU die. About 32-64KB per core.
+  * L2 Cache:    ~4 nanoseconds. Larger, slightly further away.
+  * L3 Cache:    ~10-15 nanoseconds. Shared across cores.
+  * Main Memory: ~100 nanoseconds. A completely separate chip.
+    (DRAM)
+
+This is the only pyramid scheme where the returns are real.
+
+When your CPU needs a value, it checks L1 first. If it is not there (a "cache miss"), it checks L2, then L3,
+then finally goes to main memory.
+
+Each miss costs time your CPU spends doing nothing. It just waits. This is why the L1 cache matters so much.
+It is the only memory fast enough to keep the CPU busy.
+
+The secret life of a cache line
+Here is the important part: the CPU never fetches a single byte.
+
+When you ask for 1 byte, the CPU assumes you will probably need the bytes next to it soon. This is called
+spatial locality. So instead of fetching 1 byte, it fetches a 64-byte block called a cache line.
+
+Glossary // Cache Line
+Cache Line: The smallest unit of data transfer between the cache and main memory. Even if you only need 1
+byte, the hardware fetches 64 bytes and stores the whole block in the cache.
+
+Here is what that looks like in practice with our two structs:
+
+  One 64-byte cache line:
+
+  BadStruct (24 bytes) - 2 fit, 16 bytes wasted:
+  +------------------------+------------------------+- - -
+  |       entity 0         |       entity 1         |
+  +------------------------+------------------------+- - -
+   0                      23 24                     47
+
+  GoodStruct (16 bytes) - 4 fit, 0 bytes wasted:
+  +----------------+----------------+----------------+----------------+
+  |    entity 0    |    entity 1    |    entity 2    |    entity 3    |
+  +----------------+----------------+----------------+----------------+
+   0              15 16            31 32            47 48            63
+
+If your structs are small and tightly packed, one 64-byte cache line holds four of them. The CPU hits main
+memory once and has data for the next four loop iterations.
+
+If your structs are bloated with padding, that same cache line holds only two. You hit main memory twice as
+often for the same amount of work.
+
+Why struct field order matters
+Let´s look at how our two structs actually sit in memory.
+
+BadStruct (24 bytes)
+------------------------------------------
+Byte Offset    Field    Content
+------------------------------------------
+0              A        bool (1 byte)
+1-7            -        Padding (7 bytes)
+8-15           B        int64 (8 bytes)
+16             C        bool (1 byte)
+17-23          -        Padding (7 bytes)
+------------------------------------------
+
+GoodStruct (16 bytes)
+------------------------------------------
+Byte Offset    Field    Content
+------------------------------------------
+0-7            B        int64 (8 bytes)
+8              A        bool (1 byte)
+9              C        bool (1 byte)
+10-15          -        Padding (6 bytes)
+------------------------------------------
+
+By moving the int64 to the top, the two booleans sit together at the end. We cut the struct size by 33%.
+
+In a tight loop over millions of elements, this means fitting more data into each cache line, which means
+fewer trips to main memory.
+
+The benchmark
+I wrote a Go benchmark to confirm this. Two slices of 10,000,000 structs. Iterate over each and sum the
+integer field.
+
+func BenchmarkBadStruct(b *testing.B) {
+	data := make([]BadStruct, 10_000_000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var sum int64
+		for j := 0; j < len(data); j++ {
+			sum += data[j].B
+		}
+	}
+}
+
+func BenchmarkGoodStruct(b *testing.B) {
+	data := make([]GoodStruct, 10_000_000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var sum int64
+		for j := 0; j < len(data); j++ {
+			sum += data[j].B
+		}
+	}
+}
+
+Result (benchstat):
+
+1name           time/op
+2BadStruct-16   12.4ms ± 2%
+3GoodStruct-16   8.7ms ± 1%
+
+30% faster. Just from reordering fields.
+
+The reason: GoodStruct fits roughly 4,000,000 elements into 64MB. BadStruct fits only 2,666,666. The bad
+version keeps evicting cache lines and waiting for main memory. The CPU has no work to do. It just waits.
+
+If you want to catch this automatically, betteralign is a Go linter that finds structs with suboptimal field
+ordering and suggests the fix. One pass over your codebase and it will find every case like this one.
+
+Hardware sympathy
+Languages like Go, Java, and Python hide most of the hardware from you. That is a good thing. You can focus
+on the actual problem.
+
+But the hiding breaks down at scale.
+
+The CPU does not care about your abstractions. It only sees cache lines, bus cycles, and latency. When your
+working set stops fitting in cache, you pay the full 100ns penalty for every miss, millions of times per
+second.
+
+"Hardware sympathy" is a term from the LMAX Disruptor project. The idea is simple: understand the physical
+machine well enough to write code that works with it, not against it. It does not mean writing assembly. It
+means knowing that a cache line is 64 bytes, and thinking about whether your data layout respects that.
+
+Back in Derelict Facility, I went through the entity structs with fresh eyes. Most of them had the same
+problem: small boolean flags scattered between larger fields. After reordering, the update loop got
+noticeably faster without touching a single line of game logic.
+
+Four hours to understand the problem. Five minutes to fix it. Run betteralign on your own codebase and see
+what it finds.
+
+
+---
+
