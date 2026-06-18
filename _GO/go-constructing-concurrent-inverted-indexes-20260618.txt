@@ -1,0 +1,442 @@
+filename: go-constructing-concurrent-inverted-indexes-20260618.txt
+https://lorbic.com/constructing-concurrent-inverted-indexes-in-go/
+
+Constructing Concurrent Inverted Indexes in Go
+
+Building a thread-safe inverted index from scratch in Go. Covers sharded mutexes, lock contention profiling,
+slice pooling to avoid GC pressure, and benchmark comparisons against a naive sync.RWMutex approach under
+varying read/write ratios.
+
+I spent a Saturday afternoon benchmarking a concurrent inverted index and discovered that a single
+sync.RWMutex starts to break down at roughly 4 concurrent readers. The degradation is not linear. It is not
+graceful. It is a cliff.
+
+The inverted index is one of the oldest data structures in information retrieval. It maps terms to the
+documents that contain them, forming the backbone of every search engine from Elasticsearch to Lucene to
+Google´s earliest prototypes. The data structure itself is simple. Making it fast under concurrent load is
+not.
+
+This article walks through building a concurrent inverted index in Go. I start with a naive implementation,
+profile its lock contention, and progressively refine it with sharded mutexes, compressed posting lists, and
+allocation-aware index structures.
+
+If you have ever wondered what happens under the hood when you type a query into a search box, or why some
+databases can handle 50,000 index writes per second while others stall at 5,000, this is for you.
+
+The inverted index: a five-minute primer
+An inverted index takes a collection of documents and builds a mapping from each term to a list of document
+identifiers where that term appears. Given a query like "concurrent Go", the engine looks up "concurrent" and
+"Go" in the index, retrieves their posting lists, and intersects them to find documents containing both
+terms.
+
+// The core data structure, stripped to its essence
+type InvertedIndex struct {
+	mu    sync.RWMutex
+	index map[string][]int // term --> sorted list of document IDs
+}
+
+func (idx *InvertedIndex) Index(docID int, terms []string) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	for _, term := range terms {
+		idx.index[term] = append(idx.index[term], docID)
+	}
+}
+
+func (idx *InvertedIndex) Search(term string) []int {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.index[term]
+}
+
+This works. It is correct. It is also catastrophically slow under any real workload.
+
+The problem is the single sync.RWMutex. Every reader acquires a read lock. Every writer acquires a write
+lock. When a writer arrives, it blocks all new readers. When even a modest number of readers are active,
+writers starve. The mutex becomes a serialization point, and your concurrent index degrades into a sequential
+one.
+
+Measuring the damage: lock contention profiling
+Before optimizing, we need to quantify the problem. I wrote a benchmark harness that simulates different read
+/write ratios against the naive index. The workload: 1 million terms across 100,000 documents, with goroutine
+counts varying from 1 to 64.
+
+func BenchmarkNaiveIndex(b *testing.B) {
+	scenarios := []struct {
+		name       string
+		readRatio  float64 // fraction of operations that are reads
+		goroutines int
+	}{
+		{"read-heavy-4", 0.95, 4},
+		{"read-heavy-16", 0.95, 16},
+		{"balanced-4", 0.50, 4},
+		{"balanced-16", 0.50, 16},
+		{"write-heavy-4", 0.05, 4},
+		{"write-heavy-16", 0.05, 16},
+	}
+
+	for _, sc := range scenarios {
+		b.Run(sc.name, func(b *testing.B) {
+			idx := NewNaiveIndex()
+			// pre-populate with 100k documents, 10 terms each
+			for i := 0; i < 100_000; i++ {
+				idx.Index(i, generateTerms(10))
+			}
+
+			b.ResetTimer()
+			b.SetParallelism(sc.goroutines)
+			b.RunParallel(func(pb *testing.PB) {
+				rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+				for pb.Next() {
+					if rng.Float64() < sc.readRatio {
+						idx.Search(randomTerm(rng))
+					} else {
+						idx.Index(randomDocID(rng), generateTerms(5))
+					}
+				}
+			})
+		})
+	}
+}
+
+The results, measured in operations per second on an M2 Pro with 12 cores:
+----------------------------------------------------
+Scenario       Naive RWMutex (ops/sec)  Contention %
+----------------------------------------------------
+read-heavy-4   2,847,000                12%
+read-heavy-16  1,210,000                58%
+balanced-4     892,000                  43%
+balanced-16    412,000                  76%
+write-heavy-4  310,000                  65%
+write-heavy-16 94,000                   91%
+----------------------------------------------------
+
+At 16 goroutines with a balanced workload, 76% of CPU time is spent waiting on the mutex. The goroutines are
+not doing useful work. They are standing in line.
+
+Diagnostics // Reading Go Mutex Profiles
+The Go runtime exposes mutex contention profiling through runtime.SetMutexProfileFraction. Enable it with a
+non-zero rate, then visualize with go tool pprof:
+
+1go test -bench=BenchmarkNaiveIndex -mutexprofile=mutex.out
+2go tool pprof -http=:8080 mutex.out
+
+The flame graph will show sync.(*RWMutex).Lock dominating your CPU samples. This is the "contention %" column
+above. If this number exceeds 20%, your mutex is your bottleneck.
+
+Sharded mutexes: divide and conquer
+
+The core insight is that contention arises because all operations-reads and writes-funnel through a single
+lock, even when they target different terms. A query for "database" should not block an index update for
+"garbage-collector".
+
+A sharded mutex distributes the lock across N independent partitions. Each partition guards a subset of the
+term space. The term is hashed to a shard, and only that shard´s mutex is acquired.
+
+const numShards = 256
+
+type ShardedIndex struct {
+	shards [numShards]indexShard
+}
+
+type indexShard struct {
+	mu    sync.RWMutex
+	terms map[string]*PostingList
+}
+
+func (idx *ShardedIndex) shard(term string) *indexShard {
+	h := fnv.New32a()
+	h.Write([]byte(term))
+	return &idx.shards[h.Sum32()%numShards]
+}
+
+func (idx *ShardedIndex) Index(docID int, terms []string) {
+	// Group terms by shard to minimize lock acquisitions
+	grouped := make(map[uint32][]string)
+	for _, term := range terms {
+		h := fnv.New32a()
+		h.Write([]byte(term))
+		shardID := h.Sum32() % numShards
+		grouped[shardID] = append(grouped[shardID], term)
+	}
+
+	for shardID, shardTerms := range grouped {
+		shard := &idx.shards[shardID]
+		shard.mu.Lock()
+		for _, term := range shardTerms {
+			shard.terms[term].Add(docID)
+		}
+		shard.mu.Unlock()
+	}
+}
+
+Two details matter here. First, terms are grouped by shard before acquiring locks. Without this grouping, the
+function would acquire and release a new lock for every term in the document, doubling the lock/unlock
+overhead. Second, the hash function is FNV-32a, not a cryptographic hash. We need speed, not collision
+resistance. A handful of collisions across 256 shards is statistically irrelevant.
+
+The results:
+----------------------------------------------------------------------------
+Scenario       Naive RWMutex (ops/sec) Sharded 256-way (ops/sec) Improvement
+----------------------------------------------------------------------------
+read-heavy-4   2,847,000               4,120,000                 1.45×
+read-heavy-16  1,210,000               3,890,000                 3.21×
+balanced-4     892,000                 1,740,000                 1.95×
+balanced-16    412,000                 1,610,000                 3.91×
+write-heavy-4  310,000                 520,000                   1.68×
+write-heavy-16 94,000                  420,000                   4.47×
+----------------------------------------------------------------------------
+
+The improvement is most dramatic at high goroutine counts because sharding reduces the probability of any two
+operations landing on the same mutex. With 256 shards, the expected collision rate for 16 concurrent
+operations is roughly 6%, compared to 100% with a single mutex.
+
+How many shards? The Goldilocks problem
+The number of shards is a tuning parameter with real trade-offs. Too few, and you retain contention. Too
+many, and you waste memory on mutex overhead and increase the cost of the hash-and-dispatch step.
+
+I ran the balanced-16 benchmark against shard counts from 1 to 2048:
+------------------------------------------------------------
+Shards Throughput (ops/sec)  Index Memory (MB) Useful Work %
+------------------------------------------------------------
+1      412,000               48                24%
+8      1,140,000             49                52%
+32     1,480,000             50                68%
+128    1,620,000             52                82%
+256    1,610,000             54                86%
+512    1,590,000             58                87%
+1024   1,550,000             66                88%
+2048   1,490,000             82                89%
+------------------------------------------------------------
+
+Beyond 256 shards, throughput plateaus and then declines. The mutex overhead per shard (each sync.RWMutex is
+24 bytes plus the map header) starts consuming measurable memory, and the hash-compute cost per operation
+overtakes the contention savings. 256 is the empirical sweet spot for this workload.
+
+The garbage collector is watching
+Lock contention is not the only threat to throughput. The Go garbage collector is a concurrent, tri-color
+mark-and-sweep collector. It runs alongside your goroutines. Every heap allocation you make during indexing
+adds to its workload.
+
+In our naive implementation, every call to append on a posting list potentially triggers a slice growth,
+which allocates a new backing array and copies the old one. Over millions of documents, this is a constant,
+grinding allocation pressure.
+
+The fix is a posting list backed by a pre-allocated, growable buffer with amortized constant-time append. But
+even better: we can pool the individual posting entries.
+
+var postingPool = sync.Pool {
+	New: func() interface{} {
+		return &Posting{}
+	},
+}
+
+type Posting struct {
+	DocID     int
+	TermFreq  int
+	Positions []int
+}
+
+type PostingList struct {
+	mu       sync.RWMutex
+	postings []*Posting
+}
+
+func (pl *PostingList) Add(docID int, positions []int) {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+
+	p := postingPool.Get().(*Posting)
+	p.DocID = docID
+	p.TermFreq = len(positions)
+	p.Positions = append(p.Positions[:0], positions...)
+	pl.postings = append(pl.postings, p)
+}
+
+Diagnostics // sync.Pool Mechanics
+sync.Pool is a per-P (logical processor) cache of objects. When you call Get(), the runtime checks the local
+P´s pool first, falling back to other P´s pools and finally to New(). When you call Put(), the object is
+returned to the local pool.
+
+Critical caveat: objects in a sync.Pool can be garbage collected at any time. The pool is a cache, not a
+guarantee. Do not store state in pooled objects that cannot be reconstructed.
+
+For the posting pool, this is fine. Every Get() call is followed by a full re-initialization of all fields.
+
+With sync.Pool in place, the allocation profile shifted:
+------------------------------------------------------
+Metric                    Without Pooling With Pooling
+------------------------------------------------------
+Allocations per index op  47              3
+Bytes allocated per op    2,840           312
+GC pause p99 (μs)         1,240           180
+GC CPU overhead           18%             4%
+------------------------------------------------------
+
+The GC CPU overhead dropped from 18% to 4%. That is 14% of your CPU budget returned to actual indexing work.
+Pooling is not a micro-optimization. It is a structural decision that changes how your program interacts with
+the runtime.
+
+Compressed posting lists: Elias-Fano encoding
+A posting list for a common term like "the" might contain millions of document IDs. Storing these as a raw []
+int consumes 8 bytes per ID. On a corpus of 10 million documents, "the" alone would occupy 80 MB.
+
+Compression matters. The standard approach in information retrieval is delta encoding followed by
+variable-length integer coding. Delta encoding stores the difference between consecutive document IDs (which
+are sorted). Since document IDs are monotonically increasing, the deltas are small positive integers.
+
+Elias-Fano encoding is a quasi-succinct representation that stores a monotone sequence of N integers from a
+universe of size U in roughly N * (2 + log₂(U/N)) bits. For a posting list with an average gap of 64 between
+document IDs, Elias-Fano uses approximately 5-6 bits per integer, compared to 64 bits for raw int.
+
+type EliasFanoPostingList struct {
+	lowerBits    uint8
+	lowerBitsLen int
+	lowBits      []uint64
+	highBits     *roaring.Bitmap // from github.com/RoaringBitmap/roaring
+	lastDocID    int
+	length       int
+}
+
+func (pl *EliasFanoPostingList) Add(docID int) {
+	delta := docID - pl.lastDocID
+
+	// Lower bits: store the lower 'lowerBitsLen' bits of delta
+	lowMask := (1 << pl.lowerBitsLen) - 1
+	low := delta & lowMask
+	pl.appendLowBits(low)
+
+	// High bits: store (delta >> lowerBitsLen) as unary in a bitmap
+	high := delta >> pl.lowerBitsLen
+	pos := pl.highBits.GetCardinality()
+	pl.highBits.Add(pos + high)
+
+	pl.lastDocID = docID
+	pl.length++
+}
+
+The decoding path reconstructs the original document ID by reading the high-bit bitmap to find the position,
+extracting the lower bits at the corresponding index, and adding the previous document ID.
+
+The space savings are substantial:
+----------------------------------------------------------------------------
+Corpus Size                 Raw int[] (MB) Elias-Fano (MB) Compression Ratio
+----------------------------------------------------------------------------
+1M docs, avg 200 terms/doc  1,600          380             4.2×
+10M docs, avg 200 terms/doc 16,000         3,600           4.4×
+----------------------------------------------------------------------------
+
+The trade-off is decode latency. Random access into an Elias-Fano list requires a rank operation on the
+high-bit bitmap, which is O(log N) with a rank-indexed roaring bitmap. For intersection-heavy query
+workloads, this cost is amortized across thousands of list accesses. For single-term lookups, a variable-byte
+encoded list (with O(1) sequential decode) may be faster.
+
+Putting it together: the production index
+The final index combines sharded mutexes, pooled postings, and compressed posting lists into a single
+structure:
+
+type Index struct {
+	shards     [256]indexShard
+	docStore   *DocumentStore
+	termDict   *TermDictionary
+	stats      *IndexStats
+	closeCh    chan struct{}
+}
+
+type indexShard struct {
+	mu    sync.RWMutex
+	terms map[string]*EliasFanoPostingList
+}
+
+func NewIndex() *Index {
+	idx := &Index{
+		docStore: NewDocumentStore(),
+		termDict: NewTermDictionary(),
+		stats:    NewIndexStats(),
+		closeCh:  make(chan struct{}),
+	}
+	for i := range idx.shards {
+		idx.shards[i].terms = make(map[string]*EliasFanoPostingList)
+	}
+	return idx
+}
+
+func (idx *Index) Index(doc *Document) error {
+	idx.stats.IncrDocuments()
+
+	// Tokenize with pipeline: lowercase --> tokenize --> filter stopwords --> stem
+	tokens := idx.tokenize(doc.Content)
+
+	// Store document
+	idx.docStore.Put(doc.ID, doc)
+
+	// Group tokens by shard
+	grouped := idx.groupByShard(tokens)
+
+	// Index each shard´s batch under that shard´s lock
+	for shardID, shardTokens := range grouped {
+		shard := &idx.shards[shardID]
+		shard.mu.Lock()
+		for _, token := range shardTokens {
+			pl, ok := shard.terms[token]
+			if !ok {
+				pl = NewEliasFanoPostingList()
+				shard.terms[token] = pl
+				idx.termDict.Add(token)
+			}
+			pl.Add(doc.ID)
+		}
+		shard.mu.Unlock()
+	}
+
+	return nil
+}
+
+This is the shape of a production inverted index. It is correct under concurrent reads and writes. It
+compresses its posting lists. It pools its allocations. It can be extended with a background merge goroutine
+to periodically compact posting lists and a WAL (write-ahead log) for crash recovery.
+
+What we did not cover
+This article focuses on the index structure and concurrency model. Several adjacent concerns are
+intentionally deferred:
+  * Tokenization and analysis: Lowercasing, stemming (Porter2), stop-word removal, and n-gram generation are
+    critical for recall but are pipeline stages that plug into the index, not properties of the index itself.
+  * Query execution: Boolean AND/OR/NOT, phrase queries with position information, and relevance scoring
+    (TF-IDF, BM25) operate on top of the index. The index provides raw posting lists. The query executor does
+    the rest.
+  * Persistence: An in-memory index is fast but ephemeral. A production system needs a write-ahead log and
+    periodic snapshots to disk.
+  * Distributed indexing: Sharding the index across multiple machines introduces consensus, replication, and
+    partition-tolerant query routing.
+
+Each of these will be the subject of a dedicated article in this series.
+
+
+The benchmark table
+----------------------------------------------------------------------------------------
+Approach                       Balanced-16 (ops/sec) Memory (MB) GC Overhead Compression
+----------------------------------------------------------------------------------------
+Naive RWMutex                  412,000               48          18%         None
+Sharded (256-way)              1,610,000             54          14%         None
+Sharded + Pooling              1,720,000             52          4%          None
+Sharded + Pooling + Elias-Fano 1,680,000             18          4%          4.2×
+----------------------------------------------------------------------------------------
+
+The fully optimized index achieves a 4× throughput improvement over the naive implementation while using 63%
+less memory and 78% less GC CPU time. The slight throughput regression from Elias-Fano compression (1,720k -->
+1,680k) is the decode penalty. In practice, this is offset by the memory savings, which allow larger working
+sets to fit in the CPU cache.
+
+Further reading
+  * Manning, Raghavan, and Schütze. Introduction to Information Retrieval. Chapter 1 (Boolean Retrieval) and
+    Chapter 5 (Index Compression).
+  * Sebastiano Vigna. "Quasi-succinct indices". Proceedings of WSDM 2013. The canonical paper on Elias-Fano
+    for inverted indexes.
+  * Go Blog. "Go´s http/2 server: Priority and flow control for a concurrent world". Demonstrates sharded
+    synchronization patterns in the standard library.
+  * Daniel Lemire´s blog: Roaring Bitmaps. The compressed bitmap library used in the high-bit component of
+    Elias-Fano.
+
+
+---
+
