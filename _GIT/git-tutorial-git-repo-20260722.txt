@@ -1,0 +1,115 @@
+filename: git-tutorial-git-repo-20260722.txt
+https:// mccd.space/wiki/tutorial-git-repo.shtml
+
+Tutorial: Minimal git hosting
+
+   Aim  Setup a publicly accessible read-only git repo with a CI
+
+Prerequisites
+     * A personal server with ssh setup
+     * nq: queue utility. Will be used for async jobs
+
+Setup the Git Repo
+    1. Create a directory for your projects somewhere publicly accessible within the repository
+# mkdir -p /var/git-public/
+# chown -R you:you /var/git-public
+$> mkdir /var/git-public/my-project
+$> cd /var/git-public/my-project && git init --bare
+
+    2. Locally on your computer, add the new remote and push your project.
+$> git remote add my-server you@server:/var/git-public/my-project
+$> git push my-server main
+
+Setup the CI
+    1. Add a post-receive hook to add a CI. We can leverage landdown if we want to further secure it.
+$> cat > /var/git-public/my-project/hooks/post-receive <<EOF
+#!/bin/sh
+export NQDIR=/home/you/.nqdir # set to whatever you want.
+echo "Starting job for my-project"
+nq echo "My job goes here"
+EOF
+$> chmod +x /var/git-public/my-project/hooks/post-receive
+
+       You may want to set the variable NQDIR in your ssh profile to match the post-receive script. This
+       will require PermitUserEnvironment yes in your sshd config.
+
+       Now when pushing to your repository, it will run whatever is in the post-receive hook, and nq
+       makes it run async.
+
+       You can inspect the latest job with ssh my-server nqtail or optionally view prior jobs by
+       supplying the jobid, or view all jobs by appending the -a parameter.
+
+   When implementing a real CI, I recommend using mktemp -d to create a temporary directory where you
+   can then clone the repository with git clone file:/// var/public-git/my-project .
+
+Expose to the www
+   You have a few options
+     * git web The built-in git interface.
+     * stagit Static git generator. Post-receive can be used to regenerate the static files on each
+       commit. You´ll need to run a separate git-daemon for the public to be able to clone the repo.
+     * cgit CGI script that renders a git repo.
+
+   If you just need to expose the project without a public website, you can use git-daemon
+
+   Since I already had a static website up and running, I´m going with stagit.
+
+   I created two scripts, one to generate the index for stagit. Below is the full script I use as my
+   post-receive hook for my fork of stagit.
+
+   Sample: Stagit post-receive hook
+#!/bin/sh
+NQDIR=/home/marc/.nqdir
+# By adding -s, we add labels that show up when we run
+# nqtail -aq
+nq sh -s $(date -Iseconds) stagit <<EOF
+set -xe
+echo ">>> Building stagit"
+cd $(mktemp -d)
+git clone file:/// var/git-public/stagit
+cd stagit
+make
+echo ">>> Installing"
+make install
+echo ">>> Regenerating stagit"
+cd /var/www-data/git
+stagit-index /var/git-public/* > index.html
+for repo in /var/git-public/*; do
+[ -d "$repo" ] || continue
+name=$(basename "$repo")
+mkdir -p "/var/www-data/git/$name"
+(cd "/var/www-data/git/$name" && stagit -u "https:// mccd.space/git/$name/" "$repo")
+done
+EOF
+
+   Then I can simply run this script in my post-receive hook with nq to make it refresh in the
+   background.
+
+   One caveat with this approach is that rerunning a job is done by running sh ,jobid, which will
+   execute the first line of the log file, which repeats whatever command nq was invoked with. Since we
+   have the script in a heredoc, rerunning wont be possible. Consider moving the script to a command in
+   $PATH to enable rerunning jobs.
+
+   To serve the static git repos, I use apache httpd and added a directive:
+   Sample: Apache HTTPD directive
+Alias /git ${GITDIR}/
+<Directory ${GITDIR}>
+Require all granted
+DirectoryIndex index.html
+</Directory>
+
+Expose git repos to a limited set of people
+   If you would like limited access to the repository, such as only friends access, you can set up a
+   unix user with git-shell set as its shell, and home directory to the directory of all git
+   repositories. Then set the user´s authorized_keys to the ssh keys of the people you want to have
+   access, and use a pre-receive hook to manage access control along with unix user permissions.
+
+   You can add interactive shell commands as well to ~/git-shell-commands, which is handy if you want to
+   allow them to, for example, list all available repositories.
+
+   Alternatively, you can also just use http with git´s http backend. It is a CGI-bin script that
+   works with Apache HTTPD, Lighttpd and more. This can be used to set up per-user access with each user
+   having their own credentials, using the http server´s password config (for example htpasswd).
+
+
+---
+
