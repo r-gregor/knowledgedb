@@ -1,0 +1,271 @@
+filename: c-hot-code-reloading-in-c-20260723.txt
+https://codefade.com/posts/94386_hot_code_reloading_in_c/
+
+Hot Code Reloading in C
+25 March 2024
+
+Introduction
+   While working on a piece of code, you go through this cycle of edit, compile, run. While working on large
+   binaries the compile time may be high. Or while running the code, the initial setup may take some time
+   before you get to the part which you need to test. How fascinating would it be if your program was already
+   running with its initial state set, and all you need to do is to just edit a small piece of code, compile
+   that part and somehow trigger the reload of that portion of code.  This would be highly useful in case
+   you´re developing things iteratively like tuning the UI.
+
+Dynamic Shared Library
+   Dynamic shared libraries as the name describes are shared binaries that is loaded dynamically by an
+   executing process. The purpose of these libraries is to have
+    1. Shared executable code among multiple executing process loaded once into the memory.
+    2. Ability to update shared libraries without compiling the main executable using these libraries.
+
+Creating a shared library
+Let´s say we have following library that provides a few functions.
+
+[math.c]
+
+int add(int a, int b) {
+	return a + b;
+}
+
+char *version() {
+	return "1.0.0";
+}
+
+[math.h]
+
+int add(int, int);
+
+char *version();
+
+Compile the shared library with gccor clang.
+
+$> gcc -c -o math.o math.c -fPIC
+$> gcc --shared -o libmath.so math.o
+$> file libmath.so
+ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked,
+BuildID[sha1]=2040df97a6ac807322f73e801db0364f4ace9114, not stripped
+
+We can use the above library in the following manner.
+
+[main.c]
+
+#include <stdio.h>
+#include "math.h"
+
+int main() {
+	printf("Version: %s\n", version());
+	printf("Add 1+2: %d\n", add(1,2));
+	return 0;
+}
+
+Compile & execute the driver file as follows
+$> gcc -o main -L. -lmath -I. main.c
+$> LD_LIBRARY_PATH=. ./main
+
+Using shared libraries
+This shared library libmath.so can be updated and compiled independently without recompiling main.c. You can
+try updating the version number of the shared library and run the main again without recompiling it and it
+would show the newer updated version number.
+
+This however cannot be directly used to update code while the main executable is in the running state. The
+dynamic library is loaded once and cannot be reloaded the way described above. We need to load the dynamic
+library manually and add a hook to hot reload this shared library as required.
+
+Dynamically Loaded Library
+In this method, we create a shared library in the same way as above but we don´t link it with the main
+executable while compiling it. The main executable has extra code that loads the shared library at runtime.
+All POSIX compatible systems provide APIs dlopen, dlclose and dlsym that can be used to achieve what we want
+here.
+
+dlopen: Takes the name of the shared library file and returns the handle (pointer) of the loaded library in
+        memory.
+
+dlclose: Takes the handle of the loaded shared library and unloads in from memory (unmap).
+
+dlsym: Takes the handle of the loaded shared library, name of symbol and returns the address of the symbol. If
+       the symbol is not present in the loaded .so file, it returns NULL.
+
+[main.c]
+
+#include<stdio.h>
+#include<stdlib.h>
+#include<dlfcn.h>
+#define LOGSYM(sym) printf("Loaded %s at: 0x%x\n", #sym, sym)
+
+void *handle = NULL;
+
+// load symbols into function pointers
+int (*add)(int, int);
+char *(*version)();
+
+void load_symbols() {
+	handle = dlopen("libmath.so", RTLD_LAZY);
+	if (!handle) {
+		printf("Error: %s\n", dlerror());
+		exit(1);
+	}
+	add = dlsym(handle, "add");
+	version = dlsym(handle, "version");
+	LOGSYM(add);
+	LOGSYM(version);
+}
+
+int main() {
+	// load symbols from the shared library.
+	load_symbols();
+	printf("Version: %s\n", (*version)());
+	printf("Add 1+2: %d\n", (*add)(1,2));
+	return 0;
+}
+
+$> gcc -g -o main main.c
+$> ./main
+
+In the code above, in load_symbols we´re loading the shared object file with dlopen passing RTLD_LAZY
+(info) flag. If the .so file is opened, we fetch the symbols add and version. Once load_symbols is
+successful, the following printf statements should print the desired values.
+
+The above code example shows how we can execute code from the shared library without linking it while
+compiling. The above code has two issues, it does not have a trigger to reload code yet and the code looks
+significantly different than what we wrote earlier. e.g. add function is now being called by de-referencing
+the *add function pointer. What if we want to write the code in such a way such that it´s able to link the
+shared library when distributing the product but while testing we´re able to hot-reload code. Best of both
+worlds without making too many changes to either the driver code main.c or the shared library math.so. Let´s
+make the above code better.
+
+Hot Reloading Code from Shared Library
+Let do some code reshuffling and move out the load_symbols and any other functionality related to hot
+reloading out of main.c.
+
+[main.c]
+
+#include<stdio.h>
+
+#define HOTRELOAD 1
+#ifdef HOTRELOAD
+#include "hotreload.h"
+#else
+#include "math.h"
+#endif
+
+int main() {
+#ifdef HOTRELOAD
+	hot_reload_init();
+	register_hr_signal(SIGINT);
+#endif
+	char c;
+	while(1) {
+		printf("Version: %s\n", version());
+		printf("Add 1+2: %d\n", add(1,2));
+		scanf("%c", &c);
+	}
+	return 0;
+}
+
+   In the file above, we can toggle the hot-reload functionality by removing the directive HOTRELOAD.
+
+   When HOTRELOAD is defined, we load the libmath.so in the function hot_reload_init and set the add &
+   version symbols. In the next line, we bind SIGINT to the hot_reload_init function, so that every time
+   you press Ctrl+C , it reloads the math.so file.
+
+   If you´ve noticed by now, we´re no longer calling the add and version by de-referencing a function
+   pointer. It looks like a normal function call. Here´s the trick defined in the hotreload.h
+
+[hotreload.h]
+
+#include<signal.h>
+#include "typeinfo.h"
+
+void hot_reload_init();
+void register_hr_signal(int);
+extern func_add_t add_ld;
+extern func_version_t version_ld;
+#define add (*add_ld)
+#define version (*version_ld)
+
+We´ve just aliased add to *add_ld which is the function pointer. add_ld is provided by an external library
+hotreload.c
+
+[hotreload.c]
+
+#include<stdio.h>
+#include<signal.h>
+#include<stdlib.h>
+#include<dlfcn.h>
+#include "typeinfo.h"
+#define LOGSYM(sym) printf("Loaded %s at: 0x%x\n", #sym, sym)
+
+void *handle = NULL;
+func_add_t add_ld = NULL;
+func_version_t version_ld = NULL;
+
+void hot_reload_init() {
+	if (handle) {
+		// unload if so already loaded.
+		dlclose(handle);
+	}
+
+	handle = dlopen("libmath.so", RTLD_LAZY);
+	if (!handle) {
+		printf("Error: %s\n", dlerror());
+		exit(1);
+	}
+
+	// load symbols
+	add_ld = dlsym(handle, "add");
+	version_ld = dlsym(handle, "version");
+	LOGSYM(add_ld);
+	LOGSYM(version_ld);
+}
+
+void register_hr_signal(int SIGNAL_CODE ) {
+	signal( SIGNAL_CODE, hot_reload_init );
+}
+
+I´ve also typedef-ed the function pointer types and moved them to typeinfo.h
+
+[typeinfo.h]
+
+typedef int (*func_add_t)(int,int);
+typedef char* (*func_version_t)();
+
+Compilation steps
+
+# compile hotreload.so
+$> gcc -c -g -o hotreload.o -I. hotreload.c -fPIC
+$> gcc --shared -o libhotreload.so hotreload.o
+
+# compile main.c
+$> gcc -g -o main -I. -L. main.c -lhotreload
+
+After compiling these files, main should be able to print the new version number when Ctrl+C is
+pressed.
+
+$> LD_LIBRARY_PATH=. ./main
+
+Loaded add_ld at: 0xdb5bc0f9
+Loaded version_ld at: 0xdb5bc10d
+Version: 1.0.0
+Add 1+2: 3
+^CLoaded add_ld at: 0xdb5bc0f9
+Loaded version_ld at: 0xdb5bc10d
+Version: 1.1.0
+Add 1+2: 3
+
+The advantage of this code is that the main.c remains almost the same if we´re using normal dynamic shared
+libraries. We can just remove the HOTRELOAD macro, recompile the main.c with again linking -lmath instead of
+-lhotreload and it should work just fine.
+
+On top of this, most of the code in the hot-reload library can be auto generated using a script based on the
+math.h file.
+
+Caveats
+If the shared library has some state associated with it, reloading it will reset the state created in the
+shared library memory. For example, if we have a int multiplier = 2; in math.so that gets set to 5 by the
+main.c via a function call, reloading the .so file will reset this data to 2 again. We can probably write
+extra code to save and reload this data. The code will need to be designed in such a way that saves this
+context data and writes it back after reloading the so file if needed.
+
+
+---
+
