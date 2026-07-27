@@ -1,0 +1,183 @@
+filename: bash-cli-hacking_using-find-sed-and-xargs-for-flexible-filename-transformation-20260727.txt
+https:// kevinboone.me/clh_xargs.html
+
+Command-line hacking: using find, sed, and xargs together for flexible filename transformation
+
+   This is another in my series of articles about using Linux´s Bash command line in what I hope are
+   interesting and useful ways. Today´s article is about transforming filenames when running a sequence
+   of commands on multiple files.
+
+The problem
+   Consider this situation: you have a bunch of nested directories, each containing audio files in M4A
+   format. Each filename ends with the extension .m4a. You´d like to convert every .m4a file in every
+   directory to MP3 format. The new file will have the same name as the old one except for the filename
+   extension which, most likely, you´d prefer to be .mp3.
+
+   This is a common enough situation - there are many conversions that need a change of filename. I´m
+   just using the M4A -> MP3 conversion in this article because it´s easy to understand.
+
+   The popular ffmpeg utility will do the hard work of conversion. Its command line has the following
+   form:
+$> ffmpeg -i {input_file} {output_file}
+
+   ffmpeg requires an explicit input and output file name - it won´t attempt to guess an output
+   filename. In a simple case like this, ffmpeg works out what conversion to do from the supplied
+   filenames. So our task is to write a Bash command that will apply the necessary ffmpeg command to
+   each .m4a/.mp3 filename pair, thus generating a converted .mp3 file in the same directory as the .m4a
+   file.
+
+     Note
+     Yes, you can do some MP3 transformations using lame, and not have to worry about filenames - lame
+     will change the filename extension to .mp3 by default. But that wouldn´t be very educational,
+     would it? I´ve deliberately picked an example where lame won´t work.
+
+A first attempt
+   If all the .m4a files are in the same directory - I´ll call it /some/directory - the conversion task
+   is relatively straightforward. We can just use a Bash for loop, along with the built in string
+   transformer. This should do the trick:
+$> for f in /some/directory/*.m4a; do n=${f/%.m4a/.mp3}; ffmpeg -i "$f" "$n"; done
+
+   The quotation marks need to be used with care here. We need "$f" and "$n" because the filenames might
+   contain spaces. If they do, we want Bash to pass the complete filenames to ffmpeg, and not split them
+   at the spaces.
+
+   However we don´t need quotation marks around
+/some/directory/*.m4a
+
+   Here we actually want Bash to expand the filenames that match *.m4a, and run the body of the for loop
+   on each one.
+
+   The variable expansion ${f/%.m4a/.mp3} changes the final instance of the string .m4a to .mp3 in the
+   variable f. The use of the percent sign here is, I believe, peculiar to the Bash shell and, frankly,
+   one that I readily forget.
+
+   This method is all very well for a single directory, and it might even work when there are nested
+   directories with a specific, regular structure. But what if you want to convert all the files in an
+   arbitrary set of nested directories? This is a situation we commonly handle using find, like this:
+    find /some/directory -name "*.m4a" -exec {something} \;
+
+   The problem, though, lies in finding a way to specify the exact sequence of steps as a single command
+   in place of the {something}. The command you specify with -exec will be executed exactly once for
+   each matching file, and must include the filename transformation as well as the actual conversion
+   command. I find using -exec here rather limiting, as it only executes a single command. Of course, we
+   could wrap up the filename transformation and file conversion into a script, and use -exec to run
+   that script, but that wouldn´t be very elegant. Is there a way to do this using a single command?
+
+   What we need here is a pipeline that passes the matching filenames through a chain of commands,
+   rather than trying to crush everything into an -exec statement.
+
+Introducing xargs
+   What the xargs utility does is to take a set of tokens from standard input, and apply them as
+   arguments to the specified command - ffmpeg in this case.
+
+   For example:
+$> echo a.txt b.txt c.txt | xargs wc
+
+   runs the following command:
+$> wc a.txt b.txt c.txt
+
+   The output of echo, which is a set of filenames separated by white-space, is turned into the
+   command-line arguments of the wc command. If we wanted to run the wc command on a whole bunch of .txt
+   files, we could do this:
+$> echo *.txt | xargs wc
+
+   This works because the Bash shell expands *.txt into the individual filenames. So far as the xargs
+   utility is concerned, this is no different from specifying them individually. Of course, xargs adds
+   no value here, because we could just run the echo command explicitly. However, we can get more from
+   xargs by combining it with find.
+
+   If I want to apply the wc command to all the text files in a bunch of directories and subdirectories,
+   I could use find to provide the filenames, like this:
+$> find /some/directory -name "*.txt" | xargs wc
+
+   In this case, we need to put quotation marks around *.txt. If we don´t, Bash will expand *.txt and
+   supply a list of matching filenames to find. That isn´t at all what we want here: we want find to
+   look for files matching *.txt in /some/directory and all its subdirectories.
+
+   This combination of find and xargs is powerful because it creates a pipeline, removing the limitation
+   of find -exec.
+
+xargs in a find pipeline
+   On its own, of course, xargs doesn´t provide a way to transform filenames. Remember that our ffmpeg
+   command requires two arguments - three, if you count the -i to set the input file. The second
+   argument is the same as the first, but with .m4a transformed to .mp3. How can we achieve this?
+
+   Here is a starting point:
+$> find . -name "/some/directory/*.m4a" | sed -e p -e "s/\.m4a$/\.mp3/g"
+
+   The find command outputs all filenames that match the specified pattern, in all the subdirectories.
+   However, it only outputs the matching filenames once. To generate the arguments to ffmeg We need to
+   output the filenames twice, with the second filename a transformation of the first (bear with me
+   here).
+
+   So we pass the output of find to sed. Here, the sed command has two expressions. The first is simply
+-e p
+
+   p is a sed built-in expression that just means print. It makes sed print each line of input
+   unchanged.
+
+   The second expression is
+-e "s/\.m4a$/\.mp3/g"
+
+   The s here means "substitute": apply the specified substitution and print the result. The first part
+   of the substitution is the pattern to match, and it´s a proper regular expression, not a Bash-shell
+   peculiarity. So we need \., not . to match the period in the filename extension. "." on its own
+   matches any character in a regular expression. We also have a dollar, "$" on the end, because we only
+   want to match the .m4a at the end of the line. In practice, we´re unlikely to find the extension
+   string in the middle of the filename in this example, but in other scenarios we might need to be
+   careful.
+
+   The effect of using the two expressions with sed is to make it output two filenames for each input
+   filename, each on its own line - something like this:
+    /some/directory/file1.m4a
+    /some/directory/file1.mp3
+    /some/directory/subdirectory/file2.m4a
+    /some/directory/subdirectory/file2.mp3
+    ...
+
+   Fundamentally, we need to pass this list of files to xargs ffmpeg -i, so that it will run the
+   following sequence of commands:
+$> ffmpeg -i /some/directory/file1.m4a /some/directory/file1.mp3
+$> ffmpeg -i /some/directory/subdirectory/file2.m4a /some/directory/subdirectory/file2.mp3
+
+Towards a solution
+   Based on the previous explanation, it looks as if we need a command line this:
+$> find . -name "/some/directory/*.m4a" | sed -e p -e "s/\.m4a$/\.mp3/g" | xargs ffmpeg -i
+
+   However, there are two problems.
+
+   First, by default xargs will take any white-space to be a separator. It won´t distinguish between the
+   end-of-line marker and any spaces in the filenames. If the filenames contain spaces, xargs will fail
+   horribly, by splitting the filenames into pieces.
+
+   Second, xargs won´t know to run the ffmpeg command multiple times - it will just pass all the matched
+   filenames - perhaps hundreds of them - as one huge command line to ffmpeg.
+
+   We can solve both these problems with a small adjustment to xargs:
+... | xargs -d \\n -n 2 ...
+
+   The -d option specifies the separator which, in this case is a newline (\n). We need to double the
+   \\, to stop Bash treating it as a special character. The double \\ is passed as a single \ to xargs.
+
+   The -n switch to xargs specifies the maximum number of lines of input it will pass to each invocation
+   of its command. So, rather than just running ffmpeg once with potentially hundreds of argument, it
+   runs it many times, with two arguments each. That is, each pair of input lines to xargs - one the
+   .m4a filename, and the other the corresponding .mp3 filename - result in xargs running ffmpeg one
+   time.
+
+Closing remarks
+   In summary, the final command is this:
+$> find . -name "/some/directory/*.m4a" \
+  | sed -e p -e "s/\.m4a$/\.mp3/g" \
+  | xargs -d \\n -n 2 ffmpeg -i
+
+   The find command outputs all the matching .m4a filenames, sed writes each one and its transformed
+   version, and xargs forms each pair of filenames into arguments to ffmpeg.
+
+   There are, of course, many other applications of this technique. In the end, though, it´s often
+   quicker to group multiple commands into a script, and use find -exec to run the script. But where
+   would be the challenge in that?
+
+
+---
+
