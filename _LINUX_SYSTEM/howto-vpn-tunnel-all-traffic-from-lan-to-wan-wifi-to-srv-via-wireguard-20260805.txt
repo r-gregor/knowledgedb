@@ -1,0 +1,152 @@
+filename: howto-vpn-tunnel-all-traffic-from-lan-to-wan-wifi-to-srv-via-wireguard-20260805.txt
+https://dwaves.de/2026/08/03/howto-vpn-tunnel-all-traffic-from-lan-to-wan-wifi-to-srv-via-wireguard/
+
+howto vpn tunnel all traffic from LAN to WAN (WIFI) to srv via wireguard
+03.Aug.2026
+
+   Here´s the full howto adapted to your actual interfaces (enp0s25 = LAN, wlp3s0 = WAN/Wi-Fi):
+
+   1. Packages
+$> apt update
+$> apt install wireguard wireguard-tools nftables dnsmasq network-manager
+
+   2. Connect the WAN Wi-Fi
+$> nmcli device wifi connect "SSID_NAME" password "WIFI_PASSWORD" ifname wlp3s0
+
+   Let NetworkManager manage wlp3s0 normally via DHCP.
+
+   3. LAN interface (enp0s25) - static IP
+$> nmcli device set enp0s25 managed no
+$> ip addr add 192.168.50.1/24 dev enp0s25
+$> ip link set enp0s25 up
+
+   Make it persistent via NetworkManager instead of the raw ip commands above:
+
+$> nmcli con add type ethernet ifname enp0s25 con-name lan ipv4.method manual \
+   ipv4.addresses 192.168.50.1/24 ipv4.never-default yes
+$> nmcli con up lan
+
+   4. DHCP + DNS for LAN clients - dnsmasq
+$> vim /etc/dnsmasq.conf
+
+interface=enp0s25
+bind-interfaces
+dhcp-range=192.168.50.50,192.168.50.150,12h
+dhcp-option=3,192.168.50.1
+dhcp-option=6,192.168.50.1
+server=10.10.10.1        # or a public resolver, e.g. 1.1.1.1 - will go via wg0
+no-resolv
+
+systemctl enable --now dnsmasq
+
+   5. Enable IP forwarding
+$> vim /etc/sysctl.d/99-router.conf
+
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+sysctl --system
+
+   6. WireGuard client config
+$> wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey
+
+$> vim /etc/wireguard/wg0.conf
+
+[Interface]
+PrivateKey =
+Address = 10.0.0.2/32
+
+[Peer]
+PublicKey =
+Endpoint = 123.123.123.123:51820
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+AllowedIPs = 0.0.0.0/0
+
+
+   makes wg-quick auto-add a host route to 123.123.123.123 via wlp3s0´s current gateway
+   and replace the default route with wg0
+$> systemctl enable --now wg-quick@wg0
+
+   7. Server side - unchanged
+   Same as before (server config doesn´t reference your laptop´s interface names):
+$> wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey
+
+$> vim /etc/wireguard/wg0.conf
+
+[Interface]
+PrivateKey =
+Address = 10.0.0.1/24
+ListenPort = 51820
+PostUp = iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; iptables -A FORWARD -i wg0 -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE; iptables -D FORWARD -i wg0 -j ACCEPT
+
+[Peer]
+PublicKey =
+AllowedIPs = 10.0.0.2/32
+
+   (Replace eth0 there with whatever the server´s real internet-facing interface is.)
+
+   8. nftables - NAT LAN --> wg0 + kill switch
+$> vim /etc/nftables.conf
+
+#!/usr/sbin/nft -f
+flush ruleset
+
+table inet filter {
+	chain input {
+		type filter hook input priority 0; policy drop;
+		iif "lo" accept
+			ct state established,related accept
+			iif "enp0s25" accept
+			iif "wg0" accept
+			ip protocol icmp accept
+			udp sport 51820 accept
+			tcp dport 22 accept
+	}
+
+	chain forward {
+		type filter hook forward priority 0; policy drop;
+		ct state established,related accept
+			iif "enp0s25" oif "wg0" accept
+			iif "wg0" oif "enp0s25" accept
+# no enp0s25 -> wlp3s0 rule => kill switch: if wg0 dies, LAN loses internet instead of leaking
+	}
+
+	chain output {
+		type filter hook output priority 0; policy accept;
+	}
+}
+
+table ip nat {
+	chain postrouting {
+		type nat hook postrouting priority 100;
+		oif "wg0" masquerade
+	}
+}
+
+systemctl enable --now nftables
+nft -f /etc/nftables.conf
+
+   9. Test
+# on the laptop
+$> curl ifconfig.me          # should show 123.123.123.123
+
+# on a LAN client
+$> ip route                  # gateway should be 192.168.50.1
+$> curl ifconfig.me          # should also show 123.123.123.123
+$> sudo wg show
+$> sudo nft list ruleset
+
+   Gotchas (same as before, interface names updated)
+   * Wi-Fi reconnects: if wlp3s0 gets a new gateway/IP after a reassociation, the auto-added WireGuard
+     endpoint route can go stale. A NetworkManager dispatcher script (/etc/NetworkManager/dispatcher.d/) that
+     runs wg-quick down wg0 && wg-quick up wg0 on wlp3s0 up/down events is the robust fix.
+
+   * MTU: if you see stalls/fragmentation over Wi-Fi, add MTU = 1420 (or lower) under [Interface] in wg0.conf.
+
+   * IPv6 leak: if wlp3s0´s upstream hands out IPv6 and you´re not tunneling it, disable IPv6 on wlp3s0
+   or extend the WireGuard config to carry IPv6 too.
+
+
+---
+
