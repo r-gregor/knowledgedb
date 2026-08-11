@@ -1,0 +1,2232 @@
+gilename: bash-referenses-namerefs-indirection-declare-20260811.txt
+https://blogsh.github.io/2018/06/29/references-in-bash.html
+
+References in Bash
+2018/06/29
+
+   Bash 4.3 provides the support for "namerefs". This is particularly useful to create functions which
+   modify a variable. Yes, you can pass variables by reference in bash! But this feature comes with some
+   hidden gotchas.
+
+Passing variables by reference
+   In other programming languages (eg. c, c++, php), there are ways to pass a variable by a reference
+
+   For example:
+
+   In C there are pointers
+
+void increment(int *a) {
+	(*a)++;
+}
+
+int main(void) {
+	int x = 0;
+	increment(&x); /* x gets modified */
+	return 0;
+}
+
+   C++ has a dedicated reference type
+
+void increment(int& a) {
+	a++;
+}
+
+int main(void) {
+	int x = 0;
+	increment(x); //x gets modified
+	return 0;
+}
+
+   One day even the php language started to support it
+
+function increment(&$a) {
+	$a++;
+}
+
+$x = 1
+increment($x); //$x gets modified
+
+Dynamic scope
+   Before we get to passing variables by reference in bash, we should be aware of something that is
+   called the dynamic scope.
+
+   In programming languages variables can have a static (lexical) or dynamic scope. Unlike in most
+   languages (c++, c, php, python, ruby, ...) where variables have a static scope, variables in bash have
+   the dynamic scope
+
+   What does it mean? Let´s look at the example:
+
+#pseudocode
+x = 1
+
+f () {
+	print x
+}
+
+g () {
+	var x = 17 #local variable declaration
+	f()
+}
+
+f()
+g()
+
+   If an identifier has a static scope, the object that it is referring to is determined at
+   compile/parsing/interpretation or linking time and is based on its "location" in the program
+   text/bytecode/binary.
+
+f() #prints 1
+g() #prints 1
+
+   This means that in the above example when we call g() function, the f() function will print the value
+   of global variable x. Actually it doesn´t matter where the f() is called. The x symbol will be
+   resolved before program is run.
+
+   This is not the case for dynamic scope however.
+
+f() #prints 1
+g() #prints 17
+
+     With dynamic scope, a global identifier refers to the identifier associated with the most recent
+     environment.
+
+   Which means that the x identifier is resolved at run-time. In the above example f() would print 1,
+   because in the most recent environment the x variable equals 1. However the g() would print 17,
+   because f() is called in g(), and in this scope f() would refer to x local variable defined by g()
+
+How to pass variables by reference in bash
+   Let´s come back to passing variables by reference. Bash has some mechanisms that let you support this
+   behaviour.
+
+   Let´s start with dynamic scope
+
+increment () {
+	((x++))
+}
+
+foo () {
+	local x=3
+	increment
+}
+
+bar () {
+	local x=5
+	increment
+}
+
+   Here, thanks to dynamic scope we can call increment function to modify a variable for us. This has
+   obviously one issue - we can only increment variable called x
+
+   We need a way to specify which variable from parent scope the increment function should change. So we
+   must do something like this:
+
+increment () {
+	(("$1"++))
+}
+
+foo () {
+	local x=3
+	increment x
+}
+
+   Great! This will work. We have passed a variable by reference! This is awesome. But, let´s try
+   another example. A function which will capitalize all letters. This can be easily done with tr
+
+$> tr '[[:lower:]]' '[[:upper:]]'
+
+   And the function
+
+capitalize () {
+	#here the ${!1} is syntax for $$1 - indirect variable reference
+	$1="$(echo "${!1}" | tr '[[:lower:]]' '[[:upper:]]')"
+}
+
+
+foo () {
+	local hello="hello world"
+	capitalize hello #pass by reference
+	echo "$hello"
+}
+
+foo
+
+   But this won´t work. It will print
+
+hello=HELLO WORLD: command not found
+
+   This is because out capitalize function will try to do this
+
+capitalize () {
+	hello="HELLO WORLD"
+}
+
+   And because we used parameter expansion on the left side, bash will consider this as a command and
+   will try to invoke it.
+
+   We can somehow overcome this issue. You have probably already seen the read built in.
+
+read -p "Please provide a name" name
+
+   It is going to read string from standard input into a variable called name. So? How can we use read
+   to pass parameters by reference? Let´s implement the capitalize function again
+
+capitalize () {
+	IFS= read "$1" <<< "$(echo "${!1}" | tr '[[:lower:]]' '[[:upper:]]')"
+}
+
+   Damn! This looks crazy. Let´s break it up a little bit.
+     * $1 is the first argument - here the name of variable passed by reference
+     * ${!1} is the value of variable passed by reference
+     * $(echo "${!1}" | tr '[[:lower:]]' '[[:upper:]]') - passes the value of the variable on tr stdin,
+       which will change all lowercase character to uppercase and print the result on stdout
+     * <<< is the HERESTRING syntax, which will pass the string on right side the stdin of read builtin.
+     * IFS= is the internal field separator, it is set to "" to prevent read from stripping whitespace
+
+   Note that we can´t just pipe the tr output to read like this:
+
+echo ${!1} | tr '[[:lower:]]' '[[:upper:]]' | read "$1"
+
+   because each command in pipeline is executed in a subshell, thus read would be unable to modify our
+   environment, because it would be called in a child process.
+
+   Anyway our capitalize function works
+
+foo () {
+	local hello="hello world"
+	capitalize hello #pass by reference
+	echo "$hello"
+}
+
+foo #prints HELLO WORLD
+
+   Turns out we don´t even need the read function. Bash 4.3 introduced support for "namerefs" which is
+   exactly what we need to make our solution less hacky.
+
+   From bash manual:
+     Whenever the nameref variable is referenced, assigned to, unset, or has its attributes modified
+     (other than using or changing the nameref attribute itself), the operation is actually performed
+     on the variable specified by the nameref variable´s value. A nameref is commonly used within shell
+     functions to refer to a variable whose name is passed as an argument to the function.
+
+   In practice this means that:
+
+x=1
+declare -n ref_x=x
+
+#from now on all operations on ref_x will be performed on x
+ref_x=hello
+echo $x #prints hello
+echo $ref_x #prints hello
+
+   This means can use namerefs in our capitalize function instead of read!
+
+capitalize () {
+	local -n _ref="$1"
+	_ref="$(echo "$_ref" | tr '[[:lower:]]' '[[:upper:]]')"
+}
+
+foo () {
+	local hello="hello world"
+	capitalize hello #pass by reference
+	echo "$hello"
+}
+
+foo #prints HELLO WORLD
+
+   In my opinion, it is less magical than the read example.
+
+   One thing which namerefs have that read does not is natural support for arrays
+
+append () {
+	local -n _ref="$1"; shift || return
+	_ref+=("$1")
+}
+
+main () {
+	local -a numbers=(1 2 3)
+	append numbers 4
+	append numbers 5
+	echo "${numbers[@]}"
+}
+
+main "$@"
+
+Caveats
+   The first problem can occur when the callee uses the same variable name for nameref as the variable
+   passed by reference
+
+foo () {
+	local foo=5
+	increment foo
+}
+
+increment () {
+	local -n foo="$1" #this expands to foo=foo and will cause circular reference
+	((foo++))
+}
+
+   When this situation occurs, bash will report an error.
+
+   Another problem can occur if the function uses local variable with the same name as the variable
+   passed by reference
+
+change () {
+	local -n ref="$1"
+	local x
+	ref=1 #this will just change the local x from this function
+}
+
+foo () {
+	local x
+	change x #x will be unchanged
+}
+
+   This is due to the fact that namerefs, as the name suggests, operate on variable names and those can
+   easily overlap. The only solution to this problem is to limit the amount of local variables in
+   functions that use namerefs and prefix the namerefs with so many _ that can fit on the screen.
+
+increment () {
+	local -n _______________________________________________ref="$1"
+	((_______________________________________________ref++))
+}
+
+   Just kidding. One _ will do.
+
+Summary
+   Thanks to dynamic scope of variables and namerefs, we can pass variables by reference. in bash. This
+   feature however comes with some caveats, so be careful.
+
+
+---
+https://nickjanetakis.com/blog/bash-nameref-mutate-function-arguments-pointer-like-behavior
+   #RSS Feed for https://nickjanetakis.com/
+
+
+
+Bash Nameref: Mutate Function Arguments (Pointer-Like Behavior)
+March 31, 2026
+
+This is the type of thing that´s really handy when you need it but you may not need it too often.
+
+   I´ve been writing shell scripts for around 10 years and I only had to do this once. It was a delight
+   to know the feature exists because it helped make some code a lot more readable.
+
+ TL;DR
+   The short answer is you can use local -n my_var="${1}" inside of a function to create a nameref
+   (a call by name reference). When you call my_func SOME_VAR, any changes you make to my_var in that
+   function will mutate SOME_VAR.
+
+   It works with Bash 4.3+. I see it as "pointer-like" because it gives you a way to manipulate a
+   reference of something else. In this case it does it by name instead of memory address.
+
+   This helps avoid using globals and subshells, for example having your function return a value which
+   you then assign to SOME_VAR at call time with SOME_VAR=$(my_func). Avoiding that is especially
+   helpful when you want to return an array since it´s quite painful to deal with this in Bash.
+
+   Make sure to avoid naming your local variable the same as the variable passed in. If you do then Bash
+   will throw warnings about a circular name reference, use your discretion on naming it, for example
+   you could prefix the local -n variable with an underscore or use the lowercase version of it if
+   applicable.
+
+ Use Case
+   In my dotfiles, I have an install script which handles setting up a complete system. One thing it
+   has are quite a few config array variables for setting which packages you want installed.
+
+   There´s a bunch of these variables for system package installation with pacman, yay, brew and apt as
+   well as handling Mise packages for Arch, Debian and macOS.
+
+   I wanted to make it easy for anyone to skip installing certain packages without having to redefine
+   each array variable with a complete list of packages.
+
+   For example, you can define PACKAGES_PACMAN_GUI_SKIP=("kdenlive") if you didn´t want to install that
+   video editing tool. This is way friendlier than having to redefine PACKAGES_PACMAN_GUI which has over
+   50+ packages defined only to remove kdenlive.
+
+   In code I ended up creating a _skip_packages function which takes the default package variable and
+   its associated skip variable as arguments, calling it looks like this:
+
+  _skip_packages "PACKAGES_PACMAN" "PACKAGES_PACMAN_SKIP"
+  _skip_packages "PACKAGES_PACMAN_GUI" "PACKAGES_PACMAN_GUI_SKIP"
+  _skip_packages "PACKAGES_AUR" "PACKAGES_AUR_SKIP"
+  _skip_packages "PACKAGES_AUR_GUI" "PACKAGES_AUR_GUI_SKIP"
+  _skip_packages "PACKAGES_APT" "PACKAGES_APT_SKIP"
+  _skip_packages "PACKAGES_BREW" "PACKAGES_BREW_SKIP"
+  _skip_packages "PACKAGES_BREW_CASK" "PACKAGES_BREW_CASK_SKIP"
+  _skip_packages "MISE_ARCH" "MISE_ARCH_SKIP"
+  _skip_packages "MISE_DEBIAN" "MISE_DEBIAN_SKIP"
+  _skip_packages "MISE_MACOS" "MISE_MACOS_SKIP"
+
+   That function looks like this:
+
+_skip_packages() {
+	local -n packages_default="${1}"
+	local -n packages_skip="${2}"
+	local packages_filtered=()
+
+	declare -A packages_skip_map
+
+	for item in "${packages_skip[@]}"; do
+		packages_skip_map["${item}"]=1
+	done
+
+	for item in "${packages_default[@]}"; do
+		# Avoid adding skipped packages to the new filtered packages.
+		if [ -z "${packages_skip_map[${item}]}" ]; then
+			packages_filtered+=("${item}")
+		fi
+	done
+
+	packages_default=("${packages_filtered[@]}")
+}
+
+   Take a look at the first 2 lines, there´s our nameref variables. The logic of the function just
+   builds up a new list which omits the skipped packages. Doing it this way is cleaner and more
+   predictable than using unset because Bash won´t re-index your array when you unset values. I wanted
+   my array to be in pristine form at the end of it.
+
+   The last line in the function assigns the new filtered variable to the default package variable. This
+   is where the mutation occurs. Using our example from before, PACKAGES_PACMAN_GUI would now have all
+   of its original packages minus anything in PACKAGES_PACMAN_GUI_SKIP.
+
+   Now the rest of the script doesn´t need to know or care about the skip list. It can deal with
+   PACKAGES_PACMAN_GUI and treat it as a single source of truth. This helped me because I display the
+   packages before they get installed. None of that logic had to change.
+
+   The demo video below goes over the above and a few extra examples showing a before and after of using
+   globals, subshells and namerefs.
+
+ Demo Video:
+https://www.youtube.com/embed/nvfQc8yhoGY?autoplay=0&controls=1&end=0&loop=0&mute=0&start=0
+
+Timestamps:
+     * 0:00 - Global variable
+     * 1:04 - Subshell shenanigans
+     * 2:33 - Nameref to the rescue
+     * 3:35 - Avoiding circular references
+     * 4:24 - Real world use case, dotfiles skip packages
+     * 6:22 - Looking at the code
+
+
+---
+https://www.reddit.com/r/bash/comments/wvq8fo/filling_an_associative_array_inside_a_function/
+
+Filling an associative Array inside a function using a nameref variable
+
+Hello guys,
+I have a question for you. I´m writing a script that´s supposed to check certain PCs over ssh. To achieve
+this, I have an associative array declare -A test_results outside the function. Inside the function, I try to
+fill it with strings that are supposed to be printed to stdout in the end of the script. Like this:
+
+function check_pc {
+	# $1 = Room name, $2 = pc number, $3 = Array test_results
+
+	local -n result=$3
+
+	if ! ssh $SSH_OPTIONS $SSH_USER@$1-pc$2.$DOMAIN echo test >/dev/null; then
+		result[$1-pc$2]="$1-pc$2 is unreachable\n"
+		# V_ECHO contains "echo" if run with -v option
+		$V_ECHO "[Debug] In function check_pc - Content of result varibale for $1-pc$2: >>> ${result[$1-pc$2]} <<< [SSH]"
+		return 1
+	fi
+}
+
+Imagine my room name is n040 and pc number is 10. Inside the function it´ll output ${result[n040-pc10]} just
+fine: "n040-pc10 is unreachable\n". Outside of the function though, $test_results[n040-pc10] is empty.
+
+This function is being called in a loop with many machines simultaneously like this:
+
+...
+
+declare -A test_results
+
+...
+
+for (( pc_count=0; $pc_count<=${PC[$lab_count]}; pc_count=pc_count+1 )); do
+	printf -v PC_COUNT "%02d" $pc_count
+	check_pc ${LAB[$lab_count]} $PC_COUNT test_results &
+done
+
+...
+
+Why is $test_results empty? Can anyone help me out here pls? Maybe there are smarter ways of doing this?
+pls no roasting, constructive criticism is welcome. I´m not experienced with bash scripts.
+Thank you :)
+
+***
+The issue is the check_pc call that´s put into the background with &. Removing the & will likely solve the
+empty associative array.
+
+Because & runs the function in a subshell, any variable set by the function will be out of scope for the main
+program.
+
+***
+Yea, thanks, that´s it. I need to do it this way though or it will take an eternity to execute :(
+
+***
+One way to achieve parallel execution is to leverage GNU Parallel´s parset command.
+
+Here is a very simplified rework of your code using it; runs well on bash-5.1. You´ll notice I´ve put a sleep
+just to simulate the SSH execution delay so you can be sure the whole script is running in parallel. Also, the
+indices in the array are space-separated, not dash-separated: that´s the way parset works.
+
+#!/usr/bin/env bash
+
+# Initialize parset.  It´s part of the
+# GNU Parallel package.
+. $( which env_parallel.bash )
+
+check_pc() {
+	sleep 1s
+	if (( RANDOM % 2 )); then
+		echo "${1}-${2} is offline."
+	fi
+}
+
+# Export function so that it is available for parset.
+export -f check_pc
+
+declare -A test_results
+
+# Call 'check_pc' in parallel with arguments.
+parset test_results --max-args 2 check_pc <<<"$(
+	for (( pc_count=0; pc_count<=5; pc_count++ )); do
+		printf "%d\n%02d\n" 25 "${pc_count}"
+	done
+)"
+
+# Print out the results.
+for k in "${!test_results[@]}"; do
+	printf '[%s]: %s\n' "${k}" "${test_results[$k]}"
+done
+
+***
+This is the answer. The function is setting test_results just fine, but the whole pipeline ending in & is run
+in a subshell, and the test_results variable that it sets only exists in that subshell. You don´t need
+anything fancy like namerefs or associative arrays to see this effect:
+
+$> name=foo
+$> name=bar &
+$> echo $name
+foo
+
+Even if you wait for the background job to complete, nothing it´s changed will persist in the calling
+environment.
+
+I think your best bet is probably to write the values out to a file and read them back in after the jobs
+complete. Or use a different language.
+
+For example:
+
+function check_pc{
+	# $1 = Room name, $2 = pc number, output result msg on failure
+	local node=$1-pc$2
+
+	if ! ssh $SSH_OPTIONS "$SSH_USER@$node.$DOMAIN" echo test >/dev/null; then
+		printf '%s is unreachable\n' "$node"
+		return 1
+	fi
+}
+
+temp_file=$(mktemp)
+for (( pc_count=0; $pc_count<=${PC[$lab_count]}; pc_count=pc_count+1 )); do
+	printf -v PC_COUNT "%02d" "$pc_count"
+	check_pc "${LAB[$lab_count]}" "$PC_COUNT" &
+done >"$temp_file"
+wait
+
+You can then put the results into an associative array if you want:
+
+declare -A test_results
+while read node text; do
+	test_results[$node]="$node $text"
+done <"$temp_file"
+rm -f "$temp_file"
+
+***
+I do wait after that loop and then output the array test_results to stdout because every check_pc finishes at
+a different time. The way i did it before, it worked fine but the output was a complete mess.
+
+I wanna do it like this, because i hoped to have all the results in an array which i can then output in an
+order that´s actually easy to read.
+
+How can I achieve that the main program gets data from check_pc when it´s run like this? Do you have any
+buzzwords for me to research?
+
+***
+Oh, that answer got a lot longer suddenly :D
+
+***
+So you´re having the check_pc function output text and redirect said output to a file and then parse the file,
+did i get that right?
+
+I´m not overly familiar with namerefs I don´t use them much, but the manual says The nameref attribute cannot
+be applied to array variables.
+
+That said, there seem to be loads of examples on the net of people using it like you are trying to, so I´m not
+sure what is wrong.
+
+***
+The nameref attribute cannot be applied to array variables.
+
+As I understood it, this means a varibale can either be an array or a nameref. But namerefs should be
+referencing arrays, too? Maybe not? :D I´m not sure.
+
+***
+Ahh that would make sense, so you can´t have an array of namerefs but you can reference an array. OK Sorry for
+the misdirection, good luck.
+
+
+---
+https://www.reddit.com/r/bash/comments/n8h4b6/passing_around_array/
+
+Passing around Array
+
+Hello, as for the title, that´s my intention.
+
+First of all, i would appreciate if you guis can give me a feedback on the usage i make of functions:
+
+i don´t like using globvars, i use them just in the config file.
+
+i like my functions to return a value other then 1-128+SIGnumber, i use the nameref attribute to achieve that
+further then return an appropriate integer value to comply to the bash standard.
+
+Ex, Let´s say i want the basepath as output given a fullpath filename, a very very simple wrapper:
+
+# gets 2 arguments, the second one is the actual return value
+
+Func() {
+	local retvalue=1 #this will be the "bash compliant return value based on the success or failure of the computation
+	[[ "$#" -ne 2 ]] && return "$retvalue"
+	local file_item="$1"
+	local -n base_path="$2"
+	base_path=${file_item%/*}
+	[[ -d base_path ]] && retvalue=0
+	return "$retvalue"
+}
+
+i will call the function like this: Func "$fullpath" basepath and i can do things like:
+
+if Func "$fullpath" basepath; then
+
+....
+
+fi
+
+now, if i want to parse a file a load each parsed line in a index array to be given back as return value, how
+would i do it? the nameref doesn´t work on arrays and i don´t want to write it down on a file to be read from
+the caller function, should i use a named pipe? that would work but it kinda crashes with the idea of not
+using globals
+
+edit: sorry.. wrong command, few adjustment to the code i wrote in a rush
+
+edit: just to be clear, i want to load the file in memory and don´t do any IO, that´s the reason
+
+***
+I´ve stopped manually scrubbing through videos. Clipto lets me search local clips with natural language—no
+uploads required.
+
+***
+Here´s how to return different values and a method to work with arrays and functions:
+
+Use 'return' only for returning a true/false value. The caller can then use if ... to act on that true/false
+value. A return 0 means "true".
+
+If you want to return text or a number, print it to the terminal with 'echo' or 'printf'. The caller of your
+function then can use $(...) to capture that value.
+
+To act on an array, you can use local -n foo=$1 to create a reference variable. The -n argument creates the
+reference. The caller then has to pass the name of the array as an argument to your function. "Passing the
+name" means you pass a piece of text, don´t add a $ to that argument. Here´s an example from the command line:
+
+$> add_stuff_to_array() { local -n ref=$1; shift; ref+=( "$@" ); }
+$> foo=( hello world )
+
+$> echo "${foo[@]}"
+hello world
+
+$> add_stuff_to_array foo hey hi
+$> echo "${foo[@]}"
+hello world hey hi
+
+***
+it now works with -n attribute, i was passing the array with $ (i´m so "forking" dumb but hey, i´m not used to
+all of this) even thought the GNU Bash Manual says "Array variables cannot be given the nameref attribute. "
+go figure
+
+***
+That quote from the manual doesn´t mean "you can´t use namerefs for arrays", but the actual variable that is
+used as a reference can´t be an array variable:
+
+$> arr=(1 2 3)
+$> declare -n ref=arr  # no problem: referring to an array
+$> echo "${ref[0]}"
+1
+$> declare -a arrref
+$> declare -n arrref   # not possible: making an array a nameref
+-bash: declare: arrref: reference variable cannot be an array
+
+***
+thank you ropid, i know how it works, i just worked my way out of it because i need the functions to return
+something else too while being compliant to the bash standard and return 0 1...
+
+the thing i cannot do, is what you write in the first line of code:
+
+local -n ref
+
+array do not support reference passing, it says "removing -n argument.." and goes further
+
+***
+the nameref doesn´t work on arrays
+
+Not sure I follow. This works fine for me:
+
+apush() {
+	local -n _array="$1"
+	_array+=("$2")
+}
+
+A=(1 2 3)
+declare -p A
+
+apush A 4
+declare -p A
+
+Output:
+
+declare -a A=([0]="1" [1]="2" [2]="3")
+declare -a A=([0]="1" [1]="2" [2]="3" [3]="4")
+
+Alternatively, arrayops.bash from the Bash repo examples directory has a bunch of functions for nameref-free
+array manipulation. e.g.:
+
+apush() {
+	eval "$1=(\"\${$1[@]}\" \"\${@:2}\")"
+}
+
+For your specific example, mapfile (also known as readarray) could also be useful, since it already takes an
+array name as a nameref and loads a whole file to an array at once:
+
+$> arrayname=my_array
+$> mapfile "$arrayname" <<< $'1\n2\n3'
+$> declare -p my_array
+declare -a my_array=([0]=$'1\n' [1]=$'2\n' [2]=$'3\n')
+
+Here I´m using a here string, but of course you can use a file too.
+
+You could then can use a nameref to manipulate the array entries or do some additional redirection through a
+filter to process each entry, depending on your needs. For example:
+
+number_lines() {
+	local i=0
+	while read -r line; do
+		echo "$i: $line"
+		(( i++ ))
+	done
+}
+
+mapfile my_array < <(process_lines <<< $'1\n2\n3')
+declare -p my_array
+
+Which produces:
+
+declare -a my_array=([0]=$'0: 1\n' [1]=$'1: 2\n' [2]=$'2: 3\n')
+
+Just remember you have to use redirection and not pipes because of subshells. (If you do cat somefile |
+some_filter | mapfile my_array, the mapfile command will run in a subshell and won´t actually set your
+variable in the current scope.)
+
+***
+It all works as i intended, thank you. Why does the GNu bash reference says that the nameref attribute can´t
+be used on arrays?!? I gave it a try anyway and the shell said "removing the -n attribute" so i took it as a
+confirmation, mah. Maybe there was something wrong elsewhere in the code or the env. Thanks for the details.
+
+***
+I´d need more context to understand the "removing the -n attribute" part, because I can´t reproduce that
+myself with declare -na array, but I think what you read in the reference is this:
+
+    Array variables cannot be given the nameref attribute.
+
+But that doesn´t mean you can´t use it to reference arrays. Immediately after that, it says:
+
+    However, nameref variables can reference array variables and subscripted array variables.
+
+What it means is that an array itself can´t hold namerefs. That is, you can´t do something like this, where an
+array´s entries are namerefs to other variables:
+
+foo=1 bar=2 baz=3
+declare -na refs=(foo bar baz)
+# spits out an error: "bash: declare: refs: reference variable cannot be an array"
+echo "${refs[0]}" "${refs[1]}" "${refs[2]}"  # outputs "foo bar baz" and not "1 2 3"
+
+But when you declare a nameref to an array, you only use the -n option on the reference variable, just like
+any other nameref:
+
+declare -a my_array=(1 2 3)
+declare -n array_ref=my_array
+echo "${array_ref[@]}"  # outputs "1 2 3" from my_array as you would want
+
+***
+now, if i want to parse a file a load each parsed line in a index array to be given back as return value,
+how would i do it? the nameref doesn´t work on arrays and i don´t want to write it down on a file to be
+read from the caller function, should i use a named pipe? that would work but it kinda crashes with the
+idea of not using globals
+
+This last sentence is an excellent summary of your post, meaning readers will have no idea what you want to
+do.
+
+I think you want to be able to move arrays around without constraints. If so, try this:
+
+#!/usr/bin/env bash
+
+myfunct() {
+	echo "( [a]=x [b]=y [c]=z )"
+}
+
+declare -A myarray=$(myfunct)
+
+echo "Keys: ${!myarray[@]}"
+echo "Values: ${myarray[@]}"
+
+$> ./testscript.sh
+
+Keys: c b a
+Values: z y x
+
+***
+i´m sorry i haven´t been clear but i was screen typing on the phone in the bus and made a whole lot of
+mistakes....
+
+what I do want is basically passing an array as an argument to functions and returning an array from a
+function without using any global variable.
+
+it would be easy if arrays supported the nameref attribute, but apparently they don´t. Your solution is fine
+but... is there way to get there without forking? i mean, without creating subshells with parameter
+substitution.
+
+***
+Wait, I showed you how to do it. The method I posted always works -- it can be a file, or a stream through a
+pipe, or a return value from a function, or one shell script´s input to another, and so forth. It always works
+and it does not require global variables.
+
+    Your solution is fine but... is there way to get there without forking?
+
+Yes -- declare the array in one line. Don´t use functions (requires forking), no streams (requires forking),
+no separate shell scripts (requires forking), no reading files (requires forking), and so forth, you name it,
+all require forking.
+
+
+---
+https://www.linuxjournal.com/content/whats-new-bash-parameter-expansion
+
+What´s New in Bash Parameter Expansion
+November 20, 2018
+
+   The bash man page is close to 40K words. It´s not quite War and Peace, but it could hold its own in a
+   rack of cheap novels. Given the size of bash´s documentation, missing a useful feature is easy to do
+   when looking through the man page. For that reason, as well as to look for new features, revisiting
+   the man page occasionally can be a useful thing to do.
+
+   The sub-section of interest today is Parameter Expansion-that is, $var in its many forms. Don´t be
+   confused by the name though, it´s really about parameter and variable expansion.
+
+   I´m not going to cover all the different forms of parameter expansion here, just some that I think
+   may not be as widely known as others. If you´re completely new to parameter expansion, check out my
+   ancient post or one of the many articles elsewhere on the internet.
+   Case Conversion
+
+   Gone are the days of using tr '[[:lower:]]' '[[:upper:]]' to convert strings to uppercase:
+$> a=hello
+$> echo ${a^}       # First character only
+Hello
+
+$> echo ${a^^}      # All characters
+HELLO
+
+   And for going to lowercase:
+$> a=HELLO
+$> echo ${a,}       # First character only
+hELLO
+
+$> echo ${a,,}      # All characters
+hello
+
+   You also can specify a character after the operator and change the case only of characters that
+   match:
+$> a=hello
+$> echo ${a^l}      # First character if it is an 'l'
+hello
+
+$> echo ${a^^ll}    # All characters that are 'l´s
+heLLo
+
+Names Starting with Some Prefix
+   Need a list of all the variables whose names match a certain prefix? Do this:
+$> mya=1
+$> myb=2
+$> yourc=3
+$> echo ${!my*}
+mya myb
+
+Indirection
+   Bash even can give you a taste of the good-old days of programming C and Assembler and using indirect
+   addressing-well sort of:
+$> var=somevalue
+$> var_name=var
+$> echo ${!var_name}
+somevalue
+
+   What´s happening here is that the value of var_name gives you the name of the actual variable to be
+   expanded. That variable then is expanded and becomes the result of the expansion. In this case,
+   "var_name" has the value "var", so the variable "var" is expanded to yield the ultimate value of
+   "somevalue".
+
+Short Detour into Namerefs
+   As a bit of an aside, because it´s not really about "parameter expansion", let´s take a quick look at
+   namerefs in bash. A nameref variable is a variable that references another variable:
+$> var=no
+$> declare -n ref=var   # -n == nameref
+$> ref=yes
+$> echo $ref
+yes
+
+   The variable "ref" is a reference to the variable "var". When you assign to "ref", you actually
+   change the value of "var". This can be particularly handy in getting values out of a function by
+   passing the name of a variable to the function:
+
+$> cat nref.sh
+function func() {
+	local -n up_value=$1  # -n == nameref
+	up_value=new_value
+	echo "Changing '${!up_value}' in ${FUNCNAME[0]}"
+}
+
+aval=old_value
+echo
+echo "Before function call, aval is $aval"
+func aval  # pass var *name* to func
+
+echo "After function call, aval is $aval"
+
+   Running that, you get:
+$> bash nref.sh
+Before function call, aval is old_value
+Changing 'aval' in func
+After function call, aval is new_value
+
+   Since indirection is automatic with nameref variables, you don´t use the exclamation point expansion
+   to get the value of the referenced variable; normal $var expansion works. In the case of namerefs,
+   the exclamation point expansion yields a different result: the name of the referenced variable. So,
+   this slight detour dealt with parameter expansion after all.
+
+Transformation
+   There are also a number of expansions of the form ${var@?}, where the "?" is one of the letters "Q",
+   "E", "P", "A" or "a" that can transform the value or get you information about the variable itself.
+   For example:
+$> declare -a array=(1 2)
+$> echo Attributes: ${array@a}
+Attributes: a         # i.e. array was declared with -a
+
+
+   Check the man page for more information about these "@" expansions.
+
+Unset or Null
+   And to wrap it up, one other subtle thing that can be easy to overlook when reading the parameter
+   expansion section relates to the colon (:) in many of the expansions. For example, the :- form of
+   expansion allows a default value to be specified if a variable is unset or null:
+
+unset var
+$> echo var: ${var:-default}
+var: default
+
+var=
+$> echo var: ${var:-default}
+var: default
+
+   And now if you leave out the colon:
+unset var
+$> echo var: ${var-default}
+var: default
+
+var=
+$> echo var: ${var-default}
+var:
+
+   So leaving out the colon changes the test from "unset or null" to just a test for "unset". This
+   applies to the :-, :=, :?, and :+ forms of parameter expansion as well.
+   Your Mileage May Vary
+
+   If something doesn´t seem to work, check your bash version:
+$> echo $BASH_VERSION
+4.4.23(1)-release
+
+
+---
+https://askubuntu.com/questions/926450/how-do-i-assign-a-variable-in-bash-whose-name-is-expanded-from-another-varia
+
+How do I assign a variable in Bash whose name is expanded ($) from another variable?
+
+I have a part of script as below.
+
+notify() {
+	printf -v "old_notif" "%d" "$notif_$2"
+	now=$(date +%s)
+	fark=$((now - old_notif))
+	echo $old_notif
+	if [ -z $old_notif ]; then
+
+	...
+
+	x1=$(date +%s)
+	export "notif_$2=$x1"
+
+I call notify with 2 parameters.
+
+notify xyz klm
+
+I create a dynamic variable in function with export. And the main script is in the while loop. My question is
+how can I use notif_$2 variable in if check? Or how can I assign it´s decimal content to another variable? In
+the example I tried with printf it doesn´t assign the content.
+
+***
+    This question is a bit unclear. Could you please provide a Minimal, Complete, and Verifiable example? –
+    wjandrea
+
+***
+TL;DR: One way is local tmp="notif_$2"; printf -v "old_notif" "%d" "${!tmp}".
+
+You are trying to expand a parameter (in this case, a variable) whose name must itself be obtained by
+expanding another parameter (in this case, a positional parameter). Furthermore, the positional parameter must
+be expanded, then concatenated with the text notif_, to produce the text that must then itself be expanded.
+
+Bash lets you do this cleanly with indirect expansion or a nameref.
+
+The first two sections of this post show drop-in replacements for your printf -v command, using those
+techniques. The remaining sections are optional; they further explain these features and what you can do with
+them.
+
+Way 1: Indirect Expansion
+Indirect expansion is the most similar, conceptually speaking, to what you have written. Instead of the printf
+-v command you have now, you can use these two commands:
+
+local tmp="notif_$2"
+printf -v "old_notif" "%d" "${!tmp}"
+
+local makes the tmp parameter local to the shell function. If for some reason you don´t want that, just omit
+the word local. The parameter doesn´t need to be called tmp.
+
+Indirect expansion is covered in 3.5.3 Shell Parameter Expansion in the Bash reference manual.
+
+Way 2: Namerefs
+Another way is to use a nameref. A nameref refers to a parameter. You create it from the name of the
+parameter, but once created, it behaves as though it is that parameter when you read from or write to it.
+
+To use a nameref, replace your printf -v command with:
+
+local -n ref="notif_$2"
+printf -v "old_notif" "%d" "$ref"
+
+Passing the -n option to local or declare causes the newly introduced parameter to be a nameref. Notice that,
+in the printf command, you will use ordinary parameter expansion ($ref) -- not indirect expansion -- because
+the shell performs the indirection automatically for the nameref.
+
+You do need local or declare here, because -n ref="notif_$2" by itself would be an error and ref="notif_$2" by
+itself wouldn´t make a nameref. declare without the -g option in a shell function behaves like local, so you
+can use that style if you prefer. Or, in the unusual case where you wanted the nameref to be usable after the
+function returned, you could use declare -g Thanks to G-Man for pointing out a mistake about this in an
+earlier version of this answer.
+
+(Depending on your needs, it might even make sense to use a nameref for more than just these two lines. To
+learn how, read on.)
+
+Namerefs are covered in 3.4 Shell Parameters in the Bash reference manual.
+
+Detailed Explanation: How Indirect Expansion Works
+Shell features are most easily demonstrated through interactive use, but positional parameters (like 2,
+expanded via $2) don´t have quite the same meaning outside a shell function, and the local builtin doesn´t
+work at all outside a function (you would use declare instead, or nothing).
+
+So, to start with a simplified example, suppose you are working interactively in your shell and you have run:
+
+x=foo
+export "notif_$x=1234"
+
+After you run that, 1234 is stored in the parameter notif_foo. (It also exports that parameter as an
+environment variable.) We can see this by inspecting notif_foo:
+
+echo "$notif_foo"
+
+This outputs 1234.
+
+Your scenario is analogous to not knowing what is in the x parameter. (In your case, you instead don´t know
+what´s in the second positional parameter passed to your shell function. I´ll get to that soon.)
+
+But you can build the parameter name and put it in another parameter:
+
+y="notif_$x"
+
+Now y holds notif_foo, so you can use indirect expansion on y, which looks like this:
+
+"${!y}"
+
+That expands to 1234, just as if you had used "$notif_foo". But you don´t need to know $x is foo to use it.
+
+For example, this will assign 1234 to old_notif:
+
+old_notif="${!y}"
+
+If you need to format the contents of $notif_foo, you can do that, too. For example, you can use printf if you
+need it. This command is similar to the printf command in your question, and has the effect of assigning 1234
+to old_notif:
+
+printf -v old_notif '%d' "${!y}"
+
+(It also works in your original quoting style, i.e., printf -v "old_notif" "%d" "${!y}" has the same effect.)
+
+Of course, this relies on the y parameter being suitably assigned first.
+
+To write your shell function, you will replace $x with $2, and you will probably want to use the local builtin
+to prevent your temporary variable--which I will now call tmp instead of y--from leaking out of the function´s
+scope.
+
+local tmp="notif_$2"
+printf -v old_notif '%d' "${!tmp}"
+
+Or, using the quoting style you used in the question:
+
+local tmp="notif_$2"
+printf -v "old_notif" "%d" "${!tmp}"
+
+Detailed Explanation: How Namerefs Work
+To try out namrefs interactively, you must use declare -n rather than local -n (because local only works--or
+is needed--inside the body of a shell function).
+
+As before, suppose you have run:
+
+x=foo
+export "notif_$x=1234"
+
+Thus $notif_foo expands to 1234. You can create a nameref to the parameter named by the result of expanding
+"notif_$x":
+
+declare -n y="notif_$x"
+
+Now y refers to the name notif_foo, and ordinary parameter expansion on y will automatically dereference that
+name, thereby expanding the notif_foo parameter. That is, this expands to 1234, just as if you had used
+$notif_foo:
+
+"$y"
+
+To write your shell function, you will replace $x with $2, and I recommend using local instead of declare. I
+suggest also using a somewhat more descriptive name than y; for a short function with no other nameref
+declarations, ref is probably adequately clear.
+
+local -n ref="notif_$2"
+print -v old_notif '%d' "$ref"
+
+Or, with the quoting style you´ve been using:
+
+local -n ref="notif_$2"
+print -v "old_notif" "%d" "$ref"
+
+Namerefs are Powerful
+A nameref lets you do more with its referred-to parameter than just read from it. You can also, for example,
+write to it:
+
+x=foo
+declare -n y="notif_$x"
+y=1234
+
+The second command creates a nameref to a parameter that might not yet exist. That´s no problem! It will be
+created when you first assign to it, even if that assignment is through the nameref.
+
+The third command looks like it assigns 1234 to y, but really it assigns it to notif_foo. Now both $y and
+$notif_foo expand to 1234. $notif_foo expands to 1234 because that´s the value stored in notif_foo; $y expands
+to 1234 because y is a nameref for notif_foo.
+
+Suppose you want to know what y refers to, though. That is, suppose you want to get notif_foo, rather than
+1234, from y. Well, you can, because with a nameref, indirect expansion has the opposite of its usual effect.
+This expands to notif_foo:
+
+"${!y}"
+
+In your function, you could introduce notif_$2 through a nameref.
+
+This suggests another way to deal with notif_$2 in your function: you can introduce it through a nameref, and
+use the nameref for each subsequent access.
+
+Currently you have:
+
+x1=$(date +%s)
+export "notif_$2=$x1"
+
+As an alternative, you could use:
+
+x1=$(date +%s)
+local -n ref="notif_$2"
+ref="$x1"
+export "${!ref}=$ref"
+
+That´s more complicated that necessary, though, since presumably you only created the x1 parameter because
+export "notif_$2=$(date +%s)" is hard to read. ref="$(date +%s)" is just as simple, though, so you can omit
+the x1= line and write:
+
+local -n ref="notif_$2"
+ref="$(date +%s)"
+export "${!ref}=$ref"
+
+It occurs to me that you might have been using export just to assign the parameter for use in your shell. If
+you don´t actually need to export it to child processes, then you can just use the first two lines, and that´s
+simpler than what you have.
+
+If you do need to export it, use all three. It´s still a bit more complicated than what you have... but it may
+let you simplify the rest of your function, because, afterwards:
+
+  * Instead of having to write notif_$2, you can just write ref.
+  * This works even in scenarios where writing notif_$2 is inadequate. That is, it is no longer necessary to
+    do anything special (like Way 1 and Way 2 above) to expand the parameter whose name is the result of
+    expanding notif_$2. Just write ref.
+  * This even works for writing -- and creating, and unsetting -- the parameter. (After the point of
+    declaration, ref=text writes to and can even create the referred-to parameter; unset ref unsets the
+    referred-to parameter.)
+
+If you´re going to use a nameref throughout your whole function, you may want to think of a more meaningful
+name for it than ref. (The best name will, of course, be determined by the task you are writing the function
+to carry out.)
+
+***
+Dear Eliah, thank you for your detailed explanation. I really appreciate. –
+
+***
+(1) You might want to mention that namerefs are available only in bash version 4.3 and higher. (2) You say
+“You cannot omit local here, though [… if …] you wanted the nameref to be usable after the function has
+returned, you could replace it with declare.”  Either you’re mistaken or I’m misunderstanding you.  If I do
+declare -n ref=whatever in a function, then that nameref exists only until the function returns.  This answer
+says that (in bash) variables declared (with declare, without -g) in functions are local to the function. –
+G-Man Says 'Reinstate Monica' Commented Jun 22, 2019 at 19:03 @G-Man Thanks. What I said about local was wrong
+and unclear; I´ve edited. You´re right that declare without -g in a bash function works like local. Also, my
+goal was to say that namerefs must be declared, which didn´t come through. As for which bash versions support
+namerefs, I´m reluctant to add that. Trying and failing to use namerefs shouldn´t cause harm, and no supported
+Ubuntu release packaged so old a version of bash even when the post was new. Similarly, my (and others´) AU
+poss tend not to warn about portability, outside non-EoL Ubuntu, of find, echo, and other commands. –
+
+
+---
+https://www.binaryphile.com/bash/2018/10/28/approach-bash-like-a-developer-part-34-indirection.html
+
+Approach Bash Like a Developer - Part 34 - Indirection
+Oct 28, 2018
+
+   This is part 34 of a series on how to approach bash programming in a way that´s safer and more
+   structured than your basic script.
+
+   See [https://www.binaryphile.com/bash/2018/07/26/approach-bash-like-a-developer-part-1-intro.html]part 1 if
+   you want to catch the series from the start.
+
+   [https://www.binaryphile.com/bash/2018/10/16/approach-bash-like-a-developer-part-33-modules.html]Last time,
+   we implemented a basic module system. This time, let´s talk about variable
+   [https://en.wikipedia.org/wiki/Reference_(computer_science)]references and indirection.
+
+   A reference in bash is simply the contents of a variable being the name of another variable. This is
+   occasionally useful when you don´t know the name of a variable at the time you are writing a script,
+   but you want to manipulate its value anyway.
+
+   This can be the case when you are writing a library with functions intended for use in other scripts.
+   For example, the caller may want you to return a value in a variable of their choosing. They can pass
+   in the name as an argument to your function.
+
+   The name of the variable is called the reference to it. Using the name to manipulate the variable is
+   called dereferencing. The technique in general is called indirection, since you are accessing the
+   variable indirectly, first accessing the name then the variable.
+
+Eval Indirection
+   Due to the fact that there is an eval command in bash, it has always supported indirection in some
+   fashion. For example, if I have a variable named bar and a variable named foo whose value is bar, I
+   can read it´s value this way:
+
+bar="my value"
+foo=bar
+eval "echo \"bar´s value is \$$foo\""
+
+   The escaped dollar-sign allows the value of foo to be expanded first (to bar in this case), and then
+   evaluated as a normal variable expansion by eval.
+
+   A value could be written to foo´s reference this way:
+
+eval "$foo='my value'"
+
+   The nice thing about eval is that it´s always been able to work with array and hash variables as
+   easily as normal values (as opposed to the upcoming methods). The variable with the reference can
+   contain an index as well (e.g. foo=bar[2]), or you can tag one on in the string you eval:
+
+myarray=( zero one two )
+
+# without index
+ref_=myarray
+eval "echo \"first element is: \${$ref_[0]}\""
+
+# with index
+ref_=myarray[0]
+eval "echo \"first element is: \${$ref_}\""
+
+Read and Printf Indirection - Setting Values
+   Another way to set values indirectly is to use read since it takes a variable name as an argument:
+
+foo=bar
+read -r $foo <<END
+my value
+END
+echo $bar   # echos 'my value'
+
+   I´m not sure if it has always been true, but you can assign to array and hash elements this way with
+   recent versions of bash.
+
+myarray=( zero one two )
+foo=myarray[1]
+read -r $foo <<END
+my value
+END
+echo ${myarray[1]}  # echos 'my value'
+
+   At some point, bash also added the ability to set variables with printf as well:
+
+printf -v $foo %s "my value"
+
+   It did not initially support array or hash item references, but recent versions of bash do support
+   it. It works the same as the prior read example.
+
+Bash Indirect Expansion - Getting Values
+   The last two methods set values, but there is also a method for getting values which was added to
+   bash later, called indirect expansion.
+
+   Indirect expansion takes the form ${!myvar}. Unfortunately, it shares the same ! operator as the
+   index expansion for arrays and hashes which takes the form ${!myarray[*]}. You can see why it´s easy
+   to confuse.
+
+   Indirect expansion only works when the referenced variable name is a scalar variable, or when the
+   reference includes a name as well as an index. You can´t use indirect expansion to tag an array index
+   on the outside of the variable reference. For example, this doesn´t work:
+
+myarray=( zero one two )
+ref_=myarray
+echo ${!ref_[1]}  # doesn´t work
+
+   To get to the array element, you have to include the index in the reference:
+
+myarray=( zero one two )
+ref_=myarray[1]
+echo ${!ref_}     # does work
+
+   The former example which doesn´t work is doing something else...it´s trying to find a variable
+   reference contained in an array element. For example, this does work:
+
+myrefs_=( varzero varone )
+varone='my value'
+echo ${!myrefs_[1]}   # echos 'my value'
+
+   This works because it looks at the array item at index 1 first, then dereferences it with the !
+   operator.
+
+   One neat thing about indirect expansion is that it can reference positional arguments as well. For
+   example, if ref_ holds the value "1", then ${!ref_} expands to the value of the positional argument
+   $1. We´ve also already seen the very meta ${!#} expansion, which refers to the last positional
+   argument (since $# is the index of the last argument). You can´t do either of those with a nameref,
+   described next.
+
+Nameref Indirection
+   Finally, in bash 4.3, it began supporting namerefs. Namerefs are created with declare -n and local
+   -n. You can only supply a variable name as a value during the declaration. Thereafter, any
+   manipulation of the nameref is applied instead to the referenced variable.
+
+declare -n ref_=varname
+ref_=myvalue    # sets "varname" to "myvalue"
+
+   Namerefs are by far the easiest to work with, since once they are created, you simply use them as if
+   you would a normal variable. They work equally well for scalars, arrays and hashes as well.
+
+   However, since they don´t work with all versions of bash, you may still need to use the other methods
+   for backwards compatibility.
+
+A Special Use Case for Printf
+   There is a case where printf can be useful for a particular situation. When you write a function
+   where you want to supply a reference to a return variable in some cases, but get your value on stdout
+   in others (such as in a pipeline), printf can be used for both:
+
+describe myfunc
+	it "outputs the value in the named variable"
+		myfunc result
+		assert equal "my value" $result
+	ti
+end_describe
+
+   Here´s the indirect version.
+
+myfunc () {
+	local ref_=${1:-}
+	printf $ref_ %s "my value"
+}
+
+   Here´s the stdout version.
+
+it "outputs the value on stdout"
+	result=$(myfunc)
+	assert equal "my value" $result
+ti
+
+   It only differs by the fact that no reference is provided as an argument.
+
+myfunc () {
+	local ref_=${1:-}
+	printf ${ref_:+-v$IFS$ref_} %s "my value"
+}
+
+   The ${ref_:+-v$IFS$ref_} expression checks to see if ref_ is set. If not, it doesn´t evaluate to
+   anything.
+
+   Since it´s not double-quoted, if it expands to an empty value, bash removes it as an argument to
+   printf.
+
+   If ref_ is set, the expression evaluates to the -v option.
+
+   Since the expression isn´t double-quoted, when it expands to -v, it then splits (by definition) on
+   the embedded IFS. Finally, the name in ref_ is expanded to give the argument to -v.
+
+   In this model, the return method is determined by whether the reference argument is supplied. That
+   necessarily makes the argument an optional one.
+
+   Usually there are more arguments to real functions. That means that the reference argument needs to
+   come at the end of that list, if it´s an optional positional argument.
+
+   If there are more than one optional arguments to a function, I stop using positionals for the
+   optional arguments and instead use keyword arguments. A reference argument in that case becomes
+   something like ref_=varname instead of just varname.
+
+A Word on Namespaces
+   The easiest thing to mess up with a reference in any of these methods is to accidentally set the
+   reference to itself, or another variable you didn´t intend, such as a local variable which happens to
+   have the same name.
+
+   References don´t provide any protection against such naming conflicts. If you use a reference to
+   return a value from a function, I highly suggest you namespace all of your locals with a trailing
+   underscore as I´ve done in my examples. Anything else can be more of an eyesore, and anything less
+   can result in a bug or program stop:
+
+> declare -n myvar=myvar
+bash: declare: myvar: nameref variable self references not allowed
+
+   The nameref method causes an immediate error.
+
+myfunc () {
+	local myvar=$1
+	# oops, we passed it "myvar" as $1, referring to an outer myvar
+
+		printf -v $myvar %s "my value"
+	# "my value" just got assigned to our local variable, not the outer one
+	# it goes away when the function ends because it´s local
+}
+
+   The printf method simply malfunctions silently.
+
+   Of course, if you´re in a function which is namespaced with trailing underscores, you can still get
+   conflicts if you feed a reference to another function which also namespaces with trailing
+   underscores, so you have to be conscious of such multi-level naming concerns when dealing with
+   references.
+
+   Occasionally you´ll see my examples namespace variables with leading and trailing underscores to
+   allow a reference to be passed from a caller which uses trailing underscores, but I try not to go too
+   far down that rabbit hole.
+
+   Of course, one thing you can do to avoid namespacing and name collisions is to not use variables at
+   all, other than positional arguments. If you are lucky, you can either simply refer to the positional
+   arguments as is or reset them as needed with the set -- command. This method is preferable if you can
+   pull it off, but it´s not often that you can.
+
+
+---
+https://www.ryanschulze.net/archives/2652
+
+Passing arrays to bash functions
+June 2, 2024
+
+   Short version: yes, you can pass an array to a Bash function. You can also manipulate the array
+   contents within the function to pass information back. It is easy and has been supported since Bash
+   version 4.3, I believe.
+
+Minimal setup
+
+#!/usr/bin/env bash
+
+do_stuff() {
+	local -n internal_array=${1}
+	# reads and writes to $internal_array[] are applied to the array passed to the function
+}
+
+declare -A main_array
+
+# important, the name of the array is passed as an argument (i.e. without the $), not the array itself.
+do_stuff main_array
+
+   Long version: I recently watched a talk by some very knowledgeable people about Bash, where they
+   delved deep into its internals and quirks. At one point, they discussed passing information to and
+   from functions without creating subshells. The solution became quite convoluted, and I was surprised
+   because the whole time I was thinking, "just use nameref".
+
+   Out of curiosity, I searched online, but unfortunately, the internet is full of responses like
+   "doesn´t work," "Bash can´t do that" and many variations of "just pass all the values of the array to
+   the function as arguments and piece them together again inside the function" (which is a terrible
+   solution since you lose the keys). There are a few posts here and there suggesting local -n as a
+   solution, but they are rare, and especially on sites like Stack Overflow, they are not the top
+   answers.
+
+   In a nutshell what we are going to do is pass a reference to an array to a function (think "pointers"
+   or "symlinks" if that helps).
+
+   Relevant parts of the bash
+   [https://www.gnu.org/software/bash/manual/html_node/Bash-Builtins.html#index-declare]man page for declare
+   and local:
+
+     declare -n
+     Give each name the nameref attribute, making it a name reference to another variable. That other
+     variable is defined by the value of name. All references, assignments, and attribute modifications
+     to name, except for those using or changing the -n attribute itself, are performed on the variable
+     referenced by name´s value. The nameref attribute cannot be applied to array variables.
+
+     local
+     For each argument, a local variable named name is created, and assigned value. The option can be
+     any of the options accepted by declare. local can only be used within a function; it makes the
+     variable name have a visible scope restricted to that function and its children.
+
+   So, in summary, we can use local to define variables with a scope limited to the function they are
+   defined in, and local accepts all the options that declare supports.
+
+   It seems the "The nameref attribute cannot be applied to array variables." part of the declare
+   definition causes a lot of confusion or deters people from trying to use it for referencing arrays.
+   What it means is that you can´t do a local -n my_array=() (i.e. applying the nameref attribute to an
+   array), but local -n my_array is fine (where my_array is a variable with the nameref attribute which
+   can also point to an array).
+
+   Enough theory, let´s get down to practical examples.
+
+   We will create a function called do_stuff that:
+     * takes the name of an array as argument $1
+     * reads the length key from the array
+     * add a random key to the array with a random number the length of the length key previously read
+
+   Then we will create an array outside of the function with some keys/values, pass it to the do_stuff
+   function, and then output the contents
+
+Example
+
+#!/usr/bin/env bash
+
+do_stuff() {
+	local -n internal_array=${1}
+	local length
+
+	# read values from the array passed to the function
+	length=${internal_array["length"]}
+
+	# add an entry to the array
+	internal_array["random"]="${RANDOM:0:$length}"
+}
+
+declare -A main_array
+
+main_array[name]="one"
+main_array[length]="5"
+
+# important, the name of the array is passed as an argument (i.e. without the $), not the array itself.
+do_stuff main_array
+
+# easier to use declare to print the key/values of the associative array then iterating over all keys and
+# printing the respective values
+declare -p main_array
+
+   Output
+
+declare -A main_array=([length]="5" [random]="25778" [name]="one" )
+
+   So this shows us that the do_stuff function could read from the array (the length value), and write
+   to the array (add the random number key/value), and the changes were applied to the array outside of
+   the function. (where we did the declare -p). Bonus points for not needing a subshell.
+
+   Using this "trick" allows us to pass more complex information to a function, and especially receive
+   more complex information from a function.
+
+   There is one caveat: you can´t use the same name for the array inside the function as well as
+   outside. I wouldn´t advise doing this anyway for readability reasons, as the variable´s scope can
+   become confusing. If you try it you get the following output:
+   Output
+
+local: warning: array: circular name reference
+
+   Oddly I often noticed the following statement on Stack Overflow about nameref:
+
+   "This only works if the array is defined as a global"
+   Nope, works just as fine passing an array locally scoped to a function to another function this way.
+
+Example with array scoped locally to a function
+
+#!/usr/bin/env bash
+
+do_stuff() {
+	local -n internal_array=${1}
+	local length
+
+	# read values from the array passed to the function
+	length=${internal_array["length"]}
+
+	# add an entry to the array
+	internal_array["random"]="${RANDOM:0:$length}"
+}
+
+main() {
+	local -A main_array
+
+	main_array[name]="one"
+	main_array[length]="5"
+
+	# important, the name of the array is passed as an argument (i.e. without the $), not the array
+	itself.
+	do_stuff main_array
+
+	declare -p main_array
+}
+
+main
+
+   Output
+
+declare -A main_array=([length]="5" [random]="28903" [name]="one" )
+
+   (I prefer using a main() function like in this example to avoid global variables unless explicitly
+   defined)
+
+   So, there you have it: an easy way to pass an array to a function in bash, no weird looping over
+   values. And a better way to receive information from an array than the byte return value and parsing
+   the output of the function.
+
+
+---
+https://www.computerhope.com/unix/bash/declare.htm
+
+Bash declare builtin command
+Updated: 06/01/2025 by Computer Hope
+declare command
+
+On Unix-like operating systems, declare is a builtin command of the Bash shell. It declares shell variables
+and functions, sets their attributes, and displays their values.
+
+Description
+In bash, variables can have a value (such as the number 3). Optionally, variables can also be assigned
+attributes (such as integer).
+
+For instance, a "read-only" variable (declare -r) cannot be unset, and its value and other attributes cannot
+be modified. An "indexed array" variable (declare -a) is an array of values that are indexed by number,
+starting at zero. An "associative array" variable (declare -A) is an array of key-value pairs whose values are
+indexed by a keyword. (For more information, see arrays in bash).
+
+In addition to variables, bash functions can be assigned attributes which affect their behavior. See the -f
+and -F options below for more information.
+
+Note
+The typeset command is an alias for declare. The two can be used interchangeably in bash.
+
+Syntax
+declare [-a] [-A] [-f] [-F] [-g] [-i] [-l] [-n] [-r]
+        [-t] [-u] [-x] [-p] [name[=value]] [name[=value]] ...
+
+Options
+
+The declare builtin command takes the following general options:
+
+-------------------------------------------------------------------------------------------------------------
+Option   Description
+-------------------------------------------------------------------------------------------------------------
+-f       All names are treated as the names of functions, not variables.
+-F       When displaying information about a function, display only the function´s name and attributes. Do not
+         display the contents of the function.
+-g       When declare is used within a shell function, the -g option causes all operations on variables to
+         take effect in global scope. If not used in a shell function, -g has no effect.
+-p       When used with name arguments, -p displays the options and attributes of each variable name, and -f
+         or -F are ignored (functions are not described).
+-------------------------------------------------------------------------------------------------------------
+
+When used with options, but no names, -p displays the attributes and values, which match the other specified
+options, of all variables and functions.
+
+When used with no options or names, -p displays the attributes and values of all variables and functions, or
+only functions if -f is specified.
+
+The remaining options, listed below, cause declare to set an attribute if the option letter is preceded with a
+dash. If preceded with a plus sign, declare will unset the attribute instead.
+
+-------------------------------------------------------------------------------------------------------------
+Option   Unset with    Description
+-------------------------------------------------------------------------------------------------------------
+-a                     Declare the named items to be indexed arrays. This attribute cannot be unset.
+-------------------------------------------------------------------------------------------------------------
+-A                     Declare the named items to be associative arrays. This attribute cannot be unset.
+-------------------------------------------------------------------------------------------------------------
+-i       +i            Give the named items the integer attribute. Values assigned to the variable will be
+                       restricted to integer values. If a non-integer value is assigned, either an error is
+                       reported, or the value 0 (zero) is assigned instead.
+
+                       If the assigned value is a string representing an arithmetic operation on integers
+                       (such as "5+5"), the result of the operation is assigned. If the result of the
+                       operation is not an integer, the integer floor is assigned (e.g., "22/7" assigns 3).
+                       Floating point values may not be used, and if so an error will be reported. Bash does
+                       not support floating point math operations.
+-------------------------------------------------------------------------------------------------------------
+-l       +l            When a value is assigned to the named variable, convert all uppercase letters to
+                       lowercase. If the uppercase (-u) attribute was previously set for the variable, the
+                       attribute is unset.
+-------------------------------------------------------------------------------------------------------------
+-n       +n            Give each name the nameref attribute, making it a "name reference" to another variable.
+                       The referenced variable is defined by the value of name. All references, assignments,
+                       and attribute modifications to name, except those using or changing the nameref
+                       attribute, are performed on the variable referenced by the value of name. In other
+                       words, it makes the variable a pointer to another variable. The nameref attribute
+                       cannot be applied to arrays.
+-------------------------------------------------------------------------------------------------------------
+-r       +r            Make the named items read-only. They cannot subsequently be assigned values or unset.
+-------------------------------------------------------------------------------------------------------------
+-t       +t            Give each named item the trace attribute. If the item is a function, it will inherit
+                       the DEBUG and RETURN traps from the parent shell. If the item is a variable, the trace
+                       attribute has no effect.
+-------------------------------------------------------------------------------------------------------------
+-u       +u            When the named variable is assigned a value, any lowercase letters are converted to
+                       uppercase. If the lowercase (-l) attribute was previously set for the variable, the
+                       attribute is unset.
+-------------------------------------------------------------------------------------------------------------
+-x       +x            Mark named items for export to child processes, as if the export builtin command had
+                       been used.
+-------------------------------------------------------------------------------------------------------------
+
+Lexical scope
+When declare is used inside a shell function, all named items are declared in a local scope, unless the -g
+option is used. This behavior is the same as using the local builtin command.
+
+Exit status
+The exit status of declare is success (zero), unless an invalid option is specified or an error occurs, in
+which case the status is failure (non-zero).
+
+Examples
+
+Declaring and listing variables
+declare -p
+
+List all declared variables, their attributes, and their values.
+declare myvar
+
+Declare a variable, myvar, and assign it no value. Now run the first command again:
+declare -p
+
+This time, notice in the output that myvar is listed after all other variables as:
+declare -- myvar
+
+The double dash is equivalent to "no options." This means that myvar is declared, and has no attributes. If it
+had an assigned value, the value would be listed here.
+myvar=33
+
+Assign the value 33 to myvar.
+declare myvar=33
+
+Same as the above command.
+declare -- myvar=33
+
+Same as the above two commands.
+declare -- myvar="33"
+
+Same as the above three commands; this is the proper form, including the value being enclosed in
+double-quotes. However, any of the above four commands have the same effect.
+
+Now, list all variables again:
+declare -p
+
+You´ll see that this time, the output lists myvar with its value assignment:
+declare -- myvar="33"
+
+The key thing to notice here is, when you run declare -p, variables are listed as the complete declare command
+and you need to set the variable to its current attributes and value.
+
+Setting and unsetting attributes
+
+The next commands modify the variable´s attributes:
+declare -x myvar
+
+Declare that myvar should be exported to any child shell processes. This is the equivalent of using the export
+command:
+export myvar
+
+Now, list variable declarations:
+declare -p
+
+Notice that in the output, the double dash (no options) has been replaced with -x:
+declare -x myvar="33"
+
+To remove the export attribute, use +x instead:
+declare +x myvar
+
+After running the above command, myvar will no longer be exported to subshell processes.
+
+Integers, and integer evaluation
+
+Bash lets you declare a variable to have the integer attribute, which guarantees that the variable always
+holds an integer value. It also permits arithmetic evaluation when assigning a value.
+declare -i myvar
+
+Declare that myvar should be treated an integer.
+myvar="test"
+
+The string "test" is a non-integer value, so the value 0 (zero) is assigned instead. You can verify this if
+you echo the value:
+echo $myvar
+
+0
+
+Any positive or negative integer value can be assigned, though. (The maximum possible value depends on your
+computer, but it´s huge):
+myvar=-33; echo $myvar
+
+-33
+
+If a string containing an arithmetic operation is assigned to an integer variable, the result of the operation
+is assigned. For example:
+
+myvar="2*11"; echo $myvar
+
+22
+
+The above command assigns myvar the value of 2 times 11.
+
+If the mathematical operation results in a number with a decimal point, the result is rounded down to the
+next-lowest integer. For instance:
+myvar="33/5"; echo $myvar
+
+6
+
+The precise result of 33 divided by 5 (33/5) is 6.6, but bash rounds it down to the integer 6.
+
+If you try to use decimal values as operands, bash returns an error, stating that the decimal point is an
+unknown operator:
+myvar="33.1/5"; echo $myvar
+
+bash: 33.1/5: syntax error: invalid arithmetic operator (error token is ".1/5")
+
+To unset the integer attribute, use the option +i:
+declare +i myvar
+
+Now, myvar no longer has the integer attribute. Strings containing mathematical operations are be assigned to
+myvar literally, rather than evaluated. For example:
+myvar="33.1/5"; echo $myvar
+
+33.1/5
+
+Indexed arrays
+
+To declare an indexed array, use -a:
+declare -a myvar
+
+If myvar already had an assigned value, this value is indexed as the first element, numbered zero:
+echo ${myvar[0]}
+
+33.1/5
+
+You can now assign values to elements of the array myvar using integers as the indices:
+myvar[1]="Hello"
+myvar[2]="World!"
+
+The elements can be accessed by index number using the following syntax:
+echo ${myvar[2]}
+
+World!
+
+If you use a negative integer as the index, bash counts from the last element, rather than the first. To
+access the last element, use index -1:
+echo ${myvar[-1]}
+
+World!
+
+An index of -2 would access the second-to-last array element, etc.:
+echo ${myvar[-2]}
+
+Hello
+
+To display all elements in an array, you can use an asterisk ("*") as the index. Individual elements are
+separated with a space:
+echo ${myvar[*]}
+
+33.1/5 Hello World!
+
+Note
+You cannot unset the array attribute with +a. Bash has no procedure for converting an array to another type,
+so it returns an error, even if no values were assigned. For example:
+declare +a myvar
+
+bash: declare: myvar: cannot destroy array variables in this way
+
+Check if a variable is declared
+If you´re writing a bash script, and you need to check if a variable is declared, this is the proper way to do
+it:
+if [ -z ${myvar+x} ]; then echo "not set"; else echo "set"; fi
+
+This script performs "Assign Alternate Value" parameter expansion, which tests if myvar has been set, and if
+its value is null. If myvar is unset, it will echo "not set". Otherwise, it will echo "set". Note that the
+letter x can be anything you´d like, but is required for the comparison to occur.
+
+
+---
+https://ss64.com/bash/declare.html
+
+declare
+
+   Declare variables and give them attributes.
+Syntax
+      declare [-aAfFgiIlnrtux] [-p] [name[=value]]
+
+Key
+   -a   Each name is an array variable.
+
+   -A   Each name is an associative array variable
+
+   -f   Use function names only.
+
+   -F   Inhibit the display of function definitions;
+        only the function name and attributes are printed. (implies -f)
+
+   -g   Force variables to be created or modified at the global scope, even when declare is executed
+        in a shell function. It is ignored in all other cases.
+
+   -i   The variable is to be treated as an integer; arithmetic evaluation (see Shell Arithmetic)
+        is performed when the variable is assigned a value.
+
+   -I   Cause local variables to inherit the attributes (except the nameref attribute) and value
+        of any existing variable with the same name at a surrounding scope.
+        If there is no existing variable, the local variable is initially unset.
+
+   -l   When the variable is assigned a value, all upper-case characters are
+        converted to lower-case. The upper-case attribute is disabled.
+
+   -n   Give each name the nameref attribute, making it a name reference to another variable.
+        That other variable is defined by the value of name.
+        All references, assignments, and attribute modifications to name, except for those using
+        or changing the -n attribute itself, are performed on the variable referenced by name´s value.
+        The nameref attribute cannot be applied to array variables.
+
+   -p   Display the attributes and values of each name.
+        When -p is used with name arguments, additional options, other than -f and -F, are ignored.
+        When -p is supplied without name arguments, declare will display the attributes and values
+        of all variables having the attributes specified by the additional options.
+        If no other options are supplied with -p, declare will display the attributes and values
+        of all shell variables. The -f option will restrict the display to shell functions.
+
+   -r   Make names readonly.
+        These names cannot then be assigned values by subsequent assignment statements
+        or unset.
+
+   -t   Give each name the trace attribute.
+        Traced functions inherit the DEBUG and RETURN traps from the calling shell.
+        The trace attribute has no special meaning for variables.
+
+   -u   When the variable is assigned a value, all lower-case characters are converted to upper-case.
+        The lower-case attribute is disabled.
+
+   -x   Mark each name for export to subsequent commands via the environment.
+
+   If no names are given, then 'declare' will display the values of variables instead.
+
+   Using + instead of - turns off the attribute instead, with the exceptions that '+a' and '+A' may not
+   be used to destroy array variables and '+r' will not remove the readonly attribute.
+   When used in a function, declare makes each name local, as with the local command, unless the -g
+   option is used.
+
+   If a variable name is followed by =value, the value of the variable is set to value.
+   The typeset command is supplied for compatibility with the Korn shell; however, it has been
+   deprecated in favor of the declare builtin command.
+
+   When using -a or -A and the compound assignment syntax to create array variables, additional
+   attributes do not take effect until subsequent assignments.
+
+   The return status is zero unless an invalid option is encountered, an attempt is made to define a
+   function using '-f foo=bar', an attempt is made to assign a value to a readonly variable, an attempt
+   is made to assign a value to an array variable without using the compound assignment syntax, one of
+   the names is not a valid shell variable name, an attempt is made to turn off readonly status for a
+   readonly variable, an attempt is made to turn off array status for an array variable, or an attempt
+   is made to display a non-existent function with '-f'.
+
+   "My mother never saw the irony in calling me a son-of-a-bitch" ~ Jack Nicholson
+
+
+---
+https://groups.google.com/g/gnu.bash.bug/c/E8srl6j2mjM?pli=1
+
+delcare -a on a nameref in a function modifies nameref instead of target
+Jul 17, 2018
+
+
+At global scope this works as expected:
+$> declare -n ref=var; declare -a ref=(X); declare -p ref var
+declare -n ref="var"
+declare -a var=([0]="X")
+
+But in a function, we end up with the nameref variable having both the 'a' and 'n' attributes and nothing in
+the target:
+
+$> f() { declare -n ref=var; declare ref=(X); declare -p ref var; }; f
+declare -an ref=([0]="X")
+-bash: declare: var: not found
+
+And a slight modification ends up modifying a global variable instead:
+$> f() { declare -n ref=var; declare -a ref; ref=(X); declare -p refvar; }; f; declare -p ref var
+declare -an ref=()
+-bash: declare: var: not found
+declare -a ref=([0]="X")
+-bash: declare: var: not found
+
+***
+FYI that one is already fixed in 5.0-alpha:
+wooledg:~$ declare -n ref=var; declare -a ref=(X); declare -p ref var
+declare -n ref="var"
+declare -a var=([0]="X")
+
+wooledg:~$ f() { declare -n ref=var; declare ref=(X); declare -p ref var; }; f
+declare -an ref=([0]="X")
+declare -a var=([0]="X")
+
+Or at least partly fixed. *shrug*
+
+***
+I think you are just seeing 'var' have a value after the function call because it´s still there from the
+global 'declare' invocations.  With bash 5.0 alpha, running just the version that´s wrapped in a function, I
+don´t get any value for 'var':
+
+$> echo $BASH_VERSION
+5.0.0(1)-alpha
+
+$> f() { declare -n ref=var; declare ref=(X); declare -p ref var; }; f
+declare -an ref=([0]="X")
+bash: declare: var: not found
+
+***
+In the latest devel this issue is fixed for the case that the local nameref points to a non-existent variable
+but there is still a bug if the variable pointed to by a local nameref already exists. In such a case,
+'declare' commands after the initial 'declare -n' end up modifying the value and/or attributes of the local
+nameref variable itself rather than modifying the target of the nameref.
+
+At global scope:
+
+unset -n ref; unset var
+declare var=X; declare -n ref=var; declare ref=(Y); declare -p ref var
+declare -n ref="var"
+declare -a var=([0]="Y")
+
+Whereas in a function:
+
+unset -n ref; unset var
+f() {
+	declare var=X; declare -n ref=var; declare ref=(Y); declare -p ref var
+}; f
+declare -an ref=([0]="Y")
+declare -- var="X"
+
+***
+I think there´s a related regression in the latest devel commit. Creating a local variable with the same name
+as a higher-scoped nameref pointing to an unset variable creates a local variable with the name of the target
+of the nameref.
+
+Starting with:
+
+declare -n ref=var
+f() { local ref=Y; declare -p ref var; local; }
+
+This still works fine in both latest and previous:
+$> var=X; f
+declare -- ref="Y"
+declare -- var="X"
+ref=Y
+
+But the behavior in the unset target case changed from the expected:
+$ unset var; f
+declare -- ref="Y"
+bash: declare: var: not found
+ref=Y
+
+to:
+$> unset var; f
+declare -n ref="var"
+declare -- var="Y"
+var=Y
+
+***
+I think forcing the local variable creation to only follow namerefs at the same variable scope is the right
+thing to do here.
+
+***
+A few more problematic test cases in this vein (tested against latest devel snapshot 20180803).
+
+f() { local -n ref=var; local -A ref=([1]=); ref=([2]=); declare -p ref var; }
+unset ref var; f
+# declare -An ref=()
+# declare -A var=([1]="" )
+declare -p ref
+
+# declare -a ref=([2]="")
+unset ref; var=0; f
+
+# declare -An ref=([1]="" )
+# declare -- var="0"
+declare -p ref
+
+# declare -a ref=([2]="")
+f() { local -n ref=var; local -a ref=([1]=); ref=([2]=); declare -p ref var; }
+unset ref var; f
+
+# declare -an ref=()
+# declare -a var=([1]="")
+declare -p ref
+
+# declare -a ref=([2]="")
+unset ref; var=0; f
+# declare -an ref=([1]="")
+
+# declare -- var="0"
+declare -p ref
+
+# declare -a ref=([2]="")
+# same issues for 'local -[iluctrx] ref=...'
+f() { local -n ref=var; local -i ref=([1]=); declare -p ref var; }
+unset var; f
+
+# declare -in ref="var"
+# declare -ai var=([1]="0")
+var=0; f
+# declare -in ref="var"
+# declare -a var=([1]="")
+# same issue for 'local -[ilucAa] ref=...'
+f() { local -n ref=var; local ref=1; declare -p ref var; }; var=0; f
+var=0; f
+
+# bash: local: '1': invalid variable name for name reference
+# declare -n ref="var"
+# declare -- var="0"
+
+***
+Thanks for the report. These are all the same issue, with the same fix.
+
+
+---
+https://unix.stackexchange.com/questions/744847/nameref-variables
+
+Nameref variables
+
+Have been using
+
+typeset -n ref="$1"
+
+to set a nameref variable within a function.
+
+I think that the command is also equivalent to
+
+local -n ref="$1"
+
+Which would allow one to change the value of a variable passed to the function for use outside the function.
+
+Is this correct ?
+
+***
+That´s right, though in bash, the implementation is much cruder than in ksh93 where the feature comes from or
+zsh (namerefs added in 5.10 not released yet). It´s lexical there and more syntactic sugar around eval, so has
+several limitations.
+
+For instance with this code:
+
+set_var() {
+	typeset -n var="$1"
+	typeset foo=local-var
+	var=$2
+}
+
+blah=blah foo=foo var=var
+
+set_var blah new-blah
+printf '$blah is now %q\n' "$blah"
+
+set_var foo new-foo
+printf '$foo is now %q\n' "$foo"
+
+set_var var new-var
+printf '$var is now %q\n' "$var"
+
+$> bash ./that-code
+$blah is now new-blah
+$foo is now foo
+./that-code: line 2: typeset: warning: var: circular name reference
+./that-code: line 2: warning: var: circular name reference
+./that-code: line 4: warning: var: maximum nameref depth (8) exceeded
+$var is now new-var
+
+Compare with:
+
+$> ksh93 ./that-code
+$blah is now new-blah
+$foo is now new-foo
+./that-code: set_var[2]: typeset: var: invalid self reference
+
+Better in that $foo was correctly updated.
+
+$> zsh ./that-code
+$blah is now new-blah
+$foo is now new-foo
+$var is now new-var
+
+(here with zsh built from current (as of 2025-11-08) git HEAD (6d095f2c0df4282f569d2be4dc6b70208ce20063)).
+
+zsh´s will also have limitations, for instance when it comes to referencing special or positional parameters.
+
+As to typeset (or bash´s declare alias for that dual builtin/keyword from ksh) vs local (itself from the
+Almquist shell, though behaves different there), they´re the same in bash except local can not be called
+outside functions. When called within a function, they all make the variable locale except when -g is used.
+
+***
+Would it not be much faster to just test this yourself than to write this question?
+
+In your use case both variants are equivalent, indeed. The created variable is local in one case only but the
+referenced variable is global in both cases (unless you define it as local in that function).
+
+***
+I did test it actually. The only thing is that I could not find explanations about what happens if you´d use
+typeset or declare in a function. –
+
+***
+If I do function frank () {local -n ref="$1"; ref=that} ; var=this ; frank var ; echo $var the second echo
+gives that. –
+
+***
+@Bennings ref is local, var is global. ref points to a global variable so the change in the function is
+global. But there is no variable ref outside the function. –
+
+***
+Right, there is no variable ref outside the function. But as you say an assignment to ref changed a global
+variable. If I want to pass an array to the function, a nameref must be used (using the -n option). Whether
+one uses local -n, typeset -n, or declare -n. I do not see a way to avoid using a nameref variable. –
+
+***
+@Bennings The opposite is true: You cannot use nameref with an array; at least not up to and inclusing bash
+5.2. Quoting the man page: Array variables cannot be given the nameref attribute. You can use eval, though (as
+we did before the introduction of nameref. –
+
+***
+@Bennings what´s preventing your script´s function/subroutine from reading and writing the script´s global
+variable directly? –
+
+***
+I am using the nameref feature on arrays on the latest bash version. –
+
+***
+Because I am writing a bash library, I do not want to use specific global named variables. But allow one to
+pass whatever global variable a user wants to update. The code would then be self-adapting to any global
+variable a user wants to define. –
+
+
+---
+
