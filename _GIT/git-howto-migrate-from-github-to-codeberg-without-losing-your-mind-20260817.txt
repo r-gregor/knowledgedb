@@ -1,0 +1,192 @@
+filename: git-howto-migrate-from-github-to-codeberg-without-losing-your-mind-20260817.txt
+https://dev.to/alanwest/how-to-actually-migrate-from-github-to-codeberg-without-losing-your-mind-33bf
+
+How to Actually Migrate from GitHub to Codeberg Without Losing Your Mind
+
+So you´ve finally decided to move some repos off GitHub. Maybe it´s the AI training concerns, maybe it´s
+the principle of using a platform run by a nonprofit, or maybe you just like the idea of Forgejo. Whatever
+the reason, you´ve landed on Codeberg — and now you´re staring at dozens of repositories wondering
+how to do this without mass-breaking everything.
+
+I´ve been there. I migrated about 15 repos last month, and honestly? The actual migration is the easy
+part. It´s everything around the migration that trips you up.
+The Real Problem: It´s Not the Git Part
+
+Let´s be clear about something. Moving a git repository from one remote to another is trivial. You´ve
+probably done it a hundred times:
+
+$> git remote set-url origin https://codeberg.org/yourname/yourrepo.git
+$> git push --all
+$> git push --tags
+
+That´s it for the code. But your repo isn´t just code, is it? It´s issues, pull requests, CI
+pipelines, badges in your README, links other people have bookmarked, and contributor workflows that
+assume GitHub. That´s where the pain lives.
+
+Step 1: Use Codeberg´s Built-In Migration Tool
+Codeberg runs on Forgejo (a community fork of Gitea), and it has a surprisingly solid migration feature
+built right in. Go to the "+" menu in the top right, select "New Migration," and paste your GitHub repo URL.
+
+Here´s what it can pull over:
+  * All branches and tags (obviously)
+  * Issues and their comments
+  * Labels and milestones
+  * Pull requests (as issues, since the branches may not apply cleanly)
+  * Releases with attached assets
+
+The important thing is to check all the boxes during migration. I skipped the issues checkbox on my
+first repo thinking I´d do it manually later. I did not do it manually later. Don´t be me.
+
+# If you prefer the API over the web UI, you can script it:
+$> curl -X POST "https://codeberg.org/api/v1/repos/migrate" \
+	-H "Authorization: token YOUR_CODEBERG_TOKEN" \
+	-H "Content-Type: application/json" \
+	-d '{
+		"clone_addr": "https://github.com/yourname/yourrepo.git",
+		"repo_name": "yourrepo",
+		"repo_owner": "yourname",
+		"service": "github",
+		"auth_token": "YOUR_GITHUB_TOKEN",
+		"mirror": false,
+		"issues": true,
+		"labels": true,
+		"milestones": true,
+		"releases": true,
+		"pull_requests": true
+	}'
+
+The auth_token for GitHub is needed if you´re migrating private repos or want to pull over issues. A
+fine-grained personal access token with read-only permissions works fine.
+
+Step 2: The Lazy Redirect Strategy
+Here´s the thing most migration guides skip: you don´t have to go all-in on day one. The lazy approach
+is to keep your GitHub repo around as a mirror that redirects people to Codeberg.
+
+Update your GitHub repo description to something like:
+This repo has moved to https://codeberg.org/yourname/yourrepo
+
+Then update your README:
+
+## This project has moved
+
+This repository is now maintained at
+[codeberg.org/yourname/yourrepo](https://codeberg.org/yourname/yourrepo).
+
+This GitHub mirror may be out of date. Please file issues and contributions on Codeberg.
+
+Archive the GitHub repo (Settings --> Danger Zone --> Archive) so it becomes read-only. This way existing
+links don´t 404, stars and forks stay visible, and you´re not maintaining two active copies.
+
+Step 3: Fix Your CI (This Is Where It Actually Hurts)
+If you were using GitHub Actions, that´s the one thing that absolutely will not follow you. Codeberg
+supports Woodpecker CI, which is a community-maintained fork of Drone. The syntax is different but the
+concepts map pretty directly.
+
+Here´s a GitHub Actions workflow vs the Woodpecker equivalent:
+
+# .woodpecker.yml — equivalent of a basic CI build
+steps:
+- name: test
+	image: node:20-alpine
+	commands:
+	- npm ci
+	- npm test
+
+- name: lint
+	image: node:20-alpine
+	commands:
+	- npm ci
+	- npm run lint
+
+It´s simpler than GitHub Actions, which is both a blessing and a curse. No marketplace of prebuilt
+actions, but also no YAML spaghetti with uses: some-random-person/action@v3 and fingers crossed they
+haven´t been compromised.
+
+You´ll need to enable CI for your repo at ci.codeberg.org. Sign in with your Codeberg account and
+activate the repo. Woodpecker picks up .woodpecker.yml from your repo root automatically.
+
+Step 4: Batch Migrate Like a Reasonable Person
+If you have more than a handful of repos, do NOT migrate them all at once. Seriously. I made a simple
+script that migrates repos one at a time with a delay, so I could sanity-check each one:
+
+#!/bin/bash
+# migrate-repos.sh — migrate a list of repos from GitHub to Codeberg
+
+CODEBERG_TOKEN="your_codeberg_token"
+GITHUB_TOKEN="your_github_token"
+CODEBERG_USER="yourname"
+GITHUB_USER="yourname"
+
+# list your repos, one per line
+REPOS=(
+	"project-alpha"
+	"dotfiles"
+	"cool-library"
+)
+
+for repo in "${REPOS[@]}"; do
+	echo "Migrating $repo..."
+	curl -s -X POST "https://codeberg.org/api/v1/repos/migrate" \
+		-H "Authorization: token $CODEBERG_TOKEN" \
+		-H "Content-Type: application/json" \
+		-d "{
+			\"clone_addr\": \"https://github.com/$GITHUB_USER/$repo.git\",
+			\"repo_name\": \"$repo\",
+			\"repo_owner\": \"$CODEBERG_USER\",
+			\"service\": \"github\",
+			\"auth_token\": \"$GITHUB_TOKEN\",
+			\"mirror\": false,
+			\"issues\": true,
+			\"labels\": true,
+			\"releases\": true
+		}"
+	echo "Done. Check https://codeberg.org/$CODEBERG_USER/$repo"
+	sleep 5  # be nice to the API
+done
+
+I migrated 3-4 repos per day, verified each one, and moved on. Took about a week total for 15 repos but
+nothing broke.
+
+What You´ll Actually Miss
+I want to be honest about the tradeoffs because pretending Codeberg is a perfect replacement helps nobody:
+
+  * GitHub Actions ecosystem — Woodpecker works but you´ll rewrite CI configs and lose access to the
+    massive actions marketplace
+  * Discoverability — Nobody is browsing Codeberg to find new projects. If your project depends on
+    drive-by contributors, this matters
+  * GitHub Pages — Codeberg has Codeberg Pages, but the setup is different. You´ll need a separate
+    branch or repo
+  * Dependency graph / Dependabot — Doesn´t exist on Codeberg. You´ll want to set up Renovate Bot
+    or similar yourself
+  * Network effects — Your contributors need Codeberg accounts. Some won´t bother
+
+On the flip side, Codeberg is fast, the Forgejo UI is clean and actively improving, and there´s something
+genuinely nice about using a platform that´s run by a nonprofit in the EU with no VC money involved.
+
+Prevention: Set Yourself Up So the Next Migration Is Easier
+The real lesson from any platform migration is to reduce lock-in going forward:
+
+  * Keep CI config minimal — The less platform-specific magic you use, the easier the next move. Prefer
+    running shell scripts from CI rather than relying on platform-specific action plugins
+  * Use generic git features — Issues and PRs are the main lock-in. Consider using a CONTRIBUTING.md
+    that works anywhere
+  * Mirror from the start — You can push to multiple remotes trivially. Add this to your git config
+    and you´re always one step ahead:
+
+# Push to both GitHub and Codeberg simultaneously
+$> git remote set-url --add --push origin https://codeberg.org/yourname/repo.git
+$> git remote set-url --add --push origin https://github.com/yourname/repo.git
+
+Now every git push goes to both. When you´re ready to drop GitHub, just remove that URL.
+
+The Bottom Line
+Migrating to Codeberg isn´t hard. It´s just tedious if you have a lot of repos with active issues and
+CI. The lazy strategy — migrate with the built-in tool, redirect GitHub repos, fix CI gradually —
+works well and doesn´t require a heroic weekend of DevOps.
+
+Start with one or two less-critical repos. Get comfortable with the workflow. Then move the rest at your
+own pace. The repos aren´t going anywhere.
+
+
+---
+
