@@ -1,0 +1,158 @@
+filename: fzf-feel-snappy-again-in-large-repositories-20260811.txt
+https://dev.to/jerry_schneider/how-i-made-fzf-feel-snappy-again-in-large-repositories-208n
+
+How I Made fzf Feel Snappy Again in Large Repositories
+
+Most of the time when I´m working in the terminal, I´m navigating files. Usually that looks like some
+combination of:
+$> cd
+$> ls
+$> find
+$> grep
+
+Which works fine... until a project gets large. Then it turns into:
+$> cd src
+$> ls
+$> cd components
+$> ls
+$> cd something
+$> find . -iname something
+
+I wanted something closer to Ctrl+P in an editor. A quick fuzzy search that lets me jump to files or
+directories instantly. So I added a small function to my .bashrc that lets me browse the filesystem with
+fzf like a tiny interactive file browser:
+  * fuzzy search files and directories
+  * preview files
+  * preview directory contents
+  * open files in $EDITOR
+  * cd into directories
+
+The Function
+Here´s the function from my dotfiles.
+
+# Browse files and directories with fzf - cd to directories, open files with $EDITOR;
+
+function browse() {
+	command -v fzf >/dev/null || { echo "fzf not found" >&2; return 1; }
+
+	local selection fifo="/tmp/browse_$$"
+
+	# Create named pipe
+	mkfifo "$fifo"
+
+	# Run find (or fd if available) in background, writing to named pipe (suppress job control)
+	if command -v fd >/dev/null 2>&1; then
+		{ fd -H -t f -t d . > "$fifo"; } &
+	else
+		{ (find . -type f -o -type d 2>/dev/null | sed 's|^\./||') > "$fifo"; } &
+	fi
+	local find_pid=$!
+
+	# Run fzf reading from named pipe
+	selection=$(fzf ${1:+-q "$1"} --preview 'if [[ -d {} ]]; then ls -la {}; else bat --style=numbers\
+	--color=always --line-range :50 {} 2>/dev/null || cat {} 2>/dev/null || echo "Cannot preview file"; \
+	fi' <"$fifo")
+	local exit_code=$?
+
+	# Kill background process and cleanup (suppress all output)
+	kill $find_pid >/dev/null 2>&1
+	wait $find_pid >/dev/null 2>&1
+	rm -f "$fifo"
+
+	[[ $exit_code -ne 0 ]] && return $exit_code
+
+	[[ -z "$selection" ]] && return
+
+	if [[ -d "$selection" ]]; then
+		builtin cd "$selection"
+	elif [[ -f "$selection" ]]; then
+		${EDITOR:-vim} "$selection"
+	else
+		echo "Selection is neither a file nor a directory: $selection" >&2
+		return 1
+	fi
+}
+
+Now I can run:
+$> browse
+
+or even:
+$> browse bash
+
+And instantly fuzzy-search everything under the current directory.
+
+Streaming Results to fzf with a Named Pipe
+This is the most interesting part.
+
+Instead of running find first and piping into fzf, the function uses a named pipe.
+mkfifo "$fifo"
+
+Then find (or fd for better performance) runs in the background writing results into the pipe:
+fd ... > "$fifo" &
+
+And fzf reads from the pipe:
+fzf < "$fifo"
+
+This means:
+fzf can start immediately while results are still being discovered. For large directories this feels much
+faster and allows you to make a selection before find completes.
+
+Binding the Function Directly in Bash
+Instead of triggering browse by injecting a command into the prompt, I prefer binding it directly to a key in
+Bash.
+
+Here´s the helper I use:
+
+## Bindings ##
+bind_bash_function() {
+	local key="$1"
+	local fn="$2"
+	local wrapper="__bind_${fn//[^a-zA-Z0-9_]/_}"
+
+	eval "
+$wrapper() {
+	local __line=\$READLINE_LINE
+	local __point=\$READLINE_POINT
+
+	$fn
+
+	READLINE_LINE=\$__line
+	READLINE_POINT=\$__point
+}
+"
+
+	bind -m emacs-standard -x "\"$key\": $wrapper"
+	bind -m vi-insert      -x "\"$key\": $wrapper"
+}
+
+bind_bash_function '\C-f' browse
+
+This binds Ctrl+F directly to the browse function.
+The small wrapper saves the current command line (READLINE_LINE and cursor position), runs the function,
+and then restores the line afterwards. That way the binding behaves more like a temporary tool: it runs,
+does its work, and then returns you to exactly the same prompt state you were in before.
+
+This makes the interaction feel much smoother, especially if you trigger it while you´re in the middle
+of typing a command. The helper also binds the key for both Emacs-style and vi-style editing modes so
+the behavior stays consistent regardless of the editing mode in use.
+Why I Prefer This Over Other Tools
+
+There are plenty of file navigation tools out there, but I like this approach because it stays simple
+and fits naturally into my shell. It:
+  * lives entirely in my .bashrc
+  * only depends on fzf (and bat if you want color)
+  * can be bound directly to a key like Ctrl+F
+  * returns you to exactly the same command line after it runs
+
+Binding it directly to a key makes it feel less like a command I have to remember and more like a built-in
+capability of the shell. It´s just a small shell upgrade, but it removes a surprising amount of friction
+from everyday workflows.
+
+Small Shell Improvements Compound
+I treat my dotfiles like a collection of tiny productivity improvements. Each one only saves a few
+seconds, but when you run thousands of shell commands every week, those seconds add up. This browse
+function ended up being one of my favorites.
+
+
+---
+
