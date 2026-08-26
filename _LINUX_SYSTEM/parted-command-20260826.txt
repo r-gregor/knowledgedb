@@ -1,0 +1,312 @@
+filename: parted-command-20260826.txt
+https://linuxize.com/post/parted-command-in-linux/
+
+parted Command in Linux: Manage Disk Partitions
+Aug 24, 2026
+
+Managing disk partitions with the parted command in Linux
+When a new disk appears in lsblk, it is visible to Linux but still has nowhere to store files. The disk
+needs a partition table and at least one partition before you create a filesystem and mount it. The
+parted command manages those boundaries from the terminal, works with both GPT and MBR tables, and can
+run interactively or from a script.
+
+Unlike fdisk, which stages changes until you write the table, parted applies most commands immediately. This
+guide explains how to inspect a disk, create a GPT partition table, add aligned partitions, resize a
+partition boundary, and remove a partition without losing track of which storage layer you are changing.
+
+Warning
+Partitioning the wrong disk can make its data inaccessible. Before every write operation, confirm the
+device with lsblk , use the whole-disk name such as /dev/sdb rather than a partition such as /dev/sdb1,
+and keep a current backup of any disk that holds data.
+
+parted Command Syntax
+The general form of the command is:
+$> parted [OPTIONS] [DEVICE [COMMAND [ARGUMENTS]]]
+
+Always pass the device explicitly. If you omit it, parted tries to choose a device, which is not a risk
+worth taking on a machine with several disks.
+
+The options you will use most often are:
+  -l, --list - List partition layouts on all detected block devices.
+  -s, --script - Never prompt for input. Use this only after validating the device and command.
+  -m, --machine - Produce colon-separated output for scripts.
+  -j, --json - Produce JSON output on versions that support it.
+  -a, --align - Choose the alignment type for newly created partitions. The default is optimal.
+
+The examples place options before the device and put -- before the parted command. The separator matters
+when an argument begins with a dash, such as the -1s end position that means the last sector of the
+disk. Without it, parted reads -1s as an invalid option instead of a position.
+
+Installing parted
+Most distributions include parted. If the command is missing, install it with your distribution package
+manager.
+
+On Ubuntu, Debian, and Derivatives:
+$> sudo apt update
+$> sudo apt install parted
+
+On Fedora, RHEL, and Derivatives:
+$> sudo dnf install parted
+
+Confirm the installed version before continuing:
+$> parted --version
+
+Listing Disks and Free Space
+Start with lsblk so you can match each device name to its size, model, filesystem, and mount points:
+$> lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL
+
+A row with TYPE set to disk is a whole device, while rows marked part are partitions. Confirm the size
+and model instead of relying on a name such as /dev/sdb, since device names can change between boots.
+
+Next, list the partition table on every detected disk:
+$> sudo parted --list
+
+output
+
+Model: ATA Samsung SSD 870 (scsi)
+Disk /dev/sda: 500GB
+Sector size (logical/physical): 512B/512B
+Partition Table: gpt
+Disk Flags:
+
+Number  Start   End     Size    File system  Name                  Flags
+ 1      1049kB  538MB   537MB   fat32        EFI System Partition  boot, esp
+ 2      538MB   500GB   500GB   ext4
+
+The Partition Table line identifies the layout as gpt or msdos (MBR). The partition rows show the
+boundaries, detected filesystem, GPT name, and any flags.
+
+To inspect one disk in MiB and include its unallocated regions, use unit MiB followed by print free:
+$> sudo parted /dev/sdb -- unit MiB print free
+
+output
+
+Model: QEMU QEMU HARDDISK (scsi)
+Disk /dev/sdb: 102400MiB
+Sector size (logical/physical): 512B/512B
+Partition Table: gpt
+Disk Flags:
+
+Number  Start     End        Size       File system  Name  Flags
+        0.02MiB   1.00MiB    0.98MiB    Free Space
+ 1      1.00MiB   51200MiB   51199MiB   ext4         data
+        51200MiB  102400MiB  51200MiB   Free Space
+
+Rows without a number are unallocated regions. The small gap at the start of the disk holds the GPT
+header, while the 51200MiB region after partition 1 is space available for a new partition. This read-only
+command is the one to run before creating or extending a partition, since it shows whether free space
+exists and on which side of the existing partitions it sits.
+
+On parted 3.4 and later, --json returns the same layout as structured data for scripts:
+$> sudo parted --json /dev/sdb -- unit MiB print
+
+output
+
+{
+	"disk": {
+		"path": "/dev/sdb",
+		"size": "102400MiB",
+		"model": "QEMU QEMU HARDDISK (scsi)",
+		"transport": "scsi",
+		"logical-sector-size": 512,
+		"physical-sector-size": 512,
+		"label": "gpt",
+		"max-partitions": 128,
+		"partitions": [
+			{
+				"number": 1,
+				"start": "1.00MiB",
+				"end": "51200MiB",
+				"size": "51199MiB",
+				"name": "data",
+				"filesystem": "ext4"
+			}
+		]
+	}
+}
+
+Pipe that into jq when a script needs a single value, such as jq -r '.disk.partitions[].size'.
+
+You can also open an interactive session by passing only the device:
+$> sudo parted /dev/sdb
+
+output
+
+GNU Parted 3.7
+Using /dev/sdb
+Welcome to GNU Parted! Type 'help' to view a list of commands.
+(parted)
+
+At the (parted) prompt, enter commands such as print, mkpart, and quit. The remaining examples use
+command-line mode so each operation and its target are visible in one copy-pasteable command.
+
+Creating a GPT Partition Table
+A new disk needs a partition table before it can hold partitions. GPT is the standard choice for current
+systems and is required when an MBR table with 512-byte sectors would exceed its 2 TiB addressing limit.
+
+Run the inspection command again immediately before creating the table:
+$> lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL /dev/sdb
+
+Once /dev/sdb is confirmed as the intended disk, create the GPT label:
+$> sudo parted --script /dev/sdb -- mklabel gpt
+
+This replaces the existing partition table and makes its old partitions inaccessible. The --script option
+suppresses prompts; it is not a dry run and does not make the operation safer. Use mklabel msdos only
+when you specifically need an MBR table for legacy compatibility.
+
+Creating an Aligned Partition
+The mkpart command takes a GPT partition name, a filesystem type hint, and the start and end positions. To
+create one data partition that fills the usable disk space, run:
+$> sudo parted --script /dev/sdb -- mkpart data ext4 1MiB 100%
+
+The name is data, and ext4 sets the intended partition type. It does not create an ext4 filesystem. Starting
+at 1MiB leaves room for the GPT metadata and gives the partition a common aligned starting point; 100%
+extends it to the last usable part of the disk.
+
+For two partitions, give each one its own range. This example creates a 50 GiB data partition and uses
+the remaining space for backups:
+$> sudo parted --script /dev/sdb -- mkpart data ext4 1MiB 50GiB
+$> sudo parted --script /dev/sdb -- mkpart backup ext4 50GiB 100%
+
+IEC units such as MiB and GiB identify exact positions. Decimal units such as MB and GB allow parted to
+choose a nearby position, so explicit IEC units are easier to reason about in repeatable commands.
+
+Print the finished layout:
+$> sudo parted /dev/sdb -- unit MiB print free
+
+Then check the alignment of partition 1:
+$> sudo parted /dev/sdb -- align-check optimal 1
+
+output
+
+1 aligned
+
+The alignment check confirms that the partition starts on a boundary suited to the device. If it reports
+not aligned, recreate an empty partition with a suitable start position before writing data to it.
+
+The new partition still has no filesystem. After verifying that /dev/sdb1 is the new empty partition,
+format it separately:
+$> sudo mkfs.ext4 -L data /dev/sdb1
+
+The -L data option assigns a filesystem label, which is separate from the GPT partition name. Follow
+the mount and unmount guide when you are ready to attach the filesystem to the directory tree.
+
+Renaming a GPT Partition
+GPT stores a human-readable name for each partition. To rename partition 1 without changing its filesystem
+label, use the name command:
+$> sudo parted --script /dev/sdb -- name 1 archive
+
+Run print afterward to confirm the new value in the Name column. Partition names are available with GPT
+and several other table formats, but not with an MBR table.
+
+Setting Partition Flags
+Flags mark what a partition is for so that firmware and other tools treat it correctly. The set command
+takes the partition number, the flag name, and on or off:
+$> sudo parted --script /dev/sdb -- set 1 esp on
+
+The flags you will use most often on a GPT disk are:
+  * esp       - Mark the partition as an EFI System Partition. On GPT, boot and esp are the same flag.
+  * bios_grub - Mark the small unformatted partition that GRUB needs to boot a GPT disk on BIOS firmware.
+  * lvm       - Mark the partition as an LVM physical volume.
+  * raid      - Mark the partition as a software RAID member.
+  * msftdata  - Mark the partition as Microsoft basic data, which is the type Windows expects.
+
+Turn a flag off by passing off instead:
+$> sudo parted --script /dev/sdb -- set 1 lvm off
+
+Flags record intent and set the GPT partition type, but they create nothing. Setting lvm does not run
+pvcreate, and setting esp does not put a FAT32 filesystem on the partition. To see which flags the
+current table supports, open an interactive session and run help set.
+
+Resizing a Partition
+Before extending a partition, use print free to confirm that unallocated space begins directly after it:
+$> sudo parted /dev/sdb -- unit MiB print free
+
+If partition 1 is followed by free space, move its end boundary to the end of the disk:
+$> sudo parted --script /dev/sdb -- resizepart 1 100%
+
+The resizepart command changes only the partition boundary. It does not resize the filesystem inside. For
+an ext4 filesystem, grow the filesystem afterward:
+$> sudo resize2fs /dev/sdb1
+
+Use df to confirm the filesystem now sees the extra capacity. Other filesystems need their own resizing
+tools; XFS, for example, grows with xfs_growfs and cannot be shrunk.
+
+Shrinking is a different workflow. You must unmount and shrink a shrinkable filesystem first, check it
+for errors, and only then move the partition boundary. Do not use resizepart alone to shrink a partition,
+since it can cut off live filesystem data.
+
+Removing a Partition
+List the table one final time and note the number of the partition you intend to remove:
+$> sudo parted /dev/sdb -- print
+
+When the number is confirmed, remove partition 2:
+$> sudo parted --script /dev/sdb -- rm 2
+
+The partition disappears from the table immediately, and its former space becomes unallocated. Script mode
+provides no confirmation, so keep the inspection and removal as separate commands rather than chaining them.
+
+Quick Reference
+For a printable quick reference, see the parted cheatsheet.
+-------------------------------------------------------------------------------------------------
+Task                                  Command
+-------------------------------------------------------------------------------------------------
+List all partition tables             sudo parted --list
+Show one disk and its free space      sudo parted /dev/sdb -- unit MiB print free
+Print the layout as JSON              sudo parted --json /dev/sdb -- unit MiB print
+Open interactive mode                 sudo parted /dev/sdb
+Create a GPT table                    sudo parted --script /dev/sdb -- mklabel gpt
+Create an ext4 data partition         sudo parted --script /dev/sdb -- mkpart data ext4 1MiB 100%
+Check optimal alignment               sudo parted /dev/sdb -- align-check optimal 1
+Rename GPT partition 1                sudo parted --script /dev/sdb -- name 1 archive
+Set the EFI system partition flag     sudo parted --script /dev/sdb -- set 1 esp on
+Extend partition 1                    sudo parted --script /dev/sdb -- resizepart 1 100%
+Remove partition 2                    sudo parted --script /dev/sdb -- rm 2
+-------------------------------------------------------------------------------------------------
+
+Troubleshooting
+The kernel still uses the old partition table
+Unmount filesystems on the disk, disable any swap partition it contains, and run sudo partprobe /dev/sdb
+to ask the kernel to reread the table. If the device is still busy, schedule a reboot instead of forcing
+another partition change.
+
+parted reports that a partition is not properly aligned
+Use sudo parted /dev/sdb -- align-check optimal NUMBER to verify the start boundary. If the partition
+is empty, recreate it with a 1MiB start or another boundary that satisfies the device´s reported
+alignment requirements.
+
+A partition was removed by mistake
+Stop writing to the disk. Open sudo parted /dev/sdb, run rescue START END with the approximate old
+boundaries, and confirm the discovered partition only when its location and filesystem match. Recovery
+is not guaranteed, especially after new data has been written.
+
+parted says a partition is in use
+Check lsblk and findmnt, then unmount the filesystem before changing its boundaries. A disk can also
+remain busy because it contains active swap, an LVM physical volume, software RAID, or an encrypted mapping.
+
+FAQ
+Should I use parted or fdisk?
+Both tools support GPT and MBR tables. fdisk provides an interactive workflow that stages changes until
+you write them, while parted is convenient for one-line commands, scripts, alignment checks, and changing
+a partition´s end boundary.
+
+Does parted format partitions?
+No. parted creates the partition entry and can record an intended filesystem type, but it does not create
+the filesystem. Run the appropriate mkfs command on the new partition after checking the device name.
+
+Does resizepart resize the filesystem too?
+No. resizepart only moves the partition´s end boundary. Grow or shrink the filesystem separately with
+the tool designed for that filesystem, and always shrink the filesystem before shrinking its partition.
+
+Should I use GPT or MBR?
+Use GPT for current Linux systems, UEFI boot disks, and disks larger than 2 TiB. Use MBR only when an
+older operating system or firmware requires it.
+Conclusion
+
+parted is most useful when you need precise, repeatable control over partition boundaries, especially
+on GPT disks. Keep inspection and write commands separate, use explicit units, and stop after unexpected
+output instead of pushing through with --script.
+
+
+---
+
