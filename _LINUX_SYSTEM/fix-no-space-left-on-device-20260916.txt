@@ -1,0 +1,297 @@
+filename: fix-no-space-left-on-device-20260916.txt
+https://linuxize.com/post/fix-no-space-left-on-device/
+
+Fix "No Space Left on Device" When df Shows Free Space
+Sep 14, 2026
+
+A command can fail with No space left on device even when df -h reports gigabytes of free space:
+touch: cannot touch '/var/lib/app/cache/item': No space left on device
+
+The message does not always mean that the filesystem has run out of data blocks. Linux also needs a free
+inode for every new file, and the affected path may be on a different mount or a size-limited memory
+filesystem. Btrfs can run out of usable data or metadata space while df still reports free capacity,
+and the kernel returns the same error when a program exhausts its inotify watch limit.
+
+This guide shows how to check each cause in a practical order, identify the exhausted resource, and free
+space safely.
+
+Quick Reference
+-----------------------------------------------------------------------------------
+Check                           Command
+-----------------------------------------------------------------------------------
+Space on the affected path      df -h /affected/path
+Inodes on the affected path     df -ih /affected/path
+Filesystem and source device    findmnt -T /affected/path
+Inode-heavy directories         sudo du --inodes -x -d 2 /path | sort -n | tail -20
+Deleted files still open        sudo lsof +L1
+Btrfs allocation details        sudo btrfs filesystem usage /affected/path
+inotify watch limit             sysctl fs.inotify.max_user_watches
+Docker storage usage            docker system df
+Journal size                    sudo journalctl --disk-usage
+APT cache size                  sudo du -sh /var/cache/apt/archives
+-----------------------------------------------------------------------------------
+
+Check the Exact Path That Failed
+Start by passing the affected path to df, not only the root directory:
+$> df -h /var/lib/app/cache
+
+output:
+Filesystem        Size  Used   Avail   Use%   Mounted on
+/dev/nvme0n1p5    40G   17G    22G     44%    /var
+
+The 'Mounted on' column shows which filesystem actually holds the path. Here the failing directory lives
+on a separate /var filesystem, not on the root filesystem that df -h / would have reported. A server
+may have separate filesystems for /, /var, /home, /tmp, container storage, or application data, and each
+one fills up independently.
+
+Display the source device, filesystem type, and mount point with:
+$> findmnt -T /var/lib/app/cache
+
+output:
+TARGET   SOURCE           FSTYPE   OPTIONS
+/var     /dev/nvme0n1p5   ext4     rw,relatime
+
+If Use% is 100%, the filesystem is genuinely out of data blocks. Use du or the guide on finding large
+files in Linux to locate the largest directories and files.
+
+Check Inode Usage
+When block usage looks normal, check inodes on the same path:
+$> df -ih /var/lib/app/cache
+
+output:
+Filesystem        Inodes   IUsed   IFree   IUse%   Mounted on
+/dev/nvme0n1p5    2.6M     2.6M    0       100%    /var
+
+Each file and directory consumes an inode. A filesystem containing millions of tiny cache, session,
+queue, or temporary files can run out of inodes while still having substantial free capacity in bytes.
+
+If IFree is 0 or IUse% is 100%, inode exhaustion is the cause.
+
+Find Directories Using the Most Inodes
+The GNU du command can count inodes instead of bytes. To inspect /var without crossing into other
+mounted filesystems:
+$> sudo du --inodes -x -d 2 /var 2>/dev/null | \
+  sort -n | \
+  tail -20
+
+output:
+12540    /var/lib/systemd
+48201    /var/lib/docker
+73122    /var/cache
+2310884  /var/lib/app/cache
+2485119  /var/lib
+2621402  /var
+
+The largest counts appear at the bottom. In this example, /var/lib/app/cache alone accounts for almost
+every inode on the filesystem. Repeat the command on the highest directory with a greater depth:
+$> sudo du --inodes -x -d 3 /var/lib/app/cache 2>/dev/null | \
+  sort -n | \
+  tail -20
+
+This narrows the search before you remove anything.
+
+For a file-count view grouped by parent directory, use:
+$> sudo find /var -xdev -type f -printf '%h\n' 2>/dev/null | \
+  sort |    \
+  uniq -c | \
+  sort -n | \
+  tail -20
+
+This command may take time on a filesystem containing millions of files. It does not delete anything.
+
+Remove Excess Small Files Safely
+Once you identify the directory, determine which application owns it and whether the files are
+disposable. Common sources include:
+  * Application caches that do not expire old entries.
+  * PHP session directories.
+  * Mail queues.
+  * Container image layers and build caches.
+  * Monitoring data and rotated logs.
+  * Temporary files created by failed jobs.
+
+Preview old temporary files before deleting them:
+$> sudo find /tmp -xdev -type f -mtime +7 -print
+
+If the list contains only files that are safe to remove, rerun it with -delete:
+$> sudo find /tmp -xdev -type f -mtime +7 -delete
+
+Do not run broad find ... -delete commands against application directories until you know their retention
+rules. Prefer the application´s own cleanup command when one exists.
+
+On Ubuntu and Debian, clear downloaded package archives with:
+$> sudo apt clean
+
+Check the system journal´s current size:
+$> sudo journalctl --disk-usage
+
+To remove archived journal data older than seven days:
+$> sudo journalctl --vacuum-time=7d
+
+After cleanup, confirm that inodes are available again:
+$> df -ih /var/lib/app/cache
+
+Check for Deleted Files Still Held Open
+This check covers a different version of the problem: df reports a full filesystem, but du cannot account
+for the usage. A process may still have a deleted file open. The directory entry is gone, but the kernel
+does not release its blocks until the process closes the file descriptor.
+
+List deleted files that remain open:
+$> sudo lsof +L1
+
+output:
+COMMAND   PID  USER   FD   TYPE DEVICE  SIZE/OFF    NLINK   NODE   NAME
+java      4217 app    7w   REG  259,3   8589934592  0       8123   /var/log/app.log (deleted)
+
+The example shows an 8 GB deleted log still held by a Java process. Restart the owning service during
+an appropriate maintenance window:
+$> sudo systemctl restart app.service
+
+Use the actual service name for your process. Confirm the file is gone from the lsof +L1 output and
+check space again with df -h.
+
+Gor a detailed explanation of deleted open files, see the lsof command guide.
+
+Check tmpfs and Container Filesystems
+Paths such as /run, /dev/shm, and sometimes /tmp may use tmpfs, which is backed by memory and has its
+own size limit. Check the affected path directly:
+$> df -h /run /dev/shm /tmp
+
+If a tmpfs mount is full, remove stale files owned by the relevant application or increase the mount
+limit after checking available memory.
+
+Containers also write through overlay filesystems and mounted volumes. A host filesystem may have free
+space while a container-specific mount or storage pool is full. From the host, identify the path and
+mount with findmnt -T. Inside the container, run df -h and df -i to inspect its view.
+
+For Docker, display the space used by images, containers, local volumes, and the build cache with:
+$> docker system df
+
+This command reports Docker´s storage usage without removing anything. Review the detailed output
+before deciding which objects are safe to clean up.
+
+Check Btrfs Data and Metadata Allocation
+Btrfs manages data and metadata in separate block groups. Its copy-on-write allocation can return No
+space left on device even when the free-space total from df looks sufficient.
+
+If findmnt reports btrfs for the affected path, inspect its allocation details with:
+$> sudo btrfs filesystem usage /affected/path
+
+Review the Device unallocated, Free (estimated), Data, and Metadata values together. A filesystem may
+have free data space but too little unallocated capacity to create another metadata block group.
+
+First, remove unneeded files or snapshots according to your retention policy. You can then reclaim
+completely unused data and metadata block groups with:
+$> sudo btrfs balance start -dusage=0 -musage=0 /mountpoint
+
+Replace /mountpoint with the Btrfs mount point shown by findmnt. The usage=0 filters select only empty
+block groups and do not need extra workspace. Do not run an unfiltered balance as a general disk-full
+fix because it rewrites all selected block groups, can take a long time, and needs temporary free space.
+
+Check the inotify Watch Limit
+Editors, build tools, log shippers, and file sync daemons watch files through inotify. Every watched file
+or directory consumes one watch, and the kernel enforces a per-user limit. When a program exceeds that
+limit, inotify_add_watch() fails with the same No space left on device error even though the filesystem
+has free blocks and free inodes. Applications often report it in their own wording:
+
+output:
+Error: ENOSPC: System limit for number of file watchers reached, watch '/srv/app/src'
+
+Display the current limit:
+$> sysctl fs.inotify.max_user_watches
+
+output:
+fs.inotify.max_user_watches = 65536
+
+The value varies by distribution and kernel version. To find which process is consuming the watches,
+count them per file descriptor:
+$> sudo sh -c "grep -c '^inotify' /proc/*/fdinfo/* 2>/dev/null" | \
+  awk -F: '$2 > 0 {print $2, $1}' | \
+  sort -rn | \
+  head
+
+output:
+62184 /proc/2811/fdinfo/23
+1204  /proc/1533/fdinfo/9
+118   /proc/994/fdinfo/12
+
+The PID appears in the path, so 'ps -p 2811 -o comm=' names the program holding the watches. If that
+program is watching a directory it does not need, such as a dependency or build output directory,
+exclude the directory in the program´s own configuration instead of raising the limit.
+
+When the workload genuinely needs more watches, raise the limit for the running system:
+$> sudo sysctl fs.inotify.max_user_watches=524288
+
+Make the change persistent across reboots:
+$> echo 'fs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/90-inotify.conf
+
+Each watch consumes a small amount of kernel memory that cannot be swapped out, so set the limit to
+match the workload rather than to the largest value the system accepts.
+
+Check Filesystem and Kernel Errors
+If space and inodes are available but writes still fail, inspect recent kernel messages:
+$> sudo dmesg --level=err,warn | tail -50
+
+Also check the system journal:
+$> sudo journalctl -k -p warning --since "1 hour ago"
+
+Look for Btrfs allocation warnings, I/O errors, filesystem corruption, a read-only remount, or storage
+device failures. Errors such as Input/output error and Read-only file system need a different fix than
+No space left on device. A filesystem check may be required, but do not run fsck against a mounted
+filesystem. Schedule downtime, unmount the filesystem, and follow the appropriate recovery procedure.
+
+Troubleshooting
+df -h shows space but df -i shows 100 percent
+The filesystem has exhausted its inode table. Find directories containing very large numbers of files,
+then remove or archive files according to the owning application´s retention policy.
+
+df shows more usage than du
+A process probably holds a deleted file open. Run sudo lsof +L1, identify the process, and restart the
+owning service to release the blocks.
+
+The error occurs only in /tmp, /run, or /dev/shm
+The path may be a size-limited tmpfs mount. Run df -h and df -i against that exact path rather than
+checking /.
+
+Docker reports no space while the host has free capacity
+Check Docker´s storage path and filesystem with docker info, docker system df, and findmnt -T
+/var/lib/docker. Review unused images, containers, build cache, and volumes before removing them.
+
+Btrfs reports no space while df shows free capacity
+Run sudo btrfs filesystem usage /affected/path and compare data, metadata, and unallocated space. After
+removing unneeded files or snapshots, a balance limited to -dusage=0 -musage=0 can reclaim empty block
+groups without starting a full balance.
+
+An editor, build tool, or sync daemon reports no space while df and df -i look fine
+The process reached the inotify watch limit. Check fs.inotify.max_user_watches, exclude directories the
+program does not need to watch, and raise the limit in /etc/sysctl.d/ when the workload requires it.
+
+FAQ
+What is an inode?
+An inode stores filesystem metadata for a file or directory, such as its size, ownership, permissions,
+timestamps, and the location of its data blocks. Each filesystem has a finite inode supply, and each
+file normally consumes one inode regardless of its size.
+
+Can I add more inodes to an existing ext4 filesystem?
+The inode count is chosen when the filesystem is created and cannot be increased with an online setting
+change. The practical fixes are to remove excess files, move the workload to another filesystem, or
+recreate the filesystem with a smaller bytes-per-inode ratio suited to many small files.
+
+Why does deleting a large file not free space immediately?
+A running process may still have the deleted file open. Linux releases the blocks only when the last
+file descriptor closes, so df keeps reporting the space as used. Run sudo lsof +L1 to find the process
+and restart the owning service.
+
+Why does the error appear on a system with terabytes of free space?
+The failing write is limited by something other than total capacity, most often the inode count of
+the specific mount, a size-limited tmpfs, container storage, Btrfs allocation, or the inotify watch
+limit. Always check the exact path that failed rather than the root filesystem.
+
+Conclusion
+When df -h shows free space, check the affected path with df -ih and use findmnt to confirm its mount
+and filesystem type. Inode exhaustion, a full nested mount or tmpfs, container storage, Btrfs allocation,
+and the inotify watch limit each need a different fix, while lsof +L1 solves the separate case where df
+is full but du cannot explain the usage.
+
+
+---
+
