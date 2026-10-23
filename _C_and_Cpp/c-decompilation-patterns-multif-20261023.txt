@@ -1,0 +1,672 @@
+filename: c-decompilation-patterns-multif-20261023.txt
+https://blog.sesse.net/blog/2026/Oct/04/index.html
+
+Sun, 04 Oct 2026 - Decompilation patterns part 1: Anti-CSE
+
+   Anti-CSE stands for: Anti-Common Subexpression Elimination
+
+   There´s a lot of¹ interest in decompilation these days; taking some old piece of software (usually a
+   game) and try to reconstruct C that does the same thing. (This is often for modding purposes, but
+   also often for understanding, or just as a personal challenge.) An often sought-after property is
+   matching; that the decompiled C produces 100% the same bytes as the original after compilation. (This
+   means you´ll need to find the original compiler and build flags, of course.) Typically, one starts
+   with the disassembled code and runs m2c on it, which then spits out some C that is fairly close
+   to the original, but rarely produces a match without further cleanup. (It is usually much closer to a
+   match than what Ghidra or Hex-Rays would output; Ghidra is made for ease of understanding, not
+   matching, so it tends to simplify a lot.)
+
+   Cleaning up the code for matching has two main advantages:
+    1. It usually makes the source easier to understand, and
+    2. Matching is a very strong argument (though not infallible) that the decompilation is actually
+       correct.
+
+   Like with pretty much any other field these days, there is a lot of interest in giving this task to
+   some LLM, which means there´s now a lot of decompilations around that match (fitting #2 perfectly)
+   and completely fail #1. :-) Anyway, at some point, I learned that there is almost no public
+   documentation on the cleaning-up-for-matching part; it´s all folklore and people rediscovering the
+   same patterns. So I thought I´d do something about that².
+
+   My general goal is to write up one decompilation pattern a day (focusing on what I know best, namely
+   GCC on MIPS), with some example. Most of them will be very simple; some are much less obvious. I´ll
+   keep going until I run out of ideas. None are formally named, so I´ll just invent a name. So here
+   goes part one:
+
+temp_v0_5 = g_state.players[1].unk2;
+if ((temp_v0_5 != 7) && (temp_v0_5 != 0)) {
+
+   What happened here is usually that the compiler has done common subexpression elimination; someone
+   wrote the same thing twice and then the compiler decided to just calculate it once and put it into a
+   temporary variable. (Or the programmer did, in which case you would be wise to leave it alone!
+   Getting into the original programmer´s head is part of the challenge.) This will often affect
+   register allocation and/or stack layout, so to get a better match, you could try doing CSE in
+   reverse:
+
+if (g_state.players[1].unk2 != 7 && g_state.players[1].unk2 != 0) {
+
+   Nothing is mechanical; it may help or it may not. (It may also appear to hurt at first and then help
+   later, or vice versa.) But anti-CSE is generally very common and you´ll want to have it in your
+   arsenal.
+
+   ¹ Well, all is relative.
+   ² Reluctantly, with the understanding that the LLMs might also learn from it.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/05/index.html
+
+Mon, 05 Oct 2026 - Decompilation patterns part 2: do-while
+
+   Continuing our journey on decompilation patterns, here´s another common one: Let´s say m2c outputs
+   code like this:
+
+loop_151:
+...
+if (var_s0 > var_s1) goto loop_151;
+
+   then the natural change is:
+
+do {
+	...
+} while (var_s0 > var_s1);
+
+   Fewer gotos are nearly always good, and this is a much more likely pattern than the original one.
+
+   m2c often manages to convert gotos to do/while, but not always when they are e.g. nested in some
+   other loop; so often, you may need to apply some other transformation before you get to this point.
+
+   Tomorrow, we´ll look at another variation over this topic.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/06/index.html
+
+Tue, 06 Oct 2026 - Decompilation patterns, part 3: do-while-while
+
+   Today´s decompilation pattern is a variation on yesterday´s loop pattern, because loops are important
+   and tend to induce a lot of transformations by the compiler. So assume you have code like this
+   (perhaps after converting a goto):
+
+if (var_s0 > var_s1) {
+	// Perhaps some other initialization stuff here
+	do {
+		...
+	} while (var_s0 > var_s1);
+}
+
+   Assuming there are no side effects from the initializations, a natural candidate would be that the
+   programmer instead wrote:
+
+// Initialization stuff moved up here
+while (var_s0 > var_s1) {
+	...
+}
+
+   Remember to remove the old while so that it does not say while (x) { ... } while (x); it won´t tell
+   you with a syntax error, but rather leave an infinite loop that will mess up the generated code.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/07/index.html
+
+Wed, 07 Oct 2026 - Decompilation patterns, part 4: range comparison
+
+   Today, we´re looking at a rewrite that rarely differs for matching, but can mean quite a lot for
+   understanding the code. Say that you have a signed variable and the compiler has suddenly decided to
+   make an unsigned comparison:
+
+if ((u32) (x - 4) < 2) {
+	...
+
+   What´s happening is that it uses a controlled overflow to do two signed comparisons using one
+   unsigned comparison. How does this work?
+
+   Since the comparison is unsigned, this is trivially equivalent to the first expression:
+
+if ((u32) (x - 4) >= 0 && (u32) (x - 4) < 2) {
+	...
+
+   and since negative numbers compare larger than 6 in unsigned comparisons, nothing prevents us from
+   adding 4 on each side of the inequality signs:
+
+if ((u32) (x) >= 4 && (u32) (x) < 6) {
+	...
+
+   which is, for the same reason, equivalent to:
+
+if (x >= 4 && x < 6) {
+	...
+
+   which is what you probably should be writing.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/08/index.html
+
+Thu, 08 Oct 2026 - Decompilation patterns, part 5: Nested if/goto
+
+   Here´s a pattern that sometimes comes up:
+
+if (x == 3) {
+	if (y == 4) {
+		...
+	} else {
+		goto label_5;
+	}
+} else {
+	label_5:
+	...
+}
+
+   We don´t like gotos, and here, it´s pretty obvious what was meant, namely:
+
+if (x == 3 && y == 4) {
+	...
+} else {
+	label_5:
+	...
+}
+
+   And now you can usually delete label_5 because nothing points to it.
+
+   Often, m2c can do this by itself, but as usual, you may get to this point only after cleaning up
+   other things.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/09/index.html
+
+Fri, 09 Oct 2026 - Decompilation patterns, part 6: If-add-else
+
+   Often, m2c will spit out something like this:
+
+x = 3;
+
+if (a == 10) {
+	x = 4;
+}
+
+   This may be what was intended, but if it doesn´t match (usually due to different register allocation;
+   the rewrite itself is nearly always going to be taken, since it saves a branch on one of the paths),
+   this is often a better rewrite:
+
+if (a == 10) {
+	x = 4;
+} else {
+	x = 3;
+}
+
+   and in some cases, this may have different code generation (especially as you can stick it into an
+   argument list):
+
+x = (a == 10) ? 4 : 3;
+
+   This is a bit more of a trial and error than the others, and of course, it depends on the computed
+   values not having side effects.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/10/index.html
+
+Sat, 10 Oct 2026 - Decompilation patterns, part 7: if to condition
+
+   A variation of the pattern from yesterday; say you have:
+
+if (x == 3) {
+	y = 0;
+} else {
+	y = 1;
+}
+
+   When these are zero and one, sometimes this will give a better match, since booleans are evaluated as
+   such:
+
+y = (x != 3);
+
+   It´s rare to have something else than zero or one work for this pattern (e.g. you would rarely write
+   y = (x != 3) * 2 + 1).
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/11/index.html
+
+Sun, 11 Oct 2026 - Decompiler patterns, part 8: Un-repetition of conditions
+
+   Today, for a slightly more complicated snippet, but still in the same general area; say you have code
+   like this:
+
+x = (0x1000 - y) / 24;
+z = var_s5 < 5;
+
+if (x >= 0x81) {
+	x = 0x80;
+	z = var_s5 < 5;
+}
+
+var_s4 = 0;
+
+if (z == 0) {
+	...
+
+   In particular, note the z = var_s5 < 5; repeated. Most likely, this is the compiler sticking stuff
+   into branch delay slots, or else re-checking the condition if var_s5 changed in the branches (it does
+   not here). You almost certainly want to undo this into:
+
+x = (0x1000 - y) / 24;
+
+if (x >= 0x81) {
+	x = 0x80;
+}
+
+var_s4 = 0;
+
+if ((var_s5 < 5) == 0) {
+	...
+
+   and the if, as we already know, should probably rather then be:
+
+if (var_s5 >= 5) {
+	...
+
+   For a small bonus (since I´m not going to have a separate post about it), you can choose to change
+   the upper if to:
+
+if (x > 0x80) {
+	x = 0x80;
+}
+
+   which generates exactly the same code (on MIPS), but may in many cases be easier to understand.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/12/index.html
+
+Mon, 12 Oct 2026 - Decompilation patterns part 9, sign extension
+
+   Today, for something completely different:
+
+s.x = (s16) ((s32) (temp_v0 << 0x10) >> 0x11);
+
+   MIPS has 16-bit loads and stores, but not 16-bit (signed) arithmetic, so if it wants to do that, it
+   needs to sign-extend to 32-bit first. And it does that by first shifting up by 16 so that the 16-bit
+   sign bit is at the 32-bit sign bit, and then it can do an arithmetic shift afterwards. So what you
+   want is:
+
+s16 temp_v0;
+s.x = temp_v0 >> 1;
+
+   Sometimes, it can be pretty stubborn, and you´ll need to go through memory or similar before GCC
+   really inserts the shift patterns you want.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/13/index.html
+
+Tue, 13 Oct 2026 - Decompilation patterns, part 10: return var_v0
+
+   The v0 register on MIPS is special in that it is the return register (like rax is on x86-64), so when
+   you see code like this:
+
+if (x == 3) {
+	var_v0 = 1;
+} else if (y == 4) {
+	...
+	var_v0 = 3;
+}
+
+var_v0 = 5;
+return var_v0;
+
+   then you have to consider the possibility that the intended match is:
+
+if (x == 3) {
+	return 1;
+} else if (y == 4) {
+	...
+	return 3;
+} else {
+	return 5;
+}
+
+   Whether you put the last return in an else block or not is irrelevant for the match, of course, it´s
+   purely a matter of taste.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/14/index.html
+
+Wed, 14 Oct 2026 - Decompilation patterns, part 11: Irregular switch
+
+   Here´s one that m2c usually gets right itself, but sometimes cannot:
+
+if (var_v1_7 != 1) {
+	if (var_v1_7 < 2) {
+		if (var_v1_7 != 0) {
+			spF0 = 40;
+		} else {
+			vram_x = cmt46->vram_x;
+			vram_y = cmt46->vram_y;
+			spF0 = 40;
+		}
+	} else if (var_v1_7 != 2) {
+		if (var_v1_7 != 3) {
+			...
+
+   Repeated comparisons against the same variable, especially in a nested form that could be binary
+   search, should remind you of one thing: A switch. Usually, the compiler implements a switch with a
+   jump table, but not always; if there are few conditions, or the range is too large for a
+   reasonably-sized table, it will do some ifs instead (or, enough ifs to get within the range of a
+   table). So what you want here is more like:
+
+switch (var_v1_7) {
+	case 0:
+		vram_x = cmt46->vram_x;
+		vram_y = cmt46->vram_y;
+		spF0 = 40;
+		break;
+	case 1:
+		spF0 = 40;
+		break;
+	case 2:
+		...
+}
+
+   Remember that sometimes, you may need to insert cases that are not explicitly mentioned in the ifs
+   (and/or a default case) to get everything to match back properly.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/15/index.html
+
+Thu, 15 Oct 2026 - Decompilation patterns, part 12: __builtin_memcpy
+
+   Say you see this lovely chunk of decompiled code:
+
+var_v1 = &sp10;
+var_v0 = D_80010040;
+temp_s4 = var_v1;
+sp110 = &sp2C;
+sp114 = &sp30;
+
+do {
+	var_v1->unk0 = (s32) var_v0->unk0;
+	var_v1->unk4 = (s32) var_v0[1];
+	var_v1->unk8 = (s32) var_v0[2];
+	var_v1->unkC = (s32) var_v0[3];
+	var_v0 += 0x10;
+	var_v1 += 0x10;
+} while (var_v0 != &D_8001040[0x3C]);
+
+var_v1->unk0 = (s32) var_v0->unk0;
+var_v1->unk4 = (s32) var_v0[1];
+var_v1->unk8 = (s32) var_v0[2];
+
+   If you ignore the fact that m2c wrote ->unk0 for [0] (it has a bit of an annoying habit to do that),
+   this is obviously something copying 16 bytes at a time and then 12 more bytes at the end. But would a
+   programmer ever do this? Nope, this is an inlined, unrolled memcpy.
+
+   This is known in GCC as __builtin_memcpy, and it can happen either implicitly, or by some sort of
+   lowering from a struct or array copy (e.g., through initialization of a stack array). Depending a bit
+   on whether the variable is known to be aligned or not, you´ll either get just lw or some evil lwr/lwl
+   sequence; I´m always struggling a bit to change one to the other. In any case, what you want here is:
+
+__builtin_memcpy(&sp10, D_80010040, 0x4C);
+
+   and then make sp10 the right type instead of a scalar, ideally so that you can use sizeof() on it.
+   Or, in some cases, a direct initialization:
+
+s32 foo[] = { 1, 2, 3, ...more data from D_80010040... };
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/16/index.html
+
+Fri, 16 Oct 2026 - Decompilation patterns, part 13: Reverse loop
+
+   Anyone who´s read "bro-coder" C from before that was a name will recognize this idiom:
+
+var_t1_2 = 0x7F;
+...
+do {
+	...
+	var_t1_2 -= 1;
+} while (var_t1_2 >= 0);
+
+   Why does the loop count backwards? It´s because comparison with zero is cheaper on some (many)
+   platforms. Some people would reverse the loop manually, but compilers quickly managed to do that
+   themselves. So you want:
+
+for (i = 0; i < 0x80; ++i) {
+	...
+}
+
+   and tomorrow, we´ll have a look at what´s inside the loop as well.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/17/index.html
+
+Sat, 17 Oct 2026 - Decompilation patterns, part 14: Strength increase
+
+   Let´s look at the entire loop from yesterday:
+
+u16 spE10;
+u16 *var_v0_2;
+
+...
+
+var_t1_2 = 0x7F;
+var_v0_2 = &spE10 + 0xFE;
+
+do {
+	*var_v0_2 = 0;
+	var_t1_2 -= 1;
+	var_v0_2 -= 2;
+} while (var_t1_2 >= 0);
+
+   What´s going with the pointer arithmetic here? Why is it indexing out-of-bounds?
+
+   The first thing to notice is that m2c doesn´t really take into account that arithmetic on pointers in
+   C is multiplied by the size of the element. And obviously, spE10 is the root of some array. So
+   corrected, this reads:
+
+u16 spE10[0x80];  // Modified.
+u16 *var_v0_2;
+
+...
+
+var_t1_2 = 0x7F;
+var_v0_2 = spE10 + 0x7F;  // Modified.
+
+do {
+	*var_v0_2 = 0;
+	var_t1_2 -= 1;
+    var_v0_2 -= 1;        // Modified.
+} while (var_t1_2 >= 0);
+
+   We saw yesterday how we should rewrite the iteration back to a for loop, but also, most likely, the
+   pointer arithmetic here came from strength reduction; the compiler took a multiplication operation
+   and rewrote it to a "weaker" operation (subtraction) since that´s typically cheaper, at the cost of
+   making the values dependent, an easy trade. So we can rewrite it back into multiplication:
+
+var_t1_2 = 0x7F;
+
+do {
+	var_v0_2 = spE10 + var_t1_2;
+	*var_v0_2 = 0;
+	var_t1_2 -= 1;
+} while (var_t1_2 >= 0);
+
+   and now it´s easy to see that the loop should read:
+
+for (i = 0; i < 0x80; ++i) {
+	spE10[i] = 0;
+}
+
+   and then, of course, the array should get a better name.
+
+   Sometimes the loop counter will go backwards while the pointer will go forwards, which is also
+   completely normal, especially if there´s side effects. The compiler will reverse one but not the
+   other.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/18/index.html
+
+Sun, 18 Oct 2026 - Decompilation patterns, part 15: Redundant if-for
+
+   Yet another way of writing for loops:
+
+var_a2_4 = ...
+
+if (var_a2_4 < 0x78) {
+	...
+	do {
+		...
+		var_a2_4 += 1;
+	} while (var_a2_4 < 0x78);
+}
+
+   This extra if is merely there because the compiler wasn´t able to prove that the variable didn´t
+   start below the bound, so it can´t rewrite the while-do to a do-while without that extra check. So
+   the rewrite still reads:
+
+for (var_a2_4 = ...; var_a2_4 < 0x78; ++var_a2_4) {
+	...
+}
+
+   possibly with the initializer skipped, if it comes from something complex earlier.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/19/index.html
+
+Mon, 19 Oct 2026 - Decompilation patterns, part 16: Tail reduplication
+
+   We´re nearing the end soon, I promise. Here´s one that I see all the time:
+
+ ...
+	} else {
+		var_t0_5 = temp_a0_3 - 0x140;
+		var_a2_5 = 0xA0 - temp_a3_5;
+		goto block_45;
+	}
+} else {
+	var_t0_5 = 0xA0 - temp_a0_3;
+	var_a2_5 = temp_a3_5 - 0x118;
+
+	block_45:
+	var_v0_3 = var_t0_5 + 0xA0;
+	var_v1_4 = var_a2_5 + 0x78;
+}
+
+   So, eh, what´s that goto doing there? What happened was that the compiler helpfully figured it could
+   help with some tail deduplication; someone wrote the same code twice, and the compiler figured taking
+   the cost of a branch was better than keeping it duplicated. (In a sense, it´s the opposite of
+   inlining. Ish.) In most cases, it´s as simple as copying the block and then you can remove the label:
+
+ ...
+	} else {
+		var_t0_5 = temp_a0_3 - 0x140;
+		var_a2_5 = 0xA0 - temp_a3_5;
+		var_v0_3 = var_t0_5 + 0xA0;
+		var_v1_4 = var_a2_5 + 0x78;
+	}
+} else {
+	var_t0_5 = 0xA0 - temp_a0_3;
+	var_a2_5 = temp_a3_5 - 0x118;
+	var_v0_3 = var_t0_5 + 0xA0;
+	var_v1_4 = var_a2_5 + 0x78;
+}
+
+   Sometimes, these are nested, with multiple tails goto-ing into each other, so in that case, you´ll
+   need to reduplicate multiple times. Make sure you actually come out on the correct side afterwards,
+   though.
+
+   As an extra complication, the code is deduplicated not on the C statement level, but on RTL
+   instructions, so if you´re calling functions with five parameters of more (which requires pushing
+   parameters onto the stack), m2c can get really confused and start throwing M2C_ERROR() at you on the
+   receiving side because it´s not clear at all where the parameters would be coming from.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/20/index.html
+
+Tue, 20 Oct 2026 - Decompilation patterns, part 17: Loop rotation
+
+   Occasionally, you´ll see code like this (after initial cleanup):
+
+var_v0_2 = crc & 0x80000000;
+
+do {
+	if (var_v0_2 != 0) {
+		crc = (crc << 1) ^ 0x1EDC6F41;
+	} else {
+		crc <<= 1;
+	}
+	var_a0 += 1;
+	var_v0_2 = crc & 0x80000000;
+} while (var_a0 < 8U);
+
+   The thing with var_v0_2 is unnatural. GCC sometimes does these loop rotation tricks, seemingly to
+   save registers (don´t ask me how exactly it does). You want to un-rotate back into:
+
+do {
+	var_v0_2 = crc & 0x80000000;
+	if (var_v0_2 != 0) {
+		crc = (crc << 1) ^ 0x1EDC6F41;
+	} else {
+		crc <<= 1;
+	}
+	var_a0 += 1;
+} while (var_a0 < 8U);
+
+   and then of course, you can clean up the rest:
+
+for (i = 0; i < 8; ++i) {
+	if (crc & 0x80000000) {
+		crc = (crc << 1) ^ 0x1EDC6F41;
+	} else {
+		crc <<= 1;
+	}
+}
+
+   Last one tomorrow, I think.
+
+
+---
+https://blog.sesse.net/blog/2026/Oct/21/index.html
+
+Wed, 21 Oct 2026 - Decompilation patterns, part 18: Signed division
+
+   As promised, the last one (for now?), and this one blew my mind the first time I saw it:
+
+var_v0 = sp4014;
+
+if ((s32) sp4014 < 0) {
+	var_v0 = sp4014 + 0x7FF;
+}
+
+temp_s1 = 0x800 - (sp4014 - (((s32) var_v0 >> 0xB) << 0xB));
+
+   There´s actually two things going on here. First, the compiler is faking a signed division using
+   shifting (which rounds down) as a building block: If the value is negative, then you add a bias to
+   make shift into round-up. (The right-shift by 0xB, or 11, is exactly a division by 0x800.)
+
+   So this means what we´re looking at is:
+
+var_v0 = (s32) sp4014 / 0x800;
+temp_s1 = 0x800 - (sp4014 - var_v0 * 0x800);
+
+   which reduces further to:
+
+temp_s1 = 0x800 - ((s32) sp4014 % 0x800);
+
+   Tada. That´s it. Now you know all the tricks, except those that I don´t know or that I forgot. You
+   don´t need the LLM. Have fun. :-)
+
+   Edit: Corrected a thinko; of course, MIPS has signed division. This is for power-of-two optimizations
+   only.
+
+
+---
+
