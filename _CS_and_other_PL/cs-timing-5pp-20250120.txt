@@ -1,0 +1,183 @@
+filename: cs_timing_5pp_20250120.txt
+https://blog.plover.com/2024/11/29/#timing
+
+A complex bug with a ⸢simple⸣ fix
+Fri, 29 Nov 2024
+
+   Last month I did a fairly complex piece of systems programming that worked surprisingly well. But it
+   had one big bug that took me a day to track down.
+
+   One reason I find the bug interesting is that it exemplifies the sort of challenges that come up in
+   systems programming. The essence of systems programming is that your program is dealing with the
+   state of a complex world, with many independent agents it can't control, all changing things around.
+   Often one can write a program that puts down a wrench and then picks it up again without looking. In
+   systems programming, the program may have to be prepared for the possibility that someone else has
+   come along and moved the wrench.
+
+   The other reason the bug is interesting is that although it was a big bug, fixing it required only a
+   tiny change. I often struggle to communicate to nonprogrammers just how finicky and fussy programming
+   is. Nonprogrammers, even people who have taken a programming class or two, are used to being harassed
+   by crappy UIs (or by the compiler) about missing punctuation marks and trivially malformed inputs,
+   and they think they understand how fussy programming is. But they usually do not. The issue is much
+   deeper, and I think this is a great example that will help communicate the point.
+
+   The job of my program, called sync-spam, was to move several weeks of accumulated email from system S
+   to system T. Each message was probably spam, but its owner had not confirmed that yet, and the
+   message was not yet old enough to be thrown away without confirmation.
+
+   The probably-spam messages were stored on system S in a directory hierarchy with paths like this:
+    /spam/2024-10-18/...
+
+   where 2024-10-18 was the date the message had been received. Every message system S had received on
+   October 18 was somewhere under /spam/2024-10-18.
+
+   One directory, the one for the current date, was "active", and new messages were constantly being
+   written to it by some other programs not directly related to mine. The directories for the older
+   dates never changed. Once sync-spam had dealt with the backlog of old messages, it would continue to
+   run, checking periodically for new messages in the active directory.
+
+   The sync-spam program had a database that recorded, for each message, whether it had successfully
+   sent that message from S to T, so that it wouldn't try to send the same message again.
+
+   The program worked like this:
+     * Repeat forever:
+         1. Scan the top-level spam directory for the available dates
+         2. For each date D:
+              1. Scan the directory for D and find the messages in it. Add to the database any messages
+                 not already recorded there.
+              2. Query the database for the list of messages for date D that have not yet been sent to T
+              3. For each such message:
+                   1. Attempt to send the message
+                   2. If the attempt was successful, record that in the database
+         3. Wait some appropriate amount of time and continue.
+
+   Okay, very good. The program would first attempt to deal with all the accumulated messages in roughly
+   chronological order, processing the large backlog. Let's say that on November 1 it got around to
+   scanning the active 2024-11-01 directory for the first time. There are many messages, and scanning
+   takes several minutes, so by the time it finishes scanning, some new messages will be in the active
+   directory that it hasn't seen. That's okay. The program will attempt to send the messages that it has
+   seen. The next time it comes around to 2024-11-01 it will re-scan the directory and find the new
+   messages that have appeared since the last time around.
+
+   But scanning a date directory takes several minutes, so we would prefer not to do it if we don't have
+   to. Since only the active directory ever changes, if the program is running on November 1, it can be
+   sure that none of the directories from October will ever change again, so there is no point in its
+   rescanning them. In fact, once we have located the messages in a date directory and recorded them in
+   the database, there is no point in scanning it again unless it is the active directory, the one for
+   today's date.
+
+   So sync-spam had an elaboration that made it much more efficient. It was able to put a mark on a date
+   directory that meant "I have completely scanned this directory and I know it will not change again".
+   The algorithm was just as I said above, except with these elaborations.
+     * Repeat forever:
+         1. Scan the top-level spam directory for the available dates
+         2. For each date D:
+              1.
+                    # If the directory for D is marked as having already been scanned, we already know
+                      exactly what messages are in it, since they are already recorded in the database.
+                    # Otherwise:
+                        1. Scan the directory for D and find the messages in it. Add to the database any
+                           messages not already recorded there.
+                        2. # If D is not today's date, mark the directory for D as having been scanned
+                           completely, because we need not scan it again.
+              2. Query the database for the list of messages for date D that have not yet been sent to T
+              3. For each such message:
+                   1. Attempt to send the message
+                   2. If the attempt was successful, record that in the database
+         3. Wait some appropriate amount of time and continue.
+
+   It's important to not mark the active directory as having been completely scanned, because new
+   messages are continually being deposited into it until the end of the day.
+
+   I implemented this, we started it up, and it looked good. For several days it processed the backlog
+   of unsent messages from September and October, and it successfully sent most of them. It eventually
+   caught up to the active directory for the current date, 2024-11-01, scanned it, and sent most of the
+   messages. Then it went back and started over again with the earliest date, attempting to send any
+   messages that it hadn't sent the first time.
+
+   But a couple of days later, we noticed that something was wrong. Directories 2024-11-02 and
+   2024-11-03 had been created and were well-stocked with the messages that had been received on those
+   dates. The program had found the directories for those dates and had marked them as having been
+   scanned, but there were no messages from those dates in its database.
+
+   Now why do you suppose that is?
+   I investigate this in two ways. First, I made sync-spam's logging more detailed and looked at the
+   results. While I was waiting for more logs to accumulate, I built a little tool that would generate a
+   small, simulated spam directory on my local machine, and then I ran sync-spam against the simulated
+   messages, to make sure it was doing what I expected.
+
+   In the end, though, neither of these led directly to my solving the problem; I just had a sudden
+   inspiration. This is very unusual for me. Still, I probably wouldn't have had the sudden inspiration
+   if the information from the logging and the debugging hadn't been percolating around my head. Fortune
+   favors the prepared mind.
+
+Solution
+   The problem was this: some other agent was creating the 2024-11-02 directory a bit prematurely, say
+   at 11:55 PM on November 1.
+
+   Then sync-spam came along in the last minutes of November 1 and started its main loop. It scanned the
+   spam directory for available dates, and found 2024-11-02. It processed the unsent messages from the
+   directories for earlier dates, then looked at 2024-11-02 for the first time. And then, at around
+   11:58, as per above it would:
+    1. Scan the directory for 2024-11-02 and find the messages in it. Add to the database any messages
+       not already recorded there.
+
+   There weren't any yet, because it was still 11:58 on November 1.
+    2. If 2024-11-02 is not today's date, mark the directory as having been scanned completely, because
+       we need not scan it again.
+
+   Since the 2024-11-02 directory was not the one for today's date - it was still 11:58 on November 1 -
+   sync-spam recorded that it had scanned that directory completely and need not scan it again.
+
+   Five minutes later, at 00:03 on November 2, there would be new messages in the 2024-11-02, which was
+   now the active directory, but sync-spam wouldn't look for them, because it had already marked
+   2024-11-02 as having been scanned completely.
+
+   This complex problem in this large program was completely fixed by changing:
+
+        if ($date ne $self->current_date) {
+          $self->mark_this_date_fully_scanned($date_dir);
+        }
+
+   to:
+
+        if ($date lt $self->current_date) {
+          $self->mark_this_date_fully_scanned($date_dir);
+        }
+
+   ('ne' and 'lt' are Perl-speak for "not equal to" and "less than".)
+
+   Many organizations have their own version of a certain legend, which tells how a famous person from
+   the past was once called out of retirement to solve a technical problem that nobody else could
+   understand. I first heard the General Electric version of the legend, in which Charles Proteus
+   Steinmetz was called out of retirement to figure out why a large complex of electrical equipment was
+   not working.
+
+   In the story, Steinmetz walked around the room, looking briefly at each of the large complicated
+   machines. Then, without a word, he took a piece of chalk from his pocket, marked one of the panels,
+   and departed. When the puzzled engineers removed that panel, they found a failed component, and when
+   that component was replaced, the problem was solved.
+
+   Steinmetz's consulting bill for $10,000 arrived the following week. Shocked, the bean-counters
+   replied that $10,000 seemed an exorbitant fee for making a single chalk mark, and, hoping to
+   embarrass him into reducing the fee, asked him to itemize the bill.
+
+   Steinmetz returned the itemized bill:
+
+   One chalk mark                   $1.00
+   Knowing where to put it      $9,999.00
+   --------------------------------------
+   TOTAL                       $10,000.00
+
+   This felt like one of those times. Any day when I can feel a connection with Charles Proteus
+   Steinmetz is a good day.
+
+   This episode also makes me think of the following variation on an old joke:
+
+     A: Ask me what is the most difficult thing about systems programming.
+     B: Okay, what is the most difficult thing ab-
+     A: TIMING!
+
+
+---
+

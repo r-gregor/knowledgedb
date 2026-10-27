@@ -1,0 +1,977 @@
+filename: ptn-packaging-python-command-line-apps-the-modern-way-with-uv-20250411.txt
+https://thisdavej.com/packaging-python-command-line-apps-the-modern-way-with-uv/
+
+Packaging Python Command-Line Apps the Modern Way with uv
+April 10, 2025
+
+   Summary
+   In this article, I explore how to use uv to build and package Python command-line applications
+   effectively. I demonstrate the step-by-step process of setting up a project, initializing a new CLI
+   app, and managing dependencies with uv, all while using a dictionary API as an example. The focus is
+   on building a professional-grade application that can be distributed as a Python wheel for easy
+   installation via local sharing, PyPI, or GitHub.
+
+   In my previous post, I shared how to [**1]use uv and PEP 723 to create single-file Python scripts with
+   external dependencies. This article made it to the front page of Hacker News, demonstrating there's a lot
+   of excitement around uv and its capabilities. Today we're going to focus on using uv to build a
+   professional grade CLI application that can be distributed as a Python wheel (.whl) and uploaded to PyPI or
+   simply given to others to install and use.
+
+   For simplicity, we'll continue using our dictionary API example to illustrate uv's dependency
+   management and packaging capabilities. Let's get started!
+
+Installing uv
+   As a first step, we need to install uv, if it's not's already installed. Please refer to the official
+   uv documentation for guidance on installing uv. A couple of common ways to install uv include:
+# Assuming you have pipx installed, this is the recommended way since it installs
+# uv into an isolated environment
+$> pipx install uv
+
+# uv can also be installed this way
+$> pip install uv
+
+Initializing a new uv project
+   Next, we'll initialize a new project with uv. This first command below creates a directory named
+   wordlookup and establishes the project structure as a package, which is ideal for a CLI application.
+   This will enable us to build a Python wheel (.whl) file that can be published to PyPI or simply
+   distributed to others to install and use. Be sure to include the --package flag.
+$> uv init wordlookup --package
+$> cd wordlookup
+
+   Alternatively, you can initialize a project in the working directory:
+$> mkdir wordlookup
+$> cd wordlookup
+$> uv init --package
+
+   After invoking the uv init command, uv creates an initial folder structure as follows:
+$> tree -a wordlookup
+wordlookup
++-- pyproject.toml
++-- .python-version
++-- README.md
++-- src
+    +-- wordlookup
+        +-- __init__.py
+
+   If you're acquainted with Rust's development tools, uv init will feel like a natural extension,
+   mirroring Cargo's cargo init for project setup. This method of initialization, shared by numerous
+   language ecosystems, ensures a strong base to begin building.
+
+Running the project the first time
+   In reviewing the files created, we find the obligatory hello world code in __init__.py ready for
+   action:
+
+def main() -> None:
+	print("Hello from wordlookup!")
+
+   Let's run our newly provisioned project as a first test:
+$> uv run wordlookup
+Using CPython 3.13.2 interpreter at: /usr/bin/python3.13
+Creating virtual environment at: .venv
+Installed 1 package in 7ms
+Hello from wordlookup!
+
+   Very nice! On the first run, uv creates a virtual environment for us at .venv to promote good Python
+   app building hygiene to isolate apps that contain external dependencies before running the code and
+   greeting us with a message.
+
+   When you initially run a uv command-such as uv run, uv sync, or uv lock-a virtual environment and a
+   uv.lock file are created at the project's root. This uv.lock file captures the precise versions of
+   your project's dependencies, guaranteeing reproducible builds.
+
+Adding the core CLI code
+   Let's create a file called cli.py in the src directory alongside __init__.py and add the following
+   code:
+
+import argparse
+import json
+import os
+import sys
+import textwrap
+
+import httpx
+
+def fetch_word_data(word: str) -> list:
+	"""Fetches word data from the dictionary API"""
+	url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
+	try:
+		with httpx.Client() as client:
+			response = client.get(url)
+			response.raise_for_status()
+			return response.json()
+	except httpx.HTTPError:
+		return None
+	except json.JSONDecodeError as exc:
+		print(f"Error decoding JSON for '{word}': {exc}")
+		return None
+	except Exception as e:
+		print(f"An unexpected error occurred: {e}")
+		return None
+
+
+def main():
+	"""Fetches and prints definitions for a given word with wrapping"""
+	parser = argparse.ArgumentParser(description="Fetch definitions for a word.")
+	parser.add_argument("word", type=str, help="The word to look up.")
+	args = parser.parse_args()
+	word = args.word
+
+	data = fetch_word_data(word)
+	if data:
+		print(f"Definitions for '{word}':")
+		try:
+			terminal_width = os.get_terminal_size().columns - 4  # 4 for padding
+		except OSError:
+			terminal_width = 80  # default if terminal size can't be determined
+
+		for entry in data:
+			for meaning in entry.get("meanings", []):
+				part_of_speech = meaning.get("partOfSpeech")
+				definitions = meaning.get("definitions", [])
+				if part_of_speech and definitions:
+					print(f"\n{part_of_speech}:")
+					for definition_data in definitions:
+						definition = definition_data.get("definition")
+						if definition:
+							wrapped_lines = textwrap.wrap(
+								definition, width=terminal_width,
+								subsequent_indent=""
+							)
+							for i, line in enumerate(wrapped_lines):
+								if i == 0:
+									print(f"- {line}")
+								else:
+									print(f"  {line}")
+	else:
+		print(f"Could not retrieve definition for '{word}'.")
+
+
+if __name__ == "__main__":
+	sys.exit(main())
+
+   Next, update the pyproject.toml file under the project.scripts table (in TOML parlance) so uv
+   understands that cli.py is the entry point for the application:
+
+[project.scripts]
+wordlookup = "wordlookup.cli:main"
+
+   While we could have added all our code to __init__.py, we are instead using cli.py as our entry
+   point. (This is somewhat a matter of software design preference.) Also, we're keeping it simple, but
+   our project could include multiple python source (.py) files to support our CLI application.
+
+   Although __init__.py is no longer used as the entry point in our project, it must remain to designate
+   the directory as a Python package. Keep the __init__.py file but remove all of its contents.
+
+Adding external package dependencies
+   Since we have included code that relies on httpx which is not part of the built-in Python library, we
+   need to add httpx as an external package dependency. This is accomplished as follows from the project
+   root:
+$> uv add httpx
+Resolved 8 packages in 461ms
+      Built wordlookup2 @ file:///home/dave/dev/python/wordlookup
+Prepared 1 package in 339ms
+Uninstalled 1 package in 0.48ms
+Installed 8 packages in 80ms
+ + anyio==4.9.0
+ + certifi==2025.1.31
+ + h11==0.14.0
+ + httpcore==1.0.7
+ + httpx==0.28.1
+ + idna==3.10
+ + sniffio==1.3.1
+ ~ wordlookup==0.1.0 (from file:///home/dave/dev/python/wordlookup)
+
+   As shown above, uv adds httpx and its required dependencies, ensuring it's ready for use.
+   Inspecting the pyproject.toml file, we see that httpx has been added under dependencies:
+
+[project]
+name = "wordlookup"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+	{ name = "Dave Johnson", email = "dave@thisdavej.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+	"httpx>=0.28.1",
+]
+
+[project.scripts]
+wordlookup = "wordlookup:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+Running the project
+   We're now ready to run our project and make sure it works as expected using uv run.
+
+   Note that we pass the name of the project specified in our pyproject.toml file to the uv run command
+   which is wordlookup:
+$> uv run wordlookup
+usage: wordlookup [-h] word
+wordlookup: error: the following arguments are required: word
+
+   Our CLI app ran successfully! The error simply means we need to provide a word as a parameter. Let's
+   pass munificence (I'm not sure why this esoteric word surfaced on my brain 😃) as an argument to the
+   wordlookup CLI app so we can confirm the project is in good working order:
+$> uv run wordlookup munificence
+Definitions for 'munificence':
+
+noun:
+- The quality of being munificent; generosity.
+
+noun:
+- Means of defence; fortification.
+
+   Excellent! Our app is yielding the expected results and we're ready to prepare it for packaging and
+   distribution.
+
+Preparing the project for packaging
+   Before packaging our project for distribution, we'll want to update a couple of files.
+     * pyproject.toml: modify the top section of your pyproject.toml to set the desired package version,
+       description, and other relevant metadata. You might also want to add a [project.urls] TOML table
+       with a link to your code repository, if you have one. For reference, here's my pyproject.toml
+       after updates:
+
+[project]
+name = "wordlookup"
+version = "0.1.0"
+description = "Fetches and prints definitions for a given word"
+readme = "README.md"
+authors = [
+	{ name = "Dave Johnson", email = "dave@thisdavej.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+	"httpx>=0.28.1",
+]
+
+[project.urls]
+Repository = "https://github.com/thisdavej/wordlookup"
+
+[project.scripts]
+wordlookup = "wordlookup.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+     * README.md: update this file with the information you intend to include on both your GitHub
+       repository's landing page and your PyPI package page, should you distribute it to these places.
+       Of course, any information you include here will be useful for those reviewing the app's source
+       code, regardless of whether it is published on a broader scale.
+
+Building the project
+   We're now ready to build our Python app so it can be distributed to others. The uv build is used to
+   build both source distributions and binary distributions for our project. By default, uv build will
+   build the project in the current directory, and place the built artifacts in a dist/ subdirectory:
+$> uv build
+Building source distribution...
+Building wheel from source distribution...
+Successfully built dist/wordlookup-0.1.0.tar.gz
+Successfully built dist/wordlookup-0.1.0-py3-none-any.whl
+
+   The files created in our context are:
+     * dist/wordlookup-0.1.0.tar.gz: this is a source distribution (sdist) which provides the raw source
+       code of a Python package, along with the necessary metadata and instructions to build the package
+       on the user's system.
+     * dist/wordlookup-0.1.0-py3-none-any.whl: this is a Python wheel (.whl file) which is a pre-built,
+       ready-to-install binary distribution of a Python package for a specific Python version,
+       architecture and operating system. In this context, however, we have built a "pure Python" wheel
+       that is platform independent since our code contains no compiled extension modules written in C,
+       C++, or Rust.
+
+Installing the Python wheel on the local dev system
+   We can use the uvx command, included when uv is installed, for testing. The uvx command, an alias for
+   uv tool run, is used to run the command-line tool provided by a Python wheel without explicitly
+   installing the tool into a persistent environment or adding it to our system's PATH.
+$> uvx dist/wordlookup-0.1.0-py3-none-any.whl munificence
+Installed 8 packages in 75ms
+Definitions for 'munificence':
+
+noun:
+- The quality of being munificent; generosity.
+
+noun:
+- Means of defence; fortification.
+
+   Looking good!
+
+     Note: If you're curious, you can find the place where uv store's it's ephemeral virtual
+     environments created by uvx and when creating single-file scripts by running uv cache dir to find
+     the cache directory. This is explained in detail in my other article on sharing single-file
+     Python scripts using uv and PEP 723 under the where does uv install its virtual environments?
+     section.
+
+   We can also install our CLI app in a more permanent way on our system using uv tool install:
+$> uv tool install dist/wordlookup-0.1.0-py3-none-any.whl
+
+   On Linux/macOS, we can ascertain the location of the installation using the which command:
+$> which wordlookup
+~/.local/bin/wordlookup
+
+   On Windows, we can determine the location of the installation using where.exe:
+C:\> where.exe wordlookup
+c:\Users\dave\.local\bin\wordlookup.exe
+
+   Therefore, we can navigate to %USERPROFILE%\.local\bin in Windows to find the location of the CLI app
+   and other executables installed with the uv tool install command.
+
+Distributing your Python CLI app so others can use it
+   Now that we have created and tested our newly minted Python (.whl) file, we are ready to distribute
+   it to friends and coworkers. This distribution can happen several different ways including:
+
+Local installation
+   Email the wheel (.whl) file or host it on a local file share. End users can then install your CLI app
+   from the local wheel file in multiple ways.
+
+   If the end user has uv installed on their system, they can install your CLI app easily in an isolated
+   virtual environment which is a recommended best practice to avoid dependency conflicts if different
+   tools require different versions of the same libraries.
+
+   One option is to use uvx which will install the CLI app in a non-persistent virtual environment which
+   uvx will re-create on the fly as needed:
+$> uvx wordlookup-0.1.0-py3-none-any.whl
+
+   The CLI app can also be installed in a persistent, isolated virtual environment managed by uv using
+   uv tool install:
+$> uv tool install wordlookup-0.1.0-py3-none-any.whl
+
+   While we used uv to build the Python package, end users do not need uv installed in order to install
+   and use the package. The CLI app can also be installed on a system using pip:
+$> pip install ./wordlookup-0.1.0-py3-none-any.whl
+
+   Keep in mind that this installs the package into the user's global site-packages rather than an
+   isolated environment specific to the tool. As a result, it may cause dependency conflicts if multiple
+   tools need different versions of the same libraries.
+
+   Also, pipx can be used to install the CLI app in an isolated environment. In my testing, pipx was
+   noticeably slower than uv-likely because pipx is written in Python, while uv is implemented in Rust.
+   That said, the cheerful pipx emojis at the end of installation do add a fun, shiny touch. 😉
+$> $ pipx install wordlookup-0.1.0-py3-none-any.whl
+  installed package wordlookup 0.1.0, installed using Python 3.13.2
+  These apps are now globally available
+    - wordlookup
+done! ✨ 🌟 ✨
+
+Web-based installation
+   Alternatively, you can host the wheel generated by uv on a web server, allowing users to install and
+   run it directly from a URL using uvx.
+$> uv tool install https://example.com/path/to/wordlookup-0.1.0-py3-none-any.whl
+
+Installing from PyPI
+   Another distribution method you can use is to publish the package you created with uv to PyPI. There
+   are many ways of publishing to PyPI along with associated tutorials. I recommend using Twine.
+
+     Note: I have published the wordlookup package to PyPI here so running the next commands will
+     install the package I created. These next commands are here for illustrative purposes, and you
+     would choose a different name for your specific Python CLI application.
+
+   End users can then install your CLI app directly from PyPI:
+# using uv
+$> uv tool install wordlookup
+
+# using pipx
+$> pipx install wordlookup
+
+Installing from GitHub
+   For others to install your CLI app from GitHub, here are the steps:
+    1. Clone the repository:
+
+$> git clone https://github.com/thisdavej/wordlookup-tutorial.git
+$> cd wordlookup-tutorial
+
+    1. Build using uv:
+$> uv build
+
+    1. Test the Python wheel created during the build step:
+$> uv tool run wordlookup
+
+# You can also use `uvx` which is an alias for `uv tool run`
+$> uvx wordlookup
+
+    1. Install the Python wheel
+$> uv tool install wordlookup
+
+   Finally, as another option, the end user can download and build from the GitHub rep to test the CLI
+   app:
+$> uvx git+https://github.com/thisdavej/wordlookup-tutorial.git
+
+   The end user can also install your CLI app in a persistent, isolated virtual environment managed by
+   uv from GitHub using uv tool install:
+$> uv tool install git+https://github.com/thisdavej/wordlookup-tutorial.git
+
+Uninstalling the CLI app
+   If the end user no longer wishes to keep the CLI app on their system (I can't imagine why since it is
+   so awesome! 😀), it can removed.
+
+   If the app was installed with uv tool install, it can be uninstalled like this:
+$> uv tool uninstall wordlookup
+
+   ...and if the app was installed with pipx, it be be uninstalled this way:
+$> pipx uninstall wordlookup
+
+Conclusion
+   In conclusion, this walkthrough has demonstrated the power and simplicity of using uv to build and
+   package a professional-grade Python CLI application. By leveraging uv's efficient dependency
+   management and build capabilities, we successfully created a functional wordlookup CLI app and built
+   a distributable Python wheel. We also explored various methods for sharing this application with
+   others, whether through local file sharing or publishing to PyPI. This process highlights uv as a
+   compelling tool for modern Python development and distribution workflows.
+
+
+---
+[**1]
+https://thisdavej.com/share-python-scripts-like-a-pro-uv-and-pep-723-for-easy-deployment/
+
+Share Python Scripts Like a Pro: uv and PEP 723 for Easy Deployment
+Updated April 10, 2025
+
+   Summary
+   Sharing single-file Python scripts with external dependencies is now easy thanks to uv and PEP 723,
+   which enable embedding dependency metadata directly within scripts. This approach eliminates the need
+   for complex setup tools like requirements.txt or package managers, making script distribution and
+   execution seamless and simplifying deployment while maintaining flexibility and efficiency.
+
+   We all love Python's comprehensive standard library, but let's face it - PyPI's wealth of packages
+   often becomes essential. Sharing single-file, self-contained Python scripts that rely on these
+   external tools can be a headache. Historically, we've relied on requirements.txt or full-fledged
+   package managers such as Poetry or pipenv, which can be overkill for simple scripts and intimidating
+   for newcomers. But what if there was a simpler way? That's where uv and PEP 723 come in. This article
+   delves into how uv harnesses PEP 723 to embed dependencies directly within scripts, making
+   distribution and execution extremely easy.
+
+uv and PEP 723
+   One of my favorite features of uv and its next-gen Python tooling is the ability to run
+   single-file Python scripts that contain references to external Python packages without a lot of
+   ceremony. This feat is accomplished by uv with the help of PEP 723 which is focused on "Inline
+   script metadata." This PEP defines a standardized method for embedding script metadata, including
+   external package dependencies, directly into single-file Python scripts.
+
+   PEP 723 has gone through the Python Enhancement Proposal process and has been approved by the Python
+   steering council and it is now part of the official Python specifications. Various tools in the
+   Python ecosystem have implemented support including uv, PDM (Python Development Master), and
+   Hatch. In this article, we focus on uv's excellent support of PEP 723 to create and distribute
+   single-file Python scripts.
+
+   While uv is also a package manager, it simplifies running self-contained Python scripts and stays out
+   of the way, reducing the cognitive load for both script authors and users. Time to dive in and give
+   it a try!
+
+     Note: If you like this article, see also Packaging Python Command-Line Apps the Modern Way
+     with uv
+
+Setting the stage
+   We have created a Python script called wordlookup.py to fetch definitions from a dictionary API. It's
+   looking pretty solid, but we want to distribute and give it to others to run with ease:
+
+import argparse
+import asyncio
+import json
+import os
+import textwrap
+
+import httpx
+
+async def fetch_word_data(word: str) -> list:
+	"""Fetches word data from the dictionary API."""
+	url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
+	try:
+		async with httpx.AsyncClient() as client:
+			response = await client.get(url)
+			response.raise_for_status()
+			return response.json()
+	except httpx.HTTPError:
+		return None
+	except json.JSONDecodeError as exc:
+		print(f"Error decoding JSON for '{word}': {exc}")
+		return None
+	except Exception as e:
+		print(f"An unexpected error occurred: {e}")
+		return None
+
+
+async def main(word: str):
+	"""Fetches and prints definitions for a given word with wrapping."""
+	data = await fetch_word_data(word)
+	if data:
+		print(f"Definitions for '{word}':")
+		try:
+			terminal_width = os.get_terminal_size().columns - 4  # 4 for padding
+		except OSError:
+			terminal_width = 80  # default if terminal size can't be determined
+
+		for entry in data:
+			for meaning in entry.get("meanings", []):
+				part_of_speech = meaning.get("partOfSpeech")
+				definitions = meaning.get("definitions", [])
+				if part_of_speech and definitions:
+					print(f"\n{part_of_speech}:")
+					for definition_data in definitions:
+						definition = definition_data.get("definition")
+						if definition:
+							wrapped_lines = textwrap.wrap(
+								definition, width=terminal_width,
+								subsequent_indent=""
+							)
+							for i, line in enumerate(wrapped_lines):
+								if i == 0:
+									print(f"- {line}")
+								else:
+									print(f"  {line}")
+	else:
+		print(f"Could not retrieve definition for '{word}'.")
+
+
+if __name__ == "__main__":
+	parser = argparse.ArgumentParser(description="Fetch definitions for a word.")
+	parser.add_argument("word", type=str, help="The word to look up.")
+	args = parser.parse_args()
+
+	asyncio.run(main(args.word))
+
+   This script imports several Python modules, setting the stage for a script that interacts with a
+   dictionary API web service, processes JSON data, handles command-line arguments, utilizes
+   asynchronous operations, formats text output, and interacts with the operating system to fetch the
+   terminal width. With the exception of httpx, an HTTP client library package, all of the other
+   Python modules we import are part of the Python standard library. While I could technically
+   accomplish the goal with Python's built-in urllib.request module, I prefer httpx. This, however,
+   presents a dilemma since I will need a good way to distribute this script so my friends and coworkers
+   can use it without a lot of fuss installing the needed httpx dependency.
+
+   How do we solve this dilemma? uv to the rescue! We'll walk through how this works next.
+
+     Note: This post received a lot of traction on Hacker News and sparked some great discussion.
+     A point raised was the choice between Python's built-in web client options versus
+     libraries like httpx or requests. To clarify, my focus in this article is on demonstrating how to
+     create and share a single-file Python script that relies on external Python packages, not
+     specifically advocating for one web client versus another. Using httpx is simply a demonstration
+     of this concept.
+
+Installing uv
+   As a first step, we need to install uv. Please refer to the official uv documentation for guidance on
+   installing uv. A couple of common ways to install uv include:
+# Assuming you have pipx installed, this is the recommended way since it installs
+# uv into an isolated environment
+$> pipx install uv
+
+# uv can also be installed this way
+$> pip install uv
+
+   uv is an amazingly versatile and, in my opinion, is very much the future of Python tooling. In this
+   article, however, I'm just demonstrating one of uv's awesome features for invoking single-file
+   scripts with external dependencies.
+
+Adding package dependencies in single-file scripts with uv
+   We're now ready to add httpx as a dependency in our wordlookup.py script! Here's how it's done:
+$> uv add --script wordlookup.py httpx
+
+   That's it! After this, uv will add metadata in the comments at the top of our script. Here's the
+   first part of the script with a few lines after for context so you can see this in action:
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#	"httpx",
+# ]
+# ///
+
+import argparse
+import asyncio
+import json
+import os
+import textwrap
+
+import httpx
+
+   If you have used pyproject.toml with various Python tools such as Poetry, Flit, Hatch, Maturin,
+   setuptools, etc., this syntax will likely look at least somewhat familiar. For example, Poetry might
+   look like this:
+# <-- other package metadata here -->
+
+[tool.poetry.dependencies]
+python = ">=3.13"
+httpx = "^0.28.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+   You will observe that uv adds the metadata for httpx, but does not specify a version. uv will fetch
+   the latest stable version of httpx from PyPI for use with the script. You can add dependency
+   constraints by modifying the metadata directly after the fact or specifying a version dependency
+   through the command line:
+$> uv add --script wordlookup.py "httpx>=0.28.1"
+
+Running your script with uv
+   We are ready to run our script. The uv tool makes it as simple to run as this (note that I am passing
+   a --help argument to the script as well):
+$> uv run wordlookup.py --help
+Installed 7 packages in 74ms
+usage: wordlookup.py [-h] word
+
+Fetch definitions for a word.
+
+positional arguments:
+  word        The word to look up.
+
+options:
+  -h, --help  show this help message and exit
+
+   When invoking the script with uv run the first time, you will see some extra activity at the
+   beginning as uv automatically creates an isolated virtual environment behind the scenes and fetches
+   and installs the httpx package and its associated dependencies. This is why we see Installed 7
+   packages in 74ms in the terminal output.
+
+   If you try to run the script with python wordlookup.py, the script will fail unless you happen to
+   have httpx installed globally or in your current virtual environment. How does uv use the script
+   metadata? When invoking the script with uv run, uv:
+     * Checks that the required Python version is available.
+     * Automatically creates an isolated virtual environment (without modifying your global Python
+       environment).
+     * Installs the listed dependencies (httpx in this case) if they're not already installed.
+     * Executes the script.
+
+   For each subsequent launch of the script with uv run, uv will leverage the virtual environment it
+   created behind the scenes and invoke the script:
+$> uv run wordlookup.py postulate
+Definitions for 'postulate':
+
+noun:
+- Something assumed without proof as being self-evident or generally accepted, especially when used as a basis
+  for an argument. Sometimes distinguished from axioms as being relevant to a particular science or context,
+  rather than universally true, and following from other axioms rather than being an absolute assumption.
+- A fundamental element; a basic principle.
+- An axiom.
+- A requirement; a prerequisite.
+
+verb:
+- To assume as a truthful or accurate premise or axiom, especially as a basis of an argument.
+- To appoint or request one's appointment to an ecclesiastical office.
+- To request, demand or claim for oneself.
+
+adjective:
+- Postulated.
+
+   If we add additional dependencies to our script or change the Python or httpx version in the
+   metadata, uv run will create a new isolated virtual environment the next time it is invoked.
+
+Making it even easier to run with a Python shebang
+   We can add a shebang (sometimes called a hashbang) at the top of the Python script to make it even
+   easier to invoke the script with uv. I learned this excellent trick from Trey Hunner.
+
+Linux/macOS users
+   For Linux and macOS (and BSD users), add the following line at the top of the script:
+#!/usr/bin/env -S uv run --script
+
+     Update: For macOS, it turns out that the -S in the shebang is optional. The script will run fine
+     either way. Thanks to Gregg Lind for bringing this to my attention!
+
+   Back to our regularly scheduled program...the fuller script context will look like the following at the
+   top of the file:
+
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#	"httpx>=0.28.1",
+# ]
+# ///
+
+import argparse
+import asyncio
+import json
+import os
+import textwrap
+
+import httpx
+
+   Next, make the file executable:
+$> chmod u+x wordlookup.py
+
+   Once that's done, you can run the script directly, without needing to use the full uv run
+   wordlookup.py command:
+$> ./wordlookup --help
+
+Windows users
+   For Windows users, you're also in luck since the py launcher for Windows is also able to interpret
+   shebangs. The py launcher is included by default when you install Python on Windows. Please note that
+   you'll need to omit the -S from the shebang for the script to work correctly. The first line of your
+   script should look like this:
+#!/usr/bin/env uv run --script
+
+   You can when invoke the script on Windows as follows with the py command:
+py wordlookup.py
+
+     Note: This will not work if you invoke the script via python wordlookup.py since the shebang will
+     not be interpreted.
+
+   When running from Command Prompt (cmd.exe), you can execute your Python script directly (e.g.,
+   ./wordlookup.py) due to shebang interpretation. However, using py wordlookup.py is recommended for
+   consistent behavior across both Command Prompt and PowerShell.
+
+Setting up your uv script to be invoked from anywhere on your computer
+   To make your uv (Python) script easily executable from anywhere on your system, you can move it to a
+   common executable directory that's included in your system's PATH.
+
+Linux/macOS users
+   For Linux and macOS users, copy the wordlookup.py script to a directory in your systems $PATH. On my
+   system, the $HOME/bin folder is in the path and I moved it there:
+$> mv wordlookup.py ~/bin
+
+   I also elected to rename the file and remove the .py file extension to make it more ergonomic to
+   invoke since the shebang contains all of the needed information to identify the file as a Python
+   script:
+$> mv wordlookup.py wordlookup
+
+   I am now able to invoke it from anywhere. (You will also observe that uv will create a new virtual
+   environment and resolve the package dependencies the first time the Python script is invoked form the
+   new location.)
+$> wordlookup --help
+Installed 7 packages in 21ms
+usage: wordlookup.py [-h] word
+
+Fetch definitions for a word.
+
+positional arguments:
+  word        The word to look up.
+
+options:
+  -h, --help  show this help message and exit
+
+Windows users
+   For Windows users, you can either move the script to one of the directories already included in your
+   system's PATH environment variable or add a new folder to the PATH. I will assume you have created a
+   folder called c:\scripts and added it to your PATH.
+
+   Next, create a file called wordlookup.cmd and add the following contents:
+@echo off
+py c:\scripts\wordlookup.py %*
+
+   You will then be able to invoke the script from Windows Terminal or Command Prompt anywhere on the
+   system like this:
+wordlookup --help
+
+Locking dependencies (optional)
+   AJ Kerrigan astutely noted in the comments section below that uv provides dependency locking as an
+   optional feature for single-file scripts, as detailed in the uv documentation. This
+   guarantees consistent and repeatable runtime behavior by specifying precise versions for all direct
+   and indirect dependencies, preventing unexpected issues when sharing the script.
+
+   Here's how you create a .lock file:
+$> uv lock --script wordlookup.py
+
+   Running uv lock creates a .lock file named wordlookup.py.lock alongside the script in the same
+   directory:
+$> tree .
+.
++-- wordlookup.py
++-- wordlookup.py.lock
+
+   I was curious if this would modify the script itself and was pleased to find that wordlookup.py
+   remained unchanged.
+
+   When distributing your solution, be sure to include both the script and the generated .lock file to
+   provide this added layer of reliability with the package dependency versions locked in.
+
+   For many quick one-off scripts meant for easy sharing, creating these .lock files might be overkill;
+   nonetheless, it's great that uv provides this as an option. There may come a point when your
+   application will outgrow the single-file script option. For building more professional-grade
+   command-line tools, refer to my guide on Packaging Python Command-Line Apps the Modern Way with
+   uv.
+
+Sharing your script with others
+   There are numerous ways share your script with friends and coworkers, and we'll highlight some
+   options in this section.
+    1. Send by email: You can email the script and its .lock file (if created). Be aware that some email
+       systems might block or remove Python (.py) files. While zipping the .py file can sometimes
+       circumvent basic filters, advanced systems can still analyze archive contents and potentially
+       misidentify your legitimate script as malicious.
+    2. Upload and share the script with a cloud storage service such as Google Drive or OneDrive so
+       others can download the script and run it on their local systems.
+    3. Utilize a network drive to share the script: This offers the advantage of running the script from
+       a single location, simplifying sharing among coworkers or family members sharing files on the
+       same network.
+    4. Host the script on a web server, such as your personal hosting or a service like GitHub Gist.
+       This provides a convenient option to update the script in one location when deploying updates to
+       the script.
+
+   I have uploaded the wordlookup.py script to https://thisdavej.com/utils/wordlookup.py so you can
+   directly experience running a Python script via the web.
+
+     Note: Exercising caution with internet-sourced scripts is crucial. This approach provides a
+     very convenient method for distributing and running self-contained, single-file Python scripts
+     with all necessary external dependencies included thanks to uv and PEP 723, but please inspect
+     files before running as explained below.
+
+   For any script, it's a good idea to inspect its contents before running it. We can always launch the
+   script URL to inspect it in a browser, but we can also inspect the script when we are in the terminal
+   context and preparing to invoke a given script.
+
+   For Linux/macOS systems, we can inspect the script using curl:
+# Download the script with curl and pipe the output into less. We use less -F
+# as a bonus to instruct `less` to automatically exit if the entire file can
+# be displayed on a single screen.
+$> curl -sS https://thisdavej.com/utils/wordlookup.py | less -F
+
+   As a bonus, we can pipe the output of curl into bat to achieve syntax highlighting in the
+   terminal. (I'm definitely giving you your money's worth in this tutorial. 😉)
+# We use `bat -l python` to explicitly set the language for syntax highlighting.
+$> curl -sS https://thisdavej.com/utils/wordlookup.py | bat -l python
+
+# The `-l` option can be shortened from `python` to `py`
+$> curl -sS https://thisdavej.com/utils/wordlookup.py | bat -l py
+
+   Windows (PowerShell and cmd) users can leverage curl.exe (yes, this now ships with Windows!) in the
+   terminal to view the script's contents, and more can be used in lieu of less for pagination if the
+   output is longer than one screen.
+
+     Note: Be sure to use curl.exe on Windows instead of curl which is a Powershell alias for
+     Invoke-WebRequest, which is similar in function but has a different syntax and lesser capabilities
+     than curl.exe.
+
+# From PowerShell on Windows
+PS C:\> curl.exe -s https://thisdavej.com/utils/wordlookup.py | more
+
+   Having inspected the script's contents, we can now execute it from a URL using uv run. Note also that
+   we're passing magnanimous as a command-line argument to the script.
+$> uv run https://thisdavej.com/utils/wordlookup.py magnanimous
+Definitions for 'magnanimous':
+
+adjective:
+- Noble and generous in spirit.
+
+   Similar to running uv run with a local file, uv seamlessly resolves dependencies and executes the
+   script successfully via a URL. Truly powerful!
+
+   AJ Kerrigan provided this helpful tip on executing a script using a URL in the comments below -
+   thanks, AJ!
+
+Bonus: where does uv install its virtual environments?
+   Being a curious software engineer, I decided to dive deeper to see if I could discover where uv was
+   installing its virtual environments on my Fedora Linux system. After all, I had wordlookup.py sitting
+   in its own dedicated directory. After running uv add --script to add the httpx package dependency
+   metadata and invoking uv run, a virtual environment directory such as .venv was nowhere in sight in
+   the local folder.
+
+     Update: The very day this article was originally published, uv v0.6.10 was released with a more
+     convenient way of finding where the virtual environment resides. Thanks to user JimDabell on
+     Hacker News for providing these insights.
+
+   To find where uv installed the virtual environment for a given single-file Python script in uv 0.6.10
+   or higher, invoke this command:
+$> uv python find --script wordlookup.py
+/home/dave/.cache/uv/environments-v2/wordlookup-f6e73295bfd5f60b/bin/python3
+
+   That was easy! We see that uv installs its virtual environments in one's home directory at
+   ~/.cache/uv/environments-v2/.
+
+   Beyond just satisfying one's curiosity, the location of the virtual environment can be useful since
+   some Python tools need to know the location. For example, if I was using pyright (a static type
+   checker for Python), I could supply the virtual environment location like this in Linux/macOS:
+$> pyright --pythonpath $(uv python find --script wordlookup.py) wordlookup.py
+
+   The rest of this section is included for historic purposes since the techniques I describe could be
+   useful to some in other troubleshooting endeavors.
+
+   I first started by finding all directories named httpx on my system since a new folder by this name
+   would likely get created on the first invocation of uv run after the script had been created.
+$> find -type d -name httpx
+./.cache/uv/environments-v2/wordlookup-f6e73295bfd5f60b/lib/python3.13/site-packages/httpx
+# <other folders found but omitted for brevity>
+
+   Lo and behold, I found a folder called httpx in a parent folder called ./.cache/uv/environments-v2.
+   This looked promising.
+
+   I then discovered a command I could run (uv cache clean) to clear out all of the uv virtual
+   environments. These would be harmless since the virtual environments could easily be recreated.
+$> uv cache clean
+Clearing cache at: .cache/uv
+Removed 848 files (8.2MiB)
+
+   To watch everything in action on my Linux system (perhaps this was overkill 😃), I used inotifywait to
+   monitor all of the file create events that would occur when I invoked uv run wordlookup.py since uv
+   would need to recreate its virtual environment as I had cleared the cache.
+$> inotifywait -m -r -e create ~/.cache/
+
+# While this was running and waiting for event, I invoked `uv run wordlookup.py` from another terminal window
+
+   The inotifywait command (part of the inotify-tools package) waits for filesystem events and outputs
+   them. Here are the arguments I used:
+     * -m (monitor): This option tells inotifywait to continuously monitor the specified directory for
+       events. Without this, inotifywait would only report the first event and then exit.
+     * -r (recursive): This option tells inotifywait to recursively monitor the specified directory and
+       all its subdirectories for events. Any new files or directories created within .cache/ or any of
+       its subdirectories will trigger an event.
+     * -e create (event: create): This option specifies that inotifywait should only report create
+       events. A create event occurs when a new file or directory is created within the monitored
+       directory.
+     * .cache/: This is the directory that inotifywait was asked to monitor.
+
+   Sure enough, inotifywait revealed the folders being dynamically created when uv run wordlookup.py was
+   launched.
+
+   When I copied the wordlookup.py script to my $HOME/bin folder and invoked it from there, I checked
+   ./.cache/uv/environments-v2/ and yet another wordlookup-* was created there housing the virtual
+   environment.
+
+   In reviewing my Windows VM, I similarly found uv virtual environments installed under
+   %LOCALAPPDATA%\uv\cache.
+
+   Upon further investigation, I found some uv cache directory documentation that described how uv
+   determines the location of its cache directory. Here's how it works:
+
+     uv determines the cache directory according to, in order:
+     * A temporary cache directory, if --no-cache was requested.
+     * The specific cache directory specified via --cache-dir, UV_CACHE_DIR, or tool.uv.cache-dir.
+     * A system-appropriate cache directory, e.g., $XDG_CACHE_HOME/uv or $HOME/.cache/uv on Unix and
+       %LOCALAPPDATA%\uv\cache on Windows
+
+   Typically, on Unix-like systems like my Fedora setup, uv stores its cache in $HOME/.cache/uv.
+   However, you have the option to change this location by setting the $XDG_CACHE_HOME environment
+   variable. For those unfamiliar with XDG, the XDG Base Directory Specification is a set of guidelines
+   that applications follow to organize their files. It defines a few key environment variables that
+   point to specific directories, ensuring that different types of application data are stored in their
+   designated places.
+
+   To summarize, uv stores virtual environments for single-file Python scripts within its cache,
+   typically at these OS-specific locations if you don't do anything special to change the default:
+
+   -------------------------------------------------
+   OS        Virtual Environment Location
+   -------------------------------------------------
+   Linux     ~/.cache/uv/environments-v2/
+   macOS     ~/.cache/uv/environments-v2/
+   Windows   %LOCALAPPDATA%\uv\cache\environments-v2
+   -------------------------------------------------
+
+   Update: An astute user on Hacker News (sorenjan) pointed out that you can also run uv cache dir to
+   find the location of the cache directory root (e.g. ~/.cache).
+
+How does uv derive its virtual environment folder name?
+   Take a look at the following uv virtual environment folder on my Linux system. How is the folder name
+   of wordlookup-f6e73295bfd5f60b generated?
+$> ./.cache/uv/environments-v2/wordlookup-f6e73295bfd5f60b
+
+   My preliminary investigation of uv's Rust code and other resources suggests that the virtual
+   environment folder names are generated from a hash of the Python version and the external package
+   dependency versions (such as httpx in my context). This design ensures that any modification to these
+   elements, including the script's name (which is embedded in the folder name itself), results in the
+   creation of a unique virtual environment in the cache. I validated this empirically by observing that
+   uv created a new virtual environment if I specified a different version of httpx in the metadata or
+   if I changed the name of the script file.
+
+Conclusion
+   In conclusion, uv with its implementation of PEP 723 is an awesome tool that simplifies the way we
+   handle single-file Python scripts with external dependencies. By embedding metadata directly within
+   the script, uv eliminates the need for separate requirements.txt files and complex package managers.
+   uv streamlines the process of installing dependencies and managing virtual environments, making it
+   significantly easier to run these scripts. The added convenience of shebangs and system-wide
+   executables further enhances usability. Ultimately, this combination makes Python scripting more
+   accessible, particularly for single-file scripts, and promises a more streamlined workflow for both
+   developers and users.
+
+
+---
+

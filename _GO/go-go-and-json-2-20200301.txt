@@ -1,0 +1,275 @@
+filename: go_go-and-json-2_20200301.txt
+https://eager.io/blog/go-and-json/
+
+Go and JSON
+
+   As with all other parts of the standard library, Go provides us with documentation for the JSON
+   module. Like most Go documentation it is complete, but not always the easiest for beginners to
+   understand. So let's start from the beginning.
+
+JSON and Static Typing
+   Parsing a format like JSON in a statically typed language like Go presents a bit of a problem. If
+   anything could show up in the JSON body, how does the compiler know how to setup memory to have a
+   spot to place everything?
+
+   There are two answers to this. The easy option, for when you know what your data will look like, is
+   to parse the JSON into a struct you've defined. Any field which doesn't fit in the struct will just
+   be ignored. We'll cover that option first.
+
+Parsing into a Struct
+   Here's an example of parsing into a struct:
+type App struct {
+    Id string `json:"id"`
+    Title string `json:"title"`
+}
+
+data := []byte(`
+    {
+        "id": "k34rAT4",
+        "title": "My Awesome App"
+    }
+`)
+
+var app App
+err := json.Unmarshal(data, &app)
+
+   What you're left with is app populated with the parsed JSON that was in data. You'll also notice that
+   the go term for parsing json is "Unmarshalling".
+
+Rendering from a Struct
+   Outputting from a struct works exactly as parsing but in reverse:
+data, err := json.Marshal(app)
+
+   As with all structs in Go, it's important to remember that only fields with a capital first letter
+   are visible to external programs like the JSON Marshaller.
+
+Struct Tags
+   One thing you'll notice is the "tagged" data included in our struct between backticks. The JSON
+   parser reads from that several clues about how to parse that value.
+
+The Field Name
+   As you might know, Go requires all exported fields to start with a capitalized letter. It's not
+   common to use that style in JSON however. We use the tag to let the parser know where to actually
+   look for the value.
+
+   You can see an example of that in the example above, but as a refresher this is what it looks like:
+type MyStruct struct {
+    SomeField string `json:"some_field"`
+}
+
+What to do if the Field is Empty
+   The JSON parser also accepts a flag in the tag to let it know what to do if the field is empty. The
+   omitempty flag tells it to not include the JSON value in the output if it's the "zero-value" for that
+   type.
+
+   The "zero-value" for numbers is 0, for strings it's the empty string, for maps, slices and pointers
+   it's nil. This is how you include the omitempty flag.
+type MyStruct struct {
+    SomeField string `json:"some_field,omitempty"`
+}
+
+   Notice that the flag goes inside the quotes.
+
+   If the SomeField was an empty string, and you converted it to JSON, some_field wouldn't be included
+   in the output at all.
+
+   In other words, if some_field == "":
+     * With omitempty the JSON value would be {}
+     * Without omitempty the JSON value would be {"some_field": ""}
+
+   omitempty is valuable when you deprecate a field and no longer want it to be included in output, when
+   you have a flag which defaults to false so there's no need to include it, or when you are only ever
+   operating on your data with Go, so there's no harm in using the built-in "zero-value" as the default.
+
+Skipping Fields
+   To have the JSON parser/writer skip a field, just give it the name "-". For example:
+type App struct {
+    Id string `json:"id"`
+    Password string `json:"-"`
+}
+
+   It can also make sense to have a field which will be parsed if it's available, but will never be
+   outputted. The native JSON parser doesn't have that option, but here is an example implementation.
+
+Nested Fields
+   Nested fields refers to structs which are properties of other structs. In short, nested fields work
+   exactly as you'd expect. You can nest a slice, map or other struct inside your struct and the JSON
+   will recursively parse everything correctly. If you have a field which can be anything, you can
+   always use the interface{} type.
+
+   Go also supports nesting one struct in another. For example:
+type App struct {
+    Id string `json:"id"`
+}
+
+type Org struct {
+    Name string `json:"name"`
+}
+
+type AppWithOrg struct {
+    App
+    Org
+}
+
+   You can parse into a value with the AppWithOrg type, and it will have all the properties. You can
+   also pull the .App or .Org out of it. For example:
+data := []byte(`
+    {
+        "id": "k34rAT4",
+        "name": "My Awesome Org"
+    }
+`)
+
+var appWithOrg AppWithOrg
+err := json.Unmarshal(data, &appWithOrg)
+
+app := appWithOrg.App
+org := appWithOrg.Org
+
+// AND/OR
+
+appId := appWithOrg.Id
+orgName := appWithOrg.Name
+
+   Combining structs like this might seem strange, but it's very valuable if you, for example, have an
+   API which includes some extra data with your actual value.
+
+Pointers
+   Pointers are dereferenced before the JSON is encoded. In other words, it's as if you used the real
+   value, not a pointer.
+
+Handling Errors
+   Always be sure to check the err parameter returned by Marshal and Unmarshal. It is, for example, how
+   you'll know if there's an error in the syntax of the JSON you're parsing. If you don't check it, your
+   program will continue executing with the zeroed-out struct you've already created, potentially
+   causing confusing behavior downstream.
+
+   Errors are less common during marshals, but they can occur if Go can't figure out how to convert one
+   of your types to JSON. For example if you try to marshal something containing a nil pointer.
+
+   If you don't want to deal with handling errors in every marshal, and marshal errors are suitably
+   uncommon, one option is to convert errors into panics with a MustMarshal function:
+func MustMarshal(data interface{}) []byte {
+    out, err := json.Marshal(data)
+    if err != nil {
+        panic(err)
+    }
+
+    return out
+}
+
+Parsing into an Interface
+   If you have truly no idea what your JSON might look like, you can parse it into a generic
+   interface{}. If you're not familiar an empty interface{} is a way of defining a variable in Go as
+   "this could be anything". At runtime Go will then allocate the appropriate memory to fit whatever you
+   decide to store in it.
+
+   This is what it looks like:
+var parsed interface{}
+err := json.Unmarshal(data, &parsed)
+
+   Actually using parsed is a bit laborious, as Go can't use it without knowing what type it is. You can
+   end up with code which tries the kitchen sink:
+switch parsed.(type) {
+    case int:
+        someGreatIntFunction(parsed.(int))
+    case map:
+        someMapThing(parsed.(map))
+    default:
+        panic("JSON type not understood")
+}
+
+   You can also do similar type assertions inline:
+intVal, ok := parsed.(int)
+if !ok {
+    panic("JSON value must be an int")
+}
+
+   Fortunately however, it's rare to truly have no idea what a value might be. If, for example, you know
+   your JSON value is an object, you can parse it into a map[string]interface{}. This gives you the
+   advantage of being able to refer to specific keys. An example:
+var parsed map[string]interface{}
+
+data := []byte(`
+    {
+        "id": "k34rAT4",
+        "age": 24
+    }
+`)
+
+err := json.Unmarshal(data, &parsed)
+
+   You can then refer to specific keys without a problem:
+parsed["id"]
+
+   You still have interfaces as the value of your map however, so you must do type assertions to use
+   them:
+idString := parsed["id"].(string)
+
+   Go uses these six types for all values parsed into interfaces:
+bool, for JSON booleans
+float64, for JSON numbers
+string, for JSON strings
+[]interface{}, for JSON arrays
+map[string]interface{}, for JSON objects
+nil for JSON null
+
+   Meaning, your numbers will always be of typefloat64, and will need to be casted to int, for example.
+   If you have a particular need to get ints directly, you can use the UseNumber method. Which gives
+   you an object which can be converted to either a float64 or an int at your discretion.
+
+   Similarly, all objects decoded into an interface will be map[string]interface{}, and will need to be
+   manually mapped to whatever struct you may wish to place them in.
+
+Numbers
+   We already talked about the issue with converting javascript numbers into Go values when using
+   interfaces. Javascript only has one numeric type, so Go must always use a float64 unless you ask it
+   explicitly for an integer. Another important point to realize is that since Javascript only has 64
+   bit floating point numbers, you can't precisely represent an integer of more than 53 bits. If you
+   want to transmit a 64 bit integer to the client, Go 1.3 added the ability to pass it as a string:
+type MyStruct struct {
+    Int64String int64 `json:",string"`
+}
+
+Creating Encodable Types
+   The JSON module includes two interfaces. Marshaler and Unmarshaler.
+
+   Both interfaces just require a single method. If you add those two methods to your type, it will be
+   encodable as JSON. One great example of that is the time.Time type.
+
+   Another example:
+type Month struct {
+    MonthNumber int
+    YearNumber int
+}
+
+func (m Month) MarshalJSON() ([]byte, error){
+    return []byte(fmt.Sprintf("%d/%d", m.MonthNumber, m.YearNumber)), nil
+}
+
+func (m *Month) UnmarshalJSON(value []byte) error {
+    parts := strings.Split(string(value), "/")
+    m.MonthNumber = strconv.ParseInt(parts[0], 10, 32)
+    m.YearNumber = strconv.ParseInt(parts[1], 10, 32)
+
+    return nil
+}
+
+   Go decides what marshaller and unmarshaller to use based on the types you are encoding or decoding
+   to. If you're encoding an interface, or decoding to an interface, there is no way for Go to know what
+   marshaller to use, and it will default to the six types listed above.
+
+Deferred Decoding
+   At times it can be convenient to only decode a structure into its relevant struct after reading some
+   properties from it. You can specify your nested struct structure as a RawMessage. RawMessages
+   aren't decoded immediately, allowing you to place the contents of that portion of your JSON in the
+   struct of your choice when you're ready.
+
+Conclusion
+   Go is a (mostly) strongly typed language, and therefore working with JSON is always going to be
+   tricky. That said, the Go creators have done an admirable job creating something which is usable, if
+   not always succinct. While it would be flattering if this were the only reference you needed, the Go
+   documentation is the definitive source for help.
+
+
+---

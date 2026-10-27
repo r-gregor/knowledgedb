@@ -1,0 +1,151 @@
+filename: switching-from-x11-to-native-wayland-20260728.txt
+https://oper.io/?p=linux/switching-from-x11-to-native-wayland
+
+Linux:Switching from X11 to Native Wayland
+2025-03-01
+
+   I recently switched from using X11 to Wayland when it became available in my Linux distro (Crux).
+   This of course means I had to switch from my currently window manager, i3, to its Wayland equivelant,
+   Sway. But while Sway claims to be a drop in replacement for i3, that isn´t strictly true. Switching
+   to Wayland and Sway took a lot more effort than I originally thought. Here is a list of things I had
+   to do to get things back to normal for the most part.
+
+Tooling Replacements
+
+  Setting the Wallpaper
+   When on X11, I used feh to set my wallpaper on login. I had a cleverly named script called
+   random_wallpaper.sh which took one argument, the path to the pictures directory from which to
+   randomly select an image. It them set the wallpaper with the command feh --bg-fill "${picture}".
+
+   This of course no longer works with Wayland, as feh does not have that support. Fortunately, the Sway
+   window manager provides a program with this functionality: swaybg. There is a problem with this
+   however. I don´t know how Wayland works very well, so there is probably a good explanation for this,
+   but swaybg doesn´t set the wallpaper like feh does. Feh sets the wallpaper and exits. Swaybg sets the
+   wallpaper and stays running, and if you kill it the wallpaper becomes unset again. Regardless, this
+   makes changing the wallpaper difficult, as you must track down the existing swaybg process, kill it,
+   and start a new one with a different image.
+
+   To do this, I wrote a wrapper script called swaybg-singleton.sh. This script will set the wallpaper
+   from the provided directory or image, backgrounding the swaybg process. It also writes a pidfile
+   however, so subsequent runs know which process to kill when setting the wallpaper again. When
+   changing the wallpaper, it starts a second swaybg process, which overrides the first on the display,
+   and then kills the first (old) process so there is no blip in the wallpaper between setting it from
+   old to new. It can be run as many times as needed without creating conflicting processes.
+
+  Startup Script and Properly Setting GTK Themes
+   When my computer boots up, the login screen is a tty. I don´t use any of those fancy login managers
+   like gdm or even lightdm. That said, to start up the GUI, I would log in and type startx previously.
+   That obviously doesn´t work anymore (well, if I want to use Wayland at least).
+
+   So, I wrote up a wrapper script to handle a few of the init processes, very similar to my old
+   .xinitrc file. Right now this is called runsway.sh, but I think it might get renamed to something
+   like startwl at some point.
+
+   This script contains the following:
+#!/usr/bin/env bash
+
+export XDG_RUNTIME_DIR=$(mktemp -d /tmp/xdg.XXXXXXX)
+export GTK_BACKEND=wayland
+
+gsettings set org.gnome.desktop.interface gtk-theme 'Pop-dark'
+gsettings set org.gnome.desktop.interface icon-theme 'Papirus'
+gsettings set org.gnome.desktop.interface font-name 'Iosevka Aile 12'
+# If you want to set this for the cursor
+#gsettings set org.gnome.desktop.interface cursor-theme 'Pop'
+
+dbus-run-session sway
+
+  Clipboard management
+   With X11, I used the xclip program. With Wayland, there exists an unofficial replacement called
+   [https://github.com/bugaevc/wl-clipboard]wl-clipboard, which provides the commands wl-copy and wl-paste.
+   They work fairly similarly to xclip.
+
+   This isn´t particularly needed for many folks probably. I used xclip as a means to programatically
+   place things in the clipboard, such as text (usernames and passwords most often) and images
+   (screenshots).
+
+  Watching Videos
+   With i3, I typically used mplayer to watch videos on my system or listen to some audio (I
+   typically use mpd, mpc, and ncmpc for consistently listening to music). Unfortunately, mplayer does
+   not yet support wayland. Also on my system however, I had ffplay, which is the video player utility
+   that comes with ffmpeg. This worked on Wayland, but lacked the ability to play multiple videos in
+   sequence without a wrapper script. I did some research, and came up with mpv. This tool works
+   great, and even better, it works somewhat like mplayer (because long, long ago it was forked from
+   mplayer).
+
+  Keyboard Automation
+   Under X11, I often used xdotool to type things automatically. Specifically, I used xdotool to type
+   usernames and passwords. However, due to lack of support for unicode typing (many of my passwords
+   contain characters across the unicode range), I also used xclip to copy, and xdotool to paste my
+   passwords automatically to sidestep the issue.
+
+   The consistently recommended replacement for these two tools are
+   [https://github.com/bugaevc/wl-clipboard]wl-clipboard for clipboard management and
+   [https://github.com/atx/wtype]wtype for sending keyboard key strokes.
+
+   I have had a large amount of trouble trying to get wtype to press control+v for me and it actually
+   pasting the contents of the clipboard which I set with a script with wl-clipboard. For some reason it
+   doesnt work across windows (in other words, I can´t copy in my terminal and paste in my browser).
+   That problem aside, I also haven´t had any issues with wtype typing unicode characters yet, so I am
+   just using that for now without using copy/paste between the two programs.
+
+  Lightweight Terminal
+   On i3 I used xterm for my terminal emulator. It´s old, but still very well maintained, and very
+   lightweight. However, it does not work on Wayland unfortunately. After some research, I quickly found
+   wterm, which is now an unmaintained project. My distro kindly provides the
+   [https://codeberg.org/dnkl/foot]foot terminal, which is also very lightweight and works great on wayland.
+   It even copies on highlight much like xterm does (one of my favorite features).
+
+  Screenshots
+   With X11 and i3, I used imagemagick to take screenshots, specifically the import tool. This of course
+   does not yet work on Wayland, so an alternative had to be found.
+
+   After some research I found I needed two tools to do what I wanted. Imagemagick´s import tool allowed
+   you to select what part of the screen you wanted to screenshot, rather than just always capturing the
+   whole screen. The common advice for Wayland is two tools for this.
+
+   First we need [https://github.com/emersion/slurp]slurp. This tool doesn´t do much other than grey out the
+   screen a bit and allow you to select a rectangle of it. The output of this operation (to STDOUT) is the
+   screen geometry of the selection (eg: 149,117 668x335). This output is fed into the next tool, grim
+   <https://github.com/emersion/grim>_. Grim takes the actual screenshot, but if geometry is specified, it
+   only does so of that geometry. So, to tie this together, my new screenshot command (which is now in my
+   [https://src.oper.io/nullspoon/bin.git/tree/screenshot.sh]screenshot.sh script) looks like this:
+grim -g "$(slurp -w 4)" "${savepath}/screen.${date}.jpg"
+
+  Viewing Photos
+   To be clear on this one, this is referring to things like jpgs, pngs, etc. This is not referring to
+   photo editing or raw image processing (eg: gimp or darktable, respectively, both of which I use
+   though gimp doesn´t support Wayland until version 2.99.2 or later).
+
+   As mentioned in the wallpapers section, I prevously used feh to set my wallpaper. Feh also happens to
+   be a very lightweight image viewer, which I used often. Some research quickly brought up a good
+   Wayland replacement: [https://github.com/eXeC64/imv]imv.
+
+  Viewing PDFs
+   On X11 and i3, I used mupdf to view and work on PDFs. But, as with most of the other tools in
+   this post, mupdf also does not yet work on Wayland. After some research, I found zathura, which
+   actually uses mupdf to render pdfs on Wayland. Zathura works very well and can display much more than
+   PDFs even.
+
+  Web Browsing
+   Fortunately here, I didn´t need to change the applications I use. For a while now I have used two
+   browsers, Gnome Web (Epiphany) and Firefox. Gnome Web supported Wayland out of the box and I
+   had to do nothing to start it up on Wayland. Firefox was almost that easy. By default, Firefox tries
+   to work on X11, and obviously fails on Wayland with this. The common recommendation on the internet
+   is to set the environment variable export MOZ_ENABLE_WAYLAND=1 which will make Firefox try the
+   Wayland protocol (with which it should work fine). After a lot more research though, I found a more
+   universal way to set this (not that this solution is bad at all). It turns out that Firefox also
+   reads a more generic environment variable, export GTK_BACKEND=wayland. Setting either of those should
+   make Firefox work on Wayland.
+
+Summary
+   Switching to Wayland was not an easy task for sure. It took me over a week to find all of those
+   replacements. But that said, Wayland is definitely lighter weight and seems to run much faster on
+   older hardware. I especially appreciate that I don´t need to run a special compositor in addition to
+   my display manager just to get some transparency on windows. So far I like Wayland, but this early on
+   I am still unsure if I will stick with it for the longer term. If I run into any other gaps in my
+   processes, I´ll post how I solved them here.
+
+
+---
+

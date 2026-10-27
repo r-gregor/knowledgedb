@@ -1,0 +1,171 @@
+filename: i3-udev-xrandr-hotplugging-output-switching-20251218.txt
+https://www.frdmtoplay.com/i3-udev-xrandr-hotplugging-output-switching/
+
+i3, udev, & xrandr: Hotplugging & Output Switching
+Feb 17, 2017
+
+   One of the benefits of using a Desktop Environment (DE) like Gnome or KDE is that a lot of "user
+   friendly" things are automagically taken care of. With i3, a minimalist Window Manager, that is not
+   the case. One of the more convenient things missing from a default i3 installation is the ability to
+   hotplug monitors and to quickly change whether monitors are extending/mirroring/off.
+
+Handling hotplugs with udev
+   udev is a device manager and handles hardware events. It allows scripts to be tied to specific
+   hardware events, plugging in a USB device or a monitor, for example.
+
+   Detecting udev events is straightforward with the udevadm command:
+$> sudo udevadm monitor
+
+monitor will print the received events for:
+UDEV   - the event which udev sends out after rule processing
+KERNEL - the kernel uevent
+
+KERNEL[3959.208769] change   /devices/pci0000:00/0000:00:03.0/0000:01:00.0/drm/card0 (drm)
+UDEV  [3960.654344] change   /devices/pci0000:00/0000:00:03.0/0000:01:00.0/drm/card0 (drm)
+
+   Plugging/unplugging a HDMI/VGA/DisplayPort cable will cause events to fire and be printed to the
+   terminal.
+
+   Writing a rule to respond to a particular event is accomplished by creating a file in
+   /etc/udev/rules.d/. For example, the following rule corresponds to the change event on kernel card0
+   on subsystem drm and runs /bin/bash /path/to/script.sh
+
+$> cat /etc/udev/rules.d/98-monitor-hotplug.rules
+KERNEL=="card0", SUBSYSTEM=="drm", ACTION=="change", ENV{DISPLAY}=":0", \
+	ENV{XAUTHORITY}="/home/ben/.Xauthority", RUN+="/bin/bash /path/to/script.sh"
+
+   The udev event does not specify which graphics output was plugged. For a card with multiple outputs,
+   VGA or HDMI could have been plugged in. The information about which outputs are plugged in (or not)
+   is available in /sys/. Notice that the path matches the KERNEL and SUBSYSTEM from the udev event.
+$> echo $(</sys/class/drm/card0/card0-HDMI-A-1/status )
+disconnected
+
+$> echo $(</sys/class/drm/card0/card0-VGA-1/status )
+connected
+
+   Once the output is known, it's very easy to use xrandr to setup the outputs properly. If a
+   notification daemon is running (such as dunst) notify-send will cause a pop-up.
+
+#!/bin/sh
+
+# Get out of town if something errors
+set -e
+
+HDMI_STATUS=$(</sys/class/drm/card0/card0-HDMI-A-1/status )
+VGA_STATUS=$(</sys/class/drm/card0/card0-VGA-1/status )
+
+if [ "connected" == "$HDMI_STATUS" ]; then
+	/usr/bin/xrandr --output HDMI-1 --left-of LVDS-1 --auto
+	/usr/bin/xrandr --output VGA-1 --off
+	/usr/bin/notify-send --urgency=low -t 5000 "Graphics Update" "HDMI plugged in"
+elif [ "connected" == "$VGA_STAUTS" ]; then
+	/usr/bin/xrandr --output HDMI-1 --off
+	/usr/bin/xrandr --output VGA-1 --left-of LVDS-1 --auto
+	/usr/bin/notify-send --urgency=low -t 5000 "Graphics Update" "VGA plugged in"
+else
+	/usr/bin/xrandr --output HDMI-1 --off
+	/usr/bin/xrandr --output VGA-1 --off
+	/usr/bin/notify-send --urgency=low -t 5000 "Graphics Update" "External monitor disconnected"
+	exit
+fi
+
+Convenient Output Switching
+   With monitors being detected on hotplug, the next phase of user friendliness is quickly being able to
+   change whether the display is mirroring, extending, or off.
+
+   arandr is a convenient GUI to position windows and change output behavior. However, hotkeys can be
+   far superior. The goal is to have a hotkey that toggles between a few states:
+    1. LVDS-1 (laptop screen) is on and external display is off
+    2. LVDS-1 is off and external display is off
+    3. LVDS-1 and external display are mirroring
+    4. LVDS-1 and external display are extending
+
+   To maintain state through multiple executions of the script, a temporary file to store the next state
+   will be created.
+
+#!/bin/sh
+
+# Get out of town if something errors
+# set -e
+
+# Get info on the monitors
+LVDS_STATUS=$(</sys/class/drm/card0/card0-LVDS-1/status )
+HDMI_STATUS=$(</sys/class/drm/card0/card0-HDMI-A-1/status )
+VGA_STATUS=$(</sys/class/drm/card0/card0-VGA-1/status )
+
+LVDS_ENABLED=$(</sys/class/drm/card0/card0-LVDS-1/enabled)
+HDMI_ENABLED=$(</sys/class/drm/card0/card0-HDMI-A-1/enabled)
+VGA_ENABLED=$(</sys/class/drm/card0/card0-VGA-1/enabled)
+
+# Check to see if our state log exists
+if [ ! -f /tmp/monitor ]; then
+	touch /tmp/monitor
+	STATE=5
+else
+	STATE=$(</tmp/monitor)
+fi
+
+# The state log has the NEXT state to go to in it
+
+# If monitors are disconnected, stay in state 1
+if [ "disconnected" == "$HDMI_STATUS" -a "disconnected" == "$VGA_STATUS" ]; then
+	STATE=1
+fi
+
+case $STATE in
+	1)
+		# LVDS is on, projectors not connected
+		/usr/bin/xrandr --output LVDS-1 --auto
+		STATE=2
+		;;
+	2)
+		# LVDS is on, projectors are connected but inactive
+		/usr/bin/xrandr --output LVDS-1 --auto --output HDMI-1 --off --output VGA-1 --off
+		STATE=3
+		;;
+	3)
+		# LVDS is off, projectors are on
+		if [ "connected" == "$HDMI_STATUS" ]; then
+			/usr/bin/xrandr --output LVDS-1 --off --output HDMI-1 --auto
+			TYPE="HDMI"
+		elif [ "connected" == "$VGA_STATUS" ]; then
+			/usr/bin/xrandr --output VGA-1 --off --output VGA-1 --auto
+			TYPE="VGA"
+		fi
+		/usr/bin/notify-send -t 5000 --urgency=low "Graphics Update" "Switched to $TYPE"
+		STATE=4
+		;;
+	4)
+		# LVDS is on, projectors are mirroring
+		if [ "connected" == "$HDMI_STATUS" ]; then
+			/usr/bin/xrandr --output LVDS-1 --auto --output HDMI-1 --auto
+			TYPE="HDMI"
+		elif [ "connected" == "$VGA_STATUS" ]; then
+			/usr/bin/xrandr --output VGA-1 --auto --output VGA-1 --auto
+			TYPE="VGA"
+		fi
+		/usr/bin/notify-send -t 5000 --urgency=low "Graphics Update" "Switched to $TYPE mirroring"
+		STATE=5
+		;;
+	5)
+		# LVDS is on, projectors are extending
+		if [ "connected" == "$HDMI_STATUS" ]; then
+			/usr/bin/xrandr --output LVDS-1 --auto --output HDMI-1 --auto --left-of LVDS-1
+			TYPE="HDMI"
+		elif [ "connected" == "$VGA_STATUS" ]; then
+			/usr/bin/xrandr --output VGA-1 --auto --output VGA-1 --auto --left-of LVDS-1
+			TYPE="VGA"
+		fi
+		/usr/bin/notify-send -t 5000 --urgency=low "Graphics Update" "Switched to $TYPE extending"
+		STATE=2
+		;;
+	*)
+		# Unknown state, assume we're in 1
+		STATE=1
+esac
+
+echo $STATE > /tmp/monitor
+
+
+---
+

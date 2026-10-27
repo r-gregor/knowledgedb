@@ -1,0 +1,141 @@
+filename: c_pointer_offset_arithmetics_20230824.txt
+https://groups.google.com/g/comp.lang.c/c/THSRC_lD8as?pli=1
+
+Pointer offset/arithmetic into a void * buffer
+May 25, 2021
+
+   Say mmap has returned a void * pointer to an in-memory image of a file.
+   The file header, because it's at offset 0, can naturally be accessed by
+   assigning the value returned into a pointer of the right type.
+   But the header says that there's a 'section structure' 712 bytes from
+   the start of the file and I am not sure what's the best way to set up a
+   pointer to that structure.
+
+   I know I can cast the original pointer to a char *, add 712 to it (or
+   take the address of the byte at offset 712), and cast it to a pointer of
+   the right type for the section structure; and that would work for the
+   architecture I need it for.
+
+   But to do this 'properly' is there a better or more standard or more
+   portable way to set the pointer to the section structure that doesn't
+   require the casts?
+
+***
+   Not sure what the problem is with the casts; it might be the only with a
+   file layout that is not determinable at compile-time.
+   But perhaps something like this:
+
+#include <stdio.h>
+
+typedef struct{
+	char stuff[100];
+} Section;
+
+typedef struct {
+	char fileheader[712];
+	Section sectinfo;
+	char rest[];
+} Image;
+
+int main(void) {
+	Image* p;
+	Section* q = &(p->sectinfo);
+}
+
+   p points to the whole file image. q points to the section structure. But
+   if you were to look at the generated code, it just ends up adding 712 to
+   p to get q! Exactly what you were trying to avoid.
+   So I wouldn't worry about it.
+
+***
+   No, no calculation is needed. Effectively, the file is specified to be,
+   as you may expect, an array of 8-bit bytes and the offset - in terms of
+   such bytes - is given by a value in the file header.
+   You mentioned making the code more portable or using implicit
+   conversions - which sounds interesting. The following code is an extract
+   of the relevant lines. Would you recommend any changes to them?
+
+void elf_report(FILE *f) {
+	uint8_t *bp;    /* Byte pointer into the file */
+	void *fbuf;     /* Pointer to start of file buffer */
+	Elf32_Ehdr *eh; /* Pointer to Elf header */
+	Elf32_Shdr *sh; /* Pointer to section header array */
+	fbuf = mmap(NULL, flen, PROT_READ, MAP_SHARED, fileno(f), 0);
+	bp = fbuf;
+	eh = fbuf;
+	sh = (Elf32_Shdr *) &bp[eh->e_shoff];
+...
+
+***
+   Do you have a C type that corresponds to the first 712 bytes of the
+   file? Say something like struct header { ... } such that sizeof (struct
+   header) is guaranteed to be 712? If so, then you can use pointer
+   arithmetic using that type rather than char.
+
+   void *beginning = mmap(...);
+   void *after_header = (void*)((struct header*)beginning + 1);
+
+   You'll probably also want some kind of assertion that the header struct
+   has the right size.
+   I'm not entirely sure this is an improvement over char* arithmetic, but
+   it's something to consider.
+
+***
+   Usually there is a library to handle this, for example libelf:
+
+if (elf_version(EV_CURRENT) == EV_NONE) {
+	lp->log("ELF library initialization failure for '%s': %s\n",
+			filename, elf_errmsg(-1));
+	goto leave;
+}
+
+elf = elf_begin(fd, ELF_C_READ, NULL);
+
+if (elf == NULL) {
+	lp->log("ELF Codefile access failure for '%s': %s\n",
+			filename, elf_errmsg(-1));
+	goto leave;
+}
+
+if (elf_kind(elf) != ELF_K_ELF) {
+	lp->log("File '%s' is not an ELF file\n", filename);
+	goto leave;
+}
+
+ident = elf_getident(elf, NULL);
+
+if (ident[EI_CLASS] == ELFCLASS32) {
+	rval = load_elf32(fd, elf, filename, options, lp, base_address);
+	goto leave;
+}
+
+if (ident[EI_CLASS] != ELFCLASS64) {
+	lp->log("File '%s' is not a 64-bit ELF codefile\n", filename);
+	goto leave;
+}
+
+hdr = elf64_getehdr(elf);
+
+if (hdr->e_type != ET_EXEC) {
+	lp->log("File '%s' is not an executable\n", filename);
+	goto leave;
+}
+
+Elf64_Phdr *phdr = NULL;
+phdr = elf64_getphdr(elf);
+
+if (phdr == NULL) {
+	lp->log("The ELF file '%s' seems broken: "
+			"Cannot retrieve program headers: %s\n",
+			filename, elf_errmsg(-1));
+	goto leave;
+}
+
+for(size_t ph = 0; ph < hdr->e_phnum; ph++, phdr++) {
+	if (phdr->p_type != PT_LOAD) continue; // ignore debug info, etc...
+   ...
+
+
+
+---
+

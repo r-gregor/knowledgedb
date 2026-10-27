@@ -1,0 +1,222 @@
+filename: c_howto-serialize-struct_20230607.txt
+https://itecnote.com/tecnote/r-how-to-serialize-a-struct-in-c/
+
+How to serialize a struct in c
+
+   I have a struct object that comprises of several primitive data types, pointers and struct pointers.
+   I want to send it over a socket so that it can be used at the other end. As I want to pay the
+   serialization cost upfront, how do I initialize an object of that struct so that it can be sent
+   immediately without marshalling? For example
+
+struct A {
+	int i;
+	struct B *p;
+};
+
+struct B {
+	long l;
+	char *s[0];
+};
+
+struct A *obj;
+
+// can do I initialize obj?
+int len = sizeof(struct A) + sizeof(struct B) + sizeof(?);
+obj = (struct A *) malloc(len);
+...
+
+write(socket, obj, len);
+
+// on the receiver end, I want to do this
+char buf[len];
+
+read(socket, buf, len);
+struct A *obj = (struct A *)buf;
+int i = obj->i;
+char *s = obj->p->s[0];
+int i obj.i=1; obj.p.
+
+   Thank you.
+
+***
+Best Solution
+   The simplest way to do this may be to allocate a chunk of memory to hold everything. For instance,
+
+   consider a struct as follows:
+typedef struct A {
+	int v;
+	char* str;
+} our_struct_t;
+
+   Now, the simplest way to do this is to create a defined format and pack it into an array of bytes. I
+   will try to show an example:
+   
+int sLen = 0;
+int tLen = 0;
+char* serialized = 0;
+char* metadata = 0;
+char* xval = 0;
+char* xstr = 0;
+our_struct_t x;
+x.v   = 10;
+x.str = "Our String";
+sLen  = strlen(x.str);                                   // Assuming null-terminated (which ours is)
+tLen  = sizeof(int) + sLen;                              // Our struct has an int and a string -
+                                                         // we want the whole string not a mem addr
+serialized = malloc(sizeof(char) * (tLen + sizeof(int)); // We have an additional sizeof(int) for metadata -
+                                                         // this will hold our string length
+metadata = serialized;
+xval = serialized + sizeof(int);
+xstr = xval + sizeof(int);
+*((int*)metadata) = sLen;                                // Pack our metadata
+*((int*)xval) = x.v;                                     // Our "v" value (1 int)
+strncpy(xstr, x.str, sLen);                              // A full copy of our string
+
+   So this example copies the data into an array of size 2 * sizeof(int) + sLen which allows us a single
+   integer of metadata (i.e. string length) and the extracted values from the struct. To deserialize,
+   you could imagine something as follows:
+
+char* serialized = // Assume we have this
+char* metadata = serialized;
+char* yval = metadata + sizeof(int);
+char* ystr = yval + sizeof(int);
+our_struct_t y;
+int sLen = *((int*)metadata);
+y.v = *((int*)yval);
+y.str = malloc((sLen + 1) * sizeof(char));               // +1 to null-terminate
+strncpy(y.str, ystr, sLen);
+y.str[sLen] = '\0';
+
+   As you can see, our array of bytes is well-defined. Below I have detailed the structure:
+	 * Bytes 0-3 : Meta-data (string length)
+	 * Bytes 4-7 : X.v (value)
+	 * Bytes 8 - sLen : X.str (value)
+
+   This kind of well-defined structure allows you to recreate the struct on any environment if you
+   follow the defined convention. To send this structure over the socket, now, depends on how you
+   develop your protocol. You can first send an integer packet containing the total length of the packet
+   which you just constructed, or you can expect that the metadata is sent first/separately (logically
+   separately, this technically can still all be sent at the same time) and then you know how much data
+   to receive on the client-side. For instance, if I receive metadata value of 10 then I can expect
+   sizeof(int) + 10 bytes to follow to complete the struct. In general, this is probably 14 bytes.
+
+   EDIT
+   I will list some clarifications as requested in the comments.
+
+   I do a full copy of the string so it is in (logically) contiguous memory. That is, all the data in my
+   serialized packet is actually full data - there are no pointers. This way, we can send a single
+   buffer (we call is serialized) over the socket. If simply send the pointer, the user receiving the
+   pointer would expect that pointer to be a valid memory address. However, it is unlikely that your
+   memory addresses will be exactly the same. Even if they are, however, he will not have the same data
+   at that address as you do (except in very limited and specialized circumstances).
+
+   Hopefully this point is made more clear by looking at the deserialization process (this is on the
+   receiver's side). Notice how I allocate a struct to hold the information sent by the sender. If the
+   sender did not send me the full string but instead only the memory address, I could not actually
+   reconstruct the data which was sent (even on the same machine we have two distinct virtual memory
+   spaces which are not the same). So in essence, a pointer is only a good mapping for the originator.
+
+   Finally, as far as "structs within structs" go, you will need to have several functions for each
+   struct. That said, it is possible that you can reuse the functions. For instance, if I have two
+   structs A and B where A contains B, I can have two serialize methods:
+
+char* serializeB() {
+  // ... Do serialization
+}
+
+char* serializeA() {
+  char* B = serializeB();
+  // ... Either add on to serialized version of B or do some other modifications to combine the structures
+}
+
+   So you should be able to get away with a single serialization method for each struct.
+
+Related Solutions
+
+Setting a bit
+   Use the bitwise OR operator (|) to set a bit.
+number |= 1UL << n;
+
+   That will set the nth bit of number. n should be zero, if you want to set the 1st bit and so on upto
+   n-1, if you want to set the nth bit.
+
+   Use 1ULL if number is wider than unsigned long; promotion of 1UL << n doesn't happen until after
+   evaluating 1UL << n where it's undefined behaviour to shift by more than the width of a long. The
+   same applies to all the rest of the examples.
+
+Clearing a bit
+   Use the bitwise AND operator (&) to clear a bit.
+number &= ~(1UL << n);
+
+   That will clear the nth bit of number. You must invert the bit string with the bitwise NOT operator
+   (~), then AND it.
+
+Toggling a bit
+   The XOR operator (^) can be used to toggle a bit.
+number ^= 1UL << n;
+
+   That will toggle the nth bit of number.
+
+Checking a bit
+   You didn't ask for this, but I might as well add it.
+
+   To check a bit, shift the number n to the right, then bitwise AND it:
+bit = (number >> n) & 1U;
+
+   That will put the value of the nth bit of number into the variable bit.
+
+Changing the nth bit to x
+   Setting the nth bit to either 1 or 0 can be achieved with the following on a 2's complement C++
+   implementation:
+number ^= (-x ^ number) & (1UL << n);
+
+   Bit n will be set if x is 1, and cleared if x is 0. If x has some other value, you get garbage. x =
+   !!x will booleanize it to 0 or 1.
+
+   To make this independent of 2's complement negation behaviour (where -1 has all bits set, unlike on a
+   1's complement or sign/magnitude C++ implementation), use unsigned negation.
+number ^= (-(unsigned long)x ^ number) & (1UL << n);
+
+   or
+unsigned long newbit = !!x;    // Also booleanize to force 0 or 1
+number ^= (-newbit ^ number) & (1UL << n);
+
+   It's generally a good idea to use unsigned types for portable bit manipulation.
+
+   or
+number = (number & ~(1UL << n)) | (x << n);
+
+   (number & ~(1UL << n)) will clear the nth bit and (x << n) will set the nth bit to x.
+
+   It's also generally a good idea to not to copy/paste code in general and so many people use
+   preprocessor macros or some sort of encapsulation.
+
+New answer, powershell
+
+TCP
+Get-Process -Id (Get-NetTCPConnection -LocalPort YourPortNumberHere).OwningProcess
+
+UDP
+Get-Process -Id (Get-NetUDPEndpoint -LocalPort YourPortNumberHere).OwningProcess
+
+Old answer, cmd
+ C:\> netstat -a -b
+
+   (Add -n to stop it trying to resolve hostnames, which will make it a lot faster.)
+
+   -a Displays all connections and listening ports.
+
+   -b Displays the executable involved in creating each connection or listening port. In some cases
+   well-known executables host multiple independent components, and in these cases the sequence of
+   components involved in creating the connection or listening port is displayed. In this case the
+   executable name is in [] at the bottom, on top is the component it called, and so forth until TCP/IP
+   was reached. Note that this option can be time-consuming and will fail unless you have sufficient
+   permissions.
+
+   -n Displays addresses and port numbers in numerical form.
+
+   -o Displays the owning process ID associated with each connection.
+
+
+---
+

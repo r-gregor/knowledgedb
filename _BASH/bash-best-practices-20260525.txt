@@ -1,0 +1,236 @@
+filename: bash-best-practices-20260525.txt
+https://linuxize.com/post/bash-best-practices/
+
+Bash Best Practices: Writing Safer, Cleaner Scripts
+May 13, 2026
+
+Bash best practices for writing safer and cleaner shell scripts
+Bash scripts tend to start small and grow over time. A helper you wrote in five minutes to copy a few
+files can end up running in a cron job, a deployment pipeline, or a server startup script. When that
+happens, small oversights such as an unquoted variable or an ignored error become real outages.
+
+Start With a Clear Shebang
+Every Bash script should begin with a proper shebang line. The portable choice for Bash is:
+#!/usr/bin/env bash
+
+Using /usr/bin/env bash lets the script find Bash through the PATH, which matters on systems where Bash
+is installed outside /bin, such as macOS with Homebrew. If you rely on features that exist only in Bash,
+do not use #!/bin/sh. On many distributions /bin/sh points to dash or another minimal shell, and arrays,
+[[ ]], and local will not behave the same way.
+
+Enable Strict Mode
+By default, Bash ignores many errors. A command can fail, a variable can be unset, and the script will
+keep running as if nothing happened. Enabling strict mode at the top of the script changes that behavior.
+#!/usr/bin/env bash
+set -euo pipefail
+
+Here is what each flag does:
+    -e - Exit immediately if any command returns a non-zero status.
+    -u - Treat unset variables as an error and exit.
+    -o pipefail - Make a pipeline fail if any command in it fails, not only the last one.
+
+A common extra is IFS=$'\n\t', which prevents word splitting on spaces and avoids surprises when iterating
+over filenames that contain spaces.
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+Strict mode is not magic. It will not catch logic errors, and in some scripts you will need to opt out
+locally with || true for commands that are allowed to fail. The point is to flip the default from "keep
+going on errors" to "stop on errors", which is almost always the safer choice.
+
+Always Quote Your Variables
+Unquoted variables in Bash are expanded and then word-split. If a variable contains spaces, wildcards,
+or is empty, the result may be very different from what you expect.
+
+file="My Report.txt"
+printf '<%s>\n' $file
+
+Because $file is not quoted, Bash passes two arguments to printf: My and Report.txt. Quoting fixes it
+and keeps the filename as one value:
+
+printf '<%s>\n' "$file"
+
+The same rule applies inside tests, loops, and command substitutions. When in doubt, quote. The only
+common case where you intentionally leave a variable unquoted is when you want word splitting, which
+should be rare and deliberate.
+
+Prefer [[ ]] Over [ ]
+Bash supports two test constructs: the older [ ] (a synonym for the test command) and the newer [[ ]]
+keyword. For Bash scripts, prefer [[ ]]:
+
+if [[ -f "$config" && "$env" == "production" ]]; then
+	echo "Loading production config"
+fi
+
+[[ ]] handles empty variables safely even without quotes, supports pattern matching with == and regex
+with =~, and allows logical operators such as && and || inside the test. Only fall back to [ ] when
+writing a portable POSIX script that must run under sh or dash.
+
+Use Functions for Repeated Logic
+Once a script has more than a couple of steps, group related commands into functions. Functions make
+scripts easier to read, test, and refactor.
+
+log() {
+	printf '[%s] %s\n' "$(date +'%F %T')" "$*"
+}
+
+backup_dir() {
+	local src="$1"
+	local dst="$2"
+
+	log "Backing up $src to $dst"
+	rsync -a "$src/" "$dst/"
+}
+
+backup_dir "/var/www" "/backup/www"
+
+Declare variables inside functions with local so they do not leak into the rest of the script. Pass input
+as positional parameters, and return output via echo or printf rather than global variables when possible.
+
+See Bash functions for more details on arguments, return values, and scoping.
+
+Handle Errors Explicitly
+Strict mode stops the script on errors, but it does not tell the user what went wrong. Adding a trap on
+ERR gives you a single place to log failures.
+
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+on_error() {
+	local exit_code=$?
+	local line=$1
+	echo "Error on line $line (exit code $exit_code)" >&2
+	exit "$exit_code"
+}
+
+trap 'on_error $LINENO' ERR
+
+The -E option makes the ERR trap inherit into functions and subshells. Without it, a failure inside a
+helper function may exit the script without running your error handler.
+
+For cleanup tasks such as removing temporary files, use trap on EXIT:
+
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
+
+The EXIT trap runs whether the script exits normally, hits an error under set -e, or is interrupted with
+Ctrl+C. It is the safest way to guarantee cleanup.
+
+Validate Input Early
+Scripts that take arguments should fail fast when those arguments are missing or invalid. Check them
+before doing any work:
+
+if [[ $# -lt 2 ]]; then
+	echo "Usage: $0 <environment> <version>" >&2
+	exit 1
+fi
+
+env="$1"
+version="$2"
+
+case "$env" in
+	staging|production) ;;
+
+	*)
+		echo "Unknown environment: $env" >&2
+		exit 1
+		;;
+esac
+
+For scripts with several flags, use getopts instead of parsing $@ manually. It handles short options,
+arguments, and error reporting in a consistent way.
+
+Avoid Parsing the Output of ls
+A common beginner mistake is looping over ls output:
+
+for f in $(ls /var/log); do
+	echo "$f"
+done
+
+This breaks on filenames with spaces, newlines, or special characters. Use a glob or find instead:
+
+for f in /var/log/*; do
+	echo "$f"
+done
+
+For recursive traversal, use find with -print0 and xargs -0, or a while read loop with IFS= and -d ''
+to handle unusual filenames correctly.
+
+Keep Scripts Idempotent When Possible
+A script you can safely re-run is much easier to work with than one that breaks on the second attempt. Aim
+for idempotent behavior: check before creating directories, use mkdir -p instead of mkdir, use ln -sf
+instead of ln -s, and guard commands with if blocks when they would otherwise fail on re-run.
+$> mkdir -p /opt/app/config
+
+The same pattern applies to package installation, user creation, and configuration edits. Tools like
+Ansible enforce idempotency by design; in Bash, you have to add those checks yourself.
+
+Use Shellcheck
+Shellcheck is a static analyzer for shell scripts. It catches unquoted variables, unsafe for loops,
+and many other common mistakes before you hit them in production.
+
+Install it from your package manager:
+$> sudo apt install shellcheck
+
+Then run it against your script:
+$> shellcheck script.sh
+
+Fix the warnings it raises, or document with an inline comment why a specific check is being ignored. Making
+shellcheck part of your editor or pre-commit hook removes an entire class of Bash bugs.
+
+Prefer Readable Over Clever
+Bash is full of shortcuts and obscure expansions. They can make scripts shorter, but they also make them
+harder to read six months later. Choose the clearer form, even when it is a few characters longer.
+
+if [[ -z "$name" ]]; then
+	name="anonymous"
+fi
+
+is almost always easier to maintain than the golfed equivalent:
+: "${name:=anonymous}"
+
+Aim for scripts that a teammate can read once and understand, not ones that require a reference manual.
+
+Quick Reference
+For a printable quick reference, see the Bash cheatsheet.
+
+Before committing a Bash script, confirm the following:
+
+01 - #!/usr/bin/env bash shebang is present.
+02 - set -euo pipefail is enabled.
+03 - All variable expansions are quoted.
+04 - Tests use [[ ]] instead of [ ].
+05 - Functions replace long repeated blocks, with local variables.
+06 - trap handles errors and cleanup.
+07 - Input is validated before work begins.
+08 - No parsing of ls output.
+09 - shellcheck reports no warnings, or they are explicitly ignored.
+
+FAQ
+Is set -e enough on its own?
+No. set -e stops on many errors, but it misses failures in pipelines and ignores unset variables. Combine
+it with -u and -o pipefail to cover those cases.
+
+Does strict mode break existing scripts?
+It often surfaces bugs that were already there, such as unset variables and ignored errors. The fix is
+to quote variables, use default values like ${VAR:-}, and handle expected failures with || true.
+
+Should I write scripts in Bash or switch to Python?
+Bash is a good fit for short glue scripts that mostly call other commands. Once a script grows past a
+few hundred lines, has complex data structures, or needs proper error handling and testing, Python or
+another language is usually a better choice.
+
+Where can I learn more safe scripting patterns?
+Keep the Shellcheck wiki open while you write, and read through the official
+[https://www.gnu.org/software/bash/manual/bash.html]Bash manual section on shell builtins. Both cover the
+reasoning behind each rule, not only the rule itself.
+
+Conclusion
+Strict mode, quoting, and a few well-placed traps cover most of the risk in Bash scripting. Make these
+practices your defaults, run shellcheck on every change, and your scripts will behave the same way on
+your laptop, in CI, and on a production server.
+
+
+---
+

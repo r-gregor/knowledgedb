@@ -1,0 +1,275 @@
+filename: go-going-backward-20260805.txt
+https://antonz.org/going-backward/
+
+Going Backward
+
+   Go´s standard library has a slices package with a function called Backward. It lets you iterate over
+   the elements of a slice in reverse order:
+// Backward returns an iterator over index-value pairs in the slice,
+// traversing it backward with descending indices.
+func Backward[Slice ~[]E, E any](s Slice) iter.Seq2[int, E]
+
+   If you´re not deeply familiar with generics and iterators, the natural reaction to this signature
+   (and to the others in the slices package) is: "couldn´t this have been made simpler somehow?"
+
+   To answer that, let´s run a thought experiment. Let´s picture ourselves as a distant ancestor, living
+   in the pre-iterator era, who decided to implement Backward from scratch.
+
+     Our imaginary ancestor doesn´t work at Google, so don´t project their decisions onto the Go
+     development team. They had their own reasons - and no Jira.
+
+1. A slice in reverse
+   A pleasant, sunny summer day, birds singing. You´re at the keyboard as usual, and suddenly you decide
+   to write a function for walking a slice in reverse order. Anything beats working on yet another Jira
+   ticket.
+// Backward returns the slice in reverse order.
+func Backward[T any](s []T) []T {
+	n := len(s)
+	res := make([]T, n)
+	for i := n - 1; i >= 0; i-- {
+		res[n-1-i] = s[i]
+	}
+	return res
+}
+
+   Usage example:
+s := []int{11, 22, 33, 44, 55}
+b := Backward(s)
+fmt.Println(b)
+// [55 44 33 22 11]
+
+   The implementation is simple and works reliably. There´s one drawback, though: Backward creates a
+   copy of the slice, which can be wasteful for large slices.
+
+   Besides, the sun has hidden behind a cloud, and it looks like rain is coming. You decide to work a
+   bit more.
+
+2. Gimme, gimme, gimme
+   To avoid copying the slice, you decide to return a closure that knows the current position in the
+   original slice and returns the next element on each call:
+
+// Backward returns a function that, on each call, returns the next
+// element of the slice (in reverse order) and a flag indicating
+// whether to continue iterating (false means done).
+func Backward[T any](s []T) func() (T, bool) {
+	i := len(s)
+	return func() (T, bool) {
+		if i == 0 {
+			var zero T
+			return zero, false
+		}
+		i--
+		return s[i], true
+	}
+}
+
+   Usage example:
+s := []int{11, 22, 33, 44, 55}
+next := Backward(s)
+
+for {
+	v, ok := next()
+	if !ok {
+		break
+	}
+	fmt.Print(v, " ")
+}
+
+fmt.Println()
+// 55 44 33 22 11
+
+   Now it allocates O(1) memory instead of O(n). That´s better.
+
+   Before moving on, you glance out of the window. Yep, sure enough, the rain has started, and the sky
+   is even cloudier than before. Excellent working weather!
+
+3. A callback-based iterator
+   Something about the calling code keeps bothering you. It came out rather imperative. You´d like to
+   hand the loop mechanics over to Backward and leave the caller with nothing but the application logic
+   (whatever it is you do with the slice elements).
+
+   You decide to complicate Backward´s signature a little. Now it will return an iterator function that
+   takes a callback as an argument and applies it to each element of the slice:
+
+// Backward returns a function that takes a yield callback.
+// The callback is invoked for each element of the slice (in reverse order).
+func Backward[T any](s []T) func(yield func(T) bool) {
+	return func(yield func(T) bool) {
+		for i := len(s) - 1; i >= 0; i-- {
+			if !yield(s[i]) {
+				return
+			}
+		}
+	}
+}
+
+   The yield function returns a bool - that´s so the callback can signal when it wants to stop the
+   traversal early.
+
+   Now you can turn the for loop body in the calling code into a callback, and you don´t need the loop
+   anymore:
+
+work := func(x int) bool {
+	if x < 30 {
+		return false // early exit
+	}
+	fmt.Print(x, " ")
+	return true
+}
+
+s := []int{11, 22, 33, 44, 55}
+it := Backward(s)
+it(work)
+fmt.Println()
+// 55 44 33
+
+   Mmm, very functional.
+
+   One small nuance: Backward´s signature looks a bit heavy. You add a separate type for the return
+   value:
+
+// Seq is an iterator over sequences of individual values.
+// When called as seq(yield), seq calls yield(v) for each value
+// v in the sequence, stopping early if yield returns false.
+type Seq[T any] func(yield func(T) bool)
+
+   The function looks much better now:
+func Backward[T any](s []T) Seq[T] {
+	// body unchanged
+}
+
+   Praising yourself for inventing the iterator, you walk over to the window. It looks like the
+   weather´s gotten worse. The rain is coming down in buckets, and the sky is so overcast that it´s
+   grown as dark as evening.
+
+4. Iterator 2: Return of the Iterator
+   It´s all great, but then it hits you: an ordinary range over a slice returns both the index and the
+   element´s value. Your iterator returns only the value. You decide to fix this vexing oversight:
+
+func Backward[T any](s []T) func(yield func(int, T) bool) {
+	return func(yield func(int, T) bool) {
+		for i := len(s) - 1; i >= 0; i-- {
+			if !yield(i, s[i]) {
+				return
+			}
+		}
+	}
+}
+
+   Usage example:
+work := func(i int, x int) bool {
+	fmt.Print(i, ":", x, " ")
+		return true
+}
+
+s := []int{11, 22, 33, 44, 55}
+it := Backward(s)
+it(work)
+fmt.Println()
+// 4:55 3:44 2:33 1:22 0:11
+
+   Since the result´s signature has changed, it no longer fits the Seq type. What can you do - you´ll
+   have to add a new type. After ten minutes of deliberation, you decide to call it Seq2:
+
+// Seq2 is an iterator over sequences of key-value pairs.
+// When called as seq(yield), seq calls yield(k, v) for each pair
+// (k, v) in the sequence, stopping early if yield returns false.
+type Seq2[K any, V any] func(yield func(K, V) bool)
+
+func Backward[T any](s []T) Seq2[int, T] {
+	// body unchanged
+}
+
+   You get up to stretch your legs, and go to the window. The downpour is so heavy you can´t make
+   anything out. Lightning is flashing. Hail the size of your fist is falling - you´ve never seen
+   anything like it in your life. Well, these things happen!
+
+5. Not quite a slice
+   Have you thought of everything? Seems so. But you´re not going back to Jira tickets just yet.
+   Refreshing your memory of the Go spec, you realize that besides ordinary slices there are
+   "user-defined" ones - types whose underlying type is a slice:
+
+// IDs is a slice of identifiers.
+type IDs []int
+
+   Backward works perfectly well with IDs - the compiler accepts a value of type IDs since its
+   underlying type is []int:
+
+ids := IDs{11, 22, 33, 44, 55}
+it := Backward(ids)
+it(work)
+fmt.Println()
+// 4:55 3:44 2:33 1:22 0:11
+
+   But what about this?
+// backwardIDs builds an iterator over a slice of identifiers
+// in reverse order.
+var backwardIDs func(IDs) Seq2[int, int] = Backward[int]
+// ERROR: cannot use Backward[int]
+// (value of type func(s []int) Seq2[int, int])
+// as func(IDs) Seq2[int, int] value in variable declaration
+
+   Here´s where the difference between IDs and []int shows up.
+
+   When you assign the function itself, it´s the signatures that get compared: func(IDs) Seq2[int, int]
+   versus func([]int) Seq2[int, int]. Signatures match only if the parameter types are identical. But
+   IDs and []int are different, even though one is based on the other. The signatures differ → you get
+   an error.
+
+   Scratching your head, you turn to the spec once again and find a special generic syntax: ~T. It
+   represents the set of all types whose underlying type is T. Just what you need!
+
+   Now you´ll have to parameterize not only the element type (E) but the slice type (Slice) as well. E
+   is needed for the returned values, while Slice lets the function accept not just []E, but any types
+   based on it:
+
+func Backward[Slice ~[]E, E any](s Slice) Seq2[int, E] {
+	return func(yield func(int, E) bool) {
+		for i := len(s) - 1; i >= 0; i-- {
+			if !yield(i, s[i]) {
+				return
+			}
+		}
+	}
+}
+
+   Now the example:
+var backwardIDs func(IDs) Seq2[int, int] = Backward[IDs, int]
+
+ids := IDs{11, 22, 33, 44, 55}
+
+work := func(i int, x int) bool {
+	fmt.Print(i, ":", x, " ")
+	return true
+}
+
+it := backwardIDs(ids)
+it(work)
+fmt.Println()
+// 4:55 3:44 2:33 1:22 0:11
+
+   It works! You´ve ended up with something similar to Backward from the slices package.
+
+   You exhale wearily and walk over to the window. The downpour and hail have given way to a hurricane.
+   Trees and billboards go flying past. Toads, for some reason, are falling from the sky.
+
+6. Iterator 3: Judgment Day
+   To take your mind off the strange events outside the window, you keep pondering.
+
+   An ordinary Backward is already great. But it would be even better if the traversal logic itself were
+   configurable. On the other hand, if you end up with a lot of parameters, a strategy would suit
+   better. And, by the way, it wouldn´t hurt to add a factory that produces iterator factories according
+   to given criteria...
+
+   Before you can finish the thought, the ground outside the window tears open with a deafening roar. An
+   enormous black hand, streaming molten lava and flickering flames, bursts out of the fissure, seizes
+   you, and drags you straight down to hell.
+
+     P.S. Despite the article´s tongue-in-cheek tone, the "complicated" version in the standard library
+     [https://go.dev/blog/deconstructing-type-parameters]is justified (Backward just follows suite with other
+     package functions). But if you´re doing something similar in a project that solves a specific problem -
+     it might make sense to stop at the simpler option.
+
+
+---
+

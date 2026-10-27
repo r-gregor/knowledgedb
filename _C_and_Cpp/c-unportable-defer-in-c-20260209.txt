@@ -1,0 +1,434 @@
+filename: c-unportable-defer-in-c-20260209.txt
+https://antonz.org/defer-in-c/
+
+(Un)portable defer in C
+
+   Modern system programming languages, from Hare to Zig, seem to agree that defer is a must-have
+   feature. It's hard to argue with that, because defer makes it much easier to free memory and other
+   resources correctly, which is crucial in languages without garbage collection.
+
+   The situation in C is different. There was a N2895 proposal by Jens Gustedt and Robert Seacord in
+   2021, but it was not accepted for C23. Now, there's another N3734 proposal by JeanHeyd Meneide,
+   which will probably be accepted in the next standard version.
+
+   Since defer isn't part of the standard, people have created lots of different implementations. Let's
+   take a quick look at them and see if we can find the best one.
+
+   C23/GCC * C11/GCC * GCC/Clang * MSVC * Long jump * For loop * Stack *
+   Simplified GCC/Clang * Final thoughts
+
+C23/GCC
+
+   Jens Gustedt offers this brief version:
+#define defer __DEFER(__COUNTER__)
+#define __DEFER(N) __DEFER_(N)
+#define __DEFER_(N) __DEFER__(__DEFER_FUNCTION_##N, __DEFER_VARIABLE_##N)
+
+#define __DEFER__(F, V)        \
+    auto void F(int*);         \
+    [[gnu::cleanup(F)]] int V; \
+    auto void F(int*)
+
+   Usage example:
+void loud_free(void* p) {
+	printf("freeing %p\n", p);
+	free(p);
+}
+
+int main(void) {
+	int* p = malloc(sizeof(int));
+	if (!p) return 1;
+	defer { loud_free(p); }
+
+	*p = 42;
+	printf("p = %d\n", *p);
+}
+
+p = 42
+freeing 0x127e05b30
+
+   This approach combines C23 attribute syntax ([[attribute]]) with GCC-specific features: nested
+   functions (auto void F(int*)) and the cleanup attribute. It also uses the non-standard __COUNTER__
+   macro (supported by GCC, Clang, and MSVC), which expands to an automatically increasing integer
+   value.
+
+   Nested functions and cleanup in GCC
+   A nested function (also known as a local function) is a function defined inside another function:
+void outer() {
+	int x = 10;
+
+	void inner() {
+		x += 10;
+	}
+
+	inner();
+}
+
+   Nested functions can access variables from the enclosing scope, similar to closures in other
+   languages, but they are not first-class citizens and cannot be passed around like function pointers.
+
+   The cleanup attribute runs a function when the variable goes out of scope:
+void safe_free(int **ptr) {
+	if (!ptr || !*ptr) return;
+	free(*ptr);
+}
+
+int main(void) {
+	__attribute__((cleanup(safe_free))) int *p = malloc(sizeof(int));
+	if (!p) return 1;
+	*p = 42;
+
+	// safe_free(&p) will be called automatically
+	// when p goes out of scope.
+}
+
+   The function should take one parameter, which is a pointer to a type that's compatible with the
+   variable. If the function returns a value, it will be ignored.
+
+   On the plus side, this version works just like you'd expect defer to work. On the downside, it's only
+   available in C23+ and only works with GCC (not even Clang supports it, because of the nested
+   function).
+
+   Another downside is that using nested functions requires an executable stack, which security experts
+   strongly discourage.
+
+   Executable stack vulnerability
+   When we use nested functions in GCC, the compiler often creates trampolines (small pieces of machine
+   code) on the stack at runtime. These trampolines let the nested function access variables from the
+   parent function's scope. For the CPU to run these code fragments, the stack's memory pages need to be
+   marked as executable.
+
+   An executable stack is a serious security risk because it makes buffer overflow attacks much easier.
+   In these attacks, a hacker sends more data than a program can handle, which overwrites the stack with
+   harmful "shellcode". If the stack non-executable (which is the standard today), the CPU won't run
+   that code and the program will just crash. But since our defer macro makes the stack executable, an
+   attacker can jump straight to their injected code and run it, giving them complete control over the
+   process.
+
+C11/GCC
+   We can easily adapt the above version to use C11:
+#define defer _DEFER(__COUNTER__)
+#define _DEFER(N) __DEFER(N)
+#define __DEFER(N) ___DEFER(__DEFER_FUNC_##N, __DEFER_VAR_##N)
+
+#define ___DEFER(F, V)                                         \
+    auto void F(void*);                                        \
+    __attribute__((cleanup(F))) int V __attribute__((unused)); \
+    auto void F(void* _dummy_ptr)
+
+   Usage example:
+int main(void) {
+	int* p = malloc(sizeof(int));
+	if (!p) return 1;
+	defer { loud_free(p); }
+
+	*p = 42;
+	printf("p = %d\n", *p);
+}
+
+p = 42
+freeing 0x127e05b30
+
+   The main downside remains: it's GCC-only.
+
+GCC/Clang
+   Clang fully supports the cleanup attribute, but it doesn't support nested functions. Instead, it
+   offers the blocks extension, which works somewhat similar:
+void outer() {
+	__block int x = 10;
+
+	void (^inner)(void) = ^{
+		x += 10;
+	};
+
+	inner();
+}
+
+   We can use Clang blocks to make a defer version that works with both GCC and Clang:
+#if defined(__clang__)
+
+// Clang implementation.
+#define _DEFER_CONCAT(a, b) a##b
+#define _DEFER_NAME(a, b) _DEFER_CONCAT(a, b)
+
+static inline void _defer_cleanup(void (^*block)(void)) {
+	if (*block) (*block)();
+}
+
+#define defer                                                                   \
+    __attribute__((unused)) void (^_DEFER_NAME(_defer_var_, __COUNTER__))(void) \
+        __attribute__((cleanup(_defer_cleanup))) = ^
+
+#elif defined(__GNUC__)
+
+// GCC implementation.
+#define defer _DEFER(__COUNTER__)
+#define _DEFER(N) __DEFER(N)
+#define __DEFER(N) ___DEFER(__DEFER_FUNC_##N, __DEFER_VAR_##N)
+
+#define ___DEFER(F, V)                                         \
+    auto void F(void*);                                        \
+    __attribute__((cleanup(F))) int V __attribute__((unused)); \
+    auto void F(void* _dummy_ptr)
+
+#else
+
+// Runtime error for unsupported compilers.
+#define defer assert(!"unsupported compiler");
+
+#endif
+
+   Usage example:
+int main(void) {
+	int* p = malloc(sizeof(int));
+	if (!p) return 1;
+	defer { loud_free(p); };
+
+	*p = 42;
+	printf("p = %d\n", *p);
+}
+
+p = 42
+freeing 0x127e05b30
+
+   Now it works with Clang, but there are several things to be aware of:
+    1. We must compile with -fblocks.
+    2. We must put a ; after the closing brace in the deferred block: defer { ... };.
+    3. If we need to modify a variable inside the defer block, the variable must be declared with
+       __block:
+
+__block int x = 0;
+defer { x += 10; };
+
+   On the plus side, this implementation works with both GCC and Clang. The downside is that it's still
+   not standard C, and won't work with other compilers like MSVC.
+
+MSVC
+   MSVC, of course, doesn't support the cleanup attribute. But it provides "structured exception
+   handling" with the __try and __finally keywords:
+int main(void) {
+	int* p = malloc(sizeof(int));
+	if (!p) return 1;
+	__try {
+		*p = 42;
+		printf("p = %d\n", *p);
+	}
+	__finally {
+		loud_free(p);
+	}
+}
+
+   The code in the __finally block will always run, no matter how the __try block exits - whether it
+   finishes normally, returns early, or crashes (for example, from a null pointer dereference).
+
+   This isn't the defer we're looking for, but it's a decent alternative if you're only programming for
+   Windows.
+
+Long jump
+   There are well-known defer implementations by Jens Gustedt and moon-chilled that use setjmp
+   and longjmp. I'm mentioning them for completeness, but honestly, I would never use them in
+   production. The first one is extremely large, and the second one is extremely hacky. Also, I'd rather
+   not use long jumps unless it's absolutely necessary.
+
+   Still, here's a usage example from Gustedt's library:
+guard {
+	void * const p = malloc(25);
+	if (!p) break;
+	defer free(p);
+
+	void * const q = malloc(25);
+	if (!q) break;
+	defer free(q);
+
+	if (mtx_lock(&mut)==thrd_error) break;
+	defer mtx_unlock(&mut);
+}
+
+   Here, all deferred statements run at the end of the guarded block, no matter how we exit the block
+   (normally or through break).
+
+For loop
+   The stc library probably has the simplest defer implementation ever:
+#define defer(...) \
+    for (int _c_i3 = 0; _c_i3++ == 0; __VA_ARGS__)
+
+   Usage example:
+int main(void) {
+	int* p = malloc(sizeof(int));
+	if (!p) return 1;
+	defer(loud_free(p)) {
+		*p = 42;
+		printf("p = %d\n", *p);
+	}
+}
+
+p = 42
+freeing 0x127e05b30
+
+   Here, the deferred statement is passed as __VA_ARGS__ and is used as the loop increment. The
+   "defer-aware" block of code is the loop body. Since the increment runs after the body, the deferred
+   statement executes after the main code.
+
+   This approach works with all mainstream compilers, but it falls apart if you try to exit early with
+   break or return:
+int main(void) {
+	int* p = malloc(sizeof(int));
+	if (!p) return 1;
+	defer(loud_free(p)) {
+		*p = 42;
+		if (*p == 42) {
+			printf("early exit, defer is not called\n");
+			break;
+		}
+		printf("p = %d\n", *p);
+	}
+}
+
+early exit, defer is not called
+
+Stack
+   Dmitriy Kubyshkin provides a defer implementation that adds a "stack frame" of deferred calls to
+   any function that needs them. Here's a simplified version:
+#define countof(A) ((sizeof(A)) / (sizeof((A)[0])))
+
+// Deferred function and its argument.
+struct _defer_ctx {
+	void (*fn)(void*);
+	void* arg;
+};
+
+// Calls all deferred functions in LIFO order.
+static inline void _defer_drain (
+	const struct _defer_ctx* it,
+	const struct _defer_ctx* end) {
+	for (; it != end; it++) it->fn(it->arg);
+}
+
+// Initializes the defer stack with the given size
+// for the current function.
+#define defers(n)                     \
+    struct {                          \
+        struct _defer_ctx* first;     \
+        struct _defer_ctx items[(n)]; \
+    } _deferred = {&_deferred.items[(n)], {0}}
+
+// Pushes a deferred function call onto the stack.
+#define defer(_fn, _arg)                              \
+    do {                                              \
+        if (_deferred.first <= &_deferred.items[0]) { \
+            assert(!"defer stack overflow");          \
+        }                                             \
+        struct _defer_ctx* d = --_deferred.first;     \
+        d->fn = (void (*)(void*))(_fn);               \
+        d->arg = (void*)(_arg);                       \
+    } while (0)
+
+// Calls all deferred functions and returns from the current function.
+#define returnd                                          \
+    while (                                              \
+        _defer_drain(                                    \
+            _deferred.first,                             \
+            &_deferred.items[countof(_deferred.items)]), \
+        1) return
+
+   Usage example:
+int main(void) {
+	// The function supports up to 16 deferred calls.
+	defers(16);
+
+	int* p = malloc(sizeof(int));
+	if (!p) returnd 1;
+	defer(loud_free, p);
+
+	*p = 42;
+	printf("p = %d\n", *p);
+
+	// We must exit through returnd to
+	// ensure deferred functions are called.
+	returnd 0;
+   }
+
+p = 42
+freeing 0x127e05b30
+
+   This version works with all mainstream compilers. Also, unlike the STC version, defers run correctly
+   in case of early exit:
+int main(void) {
+	defers(16);
+
+	int* p = malloc(sizeof(int));
+	if (!p) returnd 1;
+	defer(loud_free, p);
+
+	*p = 42;
+	if (*p == 42) {
+		printf("early exit\n");
+		returnd 0;
+	}
+
+	printf("p = %d\n", *p);
+	returnd 0;
+}
+
+early exit
+freeing 0x127e05b30
+
+   Unfortunately, there are some drawbacks:
+     * Defer only supports single-function calls, not code blocks.
+     * We always have to call defers at the start of the function and exit using returnd. In the
+       original implementation, Dmitriy overrides the return keyword, but this won't compile with strict
+       compile flags (which I think we should always use).
+     * The deferred function runs before the return value is evaluated, not after.
+
+Simplified GCC/Clang
+   The Stack version above doesn't support deferring code blocks. In my opinion, that's not a problem,
+   since most defers are just "free this resource" actions, which only need a single function call with
+   one argument.
+
+   If we accept this limitation, we can simplify the GCC/Clang version by dropping GCC's nested
+   functions and Clang's blocks:
+#define _DEFER_CONCAT(a, b) a##b
+#define _DEFER_NAME(a, b) _DEFER_CONCAT(a, b)
+
+// Deferred function and its argument.
+struct _defer_ctx {
+	void (*fn)(void*);
+	void* arg;
+};
+
+// Calls the deferred function with its argument.
+static inline void _defer_cleanup(struct _defer_ctx* ctx) {
+	if (ctx->fn) ctx->fn(ctx->arg);
+}
+
+// Create a deferred function call for the current scope.
+#define defer(fn, ptr)                                      \
+    struct _defer_ctx _DEFER_NAME(_defer_var_, __COUNTER__) \
+        __attribute__((cleanup(_defer_cleanup))) =          \
+            {(void (*)(void*))(fn), (void*)(ptr)}
+
+   Works like a charm:
+int main(void) {
+	int* p = malloc(sizeof(int));
+	if (!p) return 1;
+	defer(loud_free, p);
+
+	*p = 42;
+	printf("p = %d\n", *p);
+}
+
+p = 42
+freeing 0x127e05b30
+
+Final thoughts
+   Personally, I like the simpler GCC/Clang version better. Not having MSVC support isn't a big deal,
+   since we can run GCC on Windows or use the Zig compiler, which works just fine.
+
+   But if I really need to support GCC, Clang, and MSVC - I'd probably go with the Stack version.
+
+   Anyway, I don't think we need to wait for defer to be added to the C standard. We already have defer
+   at home!
+
+
+---
+

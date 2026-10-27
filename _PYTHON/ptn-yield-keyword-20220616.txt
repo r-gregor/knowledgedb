@@ -1,0 +1,403 @@
+filename: ptn_yield-keyword_20220616.txt
+https://stackoverflow.com/questions/231767/what-does-the-yield-keyword-do
+
+What does the "yield" keyword do?
+
+   Want to improve this post? Provide detailed answers to this question, including citations and an
+   explanation of why your answer is correct. Answers without enough detail may be edited or deleted.
+
+   What is the use of the yield keyword in Python? What does it do?
+
+   For example, I'm trying to understand this code^1:
+
+def _get_child_candidates(self, distance, min_dist, max_dist):
+	if self._leftchild and distance - max_dist < self._median:
+		yield self._leftchild
+	if self._rightchild and distance + max_dist >= self._median:
+		yield self._rightchild
+
+   And this is the caller:
+
+result, candidates = [], [self]
+while candidates:
+	node = candidates.pop()
+	distance = node._get_dist(obj)
+
+	if distance <= max_dist and distance >= min_dist:
+		result.extend(node._values)
+	candidates.extend(node._get_child_candidates(distance, min_dist, max_dist))
+return result
+
+   What happens when the method _get_child_candidates is called? Is a list returned? A single element?
+   Is it called again? When will subsequent calls stop?
+
+***
+   To understand what yield does, you must understand what generators are. And before you can understand
+   generators, you must understand iterables.
+
+Iterables
+   When you create a list, you can read its items one by one. Reading its items one by one is called
+   iteration:
+>>> mylist = [1, 2, 3]
+>>> for i in mylist:
+...    print(i)
+1
+2
+3
+
+   mylist is an iterable. When you use a list comprehension, you create a list, and so an iterable:
+>>> mylist = [x*x for x in range(3)]
+>>> for i in mylist:
+...    print(i)
+0
+1
+4
+
+   Everything you can use "for... in..." on is an iterable; lists, strings, files...
+
+   These iterables are handy because you can read them as much as you wish, but you store all the values
+   in memory and this is not always what you want when you have a lot of values.
+
+Generators
+   Generators are iterators, a kind of iterable you CAN ONLY ITERATE OVER ONCE. Generators do not store
+   all the values in memory, they generate the values on the fly:
+>>> mygenerator = (x*x for x in range(3))
+>>> for i in mygenerator:
+...    print(i)
+0
+1
+4
+
+   It is just the same except you used () instead of []. BUT, you cannot perform for i in mygenerator a
+   second time since generators can only be used once: they calculate 0, then forget about it and
+   calculate 1, and end calculating 4, one by one.
+
+Yield
+   yield is a keyword that is used like return, except the function will return a generator.
+>>> def create_generator():
+... 	mylist = range(3)
+... 	for i in mylist:
+... 		yield i*i
+...
+>>> mygenerator = create_generator() # create a generator
+>>> print(mygenerator) # mygenerator is an object!
+<generator object create_generator at 0xb7555c34>
+>>> for i in mygenerator:
+... 	print(i)
+0
+1
+4
+
+   Here it's a useless example, but it's handy when you know your function will return a huge set of
+   values that you will only need to read once.
+
+   To master yield, you must understand that when you call the function, the code you have written in
+   the function body does not run. The function only returns the generator object, this is a bit tricky.
+
+   Then, your code will continue from where it left off each time for uses the generator.
+
+   Now the hard part:
+   The first time the for calls the generator object created from your function, it will run the code in
+   your function from the beginning until it hits yield, then it'll return the first value of the loop.
+   Then, each subsequent call will run another iteration of the loop you have written in the function
+   and return the next value. This will continue until the generator is considered empty, which happens
+   when the function runs without hitting yield. That can be because the loop has come to an end, or
+   because you no longer satisfy an "if/else".
+
+Your code explained
+
+   Generator:
+# Here you create the method of the node object that will return the generator
+def _get_child_candidates(self, distance, min_dist, max_dist):
+
+	# Here is the code that will be called each time you use the generator object:
+
+	# If there is still a child of the node object on its left
+	# AND if the distance is ok, return the next child
+	if self._leftchild and distance - max_dist < self._median:
+		yield self._leftchild
+
+	# If there is still a child of the node object on its right
+	# AND if the distance is ok, return the next child
+	if self._rightchild and distance + max_dist >= self._median:
+		yield self._rightchild
+
+	# If the function arrives here, the generator will be considered empty
+	# there is no more than two values: the left and the right children
+
+   Caller:
+# Create an empty list and a list with the current object reference
+result, candidates = list(), [self]
+
+# Loop on candidates (they contain only one element at the beginning)
+while candidates:
+
+	# Get the last candidate and remove it from the list
+	node = candidates.pop()
+
+	# Get the distance between obj and the candidate
+	distance = node._get_dist(obj)
+
+	# If distance is ok, then you can fill the result
+	if distance <= max_dist and distance >= min_dist:
+		result.extend(node._values)
+
+	# Add the children of the candidate in the candidate's list
+	# so the loop will keep running until it will have looked
+	# at all the children of the children of the children, etc. of the candidate
+	candidates.extend(node._get_child_candidates(distance, min_dist, max_dist))
+
+return result
+
+   This code contains several smart parts:
+	 * The loop iterates on a list, but the list expands while the loop is being iterated. It's a
+	   concise way to go through all these nested data even if it's a bit dangerous since you can end up
+	   with an infinite loop. In this case, candidates.extend(node._get_child_candidates(distance,
+	   min_dist, max_dist)) exhaust all the values of the generator, but while keeps creating new
+	   generator objects which will produce different values from the previous ones since it's not
+	   applied on the same node.
+	 * The extend() method is a list object method that expects an iterable and adds its values to the
+	   list.
+
+   Usually we pass a list to it:
+>>> a = [1, 2]
+>>> b = [3, 4]
+>>> a.extend(b)
+>>> print(a)
+[1, 2, 3, 4]
+
+   But in your code, it gets a generator, which is good because:
+	1. You don't need to read the values twice.
+	2. You may have a lot of children and you don't want them all stored in memory.
+
+   And it works because Python does not care if the argument of a method is a list or not. Python
+   expects iterables so it will work with strings, lists, tuples, and generators! This is called duck
+   typing and is one of the reasons why Python is so cool. But this is another story, for another
+   question...
+
+   You can stop here, or read a little bit to see an advanced use of a generator:
+
+Controlling a generator exhaustion
+
+>>> class Bank(): # Let's create a bank, building ATMs
+... 	crisis = False
+... 	def create_atm(self):
+... 		while not self.crisis:
+... 			yield "$100"
+>>> hsbc = Bank() # When everything's ok the ATM gives you as much as you want
+>>> corner_street_atm = hsbc.create_atm()
+>>> print(corner_street_atm.next())
+$100
+>>> print(corner_street_atm.next())
+$100
+>>> print([corner_street_atm.next() for cash in range(5)])
+['$100', '$100', '$100', '$100', '$100']
+>>> hsbc.crisis = True # Crisis is coming, no more money!
+>>> print(corner_street_atm.next())
+<type 'exceptions.StopIteration'>
+>>> wall_street_atm = hsbc.create_atm() # It's even true for new ATMs
+>>> print(wall_street_atm.next())
+<type 'exceptions.StopIteration'>
+>>> hsbc.crisis = False # The trouble is, even post-crisis the ATM remains empty
+>>> print(corner_street_atm.next())
+<type 'exceptions.StopIteration'>
+>>> brand_new_atm = hsbc.create_atm() # Build a new one to get back in business
+>>> for cash in brand_new_atm:
+...    print cash
+$100
+$100
+$100
+$100
+$100
+$100
+$100
+$100
+$100
+...
+
+   Note: For Python 3, useprint(corner_street_atm.__next__()) or print(next(corner_street_atm))
+
+   It can be useful for various things like controlling access to a resource.
+
+Itertools, your best friend
+   The itertools module contains special functions to manipulate iterables. Ever wish to duplicate a
+   generator? Chain two generators? Group values in a nested list with a one-liner? Map / Zip without
+   creating another list?
+
+   Then just import itertools.
+
+   An example? Let's see the possible orders of arrival for a four-horse race:
+>>> horses = [1, 2, 3, 4]
+>>> races = itertools.permutations(horses)
+>>> print(races)
+<itertools.permutations object at 0xb754f1dc>
+>>> print(list(itertools.permutations(horses)))
+[(1, 2, 3, 4),
+ (1, 2, 4, 3),
+ (1, 3, 2, 4),
+ (1, 3, 4, 2),
+ (1, 4, 2, 3),
+ (1, 4, 3, 2),
+ (2, 1, 3, 4),
+ (2, 1, 4, 3),
+ (2, 3, 1, 4),
+ (2, 3, 4, 1),
+ (2, 4, 1, 3),
+ (2, 4, 3, 1),
+ (3, 1, 2, 4),
+ (3, 1, 4, 2),
+ (3, 2, 1, 4),
+ (3, 2, 4, 1),
+ (3, 4, 1, 2),
+ (3, 4, 2, 1),
+ (4, 1, 2, 3),
+ (4, 1, 3, 2),
+ (4, 2, 1, 3),
+ (4, 2, 3, 1),
+ (4, 3, 1, 2),
+ (4, 3, 2, 1)]
+
+Understanding the inner mechanisms of iteration
+   Iteration is a process implying iterables (implementing the __iter__() method) and iterators
+   (implementing the __next__() method). Iterables are any objects you can get an iterator from.
+   Iterators are objects that let you iterate on iterables.
+
+***
+Shortcut to understanding yield
+
+   When you see a function with yield statements, apply this easy trick to understand what will happen:
+	1. Insert a line result = [] at the start of the function.
+	2. Replace each yield expr with result.append(expr).
+	3. Insert a line return result at the bottom of the function.
+	4. Yay - no more yield statements! Read and figure out code.
+	5. Compare function to the original definition.
+
+   This trick may give you an idea of the logic behind the function, but what actually happens with
+   yield is significantly different than what happens in the list based approach. In many cases, the
+   yield approach will be a lot more memory efficient and faster too. In other cases, this trick will
+   get you stuck in an infinite loop, even though the original function works just fine. Read on to
+   learn more...
+
+Don't confuse your Iterables, Iterators, and Generators
+
+   First, the iterator protocol - when you write
+for x in mylist:
+	...loop body...
+
+   Python performs the following two steps:
+	1. Gets an iterator for mylist:
+	   Call iter(mylist) -> this returns an object with a next() method (or __next__() in Python 3).
+	   [This is the step most people forget to tell you about]
+	2. Uses the iterator to loop over items:
+	   Keep calling the next() method on the iterator returned from step 1. The return value from next()
+	   is assigned to x and the loop body is executed. If an exception StopIteration is raised from
+	   within next(), it means there are no more values in the iterator and the loop is exited.
+
+   The truth is Python performs the above two steps anytime it wants to loop over the contents of an
+   object - so it could be a for loop, but it could also be code like otherlist.extend(mylist) (where
+   otherlist is a Python list).
+
+   Here mylist is an iterable because it implements the iterator protocol. In a user-defined class, you
+   can implement the __iter__() method to make instances of your class iterable. This method should
+   return an iterator. An iterator is an object with a next() method. It is possible to implement both
+   __iter__() and next() on the same class, and have __iter__() return self. This will work for simple
+   cases, but not when you want two iterators looping over the same object at the same time.
+
+   So that's the iterator protocol, many objects implement this protocol:
+	1. Built-in lists, dictionaries, tuples, sets, files.
+	2. User-defined classes that implement __iter__().
+	3. Generators.
+
+   Note that a for loop doesn't know what kind of object it's dealing with - it just follows the
+   iterator protocol, and is happy to get item after item as it calls next(). Built-in lists return
+   their items one by one, dictionaries return the keys one by one, files return the lines one by one,
+   etc. And generators return... well that's where yield comes in:
+def f123():
+	yield 1
+	yield 2
+	yield 3
+
+for item in f123():
+	print item
+
+   Instead of yield statements, if you had three return statements in f123() only the first would get
+   executed, and the function would exit. But f123() is no ordinary function. When f123() is called, it
+   does not return any of the values in the yield statements! It returns a generator object. Also, the
+   function does not really exit - it goes into a suspended state. When the for loop tries to loop over
+   the generator object, the function resumes from its suspended state at the very next line after the
+   yield it previously returned from, executes the next line of code, in this case, a yield statement,
+   and returns that as the next item. This happens until the function exits, at which point the
+   generator raises StopIteration, and the loop exits.
+
+   So the generator object is sort of like an adapter - at one end it exhibits the iterator protocol, by
+   exposing __iter__() and next() methods to keep the for loop happy. At the other end, however, it runs
+   the function just enough to get the next value out of it, and puts it back in suspended mode.
+
+Why Use Generators?
+   Usually, you can write code that doesn't use generators but implements the same logic. One option is
+   to use the temporary list 'trick' I mentioned before. That will not work in all cases, for e.g. if
+   you have infinite loops, or it may make inefficient use of memory when you have a really long list.
+   The other approach is to implement a new iterable class SomethingIter that keeps the state in
+   instance members and performs the next logical step in it's next() (or __next__() in Python 3)
+   method. Depending on the logic, the code inside the next() method may end up looking very complex and
+   be prone to bugs. Here generators provide a clean and easy solution.
+
+***
+   Think of it this way:
+
+   An iterator is just a fancy sounding term for an object that has a next() method. So a yield-ed
+   function ends up being something like this:
+
+   Original version:
+def some_function():
+	for i in xrange(4):
+		yield i
+
+for i in some_function():
+	print i
+
+   This is basically what the Python interpreter does with the above code:
+class it:
+	def __init__(self):
+		# Start at -1 so that we get 0 when we add 1 below.
+		self.count = -1
+
+	# The __iter__ method will be called once by the 'for' loop.
+	# The rest of the magic happens on the object returned by this method.
+	# In this case it is the object itself.
+	def __iter__(self):
+		return self
+
+	# The next method will be called repeatedly by the 'for' loop
+	# until it raises StopIteration.
+	def next(self):
+		self.count += 1
+		if self.count < 4:
+			return self.count
+		else:
+			# A StopIteration exception is raised
+			# to signal that the iterator is done.
+			# This is caught implicitly by the 'for' loop.
+			raise StopIteration
+
+def some_func():
+	return it()
+
+for i in some_func():
+	print i
+
+   For more insight as to what's happening behind the scenes, the for loop can be rewritten to this:
+iterator = some_func()
+try:
+	while 1:
+		print iterator.next()
+except StopIteration:
+	pass
+
+   Does that make more sense or just confuse you more? :)
+
+...
+
+
+---
+

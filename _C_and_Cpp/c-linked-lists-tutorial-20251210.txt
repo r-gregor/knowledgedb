@@ -1,0 +1,411 @@
+filename: c-linked-lists-tutorial-20251210.txt
+https://medium.com/@anthonybaxter819/linked-lists-in-c-74910c4b5a83
+
+Linked Lists in C
+Jul 8, 2025
+
+Chaining Your Data, One Node at a Time
+Ever tried inserting or deleting an item in the middle of an array? You have to painstakingly shift
+every element after it by a single position. Now imagine doing this over and over in a memory-constrained
+system where you can't even guarantee contiguous memory. It's a nightmare.
+
+That's where linked lists come in.
+
+They don't care about contiguous memory. They don't make you reshuffle your data. Whether you're
+inserting, deleting, or reordering, they offer flexibility where arrays demand rigidity.
+
+In this article, I'll break down how linked lists work, compare singly and doubly linked versions,
+and build one from scratch in C.
+
+What is a Linked List?
+Simply put, a linked list is a series of nodes that are stored randomly in memory connected in a train-like
+fashion. Each node contains its data, whatever that may be, as well as a pointer to the location of the next
+node. As a result, only the first node - referred to as the head node - needs to be tracked, although
+tracking the last node - referred to as the tail node - does make appending items more convenient.
+
+  HEAD --->[data][next]--->[data][next]--->[data][next]--->NULL
+          +------------+  +------------+  +------------+
+               node            node            node
+
+When compared to arrays, linked lists are very efficient at inserting and deleting items frequently;
+for this reason, they often serve as an alternative to arrays. For instance, say we wanted to insert a
+item between the second and third nodes in the diagram above; we would start at the head and follow the
+next pointers until we reach the second node. Then, we would update the second node's next pointer to
+point to our new node and set our new node's next pointer to the original third node. Thus, the chain
+remains intact, and all we did was adjust two pointers.
+
+                                  [data][next]----+
+                                     ^            |
+                                     |            v
+  HEAD---->[data][next]---->[data][next]        [data][next]---->NULL
+
+Conversely, inserting into an array at a specific index requires shifting all elements after the inserted
+index, which can be a far more expensive operation depending on the size of the array.
+
+Singly vs Doubly Linked Lists
+So far, I have been describing a linked list as what would be referred to as a singly linked list. Where
+each node contains a single pointer to the subsequent node. But there are other kinds of linked lists,
+namely the doubly linked list.
+
+           [next]---->[next]---->[next]---->NULL
+           [data]     [data]     [data]
+  NULL<----[prev]<----[prev]<----[prev]
+
+The doubly linked list looks almost exactly like a singly linked list except each node contains two
+pointers: a next pointer and a prev pointer. The previous pointer, as shown in the image above, points
+to the node immediately preceding it. Doubly linked lists come with slightly higher memory usage, as
+each node needs an additional pointer. On a 64-bit machine, that's an extra 8 bytes per node. But the
+doubly linked list comes with improved insertion and deletion times when compared to that of a singly
+linked list, which could justify the additional memory usage.
+
+Memory Management
+Implementing our linked list in a low-level language like C means we are responsible for managing memory
+manually. That means any memory allocated with malloc() must eventually be released with free(). Forget
+to do that, and we'll create a memory leak - memory that's still in use but no longer accessible,
+slowly eating away at the program's available memory.
+
+I won't go into heap vs. stack allocation here but rather provide a few general rules that we will
+apply to the implementation:
+
+  * Always free() what you malloc(). Every node allocated on the heap needs to be freed when we're done with
+    it.
+  * Never free() the same memory twice. A double free() can corrupt memory and crash the program.
+  * Avoid dangling pointers. After freeing a node, don't try to use it again. A common safety measure is to
+    set the pointer to NULL immediately after free().
+  * Clear the entire list. Loop through and free every single node to clear the list. Leaving any behind will
+    leak memory.
+  * Save the next pointer before, deleting a node. If the current node is freed before storing its next,
+    access to the rest of the list will be lost.
+
+These rules might seem tedious at first, but they're essential in C.
+
+Implementation
+The following implementation will be of a singly linked list, but with a few modifications, it could be
+adapted into a doubly linked list.
+
+Nodes
+We'll start by defining the node structure. Each node contains two fields: a pointer to the next node
+and a pointer to the value, stored as a void*. The data value is stored as a pointer because it will be
+allocated on the heap, and the node will simply hold the address of that allocated memory. Using void
+allows the node to be generic, meaning it can store values of any type, as long as all the nodes in a
+given list instance are consistent in type.
+
+typedef struct Node Node;
+
+struct Node {
+	Node *next;  // Pointer to next node
+	void *value; // Pointer to data
+};
+
+The initNode() function is responsible for allocating memory for both the node itself and its data
+value. It first allocates space for the node, then allocates space for the data on the heap; copying the
+provided data value into that space. The next pointer is initialized to NULL, since the node doesn't
+yet know what it should point to.
+
+Node *initNode(void *value, size_t elem_size) {
+	Node *node = malloc(sizeof(Node)); // Allocate the node
+
+	if (node == NULL) {
+		exit(1);
+	}
+
+	node->value = malloc(elem_size);  // Allocate the data
+	if (node->value == NULL) {
+		exit(1);
+	}
+	memcpy(node->value, value, elem_size);
+
+	node->next = NULL;
+	return node;
+}
+
+As we touched on earlier with manual memory management, any memory allocated with malloc() must eventually
+be freed. That's where freeNode() comes in.
+
+In freeNode(), we:
+  * Free the data value that was stored on the heap.
+  * Set all internal pointers to NULL to avoid dangling pointers (not explicitly necessary but good practice).
+  * Free the node memory.
+
+This ensures that both allocations made in initNode() are properly cleaned up, preventing memory leaks.
+
+void freeNode(Node *node) {
+	if (node == NULL) return;
+
+	free(node->value);     // Free the data value
+	node->value = NULL;
+	node->next = NULL;
+
+	free(node);            // Free the node
+}
+
+List
+The List struct is the backbone of our linked list implementation. It includes a head pointer to the first
+node, a tail pointer to the last node, and a count field to keep track of the number of nodes in the list.
+
+Because our nodes are generic and store their data values as void*, the list is unaware what type of
+data nodes are holding. To work around this, the list holds two function pointers: one for comparison
+and one for printing. The cmp function pointer allows the list to compare node values, while the print
+function pointer enables the list to display node values.
+
+typedef struct {
+	Node *head; // Pointer head node
+	Node *tail; // Pointer tail node
+	int count;  // Number of nodes
+
+	// function pointers
+	bool (*cmp)(const void*, const void *);
+	void (*print)(const void *);
+} List;
+
+To initialize the linked list, we define theinitList() function that sets the initial state of the List
+struct. It sets both the head and tail pointers to NULL and initializes the count to zero, indicating
+that the list is currently empty. It also sets the cmp and print function pointers, which means users
+must determine, when defining the list, the type of data that nodes will hold.
+
+void initList(List *list, bool (*cmp)(const void*, const void *), void (*print)(const void *)) {
+	list->head = NULL;
+	list->tail = NULL;
+	list->count = 0;
+	list->cmp = cmp;
+	list->print = print;
+}
+
+To properly free the linked list and avoid memory leaks, we define a series of cleanup functions:
+
+  * deleteHead() frees the first node from the list and updates the head node to be the subsequent node.
+  * clearList() repeatedly calls deleteHead() in a loop, deleting all nodes from head to tail.
+  * freeList() handles the entire process by first deleting every node and then explicitly setting all list
+    fields to safe null values.
+
+bool deleteHead(List *list) {
+	if (list->count == 0) {
+		return false;
+	}
+
+	Node *newHead = list->head->next; // Store next
+	freeNode(list->head);             // Free node
+	list->head = newHead;             // Update head
+	list->count--;                    // Decrement count
+	return true;
+}
+
+void clearList(List *list) {
+	//Delete every node from head to tail
+	while (deleteHead(list)) {
+		continue;
+	}
+	list->head = NULL;
+	list->tail = NULL;
+	list->count = 0;
+}
+
+void freeList(List *list) {
+	clearList(list);
+	list->head = NULL;
+	list->tail = NULL;
+	list->count = 0;
+	list->cmp = NULL;
+	list->print = NULL;
+}
+
+Prepend
+The listPrepend() function adds a new node to the head of the list. It begins by creating a new node. If
+the list is empty, both the head and tail pointers are set to this new node. Otherwise, the new node's
+next pointer is set to the current head node, and the list's head pointer is updated to point to the
+new node. Finally, the list's count is incremented to reflect the added element.
+
+void listPrepend(List *list, void *value, size_t elem_size) {
+	Node *newNode = initNode(value, elem_size);
+	if (list->count == 0) {
+		list->head = newNode;
+		list->tail = newNode;
+	} else {
+		newNode->next = list->head;
+		list->head = newNode;
+	}
+	list->count++;
+}
+
+Append
+The listAppend() function adds a new node to the tail of the list. Like prepend it begins by creating
+a new node. If the list is empty, both the head and tail pointers are set to this new node. Otherwise,
+the current tail node'snext pointer is updated to point to the new node. Finally, the list's count
+is incremented to reflect the added element.
+
+void listAppend(List *list, void *value, size_t elem_size) {
+	Node *newNode = initNode(value, elem_size);
+	if (list->count == 0) {
+		list->head = newNode;
+		list->tail = newNode;
+	} else {
+		list->tail->next = newNode;
+		list->tail = newNode;
+	}
+	list->count++;
+}
+
+Insert
+The listInsert() function allows insertion of a new node at any position within the linked list. If the
+list is empty or the index is zero, it simply prepends the new value to the list. If the insert index
+is greater than or equal to the current list length, it appends the value. For an index between the head
+and tail, the function traverses the list beginning with the head until it reaches the node immediately
+preceding the target index. It then creates a new node, sets the next pointer of the new node equal to
+the next pointer of the previous node, updates the previous node's next pointer to point to the new
+node, and increments the count.
+
+void listInsert(List *list, int index, void *value, size_t elem_size) {
+	if (list->head == NULL || index == 0) {
+		return listPrepend(list, value, elem_size);
+	} else if (index >= list->count) {
+		return listAppend(list, value, elem_size);
+	}
+
+	Node *tmp = list->head;
+	while (index > 1) {
+		tmp = tmp->next;
+		index--;
+	}
+
+	Node *newNode = initNode(value, elem_size);
+	newNode->next = tmp->next;
+	tmp->next = newNode;
+	list->count++;
+}
+
+Remove
+The deleteValue() function removes the first node from the list containing the specified value. It
+iterates through the nodes, using the cmp function pointer to compare node values to the target. If
+no matching node is found, it does nothing. If the matching node is the head or tail it calls the
+corresponding delete function. For nodes in between, it updates the previous node's next pointer to
+match the soon-to-be-deleted node's next pointer, frees the node's memory, and decrements the list count
+
+bool deleteHead(List *list) {
+	if (list->count == 0) {
+		return false;
+	}
+	Node *newHead = list->head->next;
+	freeNode(list->head);
+	list->head = newHead;
+	list->count--;
+	return true;
+}
+
+bool deleteTail(List *list) {
+	if (list->count == 0) {
+		return false;
+	}
+
+	if (list->count == 1) return deleteHead(list);
+
+	Node *tmp = list->head;
+	Node *prev = NULL;
+
+	while (tmp->next->next != NULL) {
+		prev = tmp;
+		tmp = tmp->next;
+	}
+	freeNode(tmp->next);
+	tmp->next = NULL;
+	list->tail = tmp;
+	list->count--;
+	return true;
+}
+
+bool deleteValue(List *list, void *value) {
+	if (list->count == 0) {
+		return false;
+	}
+
+	Node *tmp = list->head;
+	Node *prev = NULL;
+
+	while (tmp != NULL && !list->cmp(tmp->value, value)) {
+		prev = tmp;
+		tmp = tmp->next;
+	}
+
+	// Value not in list
+	if (tmp == NULL) return false;
+
+	if (prev == NULL) {
+		deleteHead(list);
+	} else if (tmp->next == NULL) {
+		deleteTail(list);
+	} else {
+		prev->next = tmp->next;
+		freeNode(tmp);
+		list->count--;
+	}
+
+	return true;
+}
+
+Find
+The listFind() function returns the first node that contains a specified value. It iterates through the
+list, comparing each node's value to the target using the cmp function pointer. If a node holding the
+specified value is found, a pointer to that node is returned; otherwise, the function returns NULL.
+
+Node *listFind(List *list, void *value) {
+	if (list->count == 0) {
+		return NULL;
+	}
+
+	Node *tmp = list->head;
+
+	while (!list->cmp(tmp->value, value)) {
+		if (tmp->next == NULL) {
+			return NULL;
+			;
+		}
+		tmp = tmp->next;
+	}
+	return tmp;
+}
+
+Example
+Below is a basic example of the implementation. You can find a more detailed example at the GitHub
+link below.
+
+#include <stdio.h>
+
+#include "ctools/list.h"
+
+bool int_cmp(const void *a, const void *b) {
+	return *(const int *)a == *(const int *)b;
+}
+
+void int_print(const void *value) {
+	printf("%d", *(const int *)value);
+}
+
+
+int main() {
+	List list;
+	initList(&list, int_cmp, int_print);
+
+	listPrepend(list, &(int){100}, sizeof(int));    // Prepend
+	listInsert(list, 1, &(int){200}, sizeof(int));  // Insert
+	listAppend(list, &(int){300}, sizeof(int));     // Append
+	listSet(list, 1, &(int){500}, sizeof(int));     // Set
+
+	Node *node = listFind(list, &(int){200});       // Find
+	printf("Should be null: %s\n", (char *)node);
+
+	deleteValue(list, &(int){500});                  // Delete
+
+	return 0;
+}
+
+Conclusion
+Linked lists can be a great option when constant-time insertions or deletions are needed or when the data
+is fragmented. While they avoid the resizing overhead commonly encountered with dynamic arrays. Arrays can
+be a better choice when fast random access by index is needed, as linked lists have a linear time complexity
+for searching. Understanding the trade-offs and how to implement linked lists can be a powerful skill.
+
+If you've made it this far, thank you for reading. You can find the full implementation and usage examples on
+[https://github.com/anthonyb8/ctools]GitHub. I'd love to hear your thoughts or feedback in the comments!
+
+
+---
+

@@ -1,0 +1,96 @@
+filename: go-builtin-new-function-takes-expresions-20250929.txt
+https://utcc.utoronto.ca/~cks/space/blog/programming/GoNewWithExpression
+
+Go's builtin 'new()' function will take an expression in Go 1.26
+September 26, 2025
+
+   An interesting little change recently landed in the development version of Go, and so will likely
+   appear in Go 1.26 when it's released. The change is that the builtin new() function will be able
+   to take an expression, not just a type. This change stems from the proposal in issue 45624, which
+   dates back to 2021 (and earlier for earlier proposals). The new specifications language is covered
+   in, for example, this comment on the issue. An example is in the current development
+   documentation for the release notes, but it may not sound very compelling.
+
+   A variety of uses came up in the issue discussion, some of which were a surprise to me. One case
+   that's apparently surprisingly common is to start with a pointer and want to make another pointer to
+   a (shallow) copy of its value. With the change to 'new()', this is:
+
+np = new(*p)
+
+   Today you can write this as a generic function (apparently often called 'ref()'), or do it with a
+   temporary variable, but in Go 1.26 this will (probably) be a built in feature, and perhaps the Go
+   compiler will be able to optimize it in various ways. This sort of thing is apparently more
+   common than you might expect.
+
+   Another obvious use for the new capability is if you're computing a new value and then creating a
+   pointer to it. Right now, this has to be written using a temporary variable:
+
+t := <some expression>
+p := &t
+
+   With 'new(expr)' this can be written as one line, without a temporary variable (although as before a
+   'ref()' generic function can do this today).
+
+   The usage example from the current documentation is a little bit peculiar, at least as far as
+   providing a motivation for this change. In a slightly modified form, the example is:
+
+type Person struct {
+	Name string `json:"name"`
+	Age  *int   `json:"age"` // age if known; nil otherwise
+}
+
+func newPerson(name string, age int) *Person {
+	return &Person{
+		Name: name,
+		Age:  new(age),
+	 }
+}
+
+   The reason this is a bit peculiar is that today you can write 'Age: &age' and it works the same way.
+   Well, at a semantic level it works the same way. The theoretical but perhaps not practical
+   complication is inlining combined with escape analysis. If newPerson() is inlined into a caller, then
+   the caller's variable for the 'age' parameter may be unused after the (inlined) call to newPerson,
+   and so could get mapped to 'Age: &callervar', which in turn could force escape analysis to put that
+   variable in the heap, which might be less efficient than keeping the variable in the stack (or
+   registers) until right at the end.
+
+   A broad language reason is that allowing new() to take an expression removes the special privilege
+   that structs and certain other compound data structures have had, where you could construct pointers
+   to initialized versions of them. Consider:
+
+type ints struct { i int }
+
+[...]
+t := 10
+ip := &t
+isp := &ints{i: 10}
+
+   You can create a pointer to the int wrapped in a struct on a single line with no temporary variable,
+   but a pointer to a plain int requires you to materialize a temporary variable. This is a bit
+   annoying.
+
+   A pragmatic part of adding this is that people appear to write and use equivalents of new(value)
+   a fair bit. The popularity of an expression is not necessarily the best reason to add a built-in
+   equivalent to the language, but it does suggest that this feature will get used (or will eventually
+   get used, since the existing uses won't exactly get converted instantly for all sorts of reasons).
+
+   This strikes me as a perfectly fine change for Go to make. The one thing that's a little bit
+   non-ideal is that 'new()' of constant numbers has less type flexibility than the constant numbers
+   themselves. Consider:
+
+var ui uint
+var uip *uint
+
+ui = 10       // okay
+uip = new(10) // type mismatch error
+
+   The current error that the compiler reports is 'cannot use new(10) (value of type *int) as *uint
+   value in assignment', which is at least relatively straightforward.
+
+   (You fix it by casting ('converting') the untyped constant number to whatever you need. The now
+   more relevant than before 'default type' of a constant is covered in the specification section on
+   Constants.)
+
+
+---
+

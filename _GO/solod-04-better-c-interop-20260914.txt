@@ -1,0 +1,179 @@
+filename: solod-04_better-c-interop-20260914.txt
+https://antonz.org/solod-0.4/
+
+Solod 0.4: Better C interop
+
+   Solod is a subset of Go that translates to regular C - with zero runtime, manual memory management,
+   and source-level interop. It´s designed for two main audiences:
+     * Go developers who want low-level control without having to learn another language.
+     * C developers who like Go´s style.
+
+   The new Solod release provides an easy way to call third-party C libraries, makes a large part of the
+   standard library freestanding, and impoves the tooling.
+
+Automatic binding generator
+   Sobind generates bindings - stubs for calling third-party C libraries from Solod. It parses .h
+   files and emits a Solod source file with necessary structs, unions, constants, variables, function
+   pointer typedefs, and function declarations.
+
+   You can then use the generated types and functions in regular Solod code:
+package main
+
+import (
+	"solod.dev/raylib/libraylib"
+	"solod.dev/so/c"
+)
+
+func main() {
+	// Using Raylib bindings.
+	libraylib.InitWindow(screenWidth, screenHeight, "Solod / Raylib")
+	defer libraylib.CloseWindow()
+	// ...
+}
+
+   Usually, the generated bindings are good enough to use as they are, without any manual changes. I
+   have also prepared bindings for popular C libraries like libuv, raylib, sodium, and
+   sqlite.
+
+   Unlike Go, calling C from Solod has zero overhead - Solod code is just regular C in the end.
+
+More freestanding packages
+   At some point I decided to make as many packages as possible freestanding - independent of any libc
+   implementation or specific OS runtime. That went pretty well. Solod now has 37 standard library
+   packages, and 31 of them work in freestanding mode.
+
+   These packages work in freestanding mode with no restrictions:
+bufio  bytealg  bytes  c  cmp  encoding  encoding/binary
+encoding/hex  encoding/json  errors  io  maps  math/bits
+math/rand  mem  path  runtime  slices  strconv  strings
+unicode  unicode/utf8  unsafe
+
+   These packages work in freestanding mode with certain limitations:
+     * crypto/crand depends on a user-provided hook to read random bytes.
+     * fmt depends on a user-provided hook to print formatted text.
+     * math offers a working subset of features.
+     * net/netip works fully, except it can´t resolve an IPv6 zone name.
+     * sync/atomic works on targets that support lock-free instructions.
+     * testing depends on a user-provided hook to print test results.
+     * time reads the clock using user-provided hooks.
+     * uuid depends on hooks from both crypto/crand and time.
+
+   There´s [https://antonz.org/going-freestanding/]a separate post with more details if you´re interested.
+
+Type assertions
+   A comma-ok type assertion is now fully supported for non-empty interfaces:
+var s1 Shape = &rect
+r, ok := s1.(*Rect)   // r is &rect, ok is true
+
+var s2 Shape = &circle
+c, ok := s2.(*Rect)   // c is nil, ok is false
+
+   Which translates to the following C code:
+main_Shape s1 = (main_Shape){.self = &rect, .Area = main_Rect_Area};
+bool ok = (s1.Area == main_Rect_Area);
+main_Rect* r = ok ? (main_Rect*)s1.self : NULL;
+// ok == true, r == &rect
+
+main_Shape s2 = (main_Shape){.self = &circle, .Area = main_Circle_Area};
+ok = (s2.Area == main_Rect_Area);
+main_Rect* c = ok ? (main_Rect*)s2.self : NULL;
+// ok == false, c == NULL
+
+   Previously, the only two supported forms were a direct assertion like r := s.(*Rect) and a check-only
+   form like _, ok := s.(*Rect).
+
+C interop helpers
+   The c package now supports more common C types:
+size_t      - c.Size
+ssize_t     - c.SSize
+ptrdiff_t   - c.Ptrdiff
+intptr_t    - c.Intptr
+long double - c.LongDouble
+
+   There´s also a c.ConstVoid type, which maps to a C const void. You can use it where C expects a const
+   void* pointer:
+// in c
+so_ssize_t find_first(const void* items, size_t count, size_t size,
+                      bool (*match)(const void*));
+
+// in solod
+//so:extern
+func find_first(items *c.ConstVoid, count c.Size, size c.Size,
+    match func(item *c.ConstVoid) bool) c.SSize
+
+   Finally, there are some useful cast functions.
+
+   c.Bitcast reads the bits of a value as another type of the same size:
+bits := c.Bitcast[uint64](1.0)   // 0x3ff0000000000000
+f := c.Bitcast[float64](bits)    // 1.0
+
+   You can use c.Bitcast instead of a pointer conversion such as *(*float64)(unsafe.Pointer(&b)).
+
+   c.StringData and c.SliceData return a typed pointer to the string or slice data:
+b := []byte{1, 2, 3}
+p := c.SliceData[c.UChar](b)     // unsigned char*
+q := c.StringData[c.UChar]("ab") // unsigned char*
+
+   They replace (*T)(unsafe.SliceData(b)) and (*T)(unsafe.StringData(s)).
+
+Multi-package testing
+   so test can now run tests from multiple packages at once. If you use a pattern that ends with ..., it
+   will select every package that has a test subdirectory under its base directory:
+so test ./so/...      # the whole stdlib
+so test ./so/net/...  # only the networking packages
+
+   The entire run only needs one translation, one compilation, and one execution, which is much faster
+   than running it separately for each package.
+
+   The -pkg-file flag restricts the run to only the packages listed in a file:
+# freestanding.txt
+so/bytes
+so/mem
+so/time
+
+so test -pkg-file=freestanding.txt ./so/...
+
+Checks and targets
+   so build, so test, so bench and so run take two new flags: -target and -check.
+
+   -target specifies the target platform for cross-compilation. Use the same value that clang and zig cc
+   accept after --target=:
+export CC="zig cc"
+so build -target=x86_64-windows-gnu -o app.exe .
+so build -target=wasm32-freestanding -o main.wasm .
+
+   -check enables code analysis:
+so test -check=warn .      # -Wall -Wextra -Werror -Wno-shadow -Wno-unused-label
+so test -check=sanitize .  # warn + AddressSanitizer + UndefinedBehaviorSanitizer
+so test -check=analyze .   # warn + GCC static analyzer
+
+   The default optimization level is -O2. You can use CFLAGS to change it.
+
+Limited Windows support
+   The standard library now builds for windows/amd64 and windows/arm64. All packages in the freestanding
+   set work. Packages that require POSIX (conc, flag, log/slog, net, os, sync) are not supported.
+
+   You can use zig cc to cross-compile for Windows:
+export CC="zig cc"
+export CFLAGS="--target=x86_64-windows-gnu"
+export LDFLAGS="-lbcrypt -liphlpapi"
+so build -o app.exe .
+
+   Not the first-class Windows support that Go offers, but it´s better than nothing.
+
+Wrapping up
+   With v0.4, Solod can work with almost any C library thanks to automatic bindings. The
+   freestanding-aware standard library makes the language a viable option for bare metal programming.
+   Extra interop helpers make C-calling code easy to read, and better tooling keeps tests fast.
+
+   There´s still a lot to do, of course. In the next release, I plan to focus on the standard library
+   and bring over some hashing and crypto packages from Go. More C library integrations are on the way
+   too!
+
+   If you´re interested, take a look at Solod´s [https://github.com/solod-dev/solod#readme]readme - it has
+   everything you need to get started.  Or [https://codapi.org/solod]try Solod online without installing
+   anything.
+
+
+---
+

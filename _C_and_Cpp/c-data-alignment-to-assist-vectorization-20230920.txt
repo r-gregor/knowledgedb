@@ -1,0 +1,632 @@
+filename: c_data-alignment-to-assist-vectorization._20230920.txt
+https://www.intel.com/content/www/us/en/developer/articles/technical/data-alignment-to-assist-vectorization.html
+
+Data Alignment to Assist Vectorization
+(Compiler Methodology for Intel MIC Architecture)
+22/01/2021
+
+
+Data Alignment to Assist Vectorization
+
+Overview
+   Data alignment is a method to force the compiler to create data objects in memory on specific byte
+   boundaries. This is done to increase efficiency of data loads and stores to and from the processor.
+   Without going into great detail, processors are designed to efficiently move data when that data can
+   be moved to and from memory addresses that are on specific byte boundaries. For Intel processors
+   that support Intel AVX-512 instructions (codenames: SKYLAKE-AVX512, ICELAKE-SERVER, etc.), memory
+   movement is optimal when the data starting address lies on 64 byte boundaries. This is also true for
+   the Intel Many Integrated Core Architecture (Intel MIC Architecture) such as the Intel Xeon Phi™
+   Coprocessor. Thus, it is desired to force the compiler to create data objects with starting addresses
+   that are modulo 64 bytes.
+
+   In addition to creating the data on aligned boundaries (that aligns the base pointer), the compiler
+   is able to perform optimizations when the data access (including base-pointer plus index) is known to
+   be aligned by 64 bytes. In typical situations, the compiler does not know that data is aligned inside
+   loops without some help from the user. This can force the compiler to do conservative code generation
+   leaving performance on the table. Thus, you must also inform the compiler of this alignment via a
+   combination of pragmas (C/C++) or directives (Fortran), options (such as -align array64byte in
+   Fortran), and clauses/attributes so that the Intel compiler can generate optimal code.
+
+   To summarize, two steps are needed:
+    1. Align the Data.
+    2. Use pragmas/directives and clauses in performance critical regions (where the data is used) to
+       tell the compiler that memory accesses are aligned.
+
+Topics
+
+1. Align the Data
+   It is important to align data for application performance. Typically this means two things:
+     * Aligning the base-pointer where the space is allocated for the array (or pointer)
+     * Making sure the starting indices have beneficial alignment properties for each vectorized loop
+       (for each thread)
+
+   Aligning STATIC Arrays (Base Pointer)
+
+   For static arrays, use an appropriate clause/attribute or option as described below to align the
+   base-pointer. Once you do this, the data will be allocated at a good boundary AND the compiler will
+   recognize alignment of the base-pointer for these arrays at all use sites.
+
+   Note that in Fortran, these properties extend to dynamic arrays as well when you compile with the
+   option -align array64byte as detailed below. Similarly, if you use !dir$ attributes align:64 for
+   aligning Fortran module data (including allocatable arrays), the compiler detects the alignment of
+   the base-pointer at USE sites.
+
+   EXAMPLE: Statically declaring a 1000 element single precision floating point array A on a 64-byte
+   boundary (optimal for Intel processors that support Intel AVX-512 instructions)
+     * With Windows C/C++,
+__declspec(align(64)) float A[1000];
+     * With Linux/Mac C/C++,
+float A[1000] __attribute__((aligned(64)));
+     * Fortran arrays: Use the Intel compiler option -align arraynbyte. With Fortran, the easiest way to
+       get array data aligned is to use compiler option -align arraynbyte to get all arrays, static or
+       dynamic, aligned on a 64 byte boundary. This option DOES NOT align data in COMMON blocks. You can
+       also align arrays with a directive. Directives in your code remove the need to remember the
+       -align arraynbyte compiler option by explicitly calling out the alignment in your code where the
+       variable is declared. Here is an example:
+real :: A(1000)
+!dir$ attributes align: 64:: A
+     * Fortran COMMON data: align all common block entities on 64 byte boundaries by inserting padding
+       (additional variables) or increasing array dimensions as needed. The options -align zcommons (and
+       similar) DO NOT align data for vectorization. -align zcommons pads data to the SMALLER of 32
+       bytes or natural alignment. If your data are REAL(8) arrays, they will be aligned to an 8 byte
+       boundary, not a 32 byte boundary!
+       NOTE: In addition to violating the Fortran standard, automatic insertion of padding bytes may
+       break many legacy applications that assume COMMON entities are packed and have no padding.
+       Automatic padding is rarely a good idea; instead, to ensure natural alignment, order variables in
+       a common block so that the largest data types appear first, or create separate common blocks for
+       data of different sizes.
+
+     * The start of a common block may be aligned using a directive, e.g.:
+!DIR$ ATTRIBUTES ALIGN : 64 :: /common_name/
+
+   Because arrays in common are storage associated, this cannot be used to align arrays within a common
+   block. The start of a common block cannot currently be aligned using a command line switch such as
+   -align array64byte. This may be possible in a future compiler version.
+     * Fortran derived type data element: Allocatable arrays that are components of derived types may be
+       aligned as described for dynamic data below. Static data cannot be aligned in this way. The
+       compiler option -align recnbyte does NOT in general align components of derived types and fields
+       within record structures on the boundary specified by (n). It simply ensures natural alignment,
+       as described under "Fortran COMMON data".  If you make your derived type a SEQUENCE derived type,
+       then you can ensure alignment of components by inserting padding variables or increasing array
+       dimensions as described above for common blocks. Also as for common blocks, you can ensure
+       alignment of the start of the derived type using an ATTRIBUTES ALIGN directive.
+     * Fortran module data: See the code example below.
+
+module mymod
+real, allocatable :: a(:), b(:)
+real              :: c(1000)
+!dir$ attributes align:64 :: a
+!dir$ attributes align:64 :: b
+!dir$ attributes align:64 :: c
+...
+end module mymod
+
+           The switch -align array64byte also applies to arrays inside modules, including static arrays.
+
+   Aligning DYNAMIC Data
+   C/C++: Replace malloc() and free() with alignment specified replacement _mm_malloc() and _mm_free().
+   These routines take an alignment parameter (in bytes) as the second argument. These replacements
+   provided by the Intel C++ Compiler also use the same size argument and return types as malloc() and
+   free(). The returned data from _mm_malloc(p, 64) will be 64  byte aligned.
+     * _aligned_malloc()
+     * _mm_malloc() and _mm_free()
+     * buf = (char*) _mm_malloc(bufsizes[i], 64);
+
+   Note that for C/C++ arrays that are dynamically allocated, it is not enough to just align the data
+   during creation using mm_malloc (which is a necessary condition), but it also requires a clause of
+   the form __assume_aligned(a, 64) before the loop of interest. Without this step, the compiler will
+   not detect the optimal alignment for accesses using such arrays. This is discussed more in a later
+   section of this article.
+
+   Fortran: Use the -align arraynbyte compiler option OR use !dir$ attributes align:n for aligning
+   Fortran module allocatable arrays. See also the alignment related sections in the article Fortran
+   Array Data and Arguments and Vectorization.
+
+   Setting Alignment Properties for the Starting-Index of Data Inside Loops
+
+   For an i-loop that has a memory access of the form a[i+n1], the loop has to be structured in such a
+   way that the starting-indices have specific alignment properties. This means the user has to ensure
+   that (lower-bnd-of-i-loop + n1) is a multiple of 16 (assuming float datatype).
+
+   The user has to also notify the compiler about this property except for the cases where the
+   information is available statically at compile-time (examples: access is of the form x[i] and the
+   loop lower-bound is the constant 0 for all threads, accesses of the form b[i+16*k] inside such a
+   loop). For all other cases, this step will also require adding a clause of the form
+   __assume(n1%16==0) OR a #pragma vector aligned before the loop. This is discussed more in the next
+   section.
+
+2. Inform the Compiler About the Data Alignment
+   Now that you have aligned your data, it is necessary to inform the compiler that this data is aligned
+   where that data is actually used in the program. For example, when you pass data as arguments to a
+   performance critical function or subroutine, how does the compiler know if the arguments are aligned
+   or unaligned? For example, data is often declared in one source file but used in many other source
+   files.  Therefore this information must be provided by the user since the compiler often has no
+   information about the arguments.
+
+   There are two methods for informing the compiler about data alignment.  One method is to use the
+   OpenMP* SIMD ALIGNED clauses to inform the compiler about data alignment where the data is used.  The
+   other method is to use Intel proprietary clauses to specify data alignment within your code. Using
+   the first method, OpenMP, provides an open non-proprietary solution for specifying data alignment.
+   This can help insure portability of your code to other architectures and compilers. The Intel
+   Compilers fully support the OpenMP SIMD clauses. This article does not discuss OpenMP SIMD which is
+   discussed here. Both methods can inform the compiler about data alignment.
+
+   Another method is to use Intel clauses to inform the compiler about data alignment is to use Intel
+   clauses. An advantage of Intel clauses is that they are not restricted to loop structures.  We will
+   focus on Intel clauses in this article.
+
+   For the compiler to generate an aligned load/store for (float array) memory accesses (such as a[i+n1]
+   and X[i]) inside an i-loop, it has to know:
+    1. Base-pointer (a and X) is aligned. For static arrays, this can be achieved using the techniques
+       discussed above - such as using   __declspec(align(64)). For arrays that are dynamically
+       allocated, it is not enough to just align the data during creation using mm_malloc, but it also
+       requires a clause __assume_aligned(a, 64) as shown below.
+    2. The compiler has to know that (lower-bnd-of-i-loop + n1) is a multiple of 16. If lower-bnd is 0
+       (for each thread that executes this loop), then the information needed is that n1 is a multiple
+       of 16. One way of doing this is to add a clause of the form __assume(n1%16==0).
+
+   Clauses such as __assume_aligned and __assume tell the compiler that the property holds at the
+   particular point in the program where the clause appears. So the statement __assume_aligned(a,
+   64); means the pointer a is aligned at 64 bytes whenever program execution reaches this point.
+   Compiler may propagate that property to other points in the program (such as a later loop), but this
+   behavior is not guaranteed (it is possible that compiler has to make conservative assumptions and
+   cannot apply the property safely for a later loop in the same function).
+
+   These clauses are different from loop pragmas (or directives) such as #pragma vector aligned that
+   have to be specified just before a loop and apply only to the immediately following loop. For
+   example, the __assume_aligned and __assume clauses can even be specified inside a loop, but the
+   pragma has to appear before the loop.
+
+   C/C++ Example 1:
+__declspec(align(64)) float X[1000], X2[1000];
+
+void foo(float * restrict a, int n, int n1, int n2) {
+	__assume_aligned(a, 64);
+	__assume(n1%16==0);
+	__assume(n2%16==0);
+
+	for(int i=0;i<n;i++) { // Compiler vectorizes loop with all aligned accesses
+		X[i] += a[i] + a[i+n1] + a[i-n1]+ a[i+n2] + a[i-n2];
+	}
+
+	for(int i=0;i<n;i++) { // Compiler vectorizes loop with all aligned accesses
+		X2[i] += X[i]*a[i];
+	}
+}
+
+   It is always a good idea to check that the compiler generated aligned accesses as expected for a
+   vectorized loop. This information is part of the optimization report output from the compiler. For
+   example, compilation of the above example shows:
+Compiler options: -O3 -xcore-avx512 -qopt-report-phase=vec -qopt-report=5 -qopt-report-file=stdout -restrict -c
+
+Begin optimization report for: foo(float *__restrict__, int, int, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at test1.c(8,3)
+   remark #15388: vectorization support: reference X[i] has aligned access   [ test1.c(9,5) ]
+   remark #15388: vectorization support: reference X[i] has aligned access   [ test1.c(9,5) ]
+   remark #15388: vectorization support: reference a[i] has aligned access   [ test1.c(9,13) ]
+   remark #15388: vectorization support: reference a[i+n1] has aligned access   [ test1.c(9,20) ]
+   remark #15388: vectorization support: reference a[i-n1] has aligned access   [ test1.c(9,30) ]
+   remark #15388: vectorization support: reference a[i+n2] has aligned access   [ test1.c(9,39) ]
+   remark #15388: vectorization support: reference a[i-n2] has aligned access   [ test1.c(9,49) ]
+   remark #15305: vectorization support: vector length 8
+   remark #15399: vectorization support: unroll factor set to 2
+   remark #15300: LOOP WAS VECTORIZED
+   remark #26013: Compiler has chosen to target XMM/YMM vector. Try using -qopt-zmm-usage=high to override
+   remark #15448: unmasked aligned unit stride loads: 6
+   remark #15449: unmasked aligned unit stride stores: 1
+   remark #15475: --- begin vector cost summary ---
+   remark #15476: scalar cost: 19
+   remark #15477: vector cost: 1.620
+   remark #15478: estimated potential speedup: 10.770
+   remark #15488: --- end vector cost summary ---
+LOOP END
+
+LOOP BEGIN at test1.c(8,3)
+<Remainder loop for vectorization>
+   remark #15388: vectorization support: reference X[i] has aligned access   [ test1.c(9,5) ]
+   remark #15388: vectorization support: reference X[i] has aligned access   [ test1.c(9,5) ]
+   remark #15388: vectorization support: reference a[i] has aligned access   [ test1.c(9,13) ]
+   remark #15388: vectorization support: reference a[i+n1] has aligned access   [ test1.c(9,20) ]
+   remark #15388: vectorization support: reference a[i-n1] has aligned access   [ test1.c(9,30) ]
+   remark #15388: vectorization support: reference a[i+n2] has aligned access   [ test1.c(9,39) ]
+   remark #15388: vectorization support: reference a[i-n2] has aligned access   [ test1.c(9,49) ]
+   remark #15305: vectorization support: vector length 4
+   remark #15309: vectorization support: normalized vectorization overhead 0.769
+   remark #15301: REMAINDER LOOP WAS VECTORIZED
+   remark #15448: unmasked aligned unit stride loads: 3
+   remark #15449: unmasked aligned unit stride stores: 1
+   remark #15475: --- begin vector cost summary ---
+   remark #15476: scalar cost: 9
+   remark #15477: vector cost: 0.870
+   remark #15478: estimated potential speedup: 9.570
+   remark #15488: --- end vector cost summary ---
+LOOP END
+
+LOOP BEGIN at test1.c(8,3)
+<Remainder loop for vectorization>
+LOOP END
+
+LOOP BEGIN at test1.c(12,3)
+   remark #15388: vectorization support: reference X2[i] has aligned access   [ test1.c(13,5) ]
+   remark #15388: vectorization support: reference X2[i] has aligned access   [ test1.c(13,5) ]
+   remark #15388: vectorization support: reference X[i] has aligned access   [ test1.c(13,14) ]
+   remark #15388: vectorization support: reference a[i] has aligned access   [ test1.c(13,19) ]
+   remark #15305: vectorization support: vector length 8
+   remark #15399: vectorization support: unroll factor set to 2
+   remark #15300: LOOP WAS VECTORIZED
+   remark #26013: Compiler has chosen to target XMM/YMM vector. Try using -qopt-zmm-usage=high to override
+   remark #15448: unmasked aligned unit stride loads: 3
+   remark #15449: unmasked aligned unit stride stores: 1
+   remark #15475: --- begin vector cost summary ---
+   remark #15476: scalar cost: 9
+   remark #15477: vector cost: 0.870
+   remark #15478: estimated potential speedup: 9.570
+   remark #15488: --- end vector cost summary ---
+LOOP END
+
+LOOP BEGIN at test1.c(12,3)
+<Remainder loop for vectorization>
+   remark #15388: vectorization support: reference X2[i] has aligned access   [ test1.c(13,5) ]
+   remark #15388: vectorization support: reference X2[i] has aligned access   [ test1.c(13,5) ]
+   remark #15388: vectorization support: reference X[i] has aligned access   [ test1.c(13,14) ]
+   remark #15388: vectorization support: reference a[i] has aligned access   [ test1.c(13,19) ]
+   remark #15305: vectorization support: vector length 4
+   remark #15309: vectorization support: normalized vectorization overhead 1.429
+   remark #15301: REMAINDER LOOP WAS VECTORIZED
+   remark #15448: unmasked aligned unit stride loads: 3
+   remark #15449: unmasked aligned unit stride stores: 1
+   remark #15475: --- begin vector cost summary ---
+   remark #15476: scalar cost: 9
+   remark #15477: vector cost: 0.870
+   remark #15478: estimated potential speedup: 9.570
+   remark #15488: --- end vector cost summary ---
+LOOP END
+
+LOOP BEGIN at test1.c(12,3)
+<Remainder loop for vectorization>
+LOOP END
+
+   You can see that the core loop gets vectorized with a vector-length of 8 and unrolled by 2 and has
+   all aligned accesses for both loops in the source.
+
+   C/C++ Example 2: For a specific variable, use the __assume_aligned macro to inform the compiler that
+   a particular variable or argument is aligned. For example, to inform the compiler that an array
+   passed in as an argument or in global data is aligned you would do the following:
+
+void myfunc( double p[], int n ) {
+	__assume_aligned(p, 64);
+	for (int i=0; i<n; i++) {
+		p[i]++;
+	}
+}
+
+void myfunc2( double *p2, double *p3, double *p4, int n) {
+	for (int j=0; j<n; j+=8) {
+		__assume_aligned(p2, 64);
+		__assume_aligned(p3, 64);
+		__assume_aligned(p4, 64);
+		for (int i=0; i<8; i++) {
+			p2[j+i] = p3[j+i] * p4[j+i];
+		}
+	}
+}
+
+   Fortran Example 1: Use the ASSUME_ALIGNED directive. Note that ASSUME_ALIGNED refers to the
+   properties of an array, not to its local usage, so its most natural location is at the point of
+   declaration. An ASSUME_ALIGNED directive for a module array must appear  in that module, and not at a
+   loop where the array is accessed via use association.
+
+!DIR$ ASSUME_ALIGNED A: 64
+...
+do i=1, N
+A(I) = A(I) + 1
+end do
+
+!DIR$ ASSUME_ALIGNED A: 64
+...
+A = A + 1
+
+   Fortran Example 2: Use the ASSUME directive to assert properties of alignment. Here is an example of
+   a loop where the compiler takes advantage of the user-provided directives to generate all aligned
+   accesses. ASSUME in this case indicates that the length of f2 is a multiple of 8.
+
+subroutine sot(a,f2,st,rep,rstr)
+real*8 :: a(*),a1
+integer f2,st,rep,rstr,i
+!DIR$ ASSUME_ALIGNED A: 64
+!DIR$ ASSUME (mod(f2,8) .eq. 0)
+!dir$ simd
+do i=1,(rep-1)*rstr+1
+	a1=a(i)+a(f2*st+i)
+	a(f2*st+i)=a(i)-a(f2*st+i)
+	a(i)=a1
+enddo
+end subroutine
+
+   The example below shows how to use the vector pragma/directive to override the vectorizer.
+
+   C/C++ Example 3: This is a technique for managing aligned and unaligned accesses.
+   Use __assume_aligned and __assume to inform the compiler that all RHS memory references are 64 byte
+   aligned.
+
+float *p, *p1, *q, *q1;
+
+void foo(int n, int n1, int n2, int n3, int n4, int n5) {
+	__assume_aligned(q,64);
+	__assume_aligned(q1,64);
+	__assume_aligned(p,64);
+	__assume_aligned(p1,64);
+	__assume(n1%16==0);
+	__assume(n2%16==0);
+	__assume(n3%16==0);
+
+	__assume(n4%16==0);
+
+	__assume(n5%16==0);
+
+#pragma simd
+	for(int i=0;i<n;i++) {
+		q[i] = p[i]+p[i+n1]+p[i+n2]+p[i+n3]+p[i+n4]+p[i+n5];
+	}
+
+#pragma simd
+	for(int i=0;i<n;i++) {
+		q1[i] = p1[i]+p1[i+n1]+p1[i+n2]+p1[i+n3]+p1[i+n4]+p1[i+n5];
+	}
+}
+
+   Use the VECTOR Pragma/Directive
+   A more general pragma or directive can be put in front of a loop to indicate that ALL data in a given
+   LOOP is aligned. In this way you do not have to specify each variable as shown in the previous
+   methods. Add #pragma vector aligned before a loop to assert that ALL array accesses inside the loop
+   are aligned (the programmer is responsible for ensuring this is indeed the case otherwise SEG FAULTS
+   will occur). Note that this pragma/directive needs to be added just before each applicable vector
+   loop.
+
+   C/C++ Example 4:
+
+__declspec(align(64)) float X[1000], X2[1000];
+void foo(float * restrict a, int n, int n1, int n2) {
+	int i;
+
+#pragma vector aligned
+	for(i=0;i<n;i++) { // Compiler vectorizes loop with all aligned accesses
+		X[i] += a[i] + a[i+n1] + a[i-n1]+ a[i+n2] + a[i-n2];
+	}
+
+#pragma vector aligned
+	for(i=0;i<n;i++) { // Compiler vectorizes loop with all aligned accesses
+		X2[i] += X[i]*a[i];
+	}
+}
+
+   Fortran Example 3:
+!DIR$ VECTOR ALIGNED
+do I=1, N
+A(I) = B(I) * C(I) + D(I)
+end do
+
+!DIR$ VECTOR ALIGNED
+A = B * C + D
+
+   NOTE: These clauses directly override the efficiency heuristics in the compiler vectorizer. These
+   clauses cause the compiler to use aligned data movement instructions for all array references. These
+   clauses disable all the advanced alignment optimizations of the compiler, such as determining
+   alignment properties from the program context or using dynamic loop peeling to make references
+   aligned. Be careful when using these clauses. Instructing the compiler to implement all array
+   references with aligned data movement instructions will cause a runtime exception if some of the
+   access patterns are actually unaligned.
+
+   NOTE: The OpenMP 4.0 standard  includes a !$OMP SIMD directive that takes an ALIGNED clause. This may
+   also be used to assert alignment of data in loops that are to be vectorized but not threaded.
+
+   Vector Alignment and Loop Parallelization
+
+   When a vectorized loop (inner-level) is nested within OpenMP* parallelized loop (outer-level), the
+   alignment pragmas/clauses work as in the sequential case. Using the same techniques, a user can mark
+   the loop with a vector pragma/directive and the compiler will generate vectorized code with aligned
+   accesses.
+
+   Fortran Example 4:
+
+subroutine initialize(a,b,c)
+double precision a(ni,nj,nk), b(ni,nj,nk), c(ni,nj,nk)
+
+integer i, j, k
+
+!$OMP PARALLEL do  collapse(2)
+	do k=1, nk
+	do j=1, nj
+!dir$ vector aligned
+		do i=1, ni
+			a(i,j,k) = 2.d0*i
+			b(i,j,k) = 3.d0*j
+			c(i,j,k) = 4.d0*k
+		end do
+	end do
+	end do
+end subroutine initialize
+
+   When the parallelization and vectorization occur at the same level-loop (as opposed to a nested
+   loop), there are some additional considerations. In this case, even if the loop lower-bound is
+   well-formed (e.g. the lower bound value is 0 in C or 1 in Fortran), after work-partitioning, each
+   thread starts with its own lower-bound for the loop. These bounds are determined at runtime based on
+   the OpenMP scheduling type (static-chunk, static-even, dynamic, guided, etc.), the number of threads,
+   etc. These values are unknown to the compiler. If the user adds a "#pragma vector aligned" to such a
+   loop, then it is the user responsibility to restrict the runtime-parameters in such a way that
+   optimal alignment properties hold for each thread. Otherwise, the application will SEG FAULT for some
+   OpenMP runtime parameters.
+
+   One way of making sure that OpenMP static scheduling achieves good alignment results for such a loop
+   is to restrict the iteration count of the parallel loop (and let the remaining iterations get
+   processed in a serial fashion) as shown below:
+
+   C/C++ Example 5a: Given the loop below, rewrite the loop to attain the desired alignment.
+
+static double * a;
+a = _mm_malloc((N+OFFSET) * sizeof(double),64);
+
+#pragma omp parallel for
+for (j = 0; j < N; j++)
+a[j] = 2.0E0 * a[j];
+
+C/C++ Example 5b:
+static double * a;
+a = _mm_malloc((N+OFFSET) * sizeof(double),64);
+#pragma omp parallel
+{
+#pragma omp master
+	{
+		num_threads = omp_get_num_threads();
+		// Assuming omp static scheduling, carefully limit the loop-size to N1 instead of N
+		N1 = ((N / num_threads)/8) * num_threads * 8;
+		// printf("num_threads = %d, N = %d, N1 = %d, num-iters in remainder
+		// serial loop = %d, parallel-pct = %f\n", num_threads,
+		// N, N1, N-N1, (float)N1*100.0/N);
+	}
+}
+
+#pragma omp parallel for
+#pragma vector aligned
+for (j = 0; j < N1; j++) // Compiler vectorizes loop with all aligned accesses
+a[j] = 2.0E0 * a[j];
+
+// Serial loop to process the last N-N1 iterations
+for (j = N1; j < N; j++)
+a[j] = 2.0E0 * a[j];
+
+   C/C++ align_value Attribute
+   The Intel C/C++ Compiler (14.0 and later versions) supports the align_value attribute as indicated
+   below.
+     * Windows:
+
+__declspec(align_value(alignment))
+     * Linux:
+
+_attribute__((align_value(alignment)))
+
+   The argument of this attribute specifies the alignment (in bytes - 8,16,32,64,...) for what the
+   pointer points to. This keyword can be added to a pointer typedef declaration to specify the
+   alignment value of pointers declared for that pointer type.
+
+   When the pointer type is used to declare a formal parameter, the compiler inserts an __assume_aligned
+   directive for the formal parameter on entry to the function. When the pointer type is used to declare
+   a local variable, the compiler inserts an __assume_aligned directive at the initialization point of
+   the local pointer. No directive will be inserted for global declarations.
+
+   NOTE: Once a variable is declared with this typedef, it is the responsibility of the user to ensure
+   that all instances of that variable in the source code adhere to the good alignment properties. For
+   example, it would be incorrect for the user to use pointer arithmetic of the form: *(out1++) in the
+   example below since the 64-byte alignment would be lost after the pointer arithmetic.
+
+   C/C++ Example 6:
+
+typedef double* __restrict__  __attribute__((align_value (64))) Real_ptr;
+
+void T1(int len, Real_ptr out1, Real_ptr out2, Real_ptr out3, Real_ptr in1, Real_ptr in2) {
+	for (int i=0; i<len ; ++i) { // Compiler vectorizes loop with all aligned acesses
+		out1[i] = in1[i] * in2[i] ;
+		out2[i] = in1[i] + in2[i] ;
+		out3[i] = in1[i] - in2[i] ;
+	}
+}
+
+   C/C++ Example 7: This example shows the use of local variables declared with the align_value
+   attribute.
+
+typedef double* __restrict__  __attribute__((align_value (64))) Real_ptr;
+typedef int Indx_type;
+
+struct LoopData {
+	double *in1 ;
+	double *in2 ;
+	double *out1 ;
+	double *out2 ;
+	double *out3 ;
+} ;
+
+void foo3(LoopData& d, Indx_type len) {
+	Real_ptr local_in1  = d.in1;
+	Real_ptr local_in2  = d.in2;
+	Real_ptr local_out1 = d.out1;
+	Real_ptr local_out2 = d.out2;
+	Real_ptr local_out3 = d.out3;
+
+	for(Indx_type i=0; i<len; ++i) {
+		local_out1[i] = local_in1[i] * local_in2[i] ;
+		local_out2[i] = local_in1[i] + local_in2[i] ;
+		local_out3[i] = local_in1[i] - local_in2[i] ;
+	}
+}
+
+   C/C++ Example 8: Here is another example using the align_value attribute with a Lambda function.
+typedef double* __restrict__  __attribute__((align_value (64))) Real_ptr;
+
+template <typename LOOP_BODY>
+inline  __attribute__((always_inline))
+void forall(int begin, int end, LOOP_BODY loop_body) {
+	for ( int ii = begin ; ii < end ; ++ii ) {
+		loop_body( ii );
+	}
+}
+
+void foo2(int len, Real_ptr out1, Real_ptr out2, Real_ptr out3, Real_ptr in1, Real_ptr in2) {
+	forall(0, len, [&] (Indx_type i) { // Compiler vectorizes loop with all aligned accesses
+		out1[i] = in1[i] * in2[i] ;
+		out2[i] = in1[i] + in2[i] ;
+		out3[i] = in1[i] - in2[i] ;
+	} ) ;
+}
+
+   C/C++ Example 9: You can use an "aligned" clause with a list of variables with "omp simd" to
+   communicate the information that the specified base-pointer variables are aligned at a specific
+   value. The example below shows a combination of this clause with some __assume clauses to convince
+   the compiler to vectorize with all aligned accesses in both loops.
+
+__declspec(align(64)) float X[1000], X2[1000];
+
+void foo(float * restrict a, int n, int n1, int n2) {
+	int i;
+
+	__assume(n1%16==0);
+	__assume(n2%16==0);
+
+#pragma omp simd aligned(X:64,a:64)
+	for(i=0;i<n;i++) {
+		X[i] += a[i] + a[i+n1] + a[i-n1]+ a[i+n2] + a[i-n2];
+	}
+
+#pragma omp simd aligned(a:64)
+	for(i=0;i<n;i++) {
+		X2[i] += X[i]*a[i];
+	}
+
+}
+
+   In this example, "#pragma omp simd aligned(X:64,a:64)" means the user is asserting that both X and a
+   base pointers are aligned at 64-bytes.
+
+   Take Aways
+   Data alignment is a method to force the compiler to create data objects in memory on specific byte
+   boundaries. This is done to increase efficiency of data loads and stores to and from the processor.
+   For the Intel processors that support Intel AVX-512 instructions, memory movement is optimal when
+   the data starting address lies on 64 byte boundaries.
+   In addition to creating the data on aligned boundaries, the compiler is able to make optimizations
+   when the data is known to be aligned by 64 bytes. Thus, you must also inform the compiler of this
+   alignment via pragmas (C/C++) or directives (Fortran) so that the compiler can generate optimal code.
+   The one exception is that Fortran module data receives alignment information at USE sites.
+
+   NEXT STEPS
+   It is essential that you read this guide from start to finish using the built-in hyperlinks to guide
+   you along a path to a successful port and tuning of your application(s) on Intel
+   AVX-512 instructions. The paths provided in this guide reflect the steps necessary to get best
+   possible application performance.
+
+
+
+---
+

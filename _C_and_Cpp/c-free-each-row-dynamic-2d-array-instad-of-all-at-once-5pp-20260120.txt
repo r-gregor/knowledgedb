@@ -1,0 +1,342 @@
+filename: c-free-each-row-dynamic-2d-array-instad-of-all-at-once-5pp-20260120.txt
+https://www.reddit.com/r/cprogramming/comments/1i83w5v/why_should_you_free_each_row_of_a_dynamic_2d/
+
+Why should you free each row of a dynamic 2D array instead of all at once?
+
+   I've been taught to free 2D arrays like this:
+
+for (int i = 0; i < rows; i++) {
+	free(matrix[i]);
+}
+
+free(matrix);
+
+   Just curious why this is necessary. Why can't I just do free(matrix); without the loop of freeing
+   each row?
+
+***
+matrix is an array of arrays. The outer array contains pointers to the rows, which are all allocated
+separately and are not necessarily adjacent in memory.
+
+The rule of the thumb is that you should have a free for every malloc, and no more. If the matrix were
+allocated as one contiguous chunk of memory, you'd only need one free.
+
+You can do contiguous allocation, but it requires addressing the elements differently:
+
+#define NUM_ROWS 4
+#define NUM_COLS 4
+
+float *matrix = malloc(sizeof(float) * NUM_ROWS * NUM_COLS);
+
+// access 3,2
+matrix[3 * NUM_COLS + 2];
+
+free(matrix);
+
+This way of addressing requires that you have knowledge of whether the matrix is row-major or column-major.
+
+***
+pro tip: use calloc to avoid integer multiplication overflow
+
+***
+thanks, genuinely cool tip.
+
+***
+There is a much better way:
+
+float (*matrix)[NUM_COLS] = malloc(NUM_ROWS * sizeof *matrix);
+
+// Access 3,2
+matrix[3][2];
+
+// Free
+free(matrix);
+
+Now you can access the array naturally and you only need 1 malloc/free
+
+***
+Yes, but this approach is limited to statically known matrix sizes.
+
+***
+No it works for sizes only known at runtime as well if you compile against c99 or later.
+
+***
+There's a one-to-one correspondence between calls to malloc() and calls to free().
+
+Since matrix was created as an array of pointers, that's one call to malloc() and hence one call to free().
+But then each of the pointers in matrix was then allocated with another call to malloc() and hence need
+another call to free().
+
+***
+The fact that one has an array of pointers doesn't imply that they were individually returned from malloc().
+It's not uncommon for programs to receive a small number of large chunks from malloc() and form pointers to
+addresses within that block. The block must not be freed until everything has done everything that's going to
+be done with any of those addresses, at which point 'free' must be called exactly once with the exact pointer
+value returned from malloc(). If each of the pointers was in fact produced by a separate call to malloc(),
+each must be passed to free, but it's equally important that any pointers that were formed by means other than
+individual calls to malloc()-family functions must not be passed to free().
+
+***
+And that's why my first comment is
+    There's a one-to-one correspondence between calls to malloc() and calls to free().
+
+The above is an inviolable constraint. You can't merge the memory chunks returned by malloc() and release them
+back to the system in a single free(). Nor can you take a single chunk returned by malloc() and return then
+piecemeal via free().
+
+***
+Good question. Try printing the address of matrix and matrix[i] for all i's.
+Matrix [i] will have the starting address of 1D array.
+You need to free all the memory allocated to your 2d array.
+
+***
+if you have a 2D array matrix, each element matrix[i] is a pointer to a location in memory, which is the start
+of the row.
+
+This is a different layout than just having a single large block of memory and using matrix[y * width + x],
+because here you have individual rows in memory + the table that tells you where to find each row (the
+litteral values of matrix[i]).
+
+So, if you have individual rows each malloc'ed individually, and which could be anywhere in memory, you need
+to free them individually; if you free matrix directly, it will only free the "list of pointers to the rows"
+so to say, but not the rows themselves, leaving them forgotten in memory, alone, stranded in an endless abyss,
+burdened to wander the void. (it'll eat ya RAM for nothin)
+
+On the other hand, if you did a single big malloc and did some trickery with stuff like
+matrix[i] = &buffer[y * width] you should just free(matrix[0])
+
+TL;DR
+2D arrays are in reality pointers to pointers to elements. matrix points to an array of pointers, which
+themselves point to the row. Freeing matrix would free the array of pointers, but not individually free each
+of them, causing the memory it lead to to remain allocated. it's like if i remove the numbers on your house,
+it becomes impossible to deliver your mail because we can't find it, but it still exists
+
+sorry if I'm a bit messy "
+
+***
+I do not recommend using pointers to pointers, unless they "inner arrays" have different sizes, otherwise,
+just map a 2D array into a 1D one.
+
+Nevertheless, if you have something like:
+
+int **Matrix = malloc(n * sizeof(int *));
+
+for (int i = 0; i < n; ++i) {
+	Matrix[i] = malloc(n * sizeof(int));
+}
+
+You can now iterate normally through this matrix, similarly to a Vec[Y][X];
+
+for (int y = 0; y < n; ++y) {
+	for (int x = 0; x < n; ++x) {
+		Matrix[y][x] = x*y;
+	}
+}
+
+Now you have a 2D array and each "line" of this matrix is a malloc'd pointer, so you need to free everyone of
+them individually.
+
+for(int i = 0; i < n; ++i) {
+	free(Matrix[i]);
+}
+free(Matrix);
+
+***
+It depends on how the "dynamic 2D array" is actually done. I have seen (and created) data structures where 10
+by 10 grid would have internally been one long array of 100 units. And then the code would treat the first 10
+items as the first row, or the next 10 items as the next row, and so on. Basically a 1D array simulating a 2D
+array. At the end, we would free one (internal) pointer and that would free all 100 (or however many) data
+locations at once.
+
+But if you're using an array of pointers instead, and malloc'd each row individually to get all of those
+pointers, then you have to free each of those individually. Because everything you malloc, you have to free.
+That's just how it is in C. You have to be careful allocating when you use the one-row-at-a-time strategy as
+well. If malloc fails at row 9 so you can't construct the grid, you still have to free matrix[0], free
+matrix[1], free matrix[2], all the way up through matrix[8]. (Which is why it is sometimes not done this way.)
+
+***
+Let's start with a regular 2D array (either auto or static):
+double matrix[2][2];
+
+What you get in memory looks like this:
+
+               double
+               ------
+                +---+
+        matrix: |   | matrix[0][0]
+                + - +
+                |   | matrix[0][1]
+                +---+
+                |   | matrix[1][0]
+                + - + 
+                |   | matrix[1][1]
+                +---+
+
+All the elements are contiguous in a single block.
+
+You can allocate such an array dynamically:
+
+double (*matrix)[2] = malloc( sizeof *matrix * 2 );
+
+which gives us
+
+        double (*)[2]     double
+        -------------     ------
+                +---+      +---+                ---+
+        matrix: |   | ---> |   | matrix[0][0]      |
+                +---+      + - +                   |
+                           |   | matrix[0][1]      |
+                           +---+                   +-- All allocated in
+                           |   | matrix[1][0]      |   a single malloc call
+                           + - +                   |
+                           |   | matrix[1][1]      |
+                           +---+                ---+
+
+matrix points to a 2x2 array of double. Again, all the elements of the array are in a single block, and you
+can deallocate the array with a single call to free:
+free( matrix );
+
+However, if you allocate your array as
+
+double **matrix = malloc( sizeof *matrix * 2 );
+
+if ( matrix ) {
+	for ( size_t i = 0; i < 2; i++ ) {
+		matrix[i] = malloc( sizeof *matrix[i] * 2 );
+	}
+}
+
+you get this:
+
+    double **  double *                 double
+    ---------  --------                 ------
+        +---+     +---+                  +---+
+matrix: |   | --> |   | matrix[0] -----> |   | matrix[0][0]
+        +---+     +---+                  +---+
+                  |   | matrix[1] --+    |   | matrix[0][1]
+                  +---+             |    +---+
+                                    |
+                                    |    +---+
+                                    +--> |   | matrix[1][0]
+                                         +---+
+                                         |   | matrix[1][1]
+                                         +---+
+
+This time, we have three separate blocks of memory that have to be dealt with; matrix points to an array of
+pointers, each element of which points to an array of double.
+
+What happens if we free the memory matrix points to without first freeing the memory each matrix[i] points to?
+We get this:
+
+        +---+                             +---+
+matrix: |   | --> ???                     |   | matrix[0][0]
+        +---+                             +---+
+                                          |   | matrix[0][1]
+                                          +---+
+
+                                          +---+
+                                          |   | matrix[1][0]
+                                          +---+
+                                          |   | matrix[1][1]
+                                          +---+
+
+You still have two blocks of memory allocated, and now you don't have a way to free them; you've already
+deleted your only references to them.
+
+This is why you need to delete each matrix[i] before deleting matrix:
+
+for ( size_t i = 0; i < 2; i++ ) {
+	free( matrix[i] );
+}
+free( matrix );
+
+***
+Because just free(matrix) isn't freeing anything and the than the array of pointers. The pointers that are
+pointed to aren't freed.
+
+***
+As others have said, you will leak memory. You have freed memory where addresses of rows were stored, but nkt
+memory for each row. If you would like an automatic destruction of objects when the "parent" is removed, you
+need for example, add a "+" sign twice tk the language :-) but you still need to be carefull, and it comes
+with possible disadvantages. 
+
+But the main reason I comment is a piece of trivia. Matrices used for numerical computing, at least dense
+ones, are most of the times imementad as a single long piece of memory. It has some advantages: just keeping
+an offset for the whole row/column use less cache and is faster than referring to another table. As a bonus,
+it allows realoc-free reshaping. 
+
+***
+It is possible to malloc space for the column of pointers to rows, and for all the rows themselves, all at
+once, and then set all the pointers in the columns to point to their associated rows.
+
+Then a single free() is possible. Although I used to teach this method to classes back in the 1990s, it's
+pretty uncommon generally.
+
+Similar techniques let one set up triangular matrices and matrices with the origin in the center, so that
+negative coördinates can be supported.
+
+I recommend avoiding all of these unless you understand memory layout, sizeof (and padding), and the
+allocation system very well, however.
+
+***
+There are two different data structures that people call a "two-dimensional array," and C overloads the [i][j]
+syntax to work with both of them.
+
+You're thinking of an array of pointers to arrays, also called a "ragged array." This is almost never the data
+structure you actually want. Programmers all learn about it first because of char** argv, but recall that the
+actual implementation of the command line would split a single string into tokens, like
+/bin/echo\0hello,\0world!\0") and pass an array of views of the tokens without allocating separate memory
+blocks for each one.
+
+But every row of a matrix has the same number of columns, so it should use a rectangular array of fixed-width
+columns, like double tf[ROWS][COLUMNS];. This is laid out as a single block of contiguious memory that can be
+freed all at once (and should have better cache performance too). It's indexed by turning tf[i][j] into *(tf +
+i*COLUMNS + j). The individual rows have no allocations or pointers that would need be freed.
+
+***
+You don't need to allocate a 2D array with multiple allocs and frees. Here is an example of doing with just
+one malloc and one free.
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+static void print_matrix(int rows, int cols, float matrix[rows][cols]) {
+	for (int row = 0; row < rows; row++) {
+		for (int col = 0; col < cols; col++) {
+			printf("[%d][%d] - %.2f\n", row, col, matrix[row][col]);
+		}
+	}
+}
+
+int main(void) {
+	srand(time(NULL));
+	int rows = (rand() % 15) + 1;
+	int cols = (rand() % 15) + 1;
+
+	// We could write "float (*matrix)[rows][cols] = malloc(sizeof *matrix);"
+	// But then we would have to use (*matrix)[row][col] syntax when indexing,
+	// so drop the left-most dimension in the type just as you do when allocation
+	// a 1D array "float *arr = malloc(8 * sizeof *arr)" for example.
+	float (*matrix)[cols] = malloc(rows * sizeof *matrix);
+
+	if (matrix != NULL) {
+		for (int row = 0; row < rows; row++) {
+			for (int col = 0; col < cols; col++) {
+				matrix[row][col] = (float)rand();
+			}
+		}
+
+		print_matrix(rows, cols, matrix);
+		free(matrix);
+	}
+
+	return 0;
+}
+
+Tested and compiled without errors with gcc version 12.2 as follows:
+$> gcc -std=c99 -Wall -Wextra -Wpedantic -Werror matrix_2d.c
+
+
+---
+

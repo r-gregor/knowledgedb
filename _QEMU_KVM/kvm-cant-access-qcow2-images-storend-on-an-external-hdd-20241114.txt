@@ -1,0 +1,221 @@
+filename: kvm_cant-access-qcow2-images-storend-on-an-external-hdd_20241114.txt
+https://unix.stackexchange.com/questions/343814/kvm-cant-access-qcow2-images-storend-on-an-external-hdd
+
+KVM can't access qcow2 images storend on an external HDD
+
+   I'm running Deepin 15.3 x64 and i have an external HDD with EXT4 file system. whereat i store things like
+   VM images. Oracle VM VirtualBox and VMware Workstation Player works just fine with this config, but KVM
+   can't read files from it. I've tried to chown the files, the container directory and even chmod -R 0777 on
+   the entire drive. But KVM still complains that it can't access the directory.  However KVM can create
+   images there, but KVM won't be able to access the image file as soon as it gets created.
+   [https://drive.google.com/file/d/0B2wKLefl-R4MUDdLUUJvc0t5b1U/view?usp=sharing][**1]Here's a video of this (in
+   case something's not clear). Note that I can't move the images to /var/lib/libvirt/images because i don't
+   have enough space on my SSD for any of them.
+
+***
+   This is because the Qemu requires execution permission along the image file's path. If the image is
+   in the mounted disk, it requires +x permission in the /media/$username
+
+   For me, I fixed this issue by this command:
+$> sudo chmod a+x /media/houcheng/
+
+   For rest of the detail, please see [https://github.com/jedi4ever/veewee/issues/996]this.
+
+***
+   Solution: Run Virtmanager as root, choose create a new VM -> select 'Import existing disk image' and
+   browse it. After clicking continue it will ask whether you want it to fix permission issues or not
+   for that path. After choosing 'Yes', it fixes the permission issue and will work when it's running as
+   a normal user too.
+
+***
+   This a permission issue for qemu accessing the folder where VMs are stored.
+
+   I had an issue who looks like this, I resolved it by giving qemu access permissions to the folder (it
+   was /home/mos in my case):
+$> sudo setfacl -m u:qemu:x /home/mos
+
+***
+   The problem I was having was that my system (Fedora 27) automatically mounts new drives (external
+   HDDs, USB, SD) to
+
+   /run/media/(username)/(device name)
+
+   For whatever reason this causes the permissions issue. What I did to fix the issue was unmount the
+   drive from that location as root, and then mount it to /mnt. My USB thumb drive is /dev/sdc1 on my
+   system so I did the following.
+$> su -     (then enter root password)
+$> umount /run/media/yourusername/devicename
+$> mount  /dev/sdc1 /mnt        (mount usb to /mnt)
+
+   After that I just made sure to have symbolic links from the original location of the qcow2 drives to
+   the new location (still as root)
+$> cd /var/lib/libvirt/images
+$> ln -s (new target) (link name)
+
+   so if your vm is named MyVM
+$> ln -s /mnt/Myvm.qcow2  MyVm.qcow2
+
+   Once I saw that my VMs were now working, I edited /etc/fstab to automatically mount the drive at
+   /mnt. The folders and qcow2 drives were owned by my standard user account and group. I am sure there
+   are better ways to do it, but this is what worked for me.
+
+***
+   For all who are using SELinux be aware of the right context of the images folder.
+
+   The context should be system_u:object_r:svirt_image_t
+
+   To change files or folder to this context just use:
+$> chcon -t svirt_image_t -u system_u /newimages
+
+   You can use -R for recursive and -L for following symbolic links, or both.
+
+   If you are just using links then be aware the link and the real file needs to be in this context.
+
+   NOTE: To check the context use e.g `ls -lZd /newimages
+
+     * I think this method does not work on partition with the exFAT format. I tried it on a external
+       storage with exFAT and the chcon command didn't work. I was able to successfully use the command
+       and start a vm on a btrfs partition.
+
+***
+   KVM uses libvirt, which requires images to be in a defined pool. You can do this with Virsh by
+   copying the config of the default pool
+virsh pool-dumpxml default > new_pool.xml
+edit new_pool.xml ## use a different name & path
+virsh pool-create new_pool.xml
+virsh pool-refresh name
+
+   KVM should then be able to pick up images on your additional drive.
+
+     * virsh pool-dumpxml default > new_pool.xml error: failed to get pool 'default' error: Storage pool
+       not found: no storage pool with matching name 'default' Also virsh pool-list list shows no pools.
+     * Ok, default pool created and is active. It points to the directory where i store the images.
+       Permissions: mode: 0777, owner: 119, group: 128. Still access denied.
+     * The above has worked for me in the past. I'm not sure what the issue could be other than
+       ownership without seeing your setup. an alternate method you could try, is a symlink on the
+       additional storage directory to /var/lib/libvirt/images directory: ln -sf
+       /path/to/additional/storage /var/lib/libvirt/images Permissions/ownership will need to be
+       identical for that to work, but I can't vouch for that working definitely, as I haven't tested it
+       myself
+     * It's still not working. There's a video link in the question so you can see this part of my
+       setup. For some reason it won't play from Google Drive so you have to download it but don't
+       worry, it's only 17,1 MB.
+
+***
+   I found these answers when trying to run off an external hard drive and was having no luck. Then I
+   remembered that selinux was a thing. To see if that was preventing access, I tried with
+$> sudo setenforce permissive
+
+   And it worked! In my case the hdd was ntfs, which doesn't match the problem as described, but it is
+   still important to remember that selinux must be happy for anything to go well. I hope this helps
+   someone in a similar situation.
+
+   Of course running with permissive defeats the point of selinux, so the 'right way' to make an
+   exception for selinux should be used as a final fix on a system that is using selinux. But those
+   details are a bit out of scope for this question.
+
+
+---
+[**1]
+https://github.com/jedi4ever/veewee/issues/996
+qemu-kvm: could not open disk image ' ': Permission denied #996A
+
+Following the KVM documentation I stumbled across this permissions error.
+
+Running as root on Centos 6.5
+
+[root@dev1 veewee]# bundle exec veewee kvm build 'bamboo-agent' --pool-name=default --network-name=default --force
+Building Box bamboo-agent with Definition bamboo-agent:
+- debug : false
+- cwd : /root/veewee
+- force : true
+- nogui : false
+- auto : false
+- checksum : false
+- postinstall_include : []
+- postinstall_exclude : []
+- skip_to_postinstall : false
+- use_emulation : false
+- network_name : default
+- pool_name : default
+
+The isofile CentOS-6.5-x86_64-netinstall.iso already exists.
+/usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/fog-1.24.0/lib/fog/libvirt/requests/compute/vm_action.rb:7:in `create': Call to virDomainCreateWithFlags failed: Unable to read from monitor: Connection reset by peer (Libvirt::Error)
+internal error process exited while connecting to monitor: char device redirected to /dev/pts/19
+qemu-kvm: -drive file=/root/veewee/iso/CentOS-6.5-x86_64-netinstall.iso,if=none,media=cdrom,id=drive-ide0-1-0,readonly=on,format=raw: could not open disk image /root/veewee/iso/CentOS-6.5-x86_64-netinstall.iso: Permission denied
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/fog-1.24.0/lib/fog/libvirt/requests/compute/vm_action.rb:7:in `vm_action'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/fog-1.24.0/lib/fog/libvirt/models/compute/server.rb:69:in `start'
+        from /root/veewee/lib/veewee/provider/kvm/box/up.rb:8:in `up'
+        from /root/veewee/lib/veewee/provider/core/box/build.rb:50:in `kickstart'
+        from /root/veewee/lib/veewee/provider/core/box/build.rb:111:in `build'
+        from /root/veewee/lib/veewee/provider/kvm/box/build.rb:6:in `build'
+        from /root/veewee/lib/veewee/command/kvm.rb:25:in `build'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/thor-0.19.1/lib/thor/command.rb:27:in `run'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/thor-0.19.1/lib/thor/invocation.rb:126:in `invoke_command'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/thor-0.19.1/lib/thor.rb:359:in `dispatch'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/thor-0.19.1/lib/thor/invocation.rb:115:in `invoke'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/thor-0.19.1/lib/thor.rb:235:in `block in subcommand'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/thor-0.19.1/lib/thor/command.rb:27:in `run'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/thor-0.19.1/lib/thor/invocation.rb:126:in `invoke_command'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/thor-0.19.1/lib/thor.rb:359:in `dispatch'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/gems/thor-0.19.1/lib/thor/base.rb:440:in `start'
+        from /root/veewee/bin/veewee:24:in `<top (required)>'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/bin/veewee:23:in `load'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/bin/veewee:23:in `<main>'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/bin/ruby_executable_hooks:15:in `eval'
+        from /usr/local/rvm/gems/ruby-1.9.3-p547@veewee/bin/ruby_executable_hooks:15:in `<main>'
+
+Oct 15, 2014
+
+***
+SOLVED: found a way.
+Changing /etc/libvirt/qemu.conf to make things work.
+Uncomment user/group to work as root.
+Then restart libvirtd
+
+# The user for QEMU processes run by the system instance. It can be
+# specified as a user name or as a user id. The qemu driver will try to
+# parse this value first as a name and then, if the name doesn't exist,
+# as a user id.
+#
+# Since a sequence of digits is a valid user name, a leading plus sign
+# can be used to ensure that a user id will not be interpreted as a user
+# name.
+#
+# Some examples of valid values are:
+#
+#       user = "qemu"   # A user named "qemu"
+#       user = "+0"     # Super user (uid=0)
+#       user = "100"    # A user named "100" or a user with uid=100
+#
+user = "root"
+
+# The group for QEMU processes run by the system instance. It can be
+# specified in a similar way to user.
+group = "root"
+
+# Whether libvirt should dynamically change file ownership
+# to match the configured user/group above. Defaults to 1.
+# Set to 0 to disable file ownership changes.
+#dynamic_ownership = 1
+
+[root@dev1 ~]# service libvirtd restart
+Stopping libvirtd daemon:                                  [  OK  ]
+Starting libvirtd daemon:                                  [  OK  ]
+
+***
+I don't think it is wise to make such edits letting qemu running as root. You should put the ISO file in a
+directory that is readable by qemu user, for example /tmp @FossPrime FossPrime commented May 27, 2017
+
+The qemu user needs search permissions all the way up the path, that means chmod a+x. For me the issue was I
+had ACL's set which blocked qemu... to remove them run "setfacl -b offending-dir/"
+
+You can tell if that's your problem when unix permissions are correct but you can't ls every upstream dir with
+sudo su -s /bin/bash qemu and ls with an account that does have access yields a result with a permission line
+that contains a dot such as drwxrwxr-x. meaning extended ACL permissions.  @murlock murlock commented Mar 24,
+2018
+...
+
+
+---
+

@@ -1,0 +1,1515 @@
+filename: go_modules-multyf_20191005.txt
+https://blog.golang.org/using-go-modules
+
+Using Go Modules
+19 March 2019
+
+Introduction
+   This post is part 1 in a series.
+     * Part 1 - Using Go Modules (this post)
+     * Part 2 - Migrating To Go Modules
+     * Part 3 - Publishing Go Modules
+
+   Go 1.11 and 1.12 include preliminary support for modules, Go's new dependency
+   management system that makes dependency version information explicit and easier to manage.
+   This blog post is an introduction to the basic operations needed to get started using
+   modules. A followup post will cover releasing modules for others to use.
+
+   A module is a collection of Go packages stored in a file tree with a go.mod file at its
+   root. The go.mod file defines the module's module path, which is also the import path used
+   for the root directory, and its dependency requirements, which are the other modules needed
+   for a successful build. Each dependency requirement is written as a module path and a
+   specific semantic version.
+
+   As of Go 1.11, the go command enables the use of modules when the current directory or any
+   parent directory has a go.mod, provided the directory is outside $GOPATH/src. (Inside
+   $GOPATH/src, for compatibility, the go command still runs in the old GOPATH mode, even if a
+   go.mod is found. See the go command documentation for details.) Starting in Go 1.13,
+   module mode will be the default for all development.
+
+   This post walks through a sequence of common operations that arise when developing Go code
+   with modules:
+     * Creating a new module.
+     * Adding a dependency.
+     * Upgrading dependencies.
+     * Adding a dependency on a new major version.
+     * Upgrading a dependency to a new major version.
+     * Removing unused dependencies.
+
+Creating a new module
+   Let's create a new module.
+
+   Create a new, empty directory somewhere outside $GOPATH/src, cd into that directory, and
+   then create a new source file, hello.go:
+package hello
+
+func Hello() string {
+    return "Hello, world."
+}
+
+   Let's write a test, too, in hello_test.go:
+package hello
+
+import "testing"
+
+func TestHello(t *testing.T) {
+    want := "Hello, world."
+    if got := Hello(); got != want {
+        t.Errorf("Hello() = %q, want %q", got, want)
+    }
+}
+
+   At this point, the directory contains a package, but not a module, because there is no
+   go.mod file. If we were working in /home/gopher/hello and ran go test now, we'd see:
+$ go test
+PASS
+ok      _/home/gopher/hello    0.020s
+$
+
+   The last line summarizes the overall package test. Because we are working outside $GOPATH
+   and also outside any module, the go command knows no import path for the current directory
+   and makes up a fake one based on the directory name: _/home/gopher/hello.
+
+   Let's make the current directory the root of a module by using go mod init and then try go
+   test again:
+$ go mod init example.com/hello
+go: creating new go.mod: module example.com/hello
+$ go test
+PASS
+ok      example.com/hello    0.020s
+$
+
+   Congratulations! You've written and tested your first module.
+
+   The go mod init command wrote a go.mod file:
+$ cat go.mod
+module example.com/hello
+
+go 1.12
+$
+
+   The go.mod file only appears in the root of the module. Packages in subdirectories have
+   import paths consisting of the module path plus the path to the subdirectory. For example,
+   if we created a subdirectory world, we would not need to (nor want to) run go mod init
+   there. The package would automatically be recognized as part of the example.com/hello
+   module, with import path example.com/hello/world.
+
+Adding a dependency
+   The primary motivation for Go modules was to improve the experience of using (that is,
+   adding a dependency on) code written by other developers.
+
+   Let's update our hello.go to import rsc.io/quote and use it to implement Hello:
+package hello
+
+import "rsc.io/quote"
+
+func Hello() string {
+    return quote.Hello()
+}
+
+   Now let's run the test again:
+$ go test
+go: finding rsc.io/quote v1.5.2
+go: downloading rsc.io/quote v1.5.2
+go: extracting rsc.io/quote v1.5.2
+go: finding rsc.io/sampler v1.3.0
+go: finding golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c
+go: downloading rsc.io/sampler v1.3.0
+go: extracting rsc.io/sampler v1.3.0
+go: downloading golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c
+go: extracting golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c
+PASS
+ok      example.com/hello    0.023s
+$
+
+   The go command resolves imports by using the specific dependency module versions listed in
+   go.mod. When it encounters an import of a package not provided by any module in go.mod, the
+   go command automatically looks up the module containing that package and adds it to go.mod,
+   using the latest version. ("Latest" is defined as the latest tagged stable
+   (non-prerelease) version, or else the latest tagged prerelease version, or else the
+   latest untagged version.) In our example, go test resolved the new import rsc.io/quote to
+   the module rsc.io/quote v1.5.2. It also downloaded two dependencies used by rsc.io/quote,
+   namely rsc.io/sampler and golang.org/x/text. Only direct dependencies are recorded in the
+   go.mod file:
+$ cat go.mod
+module example.com/hello
+
+go 1.12
+
+require rsc.io/quote v1.5.2
+$
+
+   A second go test command will not repeat this work, since the go.mod is now up-to-date and
+   the downloaded modules are cached locally (in $GOPATH/pkg/mod):
+$ go test
+PASS
+ok      example.com/hello    0.020s
+$
+
+   Note that while the go command makes adding a new dependency quick and easy, it is not
+   without cost. Your module now literally depends on the new dependency in critical areas
+   such as correctness, security, and proper licensing, just to name a few. For more
+   considerations, see Russ Cox's blog post, "Our Software Dependency Problem."
+
+   As we saw above, adding one direct dependency often brings in other indirect dependencies
+   too. The command go list -m all lists the current module and all its dependencies:
+$ go list -m all
+example.com/hello
+golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c
+rsc.io/quote v1.5.2
+rsc.io/sampler v1.3.0
+$
+
+   In the go list output, the current module, also known as the main module, is always the
+   first line, followed by dependencies sorted by module path.
+
+   The golang.org/x/text version v0.0.0-20170915032832-14c0d48ead0c is an example of a
+   pseudo-version, which is the go command's version syntax for a specific untagged
+   commit.
+
+   In addition to go.mod, the go command maintains a file named go.sum containing the expected
+   cryptographic hashes of the content of specific module versions:
+$ cat go.sum
+golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c h1:qgOY6WgZO...
+golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c/go.mod h1:Nq...
+rsc.io/quote v1.5.2 h1:w5fcysjrx7yqtD/aO+QwRjYZOKnaM9Uh2b40tElTs3...
+rsc.io/quote v1.5.2/go.mod h1:LzX7hefJvL54yjefDEDHNONDjII0t9xZLPX...
+rsc.io/sampler v1.3.0 h1:7uVkIFmeBqHfdjD+gZwtXXI+RODJ2Wc4O7MPEh/Q...
+rsc.io/sampler v1.3.0/go.mod h1:T1hPZKmBbMNahiBKFy5HrXp6adAjACjK9...
+$
+
+   The go command uses the go.sum file to ensure that future downloads of these modules
+   retrieve the same bits as the first download, to ensure the modules your project depends on
+   do not change unexpectedly, whether for malicious, accidental, or other reasons. Both
+   go.mod and go.sum should be checked into version control.
+
+Upgrading dependencies
+   With Go modules, versions are referenced with semantic version tags. A semantic version has
+   three parts: major, minor, and patch. For example, for v0.1.2, the major version is 0, the
+   minor version is 1, and the patch version is 2. Let's walk through a couple minor version
+   upgrades. In the next section, we'll consider a major version upgrade.
+
+   From the output of go list -m all, we can see we're using an untagged version of
+   golang.org/x/text. Let's upgrade to the latest tagged version and test that everything
+   still works:
+$ go get golang.org/x/text
+go: finding golang.org/x/text v0.3.0
+go: downloading golang.org/x/text v0.3.0
+go: extracting golang.org/x/text v0.3.0
+$ go test
+PASS
+ok      example.com/hello    0.013s
+$
+
+   Woohoo! Everything passes. Let's take another look at go list -m all and the go.mod file:
+$ go list -m all
+example.com/hello
+golang.org/x/text v0.3.0
+rsc.io/quote v1.5.2
+rsc.io/sampler v1.3.0
+$ cat go.mod
+module example.com/hello
+
+go 1.12
+
+require (
+    golang.org/x/text v0.3.0 // indirect
+    rsc.io/quote v1.5.2
+)
+$
+
+   The golang.org/x/text package has been upgraded to the latest tagged version (v0.3.0). The
+   go.mod file has been updated to specify v0.3.0 too. The indirect comment indicates a
+   dependency is not used directly by this module, only indirectly by other module
+   dependencies. See go help modules for details.
+
+   Now let's try upgrading the rsc.io/sampler minor version. Start the same way, by running go
+   get and running tests:
+$ go get rsc.io/sampler
+go: finding rsc.io/sampler v1.99.99
+go: downloading rsc.io/sampler v1.99.99
+go: extracting rsc.io/sampler v1.99.99
+$ go test
+--- FAIL: TestHello (0.00s)
+    hello_test.go:8: Hello() = "99 bottles of beer on the wall, 99 bottles of beer, ...", want "Hell
+o, world."
+FAIL
+exit status 1
+FAIL    example.com/hello    0.014s
+$
+
+   Uh, oh! The test failure shows that the latest version of rsc.io/sampler is incompatible
+   with our usage. Let's list the available tagged versions of that module:
+$ go list -m -versions rsc.io/sampler
+rsc.io/sampler v1.0.0 v1.2.0 v1.2.1 v1.3.0 v1.3.1 v1.99.99
+$
+
+   We had been using v1.3.0; v1.99.99 is clearly no good. Maybe we can try using v1.3.1
+   instead:
+$ go get rsc.io/sampler@v1.3.1
+go: finding rsc.io/sampler v1.3.1
+go: downloading rsc.io/sampler v1.3.1
+go: extracting rsc.io/sampler v1.3.1
+$ go test
+PASS
+ok      example.com/hello    0.022s
+$
+
+   Note the explicit @v1.3.1 in the go get argument. In general each argument passed to go get
+   can take an explicit version; the default is @latest, which resolves to the latest version
+   as defined earlier.
+
+Adding a dependency on a new major version
+   Let's add a new function to our package: func Proverb returns a Go concurrency proverb, by
+   calling quote.Concurrency, which is provided by the module rsc.io/quote/v3. First we update
+   hello.go to add the new function:
+package hello
+
+import (
+    "rsc.io/quote"
+    quoteV3 "rsc.io/quote/v3"
+)
+
+func Hello() string {
+    return quote.Hello()
+}
+
+func Proverb() string {
+    return quoteV3.Concurrency()
+}
+
+   Then we add a test to hello_test.go:
+func TestProverb(t *testing.T) {
+    want := "Concurrency is not parallelism."
+    if got := Proverb(); got != want {
+        t.Errorf("Proverb() = %q, want %q", got, want)
+    }
+}
+
+   Then we can test our code:
+$ go test
+go: finding rsc.io/quote/v3 v3.1.0
+go: downloading rsc.io/quote/v3 v3.1.0
+go: extracting rsc.io/quote/v3 v3.1.0
+PASS
+ok      example.com/hello    0.024s
+$
+
+   Note that our module now depends on both rsc.io/quote and rsc.io/quote/v3:
+$ go list -m rsc.io/q...
+rsc.io/quote v1.5.2
+rsc.io/quote/v3 v3.1.0
+$
+
+   Each different major version (v1, v2, and so on) of a Go module uses a different module
+   path: starting at v2, the path must end in the major version. In the example, v3 of
+   rsc.io/quote is no longer rsc.io/quote: instead, it is identified by the module path
+   rsc.io/quote/v3. This convention is called semantic import versioning, and it gives
+   incompatible packages (those with different major versions) different names. In contrast,
+   v1.6.0 of rsc.io/quote should be backwards-compatible with v1.5.2, so it reuses the name
+   rsc.io/quote. (In the previous section, rsc.io/sampler v1.99.99 should have been
+   backwards-compatible with rsc.io/sampler v1.3.0, but bugs or incorrect client assumptions
+   about module behavior can both happen.)
+
+   The go command allows a build to include at most one version of any particular module path,
+   meaning at most one of each major version: one rsc.io/quote, one rsc.io/quote/v2, one
+   rsc.io/quote/v3, and so on. This gives module authors a clear rule about possible
+   duplication of a single module path: it is impossible for a program to build with both
+   rsc.io/quote v1.5.2 and rsc.io/quote v1.6.0. At the same time, allowing different major
+   versions of a module (because they have different paths) gives module consumers the ability
+   to upgrade to a new major version incrementally. In this example, we wanted to use
+   quote.Concurrency from rsc/quote/v3 v3.1.0 but are not yet ready to migrate our uses of
+   rsc.io/quote v1.5.2. The ability to migrate incrementally is especially important in a
+   large program or codebase.
+
+Upgrading a dependency to a new major version
+   Let's complete our conversion from using rsc.io/quote to using only rsc.io/quote/v3.
+   Because of the major version change, we should expect that some APIs may have been removed,
+   renamed, or otherwise changed in incompatible ways. Reading the docs, we can see that Hello
+   has become HelloV3:
+$ go doc rsc.io/quote/v3
+package quote // import "rsc.io/quote"
+
+Package quote collects pithy sayings.
+
+func Concurrency() string
+func GlassV3() string
+func GoV3() string
+func HelloV3() string
+func OptV3() string
+$
+
+   (There is also a known bug in the output; the displayed import path has incorrectly
+   dropped the /v3.)
+
+   We can update our use of quote.Hello() in hello.go to use quoteV3.HelloV3():
+package hello
+
+import quoteV3 "rsc.io/quote/v3"
+
+func Hello() string {
+    return quoteV3.HelloV3()
+}
+
+func Proverb() string {
+    return quoteV3.Concurrency()
+}
+
+   And then at this point, there's no need for the renamed import anymore, so we can undo
+   that:
+package hello
+
+import "rsc.io/quote/v3"
+
+func Hello() string {
+    return quote.HelloV3()
+}
+
+func Proverb() string {
+    return quote.Concurrency()
+}
+
+   Let's re-run the tests to make sure everything is working:
+$ go test
+PASS
+ok      example.com/hello       0.014s
+
+Removing unused dependencies
+
+   We've removed all our uses of rsc.io/quote, but it still shows up in go list -m all and in
+   our go.mod file:
+$ go list -m all
+example.com/hello
+golang.org/x/text v0.3.0
+rsc.io/quote v1.5.2
+rsc.io/quote/v3 v3.1.0
+rsc.io/sampler v1.3.1
+$ cat go.mod
+module example.com/hello
+
+go 1.12
+
+require (
+    golang.org/x/text v0.3.0 // indirect
+    rsc.io/quote v1.5.2
+    rsc.io/quote/v3 v3.0.0
+    rsc.io/sampler v1.3.1 // indirect
+)
+$
+
+   Why? Because building a single package, like with go build or go test, can easily tell when
+   something is missing and needs to be added, but not when something can safely be removed.
+   Removing a dependency can only be done after checking all packages in a module, and all
+   possible build tag combinations for those packages. An ordinary build command does not load
+   this information, and so it cannot safely remove dependencies.
+
+   The go mod tidy command cleans up these unused dependencies:
+$ go mod tidy
+$ go list -m all
+example.com/hello
+golang.org/x/text v0.3.0
+rsc.io/quote/v3 v3.1.0
+rsc.io/sampler v1.3.1
+$ cat go.mod
+module example.com/hello
+
+go 1.12
+
+require (
+    golang.org/x/text v0.3.0 // indirect
+    rsc.io/quote/v3 v3.1.0
+    rsc.io/sampler v1.3.1 // indirect
+)
+
+$ go test
+PASS
+ok      example.com/hello    0.020s
+$
+
+Conclusion
+   Go modules are the future of dependency management in Go. Module functionality is now
+   available in all supported Go versions (that is, in Go 1.11 and Go 1.12).
+
+   This post introduced these workflows using Go modules:
+     * go mod init creates a new module, initializing the go.mod file that describes it.
+     * go build, go test, and other package-building commands add new dependencies to go.mod
+       as needed.
+     * go list -m all prints the current module's dependencies.
+     * go get changes the required version of a dependency (or adds a new dependency).
+     * go mod tidy removes unused dependencies.
+
+   We encourage you to start using modules in your local development and to add go.mod and
+   go.sum files to your projects. To provide feedback and help shape the future of dependency
+   management in Go, please send us bug reports or experience reports.
+
+   Thanks for all your feedback and help improving modules.
+
+---
+https://blog.golang.org/migrating-to-go-modules
+
+Migrating to Go Modules
+21 August 2019
+
+   Introduction
+      This post is part 2 in a series.
+        * Part 1 - Using Go Modules
+        * Part 2 - Migrating To Go Modules (this post)
+        * Part 3 - Publishing Go Modules
+
+      Go projects use a wide variety of dependency management strategies. Vendoring tools such as
+      dep and glide are popular, but they have wide differences in behavior and don't always work
+      well together. Some projects store their entire GOPATH directory in a single Git repository. Others
+      simply rely on go get and expect fairly recent versions of dependencies to be installed in GOPATH.
+
+      Go's module system, introduced in Go 1.11, provides an official dependency management solution built
+      into the go command. This article describes tools and techniques for converting a project to modules.
+
+      Please note: if your project is already tagged at v2.0.0 or higher, you will need to update your
+      module path when you add a go.mod file. We'll explain how to do that without breaking your users in a
+      future article focused on v2 and beyond.
+
+   Migrating to Go modules in your project
+      A project might be in one of three states when beginning the transition to Go modules:
+        * A brand new Go project.
+        * An established Go project with a non-modules dependency manager.
+        * An established Go project without any dependency manager.
+
+      The first case is covered in Using Go Modules; we'll address the latter two in this post.
+
+   With a dependency manager
+
+      To convert a project that already uses a dependency management tool, run the following commands:
+   $ git clone https://github.com/my/project
+   [...]
+   $ cd project
+   $ cat Godeps/Godeps.json
+   {
+       "ImportPath": "github.com/my/project",
+       "GoVersion": "go1.12",
+       "GodepVersion": "v80",
+       "Deps": [
+           {
+               "ImportPath": "rsc.io/binaryregexp",
+               "Comment": "v0.2.0-1-g545cabd",
+               "Rev": "545cabda89ca36b48b8e681a30d9d769a30b3074"
+           },
+           {
+               "ImportPath": "rsc.io/binaryregexp/syntax",
+               "Comment": "v0.2.0-1-g545cabd",
+               "Rev": "545cabda89ca36b48b8e681a30d9d769a30b3074"
+           }
+       ]
+   }
+   $ go mod init github.com/my/project
+   go: creating new go.mod: module github.com/my/project
+   go: copying requirements from Godeps/Godeps.json
+   $ cat go.mod
+   module github.com/my/project
+
+   go 1.12
+
+   require rsc.io/binaryregexp v0.2.1-0.20190524193500-545cabda89ca
+   $
+
+      go mod init creates a new go.mod file and automatically imports dependencies from Godeps.json,
+      Gopkg.lock, or a number of other supported formats. The argument to go mod init is the module
+      path, the location where the module may be found.
+
+      This is a good time to pause and run go build ./... and go test ./... before continuing. Later steps
+      may modify your go.mod file, so if you prefer to take an iterative approach, this is the closest your
+      go.mod file will be to your pre-modules dependency specification.
+   $ go mod tidy
+   go: downloading rsc.io/binaryregexp v0.2.1-0.20190524193500-545cabda89ca
+   go: extracting rsc.io/binaryregexp v0.2.1-0.20190524193500-545cabda89ca
+   $ cat go.sum
+   rsc.io/binaryregexp v0.2.1-0.20190524193500-545cabda89ca h1:FKXXXJ6G2bFoVe7hX3kEX6Izxw5ZKRH57DFBJmHCbkU=
+   rsc.io/binaryregexp v0.2.1-0.20190524193500-545cabda89ca/go.mod h1:qTv7/COck+e2FymRvadv62gMdZztPaShugOCi3I+8D8
+   =
+   $
+
+      go mod tidy finds all the packages transitively imported by packages in your module. It adds new
+      module requirements for packages not provided by any known module, and it removes requirements on
+      modules that don't provide any imported packages. If a module provides packages that are only
+      imported by projects that haven't migrated to modules yet, the module requirement will be marked with
+      an // indirect comment. It is always good practice to run go mod tidy before committing a go.mod file
+      to version control.
+
+      Let's finish by making sure the code builds and tests pass:
+   $ go build ./...
+   $ go test ./...
+   [...]
+   $
+
+      Note that other dependency managers may specify dependencies at the level of individual packages or
+      entire repositories (not modules), and generally do not recognize the requirements specified in the
+      go.mod files of dependencies. Consequently, you may not get exactly the same version of every package
+      as before, and there's some risk of upgrading past breaking changes. Therefore, it's important to
+      follow the above commands with an audit of the resulting dependencies. To do so, run
+   $ go list -m all
+   go: finding rsc.io/binaryregexp v0.2.1-0.20190524193500-545cabda89ca
+   github.com/my/project
+   rsc.io/binaryregexp v0.2.1-0.20190524193500-545cabda89ca
+   $
+
+      and compare the resulting versions with your old dependency management file to ensure that the
+      selected versions are appropriate. If you find a version that wasn't what you wanted, you can find
+      out why using go mod why -m and/or go mod graph, and upgrade or downgrade to the correct version
+      using go get. (If the version you request is older than the version that was previously selected, go
+      get will downgrade other dependencies as needed to maintain compatibility.) For example,
+   $ go mod why -m rsc.io/binaryregexp
+   [...]
+   $ go mod graph | grep rsc.io/binaryregexp
+   [...]
+   $ go get rsc.io/binaryregexp@v0.2.0
+   $
+
+   Without a dependency manager
+
+      For a Go project without a dependency management system, start by creating a go.mod file:
+   $ git clone https://go.googlesource.com/blog
+   [...]
+   $ cd blog
+   $ go mod init golang.org/x/blog
+   go: creating new go.mod: module golang.org/x/blog
+   $ cat go.mod
+   module golang.org/x/blog
+
+   go 1.12
+   $
+
+      Without a configuration file from a previous dependency manager, go mod init will create a go.mod
+      file with only the module and go directives. In this example, we set the module path to
+      golang.org/x/blog because that is its custom import path. Users may import packages with this
+      path, and we must be careful not to change it.
+
+      The module directive declares the module path, and the go directive declares the expected version of
+      the Go language used to compile the code within the module.
+
+      Next, run go mod tidy to add the module's dependencies:
+   $ go mod tidy
+   go: finding golang.org/x/website latest
+   go: finding gopkg.in/tomb.v2 latest
+   go: finding golang.org/x/net latest
+   go: finding golang.org/x/tools latest
+   go: downloading github.com/gorilla/context v1.1.1
+   go: downloading golang.org/x/tools v0.0.0-20190813214729-9dba7caff850
+   go: downloading golang.org/x/net v0.0.0-20190813141303-74dc4d7220e7
+   go: extracting github.com/gorilla/context v1.1.1
+   go: extracting golang.org/x/net v0.0.0-20190813141303-74dc4d7220e7
+   go: downloading gopkg.in/tomb.v2 v2.0.0-20161208151619-d5d1b5820637
+   go: extracting gopkg.in/tomb.v2 v2.0.0-20161208151619-d5d1b5820637
+   go: extracting golang.org/x/tools v0.0.0-20190813214729-9dba7caff850
+   go: downloading golang.org/x/website v0.0.0-20190809153340-86a7442ada7c
+   go: extracting golang.org/x/website v0.0.0-20190809153340-86a7442ada7c
+   $ cat go.mod
+   module golang.org/x/blog
+
+   go 1.12
+
+   require (
+       github.com/gorilla/context v1.1.1
+       golang.org/x/net v0.0.0-20190813141303-74dc4d7220e7
+       golang.org/x/text v0.3.2
+       golang.org/x/tools v0.0.0-20190813214729-9dba7caff850
+       golang.org/x/website v0.0.0-20190809153340-86a7442ada7c
+       gopkg.in/tomb.v2 v2.0.0-20161208151619-d5d1b5820637
+   )
+   $ cat go.sum
+   cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
+   cloud.google.com/go v0.34.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
+   git.apache.org/thrift.git v0.0.0-20180902110319-2566ecd5d999/go.mod h1:fPE2ZNJGynbRyZ4dJvy6G277gSllfV2HJqblrnkyeyg=
+   git.apache.org/thrift.git v0.0.0-20181218151757-9b75e4fe745a/go.mod h1:fPE2ZNJGynbRyZ4dJvy6G277gSllfV2HJqblrnkyeyg=
+   github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973/go.mod h1:Dwedo/Wpr24TaqPxmxbtue+5NUziq4I4S80YR8gNf 3Q=
+   [...]
+   $
+
+      go mod tidy added module requirements for all the packages transitively imported by packages in your
+      module and built a go.sum with checksums for each library at a specific version. Let's finish by
+      making sure the code still builds and tests still pass:
+   $ go build ./...
+   $ go test ./...
+   ok      golang.org/x/blog    0.335s
+   ?       golang.org/x/blog/content/appengine    [no test files]
+   ok      golang.org/x/blog/content/cover    0.040s
+   ?       golang.org/x/blog/content/h2push/server    [no test files]
+   ?       golang.org/x/blog/content/survey2016    [no test files]
+   ?       golang.org/x/blog/content/survey2017    [no test files]
+   ?       golang.org/x/blog/support/racy    [no test files]
+   $
+
+      Note that when go mod tidy adds a requirement, it adds the latest version of the module. If your
+      GOPATH included an older version of a dependency that subsequently published a breaking change, you
+      may see errors in go mod tidy, go build, or go test. If this happens, try downgrading to an older
+      version with go get (for example, go get github.com/broken/module@v1.1.0), or take the time to make
+      your module compatible with the latest version of each dependency.
+
+   Tests in module mode
+      Some tests may need tweaks after migrating to Go modules.
+
+      If a test needs to write files in the package directory, it may fail when the package directory is in
+      the module cache, which is read-only. In particular, this may cause go test all to fail. The test
+      should copy files it needs to write to a temporary directory instead.
+
+      If a test relies on relative paths (../package-in-another-module) to locate and read files in another
+      package, it will fail if the package is in another module, which will be located in a versioned
+      subdirectory of the module cache or a path specified in a replace directive. If this is the case, you
+      may need to copy the test inputs into your module, or convert the test inputs from raw files to data
+      embedded in .go source files.
+
+      If a test expects go commands within the test to run in GOPATH mode, it may fail. If this is the
+      case, you may need to add a go.mod file to the source tree to be tested, or set GO111MODULE=off
+      explicitly.
+
+   Publishing a release
+      Finally, you should tag and publish a release version for your new module. This is optional if you
+      haven't released any versions yet, but without an official release, downstream users will depend on
+      specific commits using pseudo-versions, which may be more difficult to support.
+   $ git tag v1.2.0
+   $ git push origin v1.2.0
+
+      Your new go.mod file defines a canonical import path for your module and adds new minimum version
+      requirements. If your users are already using the correct import path, and your dependencies haven't
+      made breaking changes, then adding the go.mod file is backwards-compatible - but it's a significant
+      change, and may expose existing problems. If you have existing version tags, you should increment the
+      minor version. See Publishing Go Modules to learn how to increment and publish versions.
+
+   Imports and canonical module paths
+      Each module declares its module path in its go.mod file. Each import statement that refers to a
+      package within the module must have the module path as a prefix of the package path. However, the go
+      command may encounter a repository containing the module through many different remote import
+      paths. For example, both golang.org/x/lint and github.com/golang/lint resolve to repositories
+      containing the code hosted at go.googlesource.com/lint. The go.mod file contained in that
+      repository declares its path to be golang.org/x/lint, so only that path corresponds to a valid
+      module.
+
+      Go 1.4 provided a mechanism for declaring canonical import paths using // import comments, but
+      package authors did not always provide them. As a result, code written prior to modules may have used
+      a non-canonical import path for a module without surfacing an error for the mismatch. When using
+      modules, the import path must match the canonical module path, so you may need to update import
+      statements: for example, you may need to change import "github.com/golang/lint" to import
+      "golang.org/x/lint".
+
+      Another scenario in which a module's canonical path may differ from its repository path occurs for Go
+      modules at major version 2 or higher. A Go module with a major version above 1 must include a
+      major-version suffix in its module path: for example, version v2.0.0 must have the suffix /v2.
+      However, import statements may have referred to the packages within the module without that suffix.
+      For example, non-module users of github.com/russross/blackfriday/v2 at v2.0.1 may have imported it as
+      github.com/russross/blackfriday instead, and will need to update the import path to include the /v2
+      suffix.
+
+   Conclusion
+      Converting to Go modules should be a straightforward process for most users. Occasional issues may
+      arise due to non-canonical import paths or breaking changes within a dependency. Future posts will
+      explore publishing new versions, v2 and beyond, and ways to debug strange situations.
+
+      To provide feedback and help shape the future of dependency management in Go, please send us bug
+      reports or experience reports.
+
+      Thanks for all your feedback and help improving modules.
+
+---
+https://blog.golang.org/publishing-go-modules
+
+Publishing Go Modules
+26 September 2019
+
+Introduction
+   This post is part 3 in a series.
+     * Part 1 - Using Go Modules
+     * Part 2 - Migrating To Go Modules
+     * Part 3 - Publishing Go Modules (this post)
+
+   This post discusses how to write and publish modules so other modules can depend on them.
+
+   Please note: this post covers development up to and including v1. A future article will cover
+   developing a module at v2 and beyond, which requires changing the module's path.
+
+   This post uses Git in examples. Mercurial, Bazaar, and others are supported as well.
+
+Project setup
+   For this post, you'll need an existing project to use as an example. So, start with the files from
+   the end of the Using Go Modules article:
+$ cat go.mod
+module example.com/hello
+
+go 1.12
+
+require rsc.io/quote/v3 v3.1.0
+
+$ cat go.sum
+golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c h1:qgOY6WgZOaTkIIMiVjBQcw93ERBE4m30iBm00nkL0i8=
+golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
+rsc.io/quote/v3 v3.1.0 h1:9JKUTTIUgS6kzR9mK1YuGKv6Nl+DijDNIc0ghT58FaY=
+rsc.io/quote/v3 v3.1.0/go.mod h1:yEA65RcK8LyAZtP9Kv3t0HmxON59tX3rD+tICJqUlj0=
+rsc.io/sampler v1.3.0 h1:7uVkIFmeBqHfdjD+gZwtXXI+RODJ2Wc4O7MPEh/QiW4=
+rsc.io/sampler v1.3.0/go.mod h1:T1hPZKmBbMNahiBKFy5HrXp6adAjACjK9JXDnKaTXpA=
+
+$ cat hello.go
+package hello
+
+import "rsc.io/quote/v3"
+
+func Hello() string {
+    return quote.HelloV3()
+}
+
+func Proverb() string {
+    return quote.Concurrency()
+}
+
+$ cat hello_test.go
+package hello
+
+import (
+    "testing"
+)
+
+func TestHello(t *testing.T) {
+    want := "Hello, world."
+    if got := Hello(); got != want {
+        t.Errorf("Hello() = %q, want %q", got, want)
+    }
+}
+
+func TestProverb(t *testing.T) {
+    want := "Concurrency is not parallelism."
+    if got := Proverb(); got != want {
+        t.Errorf("Proverb() = %q, want %q", got, want)
+    }
+}
+
+$
+
+   Next, create a new git repository and add an initial commit. If you're publishing your own project,
+   be sure to include a LICENSE file. Change to the directory containing the go.mod then create the
+   repo:
+$ git init
+$ git add LICENSE go.mod go.sum hello.go hello_test.go
+$ git commit -m "hello: initial commit"
+$
+
+Semantic versions and modules
+   Every required module in a go.mod has a semantic version, the minimum version of that dependency
+   to use to build the module.
+
+   A semantic version has the form vMAJOR.MINOR.PATCH.
+     * Increment the MAJOR version when you make a backwards incompatible change to the public API
+       of your module. This should only be done when absolutely necessary.
+     * Increment the MINOR version when you make a backwards compatible change to the API, like changing
+       dependencies or adding a new function, method, struct field, or type.
+     * Increment the PATCH version after making minor changes that don't affect your module's public API
+       or dependencies, like fixing a bug.
+
+   You can specify pre-release versions by appending a hyphen and dot separated identifiers (for
+   example, v1.0.1-alpha or v2.2.2-beta.2). Normal releases are preferred by the go command over
+   pre-release versions, so users must ask for pre-release versions explicitly (for example, go get
+   example.com/hello@v1.0.1-alpha) if your module has any normal releases.
+
+   v0 major versions and pre-release versions do not guarantee backwards compatibility. They let you
+   refine your API before making stability commitments to your users. However, v1 major versions and
+   beyond require backwards compatibility within that major version.
+
+   The version referenced in a go.mod may be an explicit release tagged in the repository (for example,
+   v1.5.2), or it may be a pseudo-version based on a specific commit (for example,
+   v0.0.0-20170915032832-14c0d48ead0c). Pseudo-versions are a special type of pre-release version.
+   Pseudo-versions are useful when a user needs to depend on a project that has not published any
+   semantic version tags, or develop against a commit that hasn't been tagged yet, but users should not
+   assume that pseudo-versions provide a stable or well-tested API. Tagging your modules with explicit
+   versions signals to your users that specific versions are fully tested and ready to use.
+
+   Once you start tagging your repo with versions, it's important to keep tagging new releases as you
+   develop your module. When users request a new version of your module (with go get -u or go get
+   example.com/hello), the go command will choose the greatest semantic release version available, even
+   if that version is several years old and many changes behind the primary branch. Continuing to tag
+   new releases will make your ongoing improvements available to your users.
+
+   Do not delete version tags from your repo. If you find a bug or a security issue with a version,
+   release a new version. If people depend on a version that you have deleted, their builds may fail.
+   Similarly, once you release a version, do not change or overwrite it. The module mirror and
+   checksum database store modules, their versions, and signed cryptographic hashes to ensure that the
+   build of a given version remains reproducible over time.
+
+v0: the initial, unstable version
+   Let's tag the module with a v0 semantic version. A v0 version does not make any stability guarantees,
+   so nearly all projects should start with v0 as they refine their public API.
+
+   Tagging a new version has a few steps:
+
+   1. Run go mod tidy, which removes any dependencies the module might have accumulated that are no
+   longer necessary.
+
+   2. Run go test ./... a final time to make sure everything is working.
+
+   3. Tag the project with a new version using git tag.
+
+   4. Push the new tag to the origin repository.
+$ go mod tidy
+$ go test ./...
+ok      example.com/hello       0.015s
+$ git add go.mod go.sum hello.go hello_test.go
+$ git commit -m "hello: changes for v0.1.0"
+$ git tag v0.1.0
+$ git push origin v0.1.0
+$
+
+   Now other projects can depend on v0.1.0 of example.com/hello. For your own module, you can run go
+   list -m example.com/hello@v0.1.0 to confirm the latest version is available (this example module does
+   not exist, so no versions are available). If you don't see the latest version immediately and you're
+   using the Go module proxy (the default since Go 1.13), try again in a few minutes to give the proxy
+   time to load the new version.
+
+   If you add to the public API, make a breaking change to a v0 module, or upgrade the minor or version
+   of one of your dependencies, increment the MINOR version for your next release. For example, the next
+   release after v0.1.0 would be v0.2.0.
+
+   If you fix a bug in an existing version, increment the PATCH version. For example, the next release
+   after v0.1.0 would be v0.1.1.
+
+v1: the first stable version
+   Once you are absolutely sure your module's API is stable, you can release v1.0.0. A v1 major version
+   communicates to users that no incompatible changes will be made to the module's API. They can upgrade
+   to new v1 minor and patch releases, and their code should not break. Function and method signatures
+   will not change, exported types will not be removed, and so on. If there are changes to the API, they
+   will be backwards compatible (for example, adding a new field to a struct) and will be included in a
+   new minor release. If there are bug fixes (for example, a security fix), they will be included in a
+   patch release (or as part of a minor release).
+
+   Sometimes, maintaining backwards compatibility can lead to awkward APIs. That's OK. An imperfect API
+   is better than breaking users' existing code.
+
+   The standard library's strings package is a prime example of maintaining backwards compatibility at
+   the cost of API consistency.
+     * Split slices a string into all substrings separated by a separator and returns a slice of the
+       substrings between those separators.
+     * SplitN can be used to control the number of substrings to return.
+
+   However, Replace took a count of how many instances of the string to replace from the beginning
+   (unlike Split).
+
+   Given Split and SplitN, you would expect functions like Replace and ReplaceN. But, we couldn't change
+   the existing Replace without breaking callers, which we promised not to do. So, in Go 1.12, we added
+   a new function, ReplaceAll. The resulting API is a little odd, since Split and Replace behave
+   differently, but that inconsistency is better than a breaking change.
+
+   Let's say you're happy with the API of example.com/hello and you want to release v1 as the first
+   stable version.
+
+   Tagging v1 uses the same process as tagging a v0 version: run go mod tidy and go test ./..., tag the
+   version, and push the tag to the origin repository:
+$ go mod tidy
+$ go test ./...
+ok      example.com/hello       0.015s
+$ git add go.mod go.sum hello.go hello_test.go
+$ git commit -m "hello: changes for v1.0.0"
+$ git tag v1.0.0
+$ git push origin v1.0.0
+$
+
+   At this point, the v1 API of example.com/hello is solidified. This communicates to everyone that our
+   API is stable and they should feel comfortable using it.
+
+Conclusion
+   This post walked through the process of tagging a module with semantic versions and when to release
+   v1. A future post will cover how to maintain and publish modules at v2 and beyond.
+
+   To provide feedback and help shape the future of dependency management in Go, please send us bug
+   reports or experience reports.
+
+   Thanks for all your feedback and help improving Go modules.
+
+
+---
+https://ukiahsmith.com/blog/a-gentle-introduction-to-golang-modules/
+
+A gentle introduction to Golang Modules
+
+   Go 1.11 introduced a new concept of Modules which brings first class support for
+   managing dependency versions and enabling reproducible builds. Go previously had no notion
+   of dependency versions, and it has been a long and arduous road to get where we
+   are now. Modules do not just copy the style of other programming language's dependency
+   tools, rather it introduces a few slightly different concepts intended to enable
+   programming in the large. These require some thought in order to fully utilize the features
+   provided by these new concepts.
+
+What is a Go Module
+   A Module is a way to group together a set of packages and give it a version number to mark
+   it's existence (state) at a specific point in time. Modules have versions and the version
+   number is meaningful. That is, a developer can expect a certain amount of predictability
+   from a library's features based on it's version number.
+
+   Go Modules use Semantic Versioning for their numbering scheme.
+
+   Modules are supported by a set of commands in the go tool and expected semantics that offer
+   a granular approach for developers in how the go tools decides which dependencies to use
+   during the build step.
+
+   This gets at the heart of the reason for Modules. They are intended to make developers
+   lives easier by reducing unexpected behavior projects, and the client libraries they use,
+   grow and evolve. Software is living after all.
+
+   The idea of Modules is built into the go tool, and is (or will soon be) in other ancillary
+   tools in the Golang toolbox. This first class support for modules is something no other
+   dependency management solution previously offered. Though gb took the same philosophy
+   that dependency management needed to be part of the core tools.
+
+Why do we need Modules
+   The Module is about programming in the large. It is a solution to managing unexpected
+   changes in upstream libraries. From the Go Wiki Module page:
+
+     Modules record precise dependency requirements and create reproducible builds.
+
+   Modules are a versioned grouping of Go packages. A Module is a set of packages that is your
+   application, the main.go and packages that can not stand alone. A Module would also be the
+   libraries that you use in your main application.
+
+   Imagine a blogging application with packages for managing it's HTML templating, document
+   indexing, taging, and other domain specific functionality. These are functionality that do
+   not stand alone as useful libraries. This project also uses Blackfriday for HTML
+   rendering. Blackfriday is able to stand alone as a useful library and as such would be a
+   Module in it's own right.
+
+No more GOPATH
+   Modules allow for the deprecation of the GOPATH. There is no longer a need to set it
+   explicitly as a go.mod files defines the root of a Module, and allows the Go toolchain to
+   know where everything is that it needs to work with. This was the purpose of GOPATH.
+   Internally to the go tool GOPATH is still used for a few things, but this not something we
+   need to be concerned with.
+
+Minimum Version Selection
+   Minimum Version Selection, or MVS, is a strategy of deciding which version of a library to
+   use given the constraints that a developer has specified in the go.mod file, and the
+   constraints of all the other dependent libraries used.
+
+   In short MVS wants to use the the oldest known "good" version of a library that works with
+   a given project, where known "good" is a version that a human specified. If the go.mod file
+   specifies a need for version v1.2 then Go will use version v1.2 even if v1.3 is available;
+   this is given that no other dependencies have a need on this library.
+
+   If our project's go.mod file specifies that it needs v1.2 of a library, and one of it's
+   other dependencies specifies that it needs v1.3 of the same library then Go will use v1.3,
+   as it is the lowest version (oldest) that satifies all stated version needs.
+
+   This is in stark contrast to most other dependency tools that other programming languages
+   use. Most other languages (heck maybe all other dependency tools) will use a set of complex
+   notation that allows a developer to let the tool decide, as it will, to use a newer version
+   if a newer version is available, and that Semantic Versioning indicates that nothing should
+   break.
+
+   One of Russ's complaints (dislikes) of other dependency tools is that this complexity
+   introduces the chance of unpredictability. Today I might build the project with v1.2 when
+   it is the latest version available, and tomorrow my co-maintainer might build the project
+   with v1.3, it having been released that morning. Each of us would be unaware that each
+   other was using a different version. In this example my co-maintainer builds from source
+   and because the dependency tools allow for using newer libraries, that ostensibly break
+   nothing, it will not throw an error, warning, or otherwise inform my colleague that they
+   are getting a different build than I got.
+
+   Now we have two different builds that could have subtly different behavior.
+
+   MVS ensure that the library versions I compile with today will be the same versions that my
+   co-maintainer compiles with tomorrow. Unless a change has been introduced and a human
+   person has updated the go.mod file, or updated a dependency that itself has a greater
+   specified version.
+
+   There is a side effect to this; I have yet to decide if I like it or not. If there are
+   updates to the client library that fix a bug or security issue, and it really does not
+   change the behavior of the library, then that update has to be manually specified, by a
+   human, before it will be included in the project.
+
+   Other programming language dependency tools will update to the newer version, and those
+   languages see this as a feature of the tool; quick and easy propagation of bug and security
+   fixes. Go, too, sees MVS as a feature. That is to say Go, and the Go Team, prefer to have
+   less unexpected changes instead of the bug and security updates, and this feature is in
+   service to programming in the large.
+
+   What to look out for: Because Minimum Version Selection does not automatically update minor
+   version you will need to pay attention to bug and security point releases for your
+   dependencies.
+
+Semantic Import Versioning
+   Previously an import path was an import path and developers used the version of the library
+   that lived on the master branch, or a tool like dep was used to specify which
+   branch/tag/hash of a VCS repo to use.
+
+   Semantic Import Version, or SIV, specifies that major versions have their version number in
+   the import path. So github.com/russross/blackfriday will become
+   github.com/russross/blackfriday/v2 for version two, and github.com/russross/blackfriday/v3
+   for version three.
+
+   This enables different major versions of a library to be used in a single main application.
+   This, again, is a need for programming in the large.
+
+   Don't worry, there is no need to update older import paths as sub-1.0 and 1.0 versions are
+   allowed to use import paths without a version.
+
+   What to look out for: Because Semantic Import Versioning locks a dependency to a major
+   version you will need to be aware of new major version releases and upgrade when you want
+   the new functionality they offer.
+
+Vendoring
+   Go stores downloaded dependencies somewhere. We don't know where exactly, and it really
+   doesn't matter. Once Go downloads the dependencies, and makes them available to your code
+   it don't matter where they live. You don't need to know about the libraries internals, or
+   the drama going on between it's maintainers; all you care is that the code compiles with
+   the versions expected and the program runs as you intended.
+
+   This is all good and fine, but there are times when having more control over dependencies
+   is useful, or required. This is where the go mod vendor command comes in. It allows you to
+   store your dependencies in the vendor directory inside of the project directory.
+
+   Vendoring dependencies is not a new idea. It has been in Go since 1.5 as an experiment, and
+   1.6 enabled by default.
+
+   There is a difference between the current vendoring and the previous. When vendoring was
+   solidified in the Go toolchain it was to enable repeatable builds. To allow projects more
+   control over their dependencies than having to use go get every time and hope the dependent
+   library still existed as a project, that it hadn't been deleted from github, and that no
+   breaking changes had been pushed to master. In this way the the vendor directory is a poor
+   devs version control. This is how the early dependency management tools worked, they
+   downloaded the dependent library to the vendor directory and used that project's VCS to
+   checkout the version that was specified in the tool's configuration.
+
+Modules are the future
+   Modules give more control to you, the programmer, by enabling more configuration options.
+   This control comes with complexity and responsibility; seen in Minimal Version Selection
+   and Semantic Version Importing. The Go Team sees that front loaded complexity as a good
+   trade off to reap the benefit of reliability and consistency through the life of a project.
+   This complexity is considered minimal to the actually benefits to programming in the large,
+   it brings reduced pain over long lived projects that have many many developers working in
+   tandem.
+
+   Modules are a way to manage the versioning of dependencies that the Go community has been
+   longing for. It is a core feature of the Go language and tooling, a single way for the
+   community as a whole to utilize each other's libraries and fill a feature hole that has
+   desired since Go was announced to the public.
+
+   The road to Modules has not always been easy, and was never quick. What has, in recent
+   months and years, been a hotly debated topic will soon fade to the background as we all
+   focus again on our projects. This will be the mark of Modules as a successful tool; one
+   that gets out of our way.
+
+
+---
+https://tutorialedge.net/golang/go-modules-tutorial/
+
+Go Modules Tutorial
+
+   In this tutorial, we are going to be looking at how you can use Go modules in your Go
+   applications to simplify the way you work with dependencies for your Go applications. We
+   will be looking at how Go Modules work, and also what problems they solve for us, before
+   finally going into developing a simple Go application which uses Go Modules.
+
+Goals
+   By the end of this tutorial:
+     * You will have a solid understanding of Go Modules
+     * You will be able to build a Go package which uses Go Modules
+
+Prerequisites
+   In order to follow this tutorial, you will have to have the following:
+     * You will need Go version 1.11+ installed on your development machine.
+     * You will need an account on GitHub
+
+Why Go Modules?
+   There has been a lot of turbulence in the dependency management space in the Go language
+   over the last few years. We've seen tools such as dep, godep, govendor and a whole heap
+   more come into the scene to try and solve this problem once and for all.
+
+   Go Modules is deemed to be the official attempt at a solution for handling dependencies
+   within your Go applications going forward. The main reasoning for this piece of work was to
+   essentially allow Go developers to use semantic versioning for their Go packages.
+
+   Semantic Versioning is very widely adopted practice of labeling different versions of your
+   applications and various packages and libraries with a semantic version number. This number
+   looks a little something like this: v1.2.3, where 1 would be the major version of your
+   application, 2 would be the minor version, and 3 would be the patch version.
+     * Major Versions - All the versions within a particular major version should be backwards
+       compatible with other minor and patch versions. Incrementing this typically tells other
+       developers using your package that you have made some breaking changes to how your
+       package works.
+     * Minor Versions - Developers tend to increment minor versions of their package or
+       application when they have added new functionality, or new features to the package
+       whilst maintaining backwards compatibility within the rest of the application.
+     * Patch Versions - Patch versions are typically used for general bug-fixes. If a
+       developer notices a slight issue or bug within their application, they can fix the
+       issue whilst again ensuring backwards compatibility and then increment the patch
+       version by one to indicate new bug fixes.
+
+     Note - You can find the original proposal for versioned Go modules here: Proposal:
+     Version Go Modules
+
+The Problem
+   Imagine you are developing a Go service that has a number of key dependencies such as
+   package A. Now, at the time of writing your service package A has a set interface and works
+   in a set way.
+
+   However, what happens when the maintainers of package A update their program to fix a bug
+   or extend functionality? You might get lucky and their changes might not impact your
+   application, however, you might be unlucky and these changes subsequently break your
+   application.
+
+   This is where versioning comes in to save the day. By using versioning, we can select the
+   precise versions of a package or library that we wish to use and ensure that whenever we
+   build our package, it always uses the specified version.
+
+A Simple Example
+   In this part of the tutorial, we are going to build an simple Go package which will use Go
+   Modules to handle dependencies.
+
+   Let's start by creating a new project in which our application can run called
+   go-modules-test/:
+$ mkdir -p go-modules-test
+$ cd go-modules-test
+
+   Next, within this, we are going to want to initialize our project to use modules. We can do
+   this using the go mod init command and specifying a placeholder github repo link.
+$ go mod init github.com/tutorialedge/go-modules-test
+
+   This will go away and generate a go.mod file which will contain all of our Go application's
+   dependencies.
+
+   Once you have done this, create a new file within your project directory called main.go.
+   go-modules-test/main.go
+package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("Hello World")
+}
+
+   Let's verify everything is working at this point by trying to run our simple Go
+   applications:
+   $ go run main.go
+Hello World
+
+Adding Dependencies To Your Project
+   Now that we have a basic project initialized and using go modules, let's take this a step
+   further and look at how we can introduce new dependencies into our codebase.
+
+   For the purpose of this tutorial, we are going to be importing a custom Go package called
+   "github.com/elliotforbes/test-package" which has a number of features that will allow us to
+   become more familiar with the more advanced practices of dependency management with Go
+   modules.
+
+   At the top of your main.go file, let's start by importing this new package. After this has
+   been imported, let's look at using some of the functions that are declared within that
+   package:
+   go-modules-test/main.go
+package main
+
+import (
+    "fmt"
+
+    sample "github.com/elliotforbes/test-package"
+)
+
+func main() {
+    fmt.Println("Hello World")
+    sample.MySampleFunction()
+}
+
+   Now that we have added that package to the list of imports at the top of our program, we
+   can then try to use some of the
+   $ go run main.go
+go: finding github.com/elliotforbes/test-package v2.0.0
+go: downloading github.com/elliotforbes/test-package v2.0.0
+go: extracting github.com/elliotforbes/test-package v2.0.0
+Hello World
+Version 2.0 of this Function
+Hello World
+
+   Awesome, we have been able to define a really simple Go application that uses Go modules
+   and import an external dependency for use within said Go application!
+
+Handling Major and Minor Versions
+   As it stands, when our application imports the package:
+   "github.com/elliotforbes/test-package", it'll import the latest version to start with. If
+   we wanted fine grained control over what versions we import then we can define the precise
+   versions we need within our go.mod file:
+   go.mod
+module github.com/TutorialEdge/go-modules-tutorial
+
+go 1.12
+
+require github.com/elliotforbes/test-package v2.0.0
+
+   When we once again go to run this after modifying the version from v2.0.0 to v1.0.0 of our
+   package, we should see the following:
+   $ go run main.go
+go: finding github.com/elliotforbes/test-package v1.0.0
+go: downloading github.com/elliotforbes/test-package v1.0.0
+go: extracting github.com/elliotforbes/test-package v1.0.0
+Hello World
+Version 1.0 of this Function
+Hello World
+
+   We have successfully been able to define the exact version of the package we want to use in
+   our production environment. This again gives us greater confidence in what we are releasing
+   and ensures that when we finally push our application into production environments, it
+   doesn't break catastrophically on us due to the underlying package changing without our
+   knowledge.
+
+Conclusion
+   I hope that you enjoyed this tutorial and it has given you some insight into how you can
+   use Modules within your own Go applications.
+
+
+---
+https://medium.com/@fonseka.live/getting-started-with-go-modules-b3dac652066d
+
+Getting started with Go modules
+
+   Golang is still a fairly new programming language. And dependency management for Go has
+   been a bit tricky since its inception. At the beginning, there was no dependency management
+   system.go get was the only way to download dependencies but this became very tricky because
+   this pulls the code from the master branch of a repository and puts the files into your
+   GOPATH. That means if there were any major changes to any dependencies there's high
+   likelihood that your code will break. Then tools like dep and concepts such as vendoring
+   came along. Personally I liked dep because it took away a lot of the headaches that came
+   with using go get . But dep was still a third party tool that you had to download to get it
+   to work. But now, with go 1.11things are finally changing.
+
+   So what are Go modules ?
+   Go modules in a nutshell is a built-in dependency versioning and dependency management
+   feature for Go. Please note that this is still in experimental stage and the the finalized
+   version will come with go 1.12 .
+
+   In this article I will show you how Go modules work. And also how to move to Go modules if
+   you are currently using dep as your dependency management tool.
+
+   First of all, you will need to make sure that you have Go 1.11 installed. But if you are a
+   fan of docker and don't want to install Go 1.11 right now you can spin up a Go 1.11
+   container and use that to play around with Go modules. Also don't forget to install a text
+   editor when you get inside the docker container.
+docker run --rm -it golang:1.11//after you get inside the container apt-get update && apt-get instal
+l nano
+
+   Our first application !
+   Inside the container you can see that the go path is set to /go
+root@275af4a4091c:~# echo $GOPATH
+/go
+
+   But I'm going to try something that would've been very wrong to do in previous Go versions.
+   I'm going to go into my home directory and create a folder for our app called TestApp and
+   set up my app there instead of inside GOPATH.
+root@275af4a4091c:~# mkdir TestApp
+root@275af4a4091c:~# ls
+TestApp
+
+   Now let's write our application inside the TestApp folder and name it main.go
+package mainimport (
+ "fmt"
+)func main(){
+ fmt.Println("Running the TestApp")
+}
+
+   Now let's run it.
+root@275af4a4091c:~/TestApp# go run main.go
+Running the TestApp
+
+   That's right !! Now we can run Go programs outside of GOPATH !! But this app runs without
+   throwing any errors because it's only using the fmt library. But let's try adding a third
+   party library and see how that plays out. I'll be using go-randomdata as our third party
+   library. It lets you generate random data. In this case I'm going to call the function
+   SillyName() after the first print statement.
+
+   This is how the update code looks like.
+package mainimport (
+        "fmt"
+        "github.com/Pallinder/go-randomdata"
+)func main(){
+        fmt.Println("Running the TestApp")
+        fmt.Println(randomdata.SillyName())
+}
+
+   Let's now run it.
+root@275af4a4091c:~/TestApp# go run main.go
+main.go:5:2: cannot find package "github.com/Pallinder/go-randomdata" in any of:
+ /usr/local/go/src/github.com/Pallinder/go-randomdata (from $GOROOT)
+ /go/src/github.com/Pallinder/go-randomdata (from $GOPATH)
+
+   It complains about not finding the package because #1 we are outside of the GOPATH and #2
+   we haven't downloaded that package yet. Let's see how we can use Go modules to fix this. To
+   initialize Go modules in to your application you can run go modules init /path/to/directory
+root@275af4a4091c:~/TestApp# go mod init /root/TestApp
+go: creating new go.mod: module /root/TestApp
+
+   You will see a new file called go.mod gets created in your app directory. Apart from the
+   definition of the module there's nothing in the go.mod at the moment. To get all the
+   dependencies lets run go build
+root@275af4a4091c:~/TestApp# go build
+go: finding github.com/Pallinder/go-randomdata v1.1.0
+go: downloading github.com/Pallinder/go-randomdata v1.1.0
+
+   Now let's take a look at the go.mod file.
+module /root/TestApprequire github.com/Pallinder/go-randomdata v1.1.0
+
+   It shows us that in order for our app to run, v1.1.0 is required of the go-randomdata
+   package. After running go build you will also see a file called go.sum gets created. The
+   purpose of this file is to keep track of which codebase of the package you are using. It
+   has a cryptographic hash attached to every dependency we have. This is very helpful if you
+   are working on a busy codebase that multiple people are working on at the same time. If
+   someone is using a different version of a package than the version the app is intended to
+   use, it will complain. If your third party library has multiple versions and you would like
+   to use a different version, you can change the version number and run go build again. Let's
+   say I would like to use v1.00 of go-randomdata instead. I simply change v1.1.0 to v1.00 and
+   then run go build again. You will see how the go.mod and go.sumfiles change accordingly.
+
+   Now let's try running the app again.
+root@275af4a4091c:~/TestApp# ls
+TestApp  go.mod  go.sum  main.go
+root@275af4a4091c:~/TestApp# go run main.go
+Running the TestApp
+Oxhorn
+
+   It works !!
+
+   Now let's take a look at some other commands that comes with Go modules.
+
+   go mod tidy : This command allows you to fetch all the dependencies that you need for
+   testing in your module.
+root@275af4a4091c:~/TestApp# go mod tidy
+go: finding golang.org/x/text/language latest
+go: finding golang.org/x/text v0.3.0
+go: downloading golang.org/x/text v0.3.0
+
+   go mod why -m <module> : This command let's you find out where any of your dependencies are
+   used. To demonstrate this I will use golang.org/x/text found in my go.mod file.
+root@275af4a4091c:~/TestApp# go mod why -m golang.org/x/text
+# golang.org/x/text
+/root/TestApp
+github.com/Pallinder/go-randomdata
+github.com/Pallinder/go-randomdata.test
+golang.org/x/text/language
+
+   The output shows that golang.org/x/text/language gets consumed by
+   github.com/Pallinder/go-randomdata.test , github.com/Pallinder/go-randomdata is consumed by
+   github.com/Pallinder/go-randomdata.
+
+   Like I mentioned before, Go modules are still in an experimental stage. While it works with
+   Go 1.11, it may not work well with older Go versions. So you might run into a situation
+   that you need to have your vendor files in your repo just to be safe.
+
+   To generate a vendor directory in your app while still maintaining the Go modules you can
+   run go mod vendor
+root@275af4a4091c:~/TestApp# go mod vendor
+root@275af4a4091c:~/TestApp# ls
+TestApp  go.mod  go.sum  main.go  vendor
+root@275af4a4091c:~/TestApp# ls vendor/
+github.com  modules.txt
+
+   Now let's talk about how to transition into Go modules from the most popular dependency
+   management tool called dep . I used the same application we used in the previous example
+   and used dep instead of go modules. You can find that code base here
+   https://github.com/Niraj-Fonseka/TestAppDep. I will clone that into my home directory in
+   the container.
+root@275af4a4091c:~/TestAppDep# ls
+Gopkg.lock  Gopkg.toml main.go  vendor
+
+   Now let's initialize go modules
+root@275af4a4091c:~/TestAppDep# go mod init
+go: creating new go.mod: module github.com/Niraj-Fonseka/TestAppDep
+go: copying requirements from Gopkg.lock
+
+   And then go mod tidy
+root@275af4a4091c:~/TestAppDep# go mod tidy
+go: finding golang.org/x/text/language latest
+
+   and then delete Gopkg.lock , Gopkg.toml and the vendor directory. Then run go get ./...
+
+   Let's look at the directory structure now.
+root@275af4a4091c:~/TestAppDep# ls
+go.mod go.sum main.go
+
+   And finally let's run the app.
+root@275af4a4091c:~/TestAppDep# go run main.go
+Running the TestApp
+Edgeorange
+
+   That's it. Hopefully this will give you a basic understanding on how to get started with Go
+   modules. If you would like to learn more about Go modules I would suggest looking at the Go
+   release notes for go 1.11 and https://github.com/golang/go/wiki/Modules. Also
+   Francesc Campoy, an ex developer advocate for Golang, has an amazing video series
+   called justforfunc where goes a lot more in-depth into Go modules and many other Go
+   related topics.
+
+
+---
+https://dev.to/dizdarevic/golang-without-a-path-47jp
+
+   GoLang without a PATH (Intro to Go Modules)
+   Feb 28, 2019
+
+   Unshackle thyself from thy GO_PATH, with go modules
+
+   We received the gift of Go Modules, with Go 1.11. Go modules are great for several reasons, but My
+   FAVORITE reason is the fact that it allows you to run your Go code OUTSIDE OF YOUR GOPATH. Let's talk
+   about how to use them.
+   From scratch
+
+   To start a new project as a Go Module: Create the project directory, write a simple main.go (you can
+   find some simple examples on gobyexample), and then run
+
+   $ go mod init <project-name>
+
+   Now you'll have a go.mod file. If you're familiar with npm, I essentially think of this as your
+   package.json when you are using npm. This is where all of the imports that your module needs, are
+   specified. It'll be initialized with your new module being declared at the top of it. Now run the
+   following command, inside of your new module.
+
+   $ go build
+
+   Now, it'll actually work without being in your GO_PATH. It will also pull in all of the required
+   modules and list them in your go.mod file. It will use the most up to date version of the package if not
+   otherwise specified. Also, you'll actually see output from the build process, rather than just having
+   the executable. If you view the mod file, you'll see that it also lists out indirect dependencies that
+   your module is using. Running go build will also create a go.sum file, which we'll talk more about in
+   the next section. Another very important command to remember is
+
+   $ go mod tidy
+
+   When you run go build, it does not apply the dependencies that your tests are using to your go.mod and
+   go.sum files. Running go mod tidy will make sure that all dependencies, including the test dependencies,
+   are accounted for.
+
+   Now your go.sum file contains your built dependency versions and their hashes. Again if you're familiar
+   with npm, you can imagine this to be something like your package-lock.json. You don't necessarily have
+   to commit your go.sum file, but I'd highly recommend that you do. The hashes make sure that if you are
+   importing a module of version v1.2.3, that the specific release wasn't tampered with. There could be
+   a mess up on the maintainers/contributors side and some change was forcibly pushed into the exact same
+   version, making that version corrupt. Your hashes will defend you from that.
+
+   Go.sum also essentially tracks the history of the packages that you've used. If you decided to use
+   v1.2.2 after already having used v1.2.3, go.sum will add the version hash of v1.2.2 and still maintain
+   the hash of v1.2.3. This is done so that if you decide that you want to bump back to the higher version,
+   you will be able to continue using the same package that you previously depended on.
+
+      NOTE: If others need/want to use your module in their projects, it will just work for them if they
+      are using Go 1.11 or later. Some previous versions MAY also work without any issues. If you want
+      to make sure that it WILL work on older versions, you must vendor your dependencies. All of your
+      dependencies that you are using should be stored locally in your GO_PATH under something resembling
+      /go/pkg/mod/. To assure that all of those dependencies are installed for others depending on your
+      module, run the following command
+
+      $ go mod vendor
+
+      inside of your module. now you'll see that you have a vendor file in your module.
+
+   From an existing project that isn't using modules or go deps
+
+   Sooo now you're wondering how you'd migrate one of your existing Go projects into a module. Run go
+   mod init on your existing project, and now it is pretty much a module but not yet finished. There is just
+   a little tidying to do. Next, run go get ./... and it will assemble all of your projects dependencies
+   into your mod file. Finally run go mod tidy to get all the rest of the dependencies in your project.
+   From existing project that is using go deps
+
+   Nooooow how to migrate from using go deps to just using modules? Running go mod init will use your
+   Gopkg.lock to build your go.mod and go.sum files. Then run go mod tidy to also collect all of your test
+   dependencies. You can then remove Gopkg.lock, Gopkg.toml, and your old vendor files from the project. Then
+   run go get ./... and finally, as a sanity check, run go test ./... to make sure everything still works
+   as expected.
+
+   And once again, you can run go mod vendor in both of these situations to continue supporting those
+   running older versions of Go.
+
+---

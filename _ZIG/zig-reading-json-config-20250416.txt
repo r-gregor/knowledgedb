@@ -1,0 +1,365 @@
+filename: zig-reading-json-config-20250416.txt
+https://www.openmymind.net/Reading-A-Json-Config-In-Zig/
+
+Reading a JSON config in Zig
+Mar 06, 2023
+
+   This post was updated on October 30 2023, to reflect changes to std.json currently on the master
+   branch.
+
+   A while ago, I wrote a Websocket Server implementation in Zig. I did it just for fun, which means
+   I didn't have to worry about the boilerplate things that go into creating an actual production
+   application.
+
+   More recently, I've jumped back into Zig for something a little more serious (but not really). As
+   part of my learning journey, I wanted to add more polish. One of the things I wanted to do was add
+   configuration options, which meant reading a config.json file.
+
+   This seemingly simple task presented me with enough challenges that I thought it might be worth a
+   blog post. The difficulties that I ran into are threefold. First, Zig's documentation is, generously,
+   experimental. Second, Zig changes enough from version to version that whatever external documentation
+   I did find, didn't work as-is (I'm writing this using 0.11-dev). Finally, decades of being coddled by
+   garbage collectors have dulled by education.
+
+   Here's the skeleton that we'll start with:
+
+const std = @import("std");
+
+pub fn main() !void {
+	const config = try readConfig("config.json");
+	std.debug.print("config.root: {s}\n", .{config.root});
+}
+
+fn readConfig(path: []const u8) !Config {
+	//TODO: all our logic here!
+
+	// since we're not using path yet, we need this to satisfy the compiler
+	_ = path;
+	return error.NotImplemented;
+}
+
+const Config = struct {
+	root: []const u8,
+};
+
+   It would be a nice addition to be able to specify the path/filename of the configuration via a
+   command line option, such as --config config.json, but Zig has no built-in flag parser, so we'd have
+   fiddle around with std.os.argv or use a third party library.
+
+   Also, as a very quick summary of Zig's error handling, the try function(...) syntax is like Go's if
+   err != nil { return err }. Note that our main function returns !void and our readConfig returns
+   !Config. This is called an error union type and it means our functions return either an error or the
+   specified type. We can list an explicit error set (like an enum), in the form of ErrorType!Type. If
+   we want to support any error, we can use the special anyerror type. Finally, we can have zig infer
+   the error set via !Type which, practically speaking, is similar to using anyerror, but is actually
+   just a shorthand form of having an explicit error set (where the error set is automatically inferred
+   at compile-time).
+
+Reading a File
+   The first thing we need to do is read the contents of our file (after which we can parse it). We
+   could explore the available API, but it should be somewhat obvious that this is going to require
+   allocating memory. One of Zig's key feature is explicit memory allocations. This means that any part
+   of the standard library (and hopefully 3rd party libraries) that might allocate memory take a
+   parameter of type std.mem.Allocator. In other words, instead of having a readFile(path) ![]u8
+   function which would allocate memory internally using, say, malloc, we'd expect to find a
+   readFile(allocator, path) ![]u8 which would use the supplied allocator.
+
+   Hopefully this will make more sense once we look at a concrete example. For now, we'll create an
+   allocator in main and pass it to readConfig:
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+pub fn main() !void {
+	// we have a few choices, but this is a safe default
+	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+	const allocator = gpa.allocator();
+
+	const config = try readConfig(allocator, "config.json");
+	std.debug.print("config.root: {s}\n", .{config.root});
+}
+
+fn readConfig(allocator: Allocator, path: []const u8) !Config {
+	//TODO: all our logic here!
+
+	// since we're not using path yet, we need this to satisfy the compiler
+	_ = path;
+	_ = allocator;
+	return error.NotImplemented;
+}
+
+   Now to actually read the file, there's a Dir type in the standard library that exposes a readFile and
+   a readFileAlloc method. I find this API a little confusing (though I'm sure there's a reason for it),
+   as these aren't static functions but members of the Dir type. So we need a Dir. Thankfully, we can
+   easily get the Dir of the current working directory using std.fs.cwd().
+
+   If we use readFileAlloc, our code looks like:
+
+fn readConfig(allocator: Allocator, path: []const u8) !Config {
+	const data = try std.fs.cwd().readFileAlloc(allocator, path, 512);
+	defer allocator.free(data);
+	...
+}
+
+   The last parameter, 512, is the maximum size to allocate/read. Our config is very small, so we're
+   limiting this to 512 bytes. Importantly, this function allocates and returns memory using our
+   provided allocator. We're responsible for freeing this memory, which we'll do when the function
+   returns, using defer.
+
+   Alternatively, we could use readFile, which takes and fills in a []u8 instead of an allocator. Using
+   this function, our code looks like:
+
+fn readConfig(allocator: Allocator, path: []const u8) !Config {
+	var buffer = try allocator.alloc(u8, 512);
+	const data = try std.fs.cwd().readFile(path, buffer);
+	defer allocator.free(buffer);
+	...
+
+   In the above code, data is a slice of buffer which is fitted to the size of file. In our specific
+   case, it doesn't matter if you use readFileAlloc or readFile. I find the first one simpler. The
+   benefit of the readFile though is the ability to re-use buffers.
+
+   It turns out that reading a file is straightforward. However, if you're coming from a garbage
+   collected mindset, it's hopefully apparent that [manual] memory management is a significant
+   responsibility. If we did forget to free data, and we did write tests for readConfig, Zig's test
+   runner would detect this and automatically fail. The output would look something like:
+
+$> zig build test
+Test [3/10] test.readConfig... [gpa] (err): memory address 0x1044f8000 leaked:
+/opt/zig/lib/std/array_list.zig:391:67: 0x10436fa5f in ensureTotalCapacityPrecise (test)
+    const new_memory = try self.allocator.alignedAlloc(T, alignment, new_capacity);
+                                                                  ^
+/opt/zig/lib/std/array_list.zig:367:51: 0x104366c2f in ensureTotalCapacity (test)
+    return self.ensureTotalCapacityPrecise(better_capacity);
+                                                  ^
+/opt/zig/lib/std/io/reader.zig:74:56: 0x104366607 in readAllArrayListAligned__anon_3814 (test)
+    try array_list.ensureTotalCapacity(math.min(max_append_size, 4096));
+                                                       ^
+/opt/zig/lib/std/fs/file.zig:959:46: 0x10436637b in readToEndAllocOptions__anon_3649 (test)
+    self.reader().readAllArrayListAligned(alignment, &array_list, max_bytes) catch |err| switch (err) {
+                                             ^
+/opt/zig/lib/std/fs.zig:2058:42: 0x104365d0f in readFileAllocOptions__anon_3466 (test)
+    return file.readToEndAllocOptions(allocator, max_bytes, stat_size, alignment, optional_sentinel);
+                                         ^
+/opt/zig/lib/std/fs.zig:2033:41: 0x104365a0f in readFileAlloc (test)
+    return self.readFileAllocOptions(allocator, file_path, max_bytes, null, @alignOf(u8), null);
+                                        ^
+/code/demo.zig:13:41: 0x10436745f in readConfig (test)
+    const data = try std.fs.cwd().readFileAlloc(allocator, path, 512);
+                                        ^
+/code/demo.zig:30:13: 0x104369547 in test.readConfig (test)
+    const config = try readConfig(allocator, "config.json");
+
+Parsing JSON
+   We've read our file and have a string, which in Zig is a []u8. Populating a Config struct is just a
+   few more lines:
+
+fn readConfig(allocator: Allocator, path: []const u8) !std.json.Parsed(Config) {
+	const data = try std.fs.cwd().readFileAlloc(allocator, path, 512);
+	defer allocator.free(data);
+	return std.json.parseFromSlice(Config, allocator, data, .{.allocate = .alloc_always});
+}
+
+   Notice that we're now returning a std.json.Parsed(Config). If you think about turning a JSON string
+   into an object, you know that there'll have to be some allocations. At a minimum, we need to allocate
+   an instance of our Config. That's why we pass our allocator. The `Parsed` structure we get back
+   contains a `value` which is our `Config` as well as an arena allocator. This is convenient as it
+   allows us to easily manage the allocated memory by tying the lifetime of the allocation to our
+   `Config` within the `Parsed` structure:
+
+pub fn main() !void {
+	// we have a few choices, but this is a safe default
+	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+	const allocator = gpa.allocator();
+
+	const parsed = try readConfig(allocator, "config.json");
+	defer parsed.deinit();
+	const config = parsed.value;
+	...
+}
+
+   I wrote a follow up blog post, [**1][https://www.openmymind.net/Zigs-std-json-Parsed/]Zig's
+   std.json.Parsed(T), that explores std.json.Parsed(T) in greater detail.
+
+   Also take note of the last parameter we passed to parseFromSlice. This is an optional argument that
+   configures various aspects of the JSON parsing. We're specifying .allocate = .alloc_always, which
+   tells the function to copy any strings from our input and thus have them owned by the Parsed object.
+   The default is alloc_if_needed. Using this option would be more efficient since our parsed Config
+   would reference our input data, rather than having to make a copy, but then we'd have to extend
+   data's lifetime to match our return value. If you're creating many objects with large text values,
+   it's likely something you'd want to consider.
+
+  Default Values
+   With the above code, json.parse will fail with an error.MissingField if our json file doesn't have a
+   root field. But what if we wanted to make it optional with a default value? There are two options.
+   The first is to specify the default value in our structure:
+
+const Config = struct {
+	root: []const u8 = "/tmp/demo",
+};
+
+   Another option is to use an Optional type and default to null:
+
+const Config = struct {
+	root: ?[]const u8 = null,
+};
+
+   When we want to use the value, we can use orelse to set the default:
+
+lmdb.open(config.root orelse "/tmp/db")
+
+  Conclusion
+   The complete code to read a json config file into a config structure is:
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+pub fn main() !void {
+	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+	const allocator = gpa.allocator();
+
+	const parsed = try readConfig(allocator, "config.json");
+	defer parsed.deinit();
+
+	const config = parsed.value;
+	std.debug.print("config.root: {s}\n", .{config.root});
+}
+
+fn readConfig(allocator: Allocator, path: []const u8) !std.json.Parsed(Config) {
+	// 512 is the maximum size to read, if your config is larger
+	// you should make this bigger.
+	const data = try std.fs.cwd().readFileAlloc(allocator, path, 512);
+	defer allocator.free(data);
+	return std.json.parseFromSlice(Config, allocator, data, .{.allocate = .alloc_always});
+}
+
+const Config = struct {
+	root: []const u8,
+};
+
+   It would be nice to parse our JSON in a single line, and I don't get why readFileAlloc is a member of
+   Dir (but I bet there's a reason). Overall though, it's pretty painless. Hopefully this helps someone
+   :)
+
+
+---
+[**1]
+https://www.openmymind.net/Zigs-std-json-Parsed/
+
+Zig's std.json.Parsed(T)
+Nov 17, 2023
+
+   When parsing JSON using one of Zig's std.json.parseFrom* functions, you'll have to deal with the
+   return type: an std.json.Parsed(T):
+
+const file = try std.fs.openFileAbsolute(file_path, .{});
+defer file.close();
+
+var buffered = std.io.bufferedReader(file.reader());
+var reader = std.json.reader(allocator, buffered.reader());
+defer reader.deinit();
+
+const parsed = try std.json.parseFromTokenSource(Config, allocator, &reader, .{
+	.allocate = .alloc_always,
+});
+defer parsed.deinit();
+const config = parsed.value;
+
+   In the above code parseFromTokenSource returns a std.json.Parsed(Config). This is a simple structure
+   which exposes a deinit function as well as the parsed value. The reason parseFromTokenSource cannot
+   simply return T (Config in the above case), is that parsing JSON likely results in memory
+   allocations. For example, if our imaginary Config struct had a tags: [][]const u8 field, then
+   parseFromTokenSource would need to allocate a slice.
+
+   Memory allocated while parsing can be difficult to manage, at least in a way that works in all cases.
+   It would be an unreasonable burden to ask the caller to know what needs freeing, especially for
+   complex/nested objects. To work around this, parseFromTokenSource creates an std.heap.ArenaAllocator
+   from which all allocations are made. When deinit() is called on the returned Parsed(T), the arena
+   allocator is freed and destroyed.
+
+   You might have noticed the .allocate = .alloc_always passed as an option to parseFromTokenSource.
+   This option only relates to whether or not strings are duplicated from the source. In the above
+   example, because our source, file, outlives parsed, we could use the alternative option
+   .alloc_if_needed. But that would not alter the fact that other allocations, such as slices for
+   arrays, would still be created and managed by the arena.
+
+   While Parsed(T) is an effective way of dealing with allocations, it's still, in my opinion,
+   cumbersome to use. Specifically, in our above example, config is tied to the lifecycle of parsed. If
+   we wanted to write a loadConfig function, we wouldn't be able to return Config, we'd have to return
+   std.json.Parsed(Config). A program that deals with a lot of JSON might find itself passing
+   std.json.Parsed(T) all over the place.
+
+   Unfortunately, there's no great solution to this problem. If our object is simple, we can clone all
+   allocate fields thus allowing us to decouple the lifetime of our object from std.json.Parsed(T), but
+   that's not efficient or scalable. If you look at the implementation of parseFromTokenSource, you'll
+   see that it creates the ArenaAllocator and calls a Leaky variant:
+
+fn parseFromTokenSource(comptime T: type, allocator: Allocator, ....) !Parsed(T) {
+	var parsed = Parsed(T) {
+		.arena = try allocator.create(ArenaAllocator),
+		.value = undefined,
+	};
+	errdefer allocator.destroy(parsed.arena);
+	parsed.arena.* = ArenaAllocator.init(allocator);
+	errdefer parsed.arena.deinit();
+
+	parsed.value = try parseFromTokenSourceLeaky(T, parsed.arena.allocator(), scanner_or_reader, options);
+
+	return parsed;
+}
+
+   Since parseFromTokenSourceLeaky is public, we can call it directly and provide our own
+   std.heap.ArenaAllocator. It isn't that different than using parseFromTokenSource, but some cases
+   might already have a suitable ArenaAlloator, or the suitable lifetime hooks in place. In such cases,
+   using the Leaky variant makes sense.
+
+   While it might seem superficial, I really dislike exposing std.json.Parsed(T). The fact that T came
+   from JSON is an irrelevant implementation detail. Also, there's nothing JSON or parsing-specific
+   about std.json.Parsed. It's just an ArenaAllocator and your value. So, while it doesn't really change
+   anything, given no other option, I like to create my own little Parsed(T)-like wrapper:
+
+pub fn Managed(comptime T: type) type {
+	return struct {
+		value: T,
+		arena: *std.heap.ArenaAllocator,
+
+		const Self = @This();
+
+		pub fn fromJson(parsed: std.json.Parsed(T)) Self {
+			return  .{
+				.arena = parsed.arena,
+					.value = parsed.value,
+			};
+		}
+
+		pub fn deinit(self: Self) void {
+			const arena = self.arena;
+			const allocator = arena.child_allocator;
+			arena.deinit();
+			allocator.destroy(arena);
+		}
+	};
+}
+
+   Which means that I can pass an myApp.Managed(Config) around rather than an std.json.Parse(T).
+
+   Our original example, changed as a function that returns a [DEL: Config :DEL] Managed(Config) from a
+   function, looks like:
+
+fn parseConfig(file_path: []const u8, allocator: Allocator) !Managed(Config) {
+	const file = try std.fs.openFileAbsolute(file_path, .{});
+	defer file.close();
+
+	var buffered = std.io.bufferedReader(file.reader());
+	var reader = std.json.reader(allocator, buffered.reader());
+	defer reader.deinit();
+
+	const parsed = try std.json.parseFromTokenSource(Config, allocator, &reader, .{
+		.allocate = .alloc_always,
+	});
+	return Managed(Config).fromJson(parsed);
+}
+
+
+---
+

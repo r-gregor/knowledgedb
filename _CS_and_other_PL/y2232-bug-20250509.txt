@@ -1,0 +1,140 @@
+filename: y2232-bug-20250509.txt
+https://www.jwz.org/blog/2025/05/y2232-bug/
+
+Y2232 bug?
+Tue, 6 May 2025
+
+$> sudo systemctl stop systemd-timesyncd.service
+$> sudo date -s '2232-04-18 16:47:16'
+date: cannot set date: Invalid argument
+Wed 18 Apr 16:47:16 PDT 2232
+Exit 1
+
+$> date
+Tue  6 May 19:06:14 PDT 2025
+
+$> sudo date -s '2232-04-18 16:47:15'
+Wed 18 Apr 16:47:15 PDT 2232
+
+$> sleep 30 ; date
+Wed 18 Apr 16:47:45 PDT 2232
+
+   The cutoff is 0x1ED5D7403.
+
+***
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/linux/time64.h?h=v6.14#n122
+<code>
+/* Disallow values which cause overflow issues vs. CLOCK_REALTIME */
+if ((unsigned long long)ts->tv_sec >= TIME_SETTOD_SEC_MAX)
+	return false;
+</code>
+
+***
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/linux/time64.h?h=v6.14#n26
+<code>
+/* Located here for timespec_valid_strict */
+#define TIME64_MAX       ((s64)~((u64)1 << 63))
+#define TIME64_MIN       (-TIME64_MAX - 1)
+
+#define KTIME_MAX        ((s64)~((u64)1 << 63))
+#define KTIME_MIN        (-KTIME_MAX - 1)
+#define KTIME_SEC_MAX    (KTIME_MAX / NSEC_PER_SEC)
+#define KTIME_SEC_MIN    (KTIME_MIN / NSEC_PER_SEC)
+
+/*
+ * Limits for settimeofday():
+ *
+ * To prevent setting the time close to the wraparound point time setting
+ * is limited so a reasonable uptime can be accomodated. Uptime of 30 years
+ * should be really sufficient, which means the cutoff is 2232. At that
+ * point the cutoff is just a small part of the larger problem.
+ */
+#define TIME_UPTIME_SEC_MAX             (30LL * 365 * 24 *3600)
+#define TIME_SETTOD_SEC_MAX             (KTIME_SEC_MAX - TIME_UPTIME_SEC_MAX)
+</code>
+
+       On 64-bit Linux, they don't want the realtime clock to get near the wraparound of
+       0x8000000000000000 ns since 1970. That's in 2262:
+
+$> perl -le 'print "".localtime(0x8000000000000000 / 1e9)'
+Fri Apr 11 23:47:16 2262
+
+       It's earlier than that to allow for valid timesetting then no reboot for 30 years.
+       I suspect that by 2232, the average computer will have good performance with 128-bit and possibly
+       even 256-bit integers.
+
+***
+            But this means I can't test my code against a time_t larger than 33 bits! This is an
+            outrage!
+
+***
+$> TZ=America/Los_Angeles perl -le 'print "".localtime((0x8000000000000000 / 1e9) - 30*365*86400)'
+
+            Upon reflection, I have no idea what problem they are trying to solve here.
+              1. It is not the year 2233, but I am trying to test something: "Sorry, no. Your test might
+                 take 30 years to complete."
+              2. It is legitimately the year 2233: "Sorry, no, you have to lie about what time it is and
+                 pretend it is the past, because you might not reboot for 30 years."
+            Rinse and repeat for the year 2263.
+
+***
+                 Seems to me this isn't about solving a problem but rather how to punt on solving it:
+[by 2232] the cutoff is just a small part of the larger problem.
+
+***
+                 I think they're trying to solve being a secure and efficient operating system in the
+                 here and now.
+
+                 Linux for 64-bit architectures chose the native integer width for ktime_t for
+                 efficiency; it saves cycles and energy on the billions of devices that aren't
+                 pretending it's 200 years in the future.
+
+                 It has a limit, so tricksy people want to overflow the limit just to see if it breaks
+                 logic somewhere else. If you say "I'll use bignums", you now have two problems, and the
+                 tricksy people set the time to a value represented by a 30 gigabyte bignum.
+
+                 The 30 years uptime thing comes about because the time of day is computed from a time
+                 source that is an unstoppable counter:
+time_now = time_you_set_the_clock_to + (counter_now - counter_at_time_you_set_the_clock) / rate_at_which_it_counts
+
+                 Tricksy people set the time to the maximum allowed value immediately (here in 2025,
+                 where it is not actually 2233) and that "sets the clock ticking" on the computer's
+                 eventual doom. As soon as the gap time has elapsed, the overflows will start happening
+                 with no other touches and the computer could go haywire. But the gap is 30 years, so
+                 the attack isn't feasible.
+
+***
+       Curious. Here's hoping that it was fixed by the 64-bit time transition that was done during the
+       Debian 13 (trixie) development cycle... (see https://wiki.debian.org/ReleaseGoals/64bit-time)
+
+***
+$> date
+2025-05-07T23:49:17 CEST
+$> sudo systemctl stop chrony.service
+$> sudo date -s '2232-04-18 16:47:16'
+2232-04-18T16:47:16 CEST
+
+$> date
+2232-04-18T16:47:21 CEST
+
+$> sleep 30 ; date
+2232-04-18T16:47:58 CEST
+
+$> lsb_release -a
+No LSB modules are available.
+Distributor ID: Debian
+Description:    Debian GNU/Linux trixie/sid
+Release:        n/a
+Codename:       trixie
+$>
+
+***
+                      D'oh, I did not account for the timezone difference.
+$> sudo date -s '2232-04-19 01:47:16'
+date: cannot set date: Invalid argument
+2232-04-19T01:47:16 CEST
+$>
+
+
+---
+

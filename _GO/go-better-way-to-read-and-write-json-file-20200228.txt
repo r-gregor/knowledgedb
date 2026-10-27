@@ -1,0 +1,353 @@
+filename: go_better-way-to-read-and-write-json-file_20200228.txt
+https://medium.com/eaciit-engineering/better-way-to-read-and-write-json-file-in-golang-9d575b7254f2
+
+Better way to read and write JSON file in Golang
+Apr 16, 2019
+
+   In EACIIT we like to create our own library a lot. In this case we create a library to ease doing
+   CRUD and Querying in JSON file.
+
+The unmarshal way
+   When we first write the code for reading and filtering data from JSON file we do it like this.
+
+package main
+
+import (
+    "encoding/json"
+    "io/ioutil"
+)
+
+func readJSON(fileName string, filter func(map[string]interface{}) bool) []map[string]interface{} {
+    datas := []map[string]interface{}{}
+
+    file, _ := ioutil.ReadFile(fileName)
+    json.Unmarshal(file, &datas)
+
+    filteredData := []map[string]interface{}{}
+
+    for _, data := range datas {
+        // Do some filtering
+        if filter(data) {
+            filteredData = append(filteredData, data)
+        }
+    }
+
+    return filteredData
+}
+
+   This is not efficient since we need to unmarshal and hold the whole data in memory then doing
+   some iteration to filter the data. It might be ok with small JSON file. But will be a problem if we
+   have big JSON file.
+
+The JSON Decoder way
+   Better way to read JSON file is using json.Decoder. Because instead of unmarshal the whole content of
+   a file the decoder will decode one line/record at a time while we doing filtering in data. This is
+   much more efficient and less burden in memory.
+   
+package main
+
+import (
+    "encoding/json"
+    "os"
+)
+
+func readJSONToken(fileName string, filter func(map[string]interface{}) bool) []map[string]interface{} {
+    file, _ := os.Open(fileName)
+    defer file.Close()
+
+    decoder := json.NewDecoder(file)
+
+    filteredData := []map[string]interface{}{}
+
+    // Read the array open bracket
+    decoder.Token()
+
+    data := map[string]interface{}{}
+    for decoder.More() {
+        decoder.Decode(&data)
+
+        if filter(data) {
+            filteredData = append(filteredData, data)
+        }
+    }
+
+    return filteredData
+}
+
+   To make sure that our code is correct that the json.Decoder way is much more efficient we benchmark
+   it with 2 json file.
+
+   The first file contains list of American Movie scrapped from wikipedia, the file size is only 3.4MB.
+   The second file contains 200,000+ random jeopardy question, i got this file from reddit post. The
+   second file size is around 16x bigger, about 55MB. I put both files link in the end of this story.
+
+package main
+
+import (
+    "testing"
+)
+
+func BenchmarkMovieRead(b *testing.B) {
+    for n := 0; n < b.N; n++ {
+        readJSON("movie.json", func(data map[string]interface{}) bool {
+            return data["year"].(float64) >= 2010
+        })
+    }
+}
+
+func BenchmarkMovieReadToken(b *testing.B) {
+    for n := 0; n < b.N; n++ {
+        readJSONToken("movie.json", func(data map[string]interface{}) bool {
+            return data["year"].(float64) >= 2010
+        })
+    }
+}
+
+func BenchmarkQRead(b *testing.B) {
+    for n := 0; n < b.N; n++ {
+        readJSON("question.json", func(data map[string]interface{}) bool {
+            return data["show_number"].(string) == "4680"
+        })
+    }
+}
+
+func BenchmarkQReadToken(b *testing.B) {
+    for n := 0; n < b.N; n++ {
+        readJSONToken("question.json", func(data map[string]interface{}) bool {
+            return data["show_number"].(string) == "4680"
+        })
+    }
+}
+
+   And.... the results are as expected.
+   
+   ---------------------------------------------------------------------------------------
+   goos: darwin
+   goarch: amd64
+   pkg: eaciit/playground/json
+   BenchmarkMovieRead-4             10   151443983 ns/op    32439763  B/op  1027571 alloc/op
+   BenchmarkMovieReadToken-4        10   142746570 ns/op    18362616  B/op   969935 alloc/op
+   BenchmarkQRead-4                  1  1781133286 ns/op   318531584  B/op  9646213 alloc/op
+   BenchmarkQReadToken-4             1  1889765599 ns/op   182561864  B/op  9212297 alloc/op
+   PASS
+   ok   eaciit/playground/json  6.993s
+   Success: Benchmark passed.
+   ---------------------------------------------------------------------------------------
+   read benchmark result
+
+   As you can see there are no difference when querying small file. But when the benchmarking on the
+   bigger file there is a big difference in the memory efficiency. Memory of code that using
+   json.Decoder is 182561704 B, that is almost half memory used rather than using unmarshal. And it's
+   faster too, I believe that the gap difference will increase along with the file size.
+
+Writing JSON file
+   The writing part is similar with the reading one, in the first release we do it like this.
+jsonString, _ := json.Marshal(makeData(1000000))
+ioutil.WriteFile("big_marhsall.json", jsonString, os.ModePerm)
+
+   Because we use Marshal, it seems fast enough when handling small file (because we never compare it
+   with other alternative before.. oopsss...), But when the file is bigger file it slows down.. obviously.
+
+   After light discussion before going home, we learn that json.Marshal return string. So there must be
+   a direct way to write into io.Writer instead of returning the value. And... yes... there is a direct way,
+   because golang contributors are smart, so we changed it to this.
+file, _ := os.OpenFile("big_encode.json", os.O_CREATE, os.ModePerm)
+defer file.Close()  encoder := json.NewEncoder(file)
+encoder.Encode(makeData(1000000))
+
+   And after benchmarking it, the one that using encode is faster (obviously). But what is strange is,
+   the time/operation difference is bigger when using smaller data than the bigger one. Maybe my
+   benchmarking code is not correct or have some flaws, if you have any idea why this happens please
+   tell me in the comment section.
+
+   --------------------------------------------------------------------------------------------
+   goos: darwin
+   goarch: amd64
+   pkg: eaciit/playground/json
+   BenchmarkMarshalWriteBig-4        1  19273814663 ns/op   3914697992 B/op  28000200 alloc/op
+   BenchmarkEncodeWriteBig-4         1  17333221620 ns/op   3294298176 B/op  28000143 alloc/op
+   BenchmarkMarshalWrite-4          20     71893597 ns/op     30306757 B/op   2800047 alloc/op
+   BenchmarkEncodeWrite-4           20     63364595 ns/op     18247827 B/op   2800040 alloc/op
+   PASS
+   ok eaciit/playground/json  40.0023s
+   Success: Benchmark passed.
+   --------------------------------------------------------------------------------------------
+   write benchmark result
+
+   I hope that my story here could help you guys to resolve any problem in life. Hopefully. All code and
+   JSON files source used can be found in
+   [**1] [https://gist.github.com/sugab/040d5155ea96797a3b2d9451bed2ecfe]this gist
+
+   
+---
+[**1]
+https://gist.github.com/sugab/040d5155ea96797a3b2d9451bed2ecfe
+
+Read JSON File form a filePath. American movies dataset can be found here:
+    https://raw.githubusercontent.com/prust/wikipedia-movie-data/master/movies.json
+    
+200,000+ Jeopardy question dataset can be found here:
+    https://www.reddit.com/r/datasets/comments/1uyd0t/200000_jeopardy_questions_in_a_json_file/
+
+
+     json_read.go
+<code>
+package main
+
+import (
+    "encoding/json"
+    "io/ioutil"
+)
+
+func readJSON(fileName string, filter func(map[string]interface{}) bool) []map[string]interface{} {
+    datas := []map[string]interface{}{}
+
+    file, _ := ioutil.ReadFile(fileName)
+    json.Unmarshal(file, &datas)
+
+    filteredData := []map[string]interface{}{}
+
+    for _, data := range datas {
+        // Do some filtering
+        if filter(data) {
+            filteredData = append(filteredData, data)
+        }
+    }
+
+    return filteredData
+}
+</code>
+
+
+    json_read_token.go
+<code>
+package main
+
+import (
+    "encoding/json"
+    "os"
+)
+
+func readJSONToken(fileName string, filter func(map[string]interface{}) bool) []map[string]interface{} {
+    file, _ := os.Open(fileName)
+    defer file.Close()
+
+    decoder := json.NewDecoder(file)
+
+    filteredData := []map[string]interface{}{}
+
+    // Read the array open bracket
+    decoder.Token()
+
+    data := map[string]interface{}{}
+    for decoder.More() {
+        decoder.Decode(&data)
+
+        if filter(data) {
+            filteredData = append(filteredData, data)
+        }
+    }
+
+    return filteredData
+}
+</code>
+
+
+    read_test.go
+<code>
+package main
+
+import (
+    "testing"
+)
+
+func BenchmarkMovieRead(b *testing.B) {
+    readJSON("movie.json", func(data map[string]interface{}) bool {
+        return data["year"].(float64) >= 2010
+    })
+}
+
+func BenchmarkMovieReadToken(b *testing.B) {
+    readJSONToken("movie.json", func(data map[string]interface{}) bool {
+        return data["year"].(float64) >= 2010
+    })
+}
+
+func BenchmarkQRead(b *testing.B) {
+    readJSON("question.json", func(data map[string]interface{}) bool {
+        return data["show_number"].(string) == "4680"
+    })
+}
+
+func BenchmarkQReadToken(b *testing.B) {
+    readJSONToken("question.json", func(data map[string]interface{}) bool {
+        return data["show_number"].(string) == "4680"
+    })
+}
+</code>
+
+
+    write_test.go
+<code>
+package main
+
+import (
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
+    "os"
+    "testing"
+    "time"
+)
+
+func makeData(n int) interface{} {
+    datas := []map[string]interface{}{}
+    for i := 0; i < n; i++ {
+        data := map[string]interface{}{
+            "Name":        fmt.Sprintf("Person %v", i),
+            "Address":     "Somewhere we don't really know",
+            "Description": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.",
+            "Age":         i + 10,
+            "PhoneNumber": i + 99,
+            "CreatedOn":   time.Now(),
+        }
+        datas = append(datas, data)
+    }
+
+    return datas
+}
+
+func BenchmarkMarshalWriteBig(b *testing.B) {
+    for n := 0; n < b.N; n++ {
+        jsonString, _ := json.Marshal(makeData(1000000))
+        ioutil.WriteFile("big_marhsall.json", jsonString, os.ModePerm)
+    }
+}
+
+func BenchmarkEncodeWriteBig(b *testing.B) {
+    for n := 0; n < b.N; n++ {
+        file, _ := os.OpenFile("big_encode.json", os.O_CREATE, os.ModePerm)
+        defer file.Close()
+
+        encoder := json.NewEncoder(file)
+        encoder.Encode(makeData(1000000))
+    }
+}
+
+func BenchmarkMarshalWrite(b *testing.B) {
+    for n := 0; n < b.N; n++ {
+        jsonString, _ := json.Marshal(makeData(10000))
+        ioutil.WriteFile("small_marhsall.json", jsonString, os.ModePerm)
+    }
+}
+
+func BenchmarkEncodeWrite(b *testing.B) {
+    for n := 0; n < b.N; n++ {
+        file, _ := os.OpenFile("small_encode.json", os.O_CREATE, os.ModePerm)
+        defer file.Close()
+
+        encoder := json.NewEncoder(file)
+        encoder.Encode(makeData(10000))
+    }
+}
+</code>

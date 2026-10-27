@@ -1,0 +1,320 @@
+filename: jv_migrating-from-jnlp-java-se-11_20190424.txt
+https://opensource.com/article/19/4/migrating-jnlp-java-se-11
+
+What to do when Java SE 11 removes JNLP
+10 Apr 2019
+
+When Java SE discontinued JNLP, my organization had to decide the best way to continue delivering a
+critical business app. Here's how we got there.
+
+   For about the past 15 years, an organization I work with has used the Java Network Launching
+   Protocol (JNLP) to internally distribute a Java Swing desktop application to its users.
+
+   To access the Java Swing application, users had to install a specific version of Java Platform,
+   Standard Edition (Java SE) that contained support for JNLP. When they wanted to use the application,
+   they would click on the link in the organization's intranet, and the Java Web Start (javaws)
+   program would download the XML at the link, interpret it, download the current version of the
+   application if necessary, and run it, all while managing the security sandbox where the application
+   ran. In other words, it was a nice, low-ceremony way to distribute a completely configured
+   application to everyone's desktop.
+
+   However, because JNLP is no longer a part of Java SE (from version 11 onward), the organization
+   was faced with a decision: discontinue its use of JNLP as a part of Java SE or eliminate its policy
+   of staying reasonably up to date with Java SE releases. This relatively simple-sounding choice turned
+   out to be somewhat complex for various reasons.
+
+Option 1: Stay with current Java SE and find a substitute for JNLP
+   IcedTea-Web is an open source project that provides JNLP capabilities. This would imply a
+   two-step pre-configuration process: 1) install Java SE and 2) install IcedTea-Web, which would
+   increase client-side maintenance. Unfortunately, when we were evaluating the options, there was not a
+   working IcedTea-Web facility compatible with Java 11, so this would mean using Java 8. However, Java
+   SE 8 was reaching end-of-life in March 2019, so we would have to create a Java 8 runtime environment
+   from OpenJDK 8 for installation on the client machines and move to a more manual process of
+   tracking OpenJDK 8 updates. Neither of these approaches seemed very appealing.
+
+Option 2: Move away from JNLP
+   At first, this approach seemed like the worst possible scenario-we would need to modify the
+   application to provide configuration information in some other fashion; all the nice automated-update
+   stuff in JNLP would be discarded; and we would need some kind of per-workstation installation
+   process. Ugh! Or we could rewrite the existing fat client application, liked by its user community,
+   as a web app. Double ugh!!!
+
+   All this negativity was surmounted by a few interesting discoveries and a bit of careful thinking:
+    1. The configuration information could be packaged as metadata in a metadata table that could be
+       selected as a "configuration" by the end user.
+    2. The application could fairly easily check its version number against the currently distributed
+       version number and refuse to run, or at least complain to any user running an out-of-date
+       version.
+    3. The application could be packaged along with a customized Java runtime [***1]created with the
+       jdeps and jlink commands provided in Open JDK 11, thus ensuring the application always runs with
+       the correct version of Java.
+    4. The whole installation and execution business could be handled on the client side with Windows
+       .cmd files, eliminating the need for an installer (perhaps one day...).
+    5. The application and the customized Java runtime distribution could still be handled as a download
+       from the intranet.
+
+   With this detail, the attentive reader may be able to guess...
+
+The chosen solution
+   In the end, the organization decided to move away from JNLP because the amount of end-user management
+   seemed reasonably straightforward compared to maintaining the existing JNLP environment.
+
+   Here is the detailed process for getting to the solution:
+    1. Building the application:
+         a. The app was always developed and maintained using the NetBeans IDE running in a Linux
+            desktop environment; this is still the case, using OpenJDK 11 (from the distro) and NetBeans
+            10 (downloaded from the new Apache NetBeans site).
+         b. The build process creates an operating system-agnostic dist folder containing the
+            application .jar file and all required libraries
+    2. Customizing the Java 11 runtime:
+         a. Unfortunately, there's no way to customize cross-platform Java runtimes, so we need an
+            intermediate Windows computer-let's call it the IWC. (I'm going to come right out and say
+            this is the major drawback of our approach.)
+         b. OpenJDK 11 prebuilt binaries are installed on the IWC.
+         c. The application dist folder is copied to the IWC.
+         d. Inside the dist folder, the jdeps command from OpenJDK 11 determines which Java runtime
+            components are needed to support the application:
+jdeps --print-module-deps TheApplication.jar lib\*
+         e. Using the output of the above command, the jlink command (also from OpenJDK 11) builds
+            the customized runtime:
+
+            $> jlink --no-header-files --no-man-pages --compress=2 \
+            --strip-debug –add-modules \ java.base,java.desktop,java.sql,java.security.jgss,java.xml \
+            --output customjre
+         f. At this point, the application can be run (tested) from this folder using the command:
+.\customjre\bin\java -jar TheApplication.jar
+         g. The Install.cmd and RunTheApplication.cmd files are copied into the dist folder.
+    3. Bundling the application for distribution:
+         a. The dist folder, containing the application, .cmd files and the custom runtime, is zipped
+            and put on the intranet server; a link pointing to the .zip file allows users to download
+            it.
+    4. Downloading, installing, and running the application:
+         a. The user navigates to the page containing the link pointing to the .zip file.
+         b. Clicking on the link downloads the .zip file.
+         c. The user unzips the .zip file, navigates to the dist folder, and double-clicks Install.cmd.
+         d. When Install.cmd executes, it copies the dist folder into a known place on the user's
+            computer and installs the RunTheApplication.cmd link on the user's desktop.
+         e. The user will need to have certain permissions to install the application.
+         f. The user does not need Java SE installed on the computer.
+
+   The application was modified to:
+     * Read the configuration parameters from a database table (the organization thinks of these as
+       "project parameters," so the user is "selecting a project").
+     * The VERSION=123 string is extracted from the RELEASE_NOTES.TXT locally and on the server to make
+       sure the versions match (and the end user is harassed if they do not).
+
+   That's it. Of course, it's possible to use an installer rather than the .cmd files for a "more
+   professional" installation experience. It's also possible to find other ways to install OpenJDK 11 on
+   the IWC, which could even be a virtual machine (making it the VIWC). It's too bad the jlink command
+   doesn't have a --target-platform option or many other improvements that might be desirable or
+   necessary depending on the nature of the deployment environment.
+
+How well does it work?
+   Early reports indicate users are happy with the results, and sysadmins are no longer responsible for
+   watching over the Java SE version installed. As for the guy supporting the application, he's more or
+   less OK with the extra build steps-but would rather deal with two machines than run a VIWC on his
+   beautiful System76 laptop.
+
+
+---
+[***1]
+https://medium.com/azulsystems/using-jlink-to-build-java-runtimes-for-non-modular-applications-9568c5e70ef4
+
+Using jlink to Build Java Runtimes for non-Modular Applications
+Oct 10, 2018
+
+   The most important new feature of JDK 9 was the Java Platform Module System (JPMS) that
+   divided the monolithic rt.jar and tools.jar files into 75 distinct modules (at least in the
+   OpenJDK, the Oracle JDK contained a few more).
+
+   JDK 9 also eliminated the distinction between the Java Development Kit (JDK) and the Java Runtime
+   Environment (JRE). In the past, there was a sub-directory in the JDK (unsurprisingly called jre)
+   which only contained things that were required to run a Java application. On Linux, the full JDK 8
+   was 364 Mb, the JRE just 197 Mb. Users who were concerned about disk space could install the JRE and
+   happily run their applications.
+
+   In JDK 9 and later, the idea is to build Java runtimes that are tailored to the requirements of a
+   specific application. Rather than including all 75 modules, you need only include the java.base
+   module (which all runtimes must include by definition) as well as any other modules the application
+   references. All transitive module dependencies must also be included. JDK 9 and later provides the
+   jlink command to assemble and optimize a set of modules and their dependencies into a custom
+   runtime image.
+
+   Many people, when moving an application from JDK 8 or earlier to JDK 11, do not want to have to take
+   on the additional work of migrating application code to use modules. Fortunately, application code
+   and external libraries can all be left on the classpath and treated as part of the unnamed module.
+   For simple applications, you can use the same command to start the application as before.
+
+   However, the assumption is that, because jlink only works with modules that it can't be used to
+   generate a runtime image for non-module based applications.
+
+   This article will take you through the steps necessary to build significantly smaller Java runtimes
+   for applications that have not been converted to use modules. In addition, since JavaFX has been
+   removed from the Oracle JDK (and was never part of OpenJDK binaries), we'll include that in our
+   application to demonstrate another part of using this tool.
+
+   The application we'll be using is a simple data-entry application that presents a form to the user
+   and then stores the fields into a MySQL database. How the application works is immaterial to this
+   post so I won't bother sharing the code.
+
+   The application was built using NetBeans, which generates a dist directory that contains all the
+   compiled code required to run the application. Since the application uses some libraries the layout
+   looks like this:
+   
+   dist/
+      +-- FlightRecorder.jar
+      +-- lib/
+            +-- NomisUtil.jar
+            +-- TravelDatabase.jar
+            +-- mysql-connector-java-5.1.23-bin.jar
+   
+or (same):
+   
+    [dist]-+-- FlightRecorder.jar
+           |
+           +-- [lib]-+-- NomisUtil.jar
+                     |
+                     +-- TravelDatabase.jar
+                     |
+                     +-- mysql-connector-java-5.1.23-bin.jar
+
+   
+   
+Using JavaFX with JDK 11
+   To run the application on JDK 8, all that was required was
+$> java -jar FlightRecorder.jar
+
+   If we run this application with JDK 9, we need to make no changes.
+
+   However, if we try this with JDK 11, we get the following error message:
+Error: Could not find or load main class flightrecorder.Main
+Caused by: java.lang.NoClassDefFoundError: javafx/application/Application
+
+   As I mentioned earlier, this is because neither the Oracle JDK nor OpenJDK binaries include JavaFX.
+   Luckily, the nice people at Gluon provide free builds of the OpenJFX project, so it's easy to
+   resolve this issue.
+
+   To start, we need to download the [https://gluonhq.com/products/javafx/]JavaFX SDK and unzip it into a
+   directory on our machine. For simplicity, we'll put it in /opt. Next, we need a couple of extra command
+   line flags:
+$> java --module-path /opt/javafx-sdk-11/lib --add-modules=javafx.controls -jar FlightRecorder.jar
+
+   The two extra flags are:
+    1. --module-path: Equivalent of the classpath, telling the JVM where to search for modules.
+    2. --add-modules: This specifies additional root modules to resolve. Because all the application
+       code is on the classpath, we don't have an initial module, so this option is required. We can
+       specify this in two ways, either with an explicit list of modules as above, or we could indicate
+       that everything on the module path is to be included by using the parameter ALL-MODULE-PATH.
+
+   We now have an application that runs on JDK 11 using external JavaFX modules but with all application
+   code still on the classpath.
+
+Building a Java Runtime
+   In order to use jlink in this situation, we need to generate a list of the JDK modules that the
+   application uses. To do this, we can use the jdeps command that also comes with the JDK.
+
+   Interestingly, if we use the JDK 9 version of jdeps on the application we get this result:
+$> jdeps --list-deps FlightRecorder.jar
+java.base
+java.logging
+java.sql
+javafx.base
+javafx.controls
+javafx.graphics
+not found
+unnamed module: FlightRecorder.jar
+
+   Most of this is fine but the 'not found' message is confusing and not very useful (what was not
+   found?) Thankfully, jdeps was improved in JDK 10 so if we use the JDK 11 version we get the
+   following:
+$> jdeps --list-deps FlightRecorder.jar
+java.base
+java.logging
+java.sql
+
+   Although this tells us which modules are used by the application, we're missing some information.
+   Remember, we're providing the JavaFX modules separately so we need to analyse any JDK module
+   dependencies they might have. The solution is to include the module details in the same way we did
+   for the Java launcher:
+$> jdeps --module-path /opt/javafx-sdk-11/lib --add-modules=javafx.controls --list-deps FlightRecorder.jar
+JDK removed internal API/com.sun.media.jfxmediaimpl.platform.ios
+java.base
+java.datatransfer
+java.desktop/java.awt.dnd.peer
+java.desktop/sun.awt
+java.desktop/sun.awt.dnd
+java.desktop/sun.swing
+java.logging
+java.scripting
+java.sql
+java.xml
+jdk.jsobject
+jdk.unsupported
+jdk.unsupported.desktop
+jdk.xml.dom
+
+   I find this output a bit odd, as it includes more than just the module dependencies (which is what we
+   asked for). In the case of (only) the java.desktop module we also get some extra information about
+   the packages used. I also find the first message about the JDK removed internal somewhat confusing.
+
+   In theory, if we want an output that can be used directly in jlink, we can use the --print-module-deps
+   flag instead of --list-dependencies. However, when I tried this on both MacOS X and Linux, I got a
+   NullPointerException. Having posted a Tweet about this it has been submitted as a bug and will
+   hopefully be fixed soon (although it's a P3 so it may be a while).
+
+   Now we are ready to use jlink to produce a runtime for the application.
+$> jlink --no-header-files --no-man-pages --compress=2 --strip-debug --add-modules java.datatransfer,\
+java.desktop,java.logging,java.scripting,java.sql,java.xml,jdk.jsobject,jdk.unsupported,\
+jdk.unsupported.desktop,jdk.xml.dom --output java-runtime
+
+   To keep the size of the runtime as small as possible, we use command line flags to suppress the
+   inclusion of header files and man pages as well as stripping the debug information and compressing to
+   zip file format where relevant. The list of modules to include is the one generated by jdeps.
+
+   At this point, you would be forgiven for thinking that we can now run the application using our jlink
+   generated runtime. However, if we try this here is the output:
+$> java-runtime/bin/java --module-path /opt/javafx-sdk-11/lib --add-modules=javafx.controls -jar FlightRecorder.jar
+SEVERE: Error connecting to database
+SEVERE: java.lang.NoClassDefFoundError: javax/naming/RefAddr
+
+   This is because the application uses a MySQL JDBC driver packaged in the
+   lib/mysql-connector-java-5.1.23-bin.jar file. Because this (and the two other jar files in the lib
+   directory) are accessed via the classpath, they are not automatically analysed by jdeps. The jdeps
+   command does allow you to specify a classpath via the -cp flag. Unfortunately, jdeps does not appear
+   to use this to reference jar files that are required by the application. It is, therefore, necessary
+   to make sure that all jar files used by the application are passed as arguments:
+$> jdeps --module-path /opt/javafx-sdk-11/lib --add-modules=javafx.controls --list-deps FlightRecorder.jar lib/*
+JDK removed internal API/com.sun.media.jfxmediaimpl.platform.ios
+java.base
+java.datatransfer
+java.desktop/java.awt.dnd.peer
+java.desktop/sun.awt
+java.desktop/sun.awt.dnd
+java.desktop/sun.swing
+java.logging
+java.management
+java.naming
+java.rmi
+java.scripting
+java.sql
+java.transaction.xa
+java.xml
+jdk.jsobject
+jdk.unsupported
+jdk.unsupported.desktop
+jdk.xml.dom
+
+   As you can see, we need to include a few more modules in our runtime. The command for jlink becomes:
+$> jlink --no-header-files --no-man-pages --add-modules java.datatransfer,java.desktop,java.logging,\
+java.management,java.naming,java.rmi,java.scripting,java.sql,java.transaction.xa,java.xml,jdk.jsobject,\
+jdk.unsupported,jdk.unsupported.desktop,jdk.xml.dom --output java-runtime
+
+   The application now runs without any problems using the generated runtime. On my Mac, the
+   java-runtime directory is a very respectable 39Mb, compared to 286Mb for the full JDK.
+
+   To simplify redistribution, we can copy the dist directory with the application jar files into the
+   java-runtime directory, create a simple script to execute Java with all the appropriate command line
+   flags and we are all good to go.
+
+
+---

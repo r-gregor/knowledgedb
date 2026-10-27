@@ -1,0 +1,1534 @@
+filename: ptn_makefiles-for-python-projects-multyf_20210604.txt
+https://venthur.de/2021-03-31-python-makefiles.html
+
+Writing Makefiles for Python Projects
+2021-03-31.
+
+   I'm a big fan of Makefiles. Almost all my side projects are using them, and I've been
+   advocating their usage at work too.
+
+   Makefiles give your contributors an entry point on how to do certain things like, building, testing,
+   deploying. And if done correctly, they can massively simplify your CI/CD pipeline scripts as they can
+   often just stupidly call the respective make targets. Most importantly, they are a very convenient
+   shortcut for you as a developer as well.
+
+   For Python projects, where I'm almost always using virtual environments, I've been using two
+   different strategies for Makefiles:
+	1. assuming that make is executed inside the virtual environment
+	2. wrapping all virtual environment calls inside make
+
+   Both strategies have their pros and cons.
+
+Assuming make is executed inside the venv
+
+   Let's have a look at a very simple Makefile that allows for building, testing and releasing a Python
+   project:
+<code>
+.PHONY: test
+test:
+	pytest
+
+.PHONY: lint
+lint:
+	flake8
+
+.PHONY: release
+release:
+	python3 setup.py sdist bdist_wheel upload
+
+clean:
+	find . -type f -name *.pyc -delete
+	find . -type d -name __pycache__ -delete
+</code>
+
+   This is straightforward and a potential contributor immediately knows the entry points to your
+   project.
+
+   Assuming there is a venv installed already, you have to activate it first and run the make commands
+   afterwards:
+
+$> . venv/bin/activate
+$> make test
+
+   The downside is of course, that you have to activate the venv for every new shell. Which can get a
+   bit annoying when you spawn a new terminal in tmux or put vim into the background to run make.
+
+   Activating the venv inside make will not work, as each recipe runs in its own shell, moreover each
+   command in each recipe runs in its own shell too. There are workarounds for the latter, i.e. using
+   the .ONESHELL flag, but that does not solve the issue of a new shell in each recipe.
+
+Wrapping the venv calls inside make
+   The second approach mitigates for the issue of activating the venv altogether. I've borrowed this
+   idea mostly from makefile.venv and simplified it a lot for my needs.
+<code>
+# system python interpreter. used only to create virtual environment
+PY = python3
+VENV = venv
+BIN=$(VENV)/bin
+
+# make it work on windows too
+ifeq ($(OS), Windows_NT)
+	BIN=$(VENV)/Scripts
+	PY=python
+endif
+
+all: lint test
+
+$(VENV): requirements.txt requirements-dev.txt setup.py
+	$(PY) -m venv $(VENV)
+	$(BIN)/pip install --upgrade -r requirements.txt
+	$(BIN)/pip install --upgrade -r requirements-dev.txt
+	$(BIN)/pip install -e .
+	touch $(VENV)
+
+.PHONY: test
+test: $(VENV)
+	$(BIN)/pytest
+
+.PHONY: lint
+lint: $(VENV)
+	$(BIN)/flake8
+
+.PHONY: release
+release: $(VENV)
+	$(BIN)/python setup.py sdist bdist_wheel upload
+
+clean:
+	rm -rf $(VENV)
+	find . -type f -name *.pyc -delete
+	find . -type d -name __pycache__ -delete
+</code>
+
+   The equivalent Makefile now looks immediately more complicated. So let's break it down.
+
+   Instead of calling just calling pytest, flake8 and python assuming the venv is already activated or
+   all dependencies are installed on the system directly, we explicitly call the ones from the venv by
+   prefixing the command with the path to the venv's bin directory. To ensure the venv exists, each of
+   the recipes is depending on the $(VENV) target, which ensures we always have an up-to-date venv
+   installed.
+
+   This works, because the . venv/bin/activate-script basically just does the same: it puts the venv
+   before anything else in your PATH, therefore each call to python, etc. will find the one installed in
+   the venv first.
+
+   While the Makefile is a bit more complicated, we now can just call
+$> make test
+
+   and don't deal with venvs directly any more (well, for those simple cases at least...). If you don't
+   need to support Windows, you can remove the appropriate block and the Makefile looks relatively tame,
+   even for people that don't use make very often.
+
+Which one is better?
+   I think the second approach is more convenient. I've used the first approach happily for years and
+   only learned quite recently about the second one. I haven't really noticed any downsides yet, but I
+   do realize that almost all Python projects with Makefiles I've checked out, seem to prefer the first
+   approach. I wonder why that is?
+
+
+---
+https://krzysztofzuraw.com/blog/2016/makefiles-in-python-projects
+
+Makefiles in python projects
+Saturday, September 3, 2016
+
+   When I join my current company I saw in their git repos strange file. It wasn't used by any
+   python code. It just sits in the main directory of the project. I asked my colleagues what
+   is this file for? They told me- to make your life easier. That's why today I write about
+   this file- Makefile.
+
+What is makefile and what is it typical use
+	 Makefiles are a simple way to organize code compilation.
+
+   Typically they are used in writing C programs to ease all stuff that needs to be done
+   before code can be used as a program. You can specify rules to tell make how to compile
+   your programs. Simple makefile for C code can be as follows:
+helloword: helloword.c
+	gcc -o hellword hellword.c -I.
+
+   Then running:
+$> make helloword
+
+   you compile C code using gcc.
+
+   How is this even connected with python? This programming language is compiled itself while
+   invoked so it doesn't need any makefiles to work. As I said in the beginning in python
+   projects you can ease your life and save a lot of keystrokes using makefile.
+
+What specific to python you can put in makefile
+   Have you ever wanted to clean up .pyc files from your project or remove artifacts after
+   building python packages? Or maybe you want to run tests with coverage? Use pep8, lint or
+   isort? Maybe run the application in docker container and end up writing commands that are
+   too long for your screen?
+
+   This is where makefile comes. You can have everything kept in one place and use only make
+   clean to clean up unnecessary files or make tests to test your application.
+
+   Let start with some examples from makefile that I am using:
+HOST=127.0.0.1
+TEST_PATH=./
+
+clean-pyc:
+	find . -name '*.pyc' -exec rm --force {} +
+	find . -name '*.pyo' -exec rm --force {} +
+	name '*~' -exec rm --force  {}
+
+clean-build:
+	rm --force --recursive build/
+	rm --force --recursive dist/
+	rm --force --recursive *.egg-info
+
+isort:
+	sh -c "isort --skip-glob=.tox --recursive . "
+
+lint:
+	flake8 --exclude=.tox
+
+test: clean-pyc
+	py.test --verbose --color=yes $(TEST_PATH)
+
+run:
+	python manage.py runserver
+
+docker-run:
+	docker build \
+	  --file=./Dockerfile \
+	  --tag=my_project ./
+	docker run \
+	  --detach=false \
+	  --name=my_project \
+	  --publish=$(HOST):8080 \
+	  my_project
+
+   At the beginning, I add two variables HOST and TEST_PATH for every command to use them.
+   Rule clean-pyc finds all files that end with *.pyc, *.pyo or *~ and delete them. The plus
+   sign at the end of the command is for -exec command {} which means that the total number of
+   invocations of the command will be much less than the number of matched files.
+
+   Next one clean-build is for removing build artifacts. In isort shell is executing isort
+   command with proper attributes, -c flag is for reading commands from a string rather than
+   from standard input. lint and run works on the same pattern. In test I added the additional
+   rule to execute before actual tests- clean-pyc. Last docker-run rule builds and runs
+   docker.
+
+   Additional things that you want to add is something called PHONY. By default, makefile
+   operates on files so if there will be a file called clean-pyc it will try to use it instead
+   of a command. To avoid this use PHONY at the beginning of your makefile:
+.PHONY: clean-pyc clean-build
+
+   I also like to have help function for my makefile so I put this somewhere inside:
+	@echo "    clean-pyc"
+	@echo "		   Remove python artifacts."
+	@echo "    clean-build"
+	@echo "		   Remove build artifacts."
+	@echo "    isort"
+		   Sort import statements.
+	@echo "    lint"
+	@echo "		   Check style with flake8."
+	@echo "    test"
+	@echo "		   Run py.test"
+	@echo '    run'
+	@echo '		   Run the 'my_project' service on your local machine.'
+	@echo '    docker-run'
+	@echo '		   Build and run the 'my_project' service in a Docker container.'
+
+   There is @ before each echo because by default make prints every line to the console before
+   it's executed. At sign is to suppress this and @ is discarded before line is passed to the
+   shell.
+
+   But what if I wanted to run my application on different host and port using makefile? It's
+   simple just add:
+run:
+	python manage.py runserver --host $(HOST) --port $(PORT)
+
+   Then you can simply run:
+$> make run HOST=127.0.0.1 PORT=8000
+
+   Lastly be aware that indentation in makefile has to be made using TAB, not spaces.
+
+What benefit you can have by using makefile in python projects
+   As you can see using makefile in python projects can bring many good things. If you are
+   tired of writing complicated shell commands- put them under a rule in the makefile. Want
+   other people easily run tests against your project? Put pytest calls in makefile. Ideas are
+   endless.
+
+
+
+---
+https://stackabuse.com/how-to-write-a-makefile-automating-python-setup-compilation-and-testing
+July 7th, 2020
+
+How to Write a Makefile - Automating Python Setup, Compilation, and Testing
+
+Introduction
+   When you want to run a project that has multiple sources, resources, etc., you need to make
+   sure that all of the code is recompiled before the main program is compiled or run.
+
+   For example, imagine our software looks something like this:
+main_program.source -> uses the libraries 'math.source' and 'draw.source'
+math.source -> uses the libraries 'floating_point_calc.source' and 'integer_calc.source'
+draw.source -> uses the library 'opengl.source'
+
+   So if we make a change in opengl.source for example, we need to recompile both draw.source
+   and main_program.source because we want our project to be up-to-date on all ends.
+
+   This is a very tedious and time-consuming process. And because all good things in the
+   software world come from some engineer being too lazy to type in a few extra commands,
+   Makefile was born.
+
+	 Makefile uses the make utility, and if we're to be completely accurate, Makefile is just
+	 a file that houses the code that the make utility uses. However, the name Makefile is
+	 much more recognizable.
+
+   Makefile essentially keeps your project up to date by rebuilding only the necessary parts
+   of your source code whose children are out of date. It can also automatize compilation,
+   builds and testing.
+
+	 In this context, a child is a library or a chunk of code which is essential for its
+	 parent's code to run.
+
+   This concept is very useful and is commonly used with compiled programming languages. Now,
+   you may be asking yourself:
+
+	 Isn't Python an interpreted language?
+   Well, Python is technically both an interpreted and compiled language, because in order for
+   it to interpret a line of code, it needs to precompile it into byte code which is not
+   hardcoded for a specific CPU, and can be run after the fact.
+
+   A more detailed, yet concise explanation can be found on Ned Batchelder's blog. Also,
+   if you need a refresher on how Programming Language Processors work, we've got you
+   covered.
+
+Concept Breakdown
+   Because Makefile is just an amalgamation of multiple concepts, there are a few things
+   you'll need to know in order to write a Makefile:
+	1. Bash Scripting
+	2. Regular Expressions
+	3. Target Notation
+	4. Understanding your project's file structure
+
+   With these in hand, you'll be able to write instructions for the make utility and automate
+   your compilation.
+
+   Bash is a command language (it's also a Unix shell but that's not really relevant right
+   now), which we will be using to write actual commands or automate file generation.
+
+   For example, if we want to echo all the library names to the user:
+DIRS=project/libs
+for file in $(DIRS); do
+	echo $$file
+done
+
+   Target notation is a way of writing which files are dependent on other files. For example,
+   if we want to represent the dependencies from the illustrative example above in proper
+   target notation, we'd write:
+main_program.cpp: math.cpp draw.cpp
+math.cpp: floating_point_calc.cpp integer_calc.cpp
+draw.cpp: opengl.cpp
+
+   As far as file structure goes, it depends on your programming language and environment.
+   Some IDEs automatically generate some sort of Makefile as well, and you won't need to write
+   it from scratch. However, it's very useful to understand the syntax if you want to tweak
+   it.
+
+   Sometimes modifying the default Makefile is even mandatory, like when you want to make
+   OpenGL and CLion play nice together.
+
+Bash Scripting
+   Bash is mostly used for automation on Linux distributions, and is essential to becoming an
+   all-powerful Linux "wizard". It's also an imperative script language, which makes it very
+   readable and easy to understand. Note that you can run bash on Windows systems, but it's
+   not really a common use case.
+
+   First let's go over a simple "Hello World" program in Bash:
+# Comments in bash look like this
+
+#!/bin/bash
+# The line above indicates that we'll be using bash for this script
+# The exact syntax is: #![source]
+echo "Hello world!"
+
+   When creating a script, depending on your current umask, the script itself might not be
+   executable. You can change this by running the following line of code in your terminal:
+chmod +x name_of_script.sh
+
+   This adds execute permission to the target file. However, if you want to give more specific
+   permissions, you can execute something similar to the following command:
+chmod 777 name_of_script.sh
+
+   Next, let's quickly go over some basics utilizing simple if-statements and variables:
+   [dvp-mpl-bundle-1-small.jpg]
+
+#!/bin/bash
+
+echo "What's the answer to the ultimate question of life, the universe, and everything?"
+read -p "Answer: " number
+# We dereference variables using the $ operator
+echo "Your answer: $number computing..."
+# if statement
+# The double brackets are necessary, whenever we want to calculate the value of an expression or sub
+expression, we have to use double brackets, imagine you have selective double vision.
+if (( number == 42 ))
+then
+	echo "Correct!"
+	# This notation, even though it's more easily readable, is rarely used.
+elif (( number == 41 || number == 43 )); then
+	echo "So close!"
+	# This is a more common approach
+else
+	echo "Incorrect, you will have to wait 7 and a half million years for the answer!"
+fi
+
+   Now, there is an alternative way of writing flow control which is actually more common than
+   if statements. As we all know Boolean operators can be used for the sole purpose of
+   generating side-effects, something like:
+++a && b++
+
+   Which means that we first increment a, and then depending on the language we're using, we
+   check if the value of the expression evaluates to True (generally if an integer is >0 or
+   =/=0 it means its boolean value is True). And if it is True, then we increment b.
+
+   This concept is called conditional execution and is used very commonly in bash scripting,
+   for example:
+#!/bin/bash
+
+# Regular if notation
+echo "Checking if project is generated..."
+# Very important note, the whitespace between '[' and '-d' is absolutely essential
+# If you remove it, it'll cause a compilation error
+if [ -d project_dir ]
+then
+	echo "Dir already generated."
+else
+	echo "No directory found, generating..."
+	mkdir project_dir
+fi
+
+   This can be rewritten using a conditional execution:
+echo "Checking if project is generated..."
+[ -d project_dir ] || mkdir project_dir
+
+   Or, we can take it even further with nested expressions:
+echo "Checking if project is generated..."
+[ -d project_dir ] || (echo "No directory found, generating..." && mkdir project_dir)
+
+   Then again, nesting expressions can lead down a rabbit hole and can become extremely
+   convoluted and unreadable, so it's not advised to nest more than two expressions at most.
+
+   You might be confused by the weird [ -d ] notation used in the code snippet above, and
+   you're not alone.
+
+   The reasoning behind this is that originally conditional statements in Bash were written
+   using the test [EXPRESSION] command. But when people started writing conditional
+   expressions in brackets, Bash followed, albeit with a very unmindful hack, by just
+   remapping the [ character to the test command, with the ] signifying the end of the
+   expression, most likely implemented after the fact.
+
+   Because of this, we can use the command test -d FILENAME which checks if the provided file
+   exists and is a directory, like this [ -d FILENAME ].
+
+Regular Expressions
+   Regular expressions (regex for short) give us an easy way to generalize our code. Or rather
+   to repeat an action for a specific subset of files that meet certain criteria. We'll cover
+   some regex basics and a few examples in the code snippet below.
+
+   Note: When we say that an expression catches ( -> ) a word, it means that the specified
+   word is in the subset of words that the regular expression defines:
+# Literal characters just signify those same characters
+StackAbuse -> StackAbuse
+sTACKaBUSE -> sTACKaBUSE
+
+# The or (|) operator is used to signify that something can be either one or other string
+Stack|Abuse -> Stack
+	-> Abuse
+Stack(Abuse|Overflow) -> StackAbuse
+	  -> StackOverflow
+
+# The conditional (?) operator is used to signify the potential occurrence of a string
+The answer to life the universe and everything is( 42)?...
+	-> The answer to life the universe and everything is...
+	-> The answer to life the universe and everything is 42...
+
+# The * and + operators tell us how many times a character can occur
+# * indicates that the specified character can occur 0 or more times
+# + indicates that the specified character can occur 1 or more times
+He is my( great)+ uncle Brian. -> He is my great uncle Brian.
+	   -> He is my great great uncle Brian.
+# The example above can also be written like this:
+He is my great( great)* uncle Brian.
+
+   This is just the bare minimum you need for the immediate future with Makefile. Though, on
+   the long term, learning Regular Expressions is a really good idea.
+
+Target Notation
+   After all of this, now we can finally get into the meat of the Makefile syntax. Target
+   notation is just a way of representing all the dependencies that exist between our source
+   files.
+
+   Let's look at an example that has the same file structure as the example from the beginning
+   of the article:
+# First of all, all pyc (compiled .py files) are dependent on their source code counterparts
+main_program.pyc: main_program.py
+	python compile.py $<
+math.pyc: math.py
+	python compile.py $<
+draw.pyc: draw.py
+	python compile.py $<
+
+# Then we can implement our custom dependencies
+main_program.pyc: main_program.py math.pyc draw.pyc
+	python compile.py $<
+math.pyc: math.py floating_point_calc.py integer_calc.py
+	python compile.py $<
+draw.pyc: draw.py opengl.py
+	python compile.py $<
+
+   Keep in mind that the above is just for the sake of clarifying how the target notation
+   works. It's very rarely used in Python projects like this, because the difference in
+   performance is in most cases negligible.
+
+   More often than not, Makefiles are used to set up a project, clean it up, maybe provide
+   some help and test your modules. The following is an example of a much more realistic
+   Python project Makefile:
+# Signifies our desired python version
+# Makefile macros (or variables) are defined a little bit differently than traditional bash, keep in
+ mind that in the Makefile there's top-level Makefile-only syntax, and everything else is bash script syntax.
+PYTHON = python3
+
+# .PHONY defines parts of the makefile that are not dependant on any specific file
+# This is most often used to store functions
+.PHONY = help setup test run clean
+
+# Defining an array variable
+FILES = input output
+
+# Defines the default target that 'make' will to try to make, or in the case of a phony target, exec
+ute the specified commands
+# This target is executed whenever we just type 'make'
+.DEFAULT_GOAL = help
+
+# The @ makes sure that the command itself isn't echoed in the terminal
+help:
+	@echo "---------------HELP-----------------"
+	@echo "To setup the project type make setup"
+	@echo "To test the project type make test"
+	@echo "To run the project type make run"
+	@echo "------------------------------------"
+
+# This generates the desired project file structure
+# A very important thing to note is that macros (or makefile variables) are referenced in the target
+'s code with a single dollar sign ${}, but all script variables are referenced with two dollar signs
+ $${}
+setup:
+
+	@echo "Checking if project files are generated..."
+	[ -d project_files.project ] || (echo "No directory found, generating..." && mkdir project_files.project)
+	for FILE in ${FILES}; do \
+		touch "project_files.project/$${FILE}.txt"; \
+	done
+
+# The ${} notation is specific to the make syntax and is very similar to bash's $()
+# This function uses pytest to test our source files
+test:
+	${PYTHON} -m pytest
+
+run:
+	${PYTHON} our_app.py
+
+# In this context, the *.project pattern means "anything that has the .project extension"
+clean:
+	rm -r *.project
+
+   With that in mind, let's open up the terminal and run the Makefile to help us out with
+   generating and compiling a Python project:
+
+   running make with the makefile
+
+Conclusion
+   Makefile and make can make your life much easier, and can be used with almost any
+   technology or language.
+
+   It can automate most of your building and testing, and much more. And as can be seen from
+   the example above, it can be used with both interpreted and compiled languages.
+
+
+---
+https://medium.com/@habibdhif/simple-makefile-to-automate-python-projects-e233af7681ad
+
+Simple Makefile to automate Python projects
+Aug 29, 2019
+
+   Makefiles make it easy to automate projects. I use them in almost all my projects including
+   python ones. All you have to do is type a couple of commands and everything is set. They
+   are also very useful when you are collabrating with others to keep everyone synced and
+   using the same python environment.
+
+The Makefile
+
+The Essentials
+   Now the first 12 lines of the files is really all you need for your makefiles.The first two
+   rules here are for creating an isolated Python environments using virtualenv. I prefer
+   using virtualenv to anaconda's environment manager because it makes the project more
+   contained and easier to manage.
+virtual: .venv/bin/pip
+.venv/bin/pip:
+	virtualenv -p /usr/bin/python3 .venv
+
+   The third rule is for installing the requirements listed on the requirement file.
+install:
+	.venv/bin/pip install -Ur requirements.txt
+
+   This rule is for freezing your Python package dependencies. Now it is not necessary to use
+   the freeze option wich adds the exact version for each dependency but it is a recommended
+   if you wanna have full control on what dependencies to use especially if your app is going
+   to run on a production like environment.
+update-requirements: install
+	.venv/bin/pip freeze > requirements.txt
+
+Formatting, sorting and linting
+   Now the rest of the Makefile is not really essential but I think linting and formatting
+   your code is a really good practice. It makes it more readable, it finds all the silly
+   (syntax) errors before even executing the code and overall it just improves the code
+   quality.
+
+   The first rule of this section is to format your code. I use black package to achieve that.
+   It is simple, fast and you have nothing to configure.
+black: .venv/bin/black
+	.venv/bin/black *.py
+
+   isort will simply sort your imports if you are into that.
+isort: .venv/bin/isort
+	.venv/bin/isort *.py
+
+   The final rule is for linting your code, this will check your code syntax and provide clear
+   instructions on how to clean it.
+flake8: .venv/bin/flake8
+	.venv/bin/flake8 *.py
+
+   That's it!
+
+
+---
+https://medium.com/aigent/makefiles-for-python-and-beyond-5cf28349bf05
+
+Makefiles for Python and beyond
+
+   Makefiles are quite unpopular in the dynamic languages world. Some Python and JavaScript
+   developers consider GNU make an ancient, deprecated, outdated, and dying tool, used by some
+   dinosaurs.
+
+   The truth is: make is a wonderful and often misunderstood tool. It is fairly simple yet
+   very powerful. Hell, source-based Linux distros and BSD operating systems heavily rely on
+   make.
+
+   There are many application for Makefiles outside of C/C++ world, and I think that make
+   deserves more attention and love.
+
+Why does Python even need a Makefile?
+   The short answer is: to avoid the "It worked on my machine" situation. Python does a very
+   good job to abstract OS layer, although Python application still needs some kind of
+   packaging before it can be distributed, or deployed to a server.
+
+   In general, Makefile is a good alternative to a bunch of bash scripts used to automate
+   tedious tasks.
+
+   First of all, instead of remembering and typing ill ./do_this_one_thing.sh
+   ./do_the_other_one (was it dash or underscore?), you can confidently strike: make one two.
+
+   But that's a joke, of course.
+
+   The real reason is: as soon as there is more than one bash script, the hidden dependencies
+   may arrive. You have to run script_1 before running script_2. Another problem is copy-paste
+   code (each bash file tends to hold the same paths, artifacts names, and whatnot).
+
+Make for the rescue
+   Feel free to skip this intro if you're already familiar with make.
+
+   All make does is tracks files' dependency graph, and "last modified" timestamps of the
+   files. If one of dependencies timestamp is greater than the one of the original file, the
+   original file needs to be rebuilt.
+
+   Every time, one file has to be built from another, make is a good alternative for the job.
+   You may think of building a .jpg from .dot files, or .mpeg4 from video, audio and subtitles
+   files, or .html files build from .j2 or .pug templates. Python itself does the very same
+   thing with .pyc files.
+
+   A Makefile consists of "rules" in the following form:
+target: dependency1, dependency2, ...
+<TAB>recipe line
+<TAB>recipe line
+...
+
+   target is a file needs to be built; dependency1 and dependency2 are source files used to
+   build the target, and recipe is a shell command used as a build step.
+
+   If you want to just copy a file, you may write something like:
+dist/config.yaml: src/config.yaml
+	cp -f src/config.yaml dist/config.yaml
+
+What is all this have to do with Python again?
+   Okay, let us make a simple application.
+
+   Let's say we want to make an application that shows random cat gifs (the example is
+   shamelessly hijacked from the glorious Elm tutorial)
+   app.py
+
+   So now you want to show this application to your buddies. No - the whole World must to see
+   it in its magnificence.
+
+   The application should render something like this:
+
+   The only problem is:
+Traceback (most recent call last):
+ File "./app.py", line 3, in <module>
+ import requests
+ ModuleNotFoundError: No module named 'requests'
+
+   Okay, apparently simple python3 app.py may not work.
+
+   Let's make a virtual environment, and install requests module in it. requirements.txt file
+   with the long list of all the requirements:
+
+   requests
+
+   Long, long list.
+
+   (Trying to pull out real-world example out of the thin air here).
+
+   And the virtual environment itself:
+$> python3 -m venv venv
+$> ./venv/bin/pip install -r requirements.txt
+
+   We may even want to save this into some build.sh file.
+
+   Now all we need is:
+$> ./venv/bin/python3 app.py
+
+   And we also may want to save this one-liner into some run.sh.
+
+   So this is the very common situation I was talking about in the beginning: we need to run
+   build.sh before run.sh, and this dependency is hidden and nowhere stated.
+
+   Let's see if this make stuff will be more clear.
+
+   The first rule in our Makefile will be the virtual environment, but "venv" is a directory,
+   and we need a plain file, so let's take any file from the " venv". For instance,
+   "venv/bin/activate" will do:
+venv/bin/activate: requirements.txt
+	python3 -m venv venv
+	./venv/bin/pip install -r requirements.txt
+
+   Now if we run make in the project's directory, we'll get virtual environment build with
+   requests installed. We had it before, with bash, but now dependency is tracked, so running
+   make the second time will give us:
+$> make
+make: 'venv/bin/activate' is up to date.
+
+   If we will edit requirements.txt - add or remove dependencies, make will rebuild the
+   virtual environment for us automagically:
+$> touch requirements.txt  # simulate edit
+$> make
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+Requirement already satisfied: requests in ./venv/lib/python3.7/site-packages...
+
+   Now, let's make the second target called run to run our application:
+run: venv/bin/activate
+	./venv/bin/python3 app.py
+
+   run explicitly depends on the virtual environment target, so now you only have to type make
+   run and dependencies will be created or updated before running the application.
+
+   So far so good, but we need to go deeper.
+
+   First of all, we don't have the file named run; make thinks that this file will be created
+   after executing the recipe, so it all works. Although, if someone would decide to created a
+   file named run the behavior of make would become unexpected.
+
+   Let's fix it by explicitly saying that we don't expect a file to be produced.
+
+   .PHONY: run
+
+   Now run is a phony target, and it will be re-evaluated every time it is called (that's
+   exactly what we need).
+
+   We may want to add the clean target to remove what we don't need:
+clean:
+	rm -rf venv
+	find . -type f -name '*.pyc' -delete
+
+   Don't forget that the clean target also doesn't produce a file:
+
+   .PHONY: run clean
+
+   By default, running make without arguments will execute the first rule from the Makefile.
+   It is considered a good style to define an entry target called all that should define a
+   default behavior. In our case, it will create the virtual environment.
+
+   all: venv/bin/activate
+
+   And again:
+
+   .PHONY: all run clean
+
+Want more make?
+   This is where some people draw the line in the sand, but make also has variables,
+   functions, and macros.
+
+   Variables are really simple:
+   NAME := VALUE
+
+   defines a variable, that can be refered by ${NAME} or $(NAME)
+
+   There is also some useful shortcuts:
+   NAME ?= VALUE
+
+   Assign VALUE to the variable NAME if it's not yet defined.
+
+   This is especially useful because you may define variables while executing make:
+
+   $> make BUILD=RELEASE ENVIRONMENT=PRODUCTION
+
+   There is also a possibility to declare an alias, like this:
+
+   NAME = VALUE
+
+   In this case, right hand side will be evaluated every time variable is accessed.
+
+   This can be explained easily by the following example
+v1 := $(shell ls)
+v2 = $(shell ls)
+
+   Both variables hold the result of the shell ls command execution, but v1 will be evaluated
+   only once, and will never show any new files.
+
+   By the way, shell is a make functions. Hooray, we've also learned the make functions!
+
+   Let's wrap up everything we've learned just now:
+
+   Easy, right?
+
+What else?
+   You may want to add your favorite linter and formatter: pep8, yapf, pyflakes - you name it.
+   You can generate gRPC or swagger stub, you can generate documentation from .rst or .md
+   files.
+
+A shiny new hammer
+   Why not use make for everything? Literally everything?!
+
+   It is very good tool for tracking dependencies between files with benefits, but when
+   targets are dynamics, like docker images, or deployments... Well, things may get ugly and
+   unpredictable. Builds may be haunted.
+
+TL;DR
+   Makefiles still rocks in 2020! Feel free to use make outside of the C/C++ world having fun
+   joy and pleasure.
+
+   Every time a file needs to be created from other files, GNU make is a good candidate for
+   the job.
+
+
+---
+
+https://krzysztofzuraw.com/blog/2016/makefiles-in-python-projects
+
+Makefiles in python projects
+Saturday, September 3, 2016
+
+   When I join my current company I saw in their git repos strange file. It wasn't used by any
+   python code. It just sits in the main directory of the project. I asked my colleagues what
+   is this file for? They told me- to make your life easier. That's why today I write about
+   this file- Makefile.
+
+What is makefile and what is it typical use
+	 Makefiles are a simple way to organize code compilation.
+
+   Typically they are used in writing C programs to ease all stuff that needs to be done
+   before code can be used as a program. You can specify rules to tell make how to compile
+   your programs. Simple makefile for C code can be as follows:
+helloword: helloword.c
+	gcc -o hellword hellword.c -I.
+
+   Then running:
+$> make helloword
+
+   you compile C code using gcc.
+
+   How is this even connected with python? This programming language is compiled itself while
+   invoked so it doesn't need any makefiles to work. As I said in the beginning in python
+   projects you can ease your life and save a lot of keystrokes using makefile.
+
+What specific to python you can put in makefile
+   Have you ever wanted to clean up .pyc files from your project or remove artifacts after
+   building python packages? Or maybe you want to run tests with coverage? Use pep8, lint or
+   isort? Maybe run the application in docker container and end up writing commands that are
+   too long for your screen?
+
+   This is where makefile comes. You can have everything kept in one place and use only make
+   clean to clean up unnecessary files or make tests to test your application.
+
+   Let start with some examples from makefile that I am using:
+HOST=127.0.0.1
+TEST_PATH=./
+
+clean-pyc:
+	find . -name '*.pyc' -exec rm --force {} +
+	find . -name '*.pyo' -exec rm --force {} +
+	name '*~' -exec rm --force  {}
+
+clean-build:
+	rm --force --recursive build/
+	rm --force --recursive dist/
+	rm --force --recursive *.egg-info
+
+isort:
+	sh -c "isort --skip-glob=.tox --recursive . "
+
+lint:
+	flake8 --exclude=.tox
+
+test: clean-pyc
+	py.test --verbose --color=yes $(TEST_PATH)
+
+run:
+	python manage.py runserver
+
+docker-run:
+	docker build \
+	  --file=./Dockerfile \
+	  --tag=my_project ./
+	docker run \
+	  --detach=false \
+	  --name=my_project \
+	  --publish=$(HOST):8080 \
+	  my_project
+
+   At the beginning, I add two variables HOST and TEST_PATH for every command to use them.
+   Rule clean-pyc finds all files that end with *.pyc, *.pyo or *~ and delete them. The plus
+   sign at the end of the command is for -exec command {} which means that the total number of
+   invocations of the command will be much less than the number of matched files.
+
+   Next one clean-build is for removing build artifacts. In isort shell is executing isort
+   command with proper attributes, -c flag is for reading commands from a string rather than
+   from standard input. lint and run works on the same pattern. In test I added the additional
+   rule to execute before actual tests- clean-pyc. Last docker-run rule builds and runs
+   docker.
+
+   Additional things that you want to add is something called PHONY. By default, makefile
+   operates on files so if there will be a file called clean-pyc it will try to use it instead
+   of a command. To avoid this use PHONY at the beginning of your makefile:
+.PHONY: clean-pyc clean-build
+
+   I also like to have help function for my makefile so I put this somewhere inside:
+	@echo "    clean-pyc"
+	@echo "		   Remove python artifacts."
+	@echo "    clean-build"
+	@echo "		   Remove build artifacts."
+	@echo "    isort"
+		   Sort import statements.
+	@echo "    lint"
+	@echo "		   Check style with flake8."
+	@echo "    test"
+	@echo "		   Run py.test"
+	@echo '    run'
+	@echo '		   Run the 'my_project' service on your local machine.'
+	@echo '    docker-run'
+	@echo '		   Build and run the 'my_project' service in a Docker container.'
+
+   There is @ before each echo because by default make prints every line to the console before
+   it's executed. At sign is to suppress this and @ is discarded before line is passed to the
+   shell.
+
+   But what if I wanted to run my application on different host and port using makefile? It's
+   simple just add:
+run:
+	python manage.py runserver --host $(HOST) --port $(PORT)
+
+   Then you can simply run:
+$> make run HOST=127.0.0.1 PORT=8000
+
+   Lastly be aware that indentation in makefile has to be made using TAB, not spaces.
+
+What benefit you can have by using makefile in python projects
+   As you can see using makefile in python projects can bring many good things. If you are
+   tired of writing complicated shell commands- put them under a rule in the makefile. Want
+   other people easily run tests against your project? Put pytest calls in makefile. Ideas are
+   endless.
+
+
+
+---
+https://stackabuse.com/how-to-write-a-makefile-automating-python-setup-compilation-and-testing
+July 7th, 2020
+
+How to Write a Makefile - Automating Python Setup, Compilation, and Testing
+
+Introduction
+   When you want to run a project that has multiple sources, resources, etc., you need to make
+   sure that all of the code is recompiled before the main program is compiled or run.
+
+   For example, imagine our software looks something like this:
+main_program.source -> uses the libraries 'math.source' and 'draw.source'
+math.source -> uses the libraries 'floating_point_calc.source' and 'integer_calc.source'
+draw.source -> uses the library 'opengl.source'
+
+   So if we make a change in opengl.source for example, we need to recompile both draw.source
+   and main_program.source because we want our project to be up-to-date on all ends.
+
+   This is a very tedious and time-consuming process. And because all good things in the
+   software world come from some engineer being too lazy to type in a few extra commands,
+   Makefile was born.
+
+	 Makefile uses the make utility, and if we're to be completely accurate, Makefile is just
+	 a file that houses the code that the make utility uses. However, the name Makefile is
+	 much more recognizable.
+
+   Makefile essentially keeps your project up to date by rebuilding only the necessary parts
+   of your source code whose children are out of date. It can also automatize compilation,
+   builds and testing.
+
+	 In this context, a child is a library or a chunk of code which is essential for its
+	 parent's code to run.
+
+   This concept is very useful and is commonly used with compiled programming languages. Now,
+   you may be asking yourself:
+
+	 Isn't Python an interpreted language?
+   Well, Python is technically both an interpreted and compiled language, because in order for
+   it to interpret a line of code, it needs to precompile it into byte code which is not
+   hardcoded for a specific CPU, and can be run after the fact.
+
+   A more detailed, yet concise explanation can be found on Ned Batchelder's blog. Also,
+   if you need a refresher on how Programming Language Processors work, we've got you
+   covered.
+
+Concept Breakdown
+   Because Makefile is just an amalgamation of multiple concepts, there are a few things
+   you'll need to know in order to write a Makefile:
+	1. Bash Scripting
+	2. Regular Expressions
+	3. Target Notation
+	4. Understanding your project's file structure
+
+   With these in hand, you'll be able to write instructions for the make utility and automate
+   your compilation.
+
+   Bash is a command language (it's also a Unix shell but that's not really relevant right
+   now), which we will be using to write actual commands or automate file generation.
+
+   For example, if we want to echo all the library names to the user:
+DIRS=project/libs
+for file in $(DIRS); do
+	echo $$file
+done
+
+   Target notation is a way of writing which files are dependent on other files. For example,
+   if we want to represent the dependencies from the illustrative example above in proper
+   target notation, we'd write:
+main_program.cpp: math.cpp draw.cpp
+math.cpp: floating_point_calc.cpp integer_calc.cpp
+draw.cpp: opengl.cpp
+
+   As far as file structure goes, it depends on your programming language and environment.
+   Some IDEs automatically generate some sort of Makefile as well, and you won't need to write
+   it from scratch. However, it's very useful to understand the syntax if you want to tweak
+   it.
+
+   Sometimes modifying the default Makefile is even mandatory, like when you want to make
+   OpenGL and CLion play nice together.
+
+Bash Scripting
+   Bash is mostly used for automation on Linux distributions, and is essential to becoming an
+   all-powerful Linux "wizard". It's also an imperative script language, which makes it very
+   readable and easy to understand. Note that you can run bash on Windows systems, but it's
+   not really a common use case.
+
+   First let's go over a simple "Hello World" program in Bash:
+# Comments in bash look like this
+
+#!/bin/bash
+# The line above indicates that we'll be using bash for this script
+# The exact syntax is: #![source]
+echo "Hello world!"
+
+   When creating a script, depending on your current umask, the script itself might not be
+   executable. You can change this by running the following line of code in your terminal:
+chmod +x name_of_script.sh
+
+   This adds execute permission to the target file. However, if you want to give more specific
+   permissions, you can execute something similar to the following command:
+chmod 777 name_of_script.sh
+
+   Next, let's quickly go over some basics utilizing simple if-statements and variables:
+   [dvp-mpl-bundle-1-small.jpg]
+
+#!/bin/bash
+
+echo "What's the answer to the ultimate question of life, the universe, and everything?"
+read -p "Answer: " number
+# We dereference variables using the $ operator
+echo "Your answer: $number computing..."
+# if statement
+# The double brackets are necessary, whenever we want to calculate the value of an expression or sub
+expression, we have to use double brackets, imagine you have selective double vision.
+if (( number == 42 ))
+then
+	echo "Correct!"
+	# This notation, even though it's more easily readable, is rarely used.
+elif (( number == 41 || number == 43 )); then
+	echo "So close!"
+	# This is a more common approach
+else
+	echo "Incorrect, you will have to wait 7 and a half million years for the answer!"
+fi
+
+   Now, there is an alternative way of writing flow control which is actually more common than
+   if statements. As we all know Boolean operators can be used for the sole purpose of
+   generating side-effects, something like:
+++a && b++
+
+   Which means that we first increment a, and then depending on the language we're using, we
+   check if the value of the expression evaluates to True (generally if an integer is >0 or
+   =/=0 it means its boolean value is True). And if it is True, then we increment b.
+
+   This concept is called conditional execution and is used very commonly in bash scripting,
+   for example:
+#!/bin/bash
+
+# Regular if notation
+echo "Checking if project is generated..."
+# Very important note, the whitespace between '[' and '-d' is absolutely essential
+# If you remove it, it'll cause a compilation error
+if [ -d project_dir ]
+then
+	echo "Dir already generated."
+else
+	echo "No directory found, generating..."
+	mkdir project_dir
+fi
+
+   This can be rewritten using a conditional execution:
+echo "Checking if project is generated..."
+[ -d project_dir ] || mkdir project_dir
+
+   Or, we can take it even further with nested expressions:
+echo "Checking if project is generated..."
+[ -d project_dir ] || (echo "No directory found, generating..." && mkdir project_dir)
+
+   Then again, nesting expressions can lead down a rabbit hole and can become extremely
+   convoluted and unreadable, so it's not advised to nest more than two expressions at most.
+
+   You might be confused by the weird [ -d ] notation used in the code snippet above, and
+   you're not alone.
+
+   The reasoning behind this is that originally conditional statements in Bash were written
+   using the test [EXPRESSION] command. But when people started writing conditional
+   expressions in brackets, Bash followed, albeit with a very unmindful hack, by just
+   remapping the [ character to the test command, with the ] signifying the end of the
+   expression, most likely implemented after the fact.
+
+   Because of this, we can use the command test -d FILENAME which checks if the provided file
+   exists and is a directory, like this [ -d FILENAME ].
+
+Regular Expressions
+   Regular expressions (regex for short) give us an easy way to generalize our code. Or rather
+   to repeat an action for a specific subset of files that meet certain criteria. We'll cover
+   some regex basics and a few examples in the code snippet below.
+
+   Note: When we say that an expression catches ( -> ) a word, it means that the specified
+   word is in the subset of words that the regular expression defines:
+# Literal characters just signify those same characters
+StackAbuse -> StackAbuse
+sTACKaBUSE -> sTACKaBUSE
+
+# The or (|) operator is used to signify that something can be either one or other string
+Stack|Abuse -> Stack
+	-> Abuse
+Stack(Abuse|Overflow) -> StackAbuse
+	  -> StackOverflow
+
+# The conditional (?) operator is used to signify the potential occurrence of a string
+The answer to life the universe and everything is( 42)?...
+	-> The answer to life the universe and everything is...
+	-> The answer to life the universe and everything is 42...
+
+# The * and + operators tell us how many times a character can occur
+# * indicates that the specified character can occur 0 or more times
+# + indicates that the specified character can occur 1 or more times
+He is my( great)+ uncle Brian. -> He is my great uncle Brian.
+	   -> He is my great great uncle Brian.
+# The example above can also be written like this:
+He is my great( great)* uncle Brian.
+
+   This is just the bare minimum you need for the immediate future with Makefile. Though, on
+   the long term, learning Regular Expressions is a really good idea.
+
+Target Notation
+   After all of this, now we can finally get into the meat of the Makefile syntax. Target
+   notation is just a way of representing all the dependencies that exist between our source
+   files.
+
+   Let's look at an example that has the same file structure as the example from the beginning
+   of the article:
+# First of all, all pyc (compiled .py files) are dependent on their source code counterparts
+main_program.pyc: main_program.py
+	python compile.py $<
+math.pyc: math.py
+	python compile.py $<
+draw.pyc: draw.py
+	python compile.py $<
+
+# Then we can implement our custom dependencies
+main_program.pyc: main_program.py math.pyc draw.pyc
+	python compile.py $<
+math.pyc: math.py floating_point_calc.py integer_calc.py
+	python compile.py $<
+draw.pyc: draw.py opengl.py
+	python compile.py $<
+
+   Keep in mind that the above is just for the sake of clarifying how the target notation
+   works. It's very rarely used in Python projects like this, because the difference in
+   performance is in most cases negligible.
+
+   More often than not, Makefiles are used to set up a project, clean it up, maybe provide
+   some help and test your modules. The following is an example of a much more realistic
+   Python project Makefile:
+# Signifies our desired python version
+# Makefile macros (or variables) are defined a little bit differently than traditional bash, keep in
+ mind that in the Makefile there's top-level Makefile-only syntax, and everything else is bash script syntax.
+PYTHON = python3
+
+# .PHONY defines parts of the makefile that are not dependant on any specific file
+# This is most often used to store functions
+.PHONY = help setup test run clean
+
+# Defining an array variable
+FILES = input output
+
+# Defines the default target that 'make' will to try to make, or in the case of a phony target, exec
+ute the specified commands
+# This target is executed whenever we just type 'make'
+.DEFAULT_GOAL = help
+
+# The @ makes sure that the command itself isn't echoed in the terminal
+help:
+	@echo "---------------HELP-----------------"
+	@echo "To setup the project type make setup"
+	@echo "To test the project type make test"
+	@echo "To run the project type make run"
+	@echo "------------------------------------"
+
+# This generates the desired project file structure
+# A very important thing to note is that macros (or makefile variables) are referenced in the target
+'s code with a single dollar sign ${}, but all script variables are referenced with two dollar signs
+ $${}
+setup:
+
+	@echo "Checking if project files are generated..."
+	[ -d project_files.project ] || (echo "No directory found, generating..." && mkdir project_files.project)
+	for FILE in ${FILES}; do \
+		touch "project_files.project/$${FILE}.txt"; \
+	done
+
+# The ${} notation is specific to the make syntax and is very similar to bash's $()
+# This function uses pytest to test our source files
+test:
+	${PYTHON} -m pytest
+
+run:
+	${PYTHON} our_app.py
+
+# In this context, the *.project pattern means "anything that has the .project extension"
+clean:
+	rm -r *.project
+
+   With that in mind, let's open up the terminal and run the Makefile to help us out with
+   generating and compiling a Python project:
+
+   running make with the makefile
+
+Conclusion
+   Makefile and make can make your life much easier, and can be used with almost any
+   technology or language.
+
+   It can automate most of your building and testing, and much more. And as can be seen from
+   the example above, it can be used with both interpreted and compiled languages.
+
+
+---
+https://medium.com/@habibdhif/simple-makefile-to-automate-python-projects-e233af7681ad
+
+Simple Makefile to automate Python projects
+Aug 29, 2019
+
+   Makefiles make it easy to automate projects. I use them in almost all my projects including
+   python ones. All you have to do is type a couple of commands and everything is set. They
+   are also very useful when you are collabrating with others to keep everyone synced and
+   using the same python environment.
+
+The Makefile
+
+The Essentials
+   Now the first 12 lines of the files is really all you need for your makefiles.The first two
+   rules here are for creating an isolated Python environments using virtualenv. I prefer
+   using virtualenv to anaconda's environment manager because it makes the project more
+   contained and easier to manage.
+virtual: .venv/bin/pip
+.venv/bin/pip:
+	virtualenv -p /usr/bin/python3 .venv
+
+   The third rule is for installing the requirements listed on the requirement file.
+install:
+	.venv/bin/pip install -Ur requirements.txt
+
+   This rule is for freezing your Python package dependencies. Now it is not necessary to use
+   the freeze option wich adds the exact version for each dependency but it is a recommended
+   if you wanna have full control on what dependencies to use especially if your app is going
+   to run on a production like environment.
+update-requirements: install
+	.venv/bin/pip freeze > requirements.txt
+
+Formatting, sorting and linting
+   Now the rest of the Makefile is not really essential but I think linting and formatting
+   your code is a really good practice. It makes it more readable, it finds all the silly
+   (syntax) errors before even executing the code and overall it just improves the code
+   quality.
+
+   The first rule of this section is to format your code. I use black package to achieve that.
+   It is simple, fast and you have nothing to configure.
+black: .venv/bin/black
+	.venv/bin/black *.py
+
+   isort will simply sort your imports if you are into that.
+isort: .venv/bin/isort
+	.venv/bin/isort *.py
+
+   The final rule is for linting your code, this will check your code syntax and provide clear
+   instructions on how to clean it.
+flake8: .venv/bin/flake8
+	.venv/bin/flake8 *.py
+
+   That's it!
+
+
+---
+https://medium.com/aigent/makefiles-for-python-and-beyond-5cf28349bf05
+
+Makefiles for Python and beyond
+
+   Makefiles are quite unpopular in the dynamic languages world. Some Python and JavaScript
+   developers consider GNU make an ancient, deprecated, outdated, and dying tool, used by some
+   dinosaurs.
+
+   The truth is: make is a wonderful and often misunderstood tool. It is fairly simple yet
+   very powerful. Hell, source-based Linux distros and BSD operating systems heavily rely on
+   make.
+
+   There are many application for Makefiles outside of C/C++ world, and I think that make
+   deserves more attention and love.
+
+Why does Python even need a Makefile?
+   The short answer is: to avoid the "It worked on my machine" situation. Python does a very
+   good job to abstract OS layer, although Python application still needs some kind of
+   packaging before it can be distributed, or deployed to a server.
+
+   In general, Makefile is a good alternative to a bunch of bash scripts used to automate
+   tedious tasks.
+
+   First of all, instead of remembering and typing ill ./do_this_one_thing.sh
+   ./do_the_other_one (was it dash or underscore?), you can confidently strike: make one two.
+
+   But that's a joke, of course.
+
+   The real reason is: as soon as there is more than one bash script, the hidden dependencies
+   may arrive. You have to run script_1 before running script_2. Another problem is copy-paste
+   code (each bash file tends to hold the same paths, artifacts names, and whatnot).
+
+Make for the rescue
+   Feel free to skip this intro if you're already familiar with make.
+
+   All make does is tracks files' dependency graph, and "last modified" timestamps of the
+   files. If one of dependencies timestamp is greater than the one of the original file, the
+   original file needs to be rebuilt.
+
+   Every time, one file has to be built from another, make is a good alternative for the job.
+   You may think of building a .jpg from .dot files, or .mpeg4 from video, audio and subtitles
+   files, or .html files build from .j2 or .pug templates. Python itself does the very same
+   thing with .pyc files.
+
+   A Makefile consists of "rules" in the following form:
+target: dependency1, dependency2, ...
+<TAB>recipe line
+<TAB>recipe line
+...
+
+   target is a file needs to be built; dependency1 and dependency2 are source files used to
+   build the target, and recipe is a shell command used as a build step.
+
+   If you want to just copy a file, you may write something like:
+dist/config.yaml: src/config.yaml
+	cp -f src/config.yaml dist/config.yaml
+
+What is all this have to do with Python again?
+   Okay, let us make a simple application.
+
+   Let's say we want to make an application that shows random cat gifs (the example is
+   shamelessly hijacked from the glorious Elm tutorial)
+   app.py
+
+   So now you want to show this application to your buddies. No - the whole World must to see
+   it in its magnificence.
+
+   The application should render something like this:
+
+   The only problem is:
+Traceback (most recent call last):
+ File "./app.py", line 3, in <module>
+ import requests
+ ModuleNotFoundError: No module named 'requests'
+
+   Okay, apparently simple python3 app.py may not work.
+
+   Let's make a virtual environment, and install requests module in it. requirements.txt file
+   with the long list of all the requirements:
+
+   requests
+
+   Long, long list.
+
+   (Trying to pull out real-world example out of the thin air here).
+
+   And the virtual environment itself:
+$> python3 -m venv venv
+$> ./venv/bin/pip install -r requirements.txt
+
+   We may even want to save this into some build.sh file.
+
+   Now all we need is:
+$> ./venv/bin/python3 app.py
+
+   And we also may want to save this one-liner into some run.sh.
+
+   So this is the very common situation I was talking about in the beginning: we need to run
+   build.sh before run.sh, and this dependency is hidden and nowhere stated.
+
+   Let's see if this make stuff will be more clear.
+
+   The first rule in our Makefile will be the virtual environment, but "venv" is a directory,
+   and we need a plain file, so let's take any file from the " venv". For instance,
+   "venv/bin/activate" will do:
+venv/bin/activate: requirements.txt
+	python3 -m venv venv
+	./venv/bin/pip install -r requirements.txt
+
+   Now if we run make in the project's directory, we'll get virtual environment build with
+   requests installed. We had it before, with bash, but now dependency is tracked, so running
+   make the second time will give us:
+$> make
+make: 'venv/bin/activate' is up to date.
+
+   If we will edit requirements.txt - add or remove dependencies, make will rebuild the
+   virtual environment for us automagically:
+$> touch requirements.txt  # simulate edit
+$> make
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+Requirement already satisfied: requests in ./venv/lib/python3.7/site-packages...
+
+   Now, let's make the second target called run to run our application:
+run: venv/bin/activate
+	./venv/bin/python3 app.py
+
+   run explicitly depends on the virtual environment target, so now you only have to type make
+   run and dependencies will be created or updated before running the application.
+
+   So far so good, but we need to go deeper.
+
+   First of all, we don't have the file named run; make thinks that this file will be created
+   after executing the recipe, so it all works. Although, if someone would decide to created a
+   file named run the behavior of make would become unexpected.
+
+   Let's fix it by explicitly saying that we don't expect a file to be produced.
+
+   .PHONY: run
+
+   Now run is a phony target, and it will be re-evaluated every time it is called (that's
+   exactly what we need).
+
+   We may want to add the clean target to remove what we don't need:
+clean:
+	rm -rf venv
+	find . -type f -name '*.pyc' -delete
+
+   Don't forget that the clean target also doesn't produce a file:
+
+   .PHONY: run clean
+
+   By default, running make without arguments will execute the first rule from the Makefile.
+   It is considered a good style to define an entry target called all that should define a
+   default behavior. In our case, it will create the virtual environment.
+
+   all: venv/bin/activate
+
+   And again:
+
+   .PHONY: all run clean
+
+Want more make?
+   This is where some people draw the line in the sand, but make also has variables,
+   functions, and macros.
+
+   Variables are really simple:
+   NAME := VALUE
+
+   defines a variable, that can be refered by ${NAME} or $(NAME)
+
+   There is also some useful shortcuts:
+   NAME ?= VALUE
+
+   Assign VALUE to the variable NAME if it's not yet defined.
+
+   This is especially useful because you may define variables while executing make:
+
+   $> make BUILD=RELEASE ENVIRONMENT=PRODUCTION
+
+   There is also a possibility to declare an alias, like this:
+
+   NAME = VALUE
+
+   In this case, right hand side will be evaluated every time variable is accessed.
+
+   This can be explained easily by the following example
+v1 := $(shell ls)
+v2 = $(shell ls)
+
+   Both variables hold the result of the shell ls command execution, but v1 will be evaluated
+   only once, and will never show any new files.
+
+   By the way, shell is a make functions. Hooray, we've also learned the make functions!
+
+   Let's wrap up everything we've learned just now:
+
+   Easy, right?
+
+What else?
+   You may want to add your favorite linter and formatter: pep8, yapf, pyflakes - you name it.
+   You can generate gRPC or swagger stub, you can generate documentation from .rst or .md
+   files.
+
+A shiny new hammer
+   Why not use make for everything? Literally everything?!
+
+   It is very good tool for tracking dependencies between files with benefits, but when
+   targets are dynamics, like docker images, or deployments... Well, things may get ugly and
+   unpredictable. Builds may be haunted.
+
+TL;DR
+   Makefiles still rocks in 2020! Feel free to use make outside of the C/C++ world having fun
+   joy and pleasure.
+
+   Every time a file needs to be created from other files, GNU make is a good candidate for
+   the job.
+
+
+---
+

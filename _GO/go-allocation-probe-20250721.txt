@@ -1,0 +1,262 @@
+filename: go-allocation-probe-20250721.txt
+https://www.scattered-thoughts.net/writing/go-allocation-probe/
+
+Go allocation probe
+2025-07-18
+
+   The profiling tools in go will tell you where allocations happened in the code, but won't record the
+   type of the allocation. I suspected that in the code I was looking at, some specific types were
+   causing a lot of allocation but that those allocations were spread over many locations. So with the
+   help of Matt Knight I wrote perhaps the most appallingly fragile code I have ever written -
+   go_allocation_probe.
+
+   Every heap allocation in go afaict goes through a single function - mallocgc.
+func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer
+
+   So we attach a bpftrace uprobe to mallocgc. The go calling convention on x64 is pretty
+   straightforward, so we can easily grab the size and typ arguments from registers, and we can count
+   the number of calls and total bytes per type. Easy.
+
+   Now we can just print out the name of the type and... what a minute... what is this *_type?
+
+   Turns out it's an alias for abi.Type.
+type Type struct {
+	Size_         uintptr
+	PtrBytes      uintptr // number of (prefix) bytes in the type that can contain pointers
+	Hash          uint32  // hash of type; avoids computation in hash tables
+	TFlag         TFlag   // extra type information flags
+	Align_        uint8   // alignment of variable with this type
+	FieldAlign_   uint8   // alignment of struct field with this type
+	Kind_         Kind    // enumeration for C
+	                      // function for comparing objects of this type
+	                      // (ptr to object A, ptr to object B) -> ==?
+	Equal func(unsafe.Pointer, unsafe.Pointer) bool
+	// GCData stores the GC type data for the garbage collector.
+	// Normally, GCData points to a bitmask that describes the
+	// ptr/nonptr fields of the type. The bitmask will have at
+	// least PtrBytes/ptrSize bits.
+	// If the TFlagGCMaskOnDemand bit is set, GCData is instead a
+	// **byte and the pointer to the bitmask is one dereference away.
+	// The runtime will build the bitmask if needed.
+	// (See runtime/type.go:getGCMask.)
+	// Note: multiple types may have the same value of GCData,
+	// including when TFlagGCMaskOnDemand is set. The types will, of course,
+	// have the same pointer layout (but not necessarily the same size).
+	GCData        *byte
+	Str           NameOff // string form
+	PtrToThis     TypeOff // type for pointer to this type, may be zero
+}
+
+   So Str is the name of the type? Nope, it's an integer offset into... something.
+// NameOff is the offset to a name from moduledata.types. See resolveNameOff in runtime.
+type NameOff int32
+
+   Well, we can't run resolveNameOff inside bpftrace, so let's just grab the NameOff and figure the rest
+   out later.
+
+uprobe:/home/jamie/go-perf-probe/main:runtime.mallocgc {
+	@main_pid = pid;
+	$size = (uint64) reg("ax");
+	$typ = (uint64) (uint32) reg("bx");
+	@typNameOff[$typ] = *($typ + 40); // Type.Str
+	@typCount[$typ] = sum(1);
+	@typSize[$typ] = sum($size);
+}
+
+tracepoint:sched:sched_process_exit {
+	// Exit bpftrace when the traced program exits.
+	if (@main_pid == pid) {
+		exit();
+	}
+}
+
+END {
+	for ($typ_nameOff : @typNameOff) {
+		printf(
+			"{\"TypePtr\": %lu, \"NameOff\": %u, \"Count\": %u, \"Size\": %u}\n",
+			$typ_nameOff.0,
+			$typ_nameOff.1,
+			(uint64) @typCount[$typ_nameOff.0],
+			(uint64) @typSize[$typ_nameOff.0]
+		);
+	}
+
+	// Don't print out this crap.
+	clear(@main_pid);
+	clear(@typNameOff);
+	clear(@typCount);
+	clear(@typSize);
+	clear(@typ);
+}
+
+   So that spits out some json with that looks like:
+{"TypePtr": 4688320, "NameOff": 7877, "Count": 1, "Size": 88}
+{"TypePtr": 4677280, "NameOff": 6247, "Count": 2, "Size": 1440}
+{"TypePtr": 4657120, "NameOff": 4982, "Count": 1, "Size": 128}
+{"TypePtr": 4654240, "NameOff": 4958, "Count": 3, "Size": 56}
+{"TypePtr": 4687872, "NameOff": 7909, "Count": 1, "Size": 88}
+{"TypePtr": 0, "NameOff": 0, "Count": 84, "Size": 8223}
+{"TypePtr": 4645728, "NameOff": 11799, "Count": 1, "Size": 24}
+{"TypePtr": 4695904, "NameOff": 4970, "Count": 4, "Size": 7232}
+{"TypePtr": 4663136, "NameOff": 13210, "Count": 2, "Size": 32}
+{"TypePtr": 4646304, "NameOff": 2480, "Count": 3, "Size": 1248}
+{"TypePtr": 4692160, "NameOff": 4982, "Count": 16, "Size": 143232}
+{"TypePtr": 4647008, "NameOff": 3175, "Count": 10, "Size": 10800}
+{"TypePtr": 4652224, "NameOff": 8432, "Count": 1, "Size": 224}
+{"TypePtr": 4694400, "NameOff": 4958, "Count": 13, "Size": 5720}
+
+   Now we need to figure out the names of those types.
+
+   Reading resolveNameOff, it's looking up the name offset in a big linked-list of constant data.
+   These get mapped into memory from a constant section in the executable, which means that we can
+   recreate this logic in a different process.
+
+   So first we have to find the right sections in the executable. Annoyingly, the data we need is spread
+   across two sections.
+
+file, err := elf.Open("/home/jamie/go-perf-probe/main")
+if err != nil {
+	return err
+}
+
+symbols, err := file.Symbols()
+if err != nil {
+	return err
+}
+
+var firstmoduledata elf.Symbol
+for _, symbol := range symbols {
+	if symbol.Name == "runtime.firstmoduledata" {
+		firstmoduledata = symbol
+		break
+	}
+}
+
+noptrdata := file.Section(".noptrdata")
+rodata := file.Section(".rodata")
+
+   Now for TypePtr in the json we can loop over the linked list of modules in the elf, looking for the
+   one that matches this ptr. When we find the right module it gives us a pointer to where the type name
+   would be loaded in memory, which we then have to map back to a different data section.
+
+modulePtr := firstmoduledata.Value
+for {
+	// runtime.moduledata.types +296 uintptr
+	typesPtr := readUint64(noptrdata, modulePtr-noptrdata.Addr+296)
+
+	// runtime.moduledata.etypes +304 uintptr
+	etypesPtr := readUint64(noptrdata, modulePtr-noptrdata.Addr+304)
+
+	if log.TypePtr >= typesPtr && log.TypePtr < etypesPtr {
+		len, bytesRead := readUvarint(rodata, typesPtr-rodata.Addr+log.NameOff+1)
+		return readString(rodata, typesPtr-rodata.Addr+log.NameOff+1+uint64(bytesRead), int(len))
+	} else {
+		// runtime.moduledata.next +576 *moduledata
+		modulePtr := readUint64(noptrdata, modulePtr-noptrdata.Addr+576)
+
+		if modulePtr == 0 {
+			return "<type not found>"
+		}
+	}
+}
+
+   Finally we get some names and we find that the most frequently allocated type is <type not found>,
+   with TypePtr: 0. What the hell?
+
+   Turns out that passing the type pointer to mallocgc is optional - you can just pass nil if the type
+   doesn't contain any pointers.
+
+   So we grep through the go runtime and find all the places that might call mallocgc with a nil type
+   and also probe those. Some of them don't have type pointers, so we'll just make up some invalid
+   pointers and catch them later.
+
+uprobe:/home/jamie/go-perf-probe/main:runtime.mallocgc {
+	@main_pid = pid;
+	$size = (uint64) reg("ax");
+	$typ = (uint64) (uint32) reg("bx");
+
+	if ($typ == 0) {
+		$typ = @typ[tid];
+	}
+
+	@typNameOff[$typ] = *($typ + 40);
+	@typCount[$typ] = sum(1);
+	@typSize[$typ] = sum($size);
+}
+
+uprobe:/home/jamie/go-perf-probe/main:runtime.makechan {
+	@typ[tid] = (uint32) reg("ax")
+}
+
+uprobe:/home/jamie/go-perf-probe/main:runtime.makeslicecopy {
+			@typ[tid] = (uint32) reg("ax")
+		}
+
+uprobe:/home/jamie/go-perf-probe/main:runtime.growslice {
+	@typ[tid] = (uint32) reg("si")
+}
+
+uprobe:/home/jamie/go-perf-probe/main:runtime.slicebytetostring {
+	@typ[tid] = 19 // string
+}
+
+config = { missing_probes = "warn" }
+// TODO missing_probes="warn" doesn't seem to work currently, these still error out.
+//
+//	uprobe:/home/jamie/go-perf-probe/main:runtime.bytealg_MakeNoZero {
+//		@typ[tid] = 17 // bytes
+//	}
+//
+//	uprobe:/home/jamie/go-perf-probe/main:runtime.rawstring {
+//		@typ[tid] = 17 // bytes
+//	}
+
+uprobe:/home/jamie/go-perf-probe/main:runtime.rawbyteslice {
+	@typ[tid] = 17 // bytes
+}
+
+uprobe:/home/jamie/go-perf-probe/main:runtime.rawruneslice {
+	@typ[tid] = 17 // bytes
+}
+
+uprobe:/home/jamie/go-perf-probe/main:runtime.itabAdd {
+	@typ[tid] = 18 // itab
+}
+
+if log.TypePtr == 0 {
+	return "<type not captured>"
+}
+
+if log.TypePtr == 17 {
+	return "<bytes>"
+}
+
+if log.TypePtr == 18 {
+	return "<itab>"
+}
+
+if log.TypePtr == 19 {
+	return "<string>"
+}
+
+   Really we should also unset @typ when these functions return, but uretprobes don't work in go
+   programs, probably due to stack-growing shenanigans.
+
+   This code still isn't quite right. When you allocate []T it will get reported with name *T but with a
+   different type pointer than a regular *T, so you might see *T appear twice in the report. I was too
+   lazy to add another flag to the output to fix it.
+
+   But it worked well enough to confirm my hunch that significant numbers of allocations were *string
+   from many occurrences of this pattern:
+
+func (thing *Thing) String() *string {
+	if thing == nil {
+		return nil
+	}
+	str = ...
+	return &str
+}
+
+
+---
+

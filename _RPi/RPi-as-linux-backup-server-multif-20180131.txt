@@ -1,0 +1,2016 @@
+filename: RPi_as_linux_backup_server-multif_20180131.txt
+https://opensource.com/life/16/3/turn-your-old-raspberry-pi-automatic-backup-server
+
+Turn your old Raspberry Pi into an automatic backup server
+16 Mar 2016
+
+   If you're one of those people upgrading to the Raspberry Pi 3, you might wonder what to do with your
+   old, lesser Pi. Aside from turning it into an array of blinking LEDs to entertain your cat, you might
+   consider configuring it as a microcontroller.
+
+   More on Raspberry Pi
+     * Our latest on Raspberry Pi
+     * What is Raspberry Pi?
+     * Getting started with Raspberry Pi
+     * Send us your Raspberry Pi projects and tutorials
+
+   Making backups of our digital lives is, as most of us begrudgingly admit, the most important thing of
+   daily computing that none of us bother to do. That's because going through the backup process
+   requires us to remember to do it, it takes effort, and it takes time. And that's precisely why the
+   best backup solution is the solution that you don't do at all; it's the one you automate.
+
+   Such a system is best when it's always on, running in the background. And that's exactly what a
+   Raspberry Pi is best at. You can leave the Pi on all day and all night and never notice it on your
+   power bill, and you can task it with the simple activity of running backups across your home network.
+   All you need is a Raspberry Pi and a big hard drive and you have built, essentially, a custom version
+   of those annoying "easy backup" systems that hard drive companies come out with every few years (you
+   know the ones? the ones you hook up to your network, waste a weekend trying to configure only to
+   discover in a hidden online forum that nothing works as advertised due to a bug in the firmware,
+   which the hard drive company promised they'll fix "soon" two years ago).
+
+rdiff-backup
+   First, you need to choose some backup software to have your backup server (your Pi) and your clients
+   (your laptop, desktop, and whatever else) run.
+
+   There are several tools for auto backups, but I've found over the years that most of the nice slick
+   graphical backup solutions end up falling out of maintenance until they fade away, forcing me to
+   switch to something different. That gets annoying after a while, so I started using rsync, the
+   venerable old UNIX command that's been around for decades. This served me quite well, but I started
+   finding myself wanting versioned backups of certain files; rsync does a backup for files that have
+   changed, but it overwrites the old version with the new, so if my problem isn't that a file has been
+   deleted but that I've messed up a file beyond recognition, then having rsync'd backup files don't do
+   me a bit of good, because the backup almost always ends up being the bad version of a file that I was
+   looking to replace.
+
+   Then I found rdiff-backup, a simple backup tool based on rsync (it uses librsync), and thereby
+   inheriting its reliability (it has, however, only been around since 2001, so it doesn't have quite
+   the history that rsync has). Rdiff-backup performs incremental backups locally or over a network
+   using standard UNIX tools (tar, rdiff, rsync, and so on), so even if it does fade away, the backup
+   files it creates are still useful. It's lightweight and runs on both Linux and FreeBSD, so it's
+   trivial to run even on the oldest Raspberry Pi.
+
+Server install
+   You don't need any special setup to turn your Raspberry Pi into a backup server. Assuming your Pi is
+   up and running, all you need to do is install rdiff-backup from your repository, ports, or extras
+   site.
+
+Client install
+   As for your clients (that is, the computers that are going to get backed up by your Pi), rdiff-backup
+   can be run on Linux, BSD, Windows, and Mac OS X, so chances are you can use this for all the
+   computers running in your home.
+
+The big hard drive
+   Even a 64GB SD card isn't going to go very far for incremental backups, so you'll need a big hard
+   drive to hook up to your Pi. You know your own data best, so let that be your guide when shopping for
+   a drive. For my home network, I have a relatively small (given the number of multimedia data files I
+   work with) 3TB drive; I do that for a number of reasons, but primarily because I don't actually back
+   up all of the data I own. A lot of data I work with exists elsewhere anyway, so there's no need for
+   me to back it up, and things like my music and movie collection I don't consider vital enough to
+   backup, either. So don't feel like you have to literally keep track of every last kilobyte; just get
+   to know your data and what matters to you most.
+
+   Once you've got the hard drive, hook it up to your Pi and format it. Strictly speaking, you may not
+   absolutely have to format it, but if you're going to have Linux manage the data then you may as well
+   store the data on a native filesystem. This assumes that your backup drive is either new or a drive
+   you want to wipe completely. If not, you can skip this part.
+
+   To format a drive on Linux, you must use root permissions. It somewhat depends on what distribution
+   you are running on your Pi (Raspbian, Pidora, and so on), but usually the sudo command is the way to
+   invoke this. No matter what, the tool to use is parted, and as long as you have no other drives
+   attached to your Pi (aside from the SD card it has booted from), then the location of your drive is
+   /dev/sda. For safety, I'll use /dev/sdx just to avoid potential copy-paste mishaps.
+
+   First, confirm the location of your drive:
+
+   $ sudo ls -1 /dev/sd*
+   /dev/sdX
+   /dev/sdX1
+   /dev/sdX2
+
+   Then run parted on the drive to confirm its total size:
+
+   $ sudo parted /dev/sdX unit MB print
+   Model: Tycoon hard drive Corp. (scsi)
+   Disk /dev/sda: 1985442MB
+   Sector size (logical/physical): 512B/512B
+   Partition Table: msdos
+
+   Look at the line that starts with Disk; this gives you the total size of the drive in megabytes. Jot
+   that down somewhere, because you'll need it in a moment.
+
+   Next, create a new partition on the drive, spanning the entire drive. Only do this if you want to
+   wipe the backup drive completely to make room for all your backups. If there is any data on the drive
+   that you do not want to disappear forever, then do not do this.
+
+   $ sudo parted /dev/sdX mklabel gpt
+   Warning: The existing disk label on /dev/sdX will be destroyed
+   and all data on this disk will be lost. Do you want to continue?
+   Yes/No? Yes
+   Information: You may need to update /etc/fstab.
+   $ sudo parted /dev/sdx mkpart primary 1 1985442
+   Information: You may need to update /etc/fstab.
+
+   Your fresh partition exists now, so create a filesystem inside of it. Note that for this command, you
+   use the partition rather than the disk location. So instead of /dev/sda, for example, you would use
+   /dev/sda1. For best results, also provide the disk with a label (the -L option), which we will use
+   later to auto-mount the drive.
+$ sudo mkfs.ext4 -L backupdrive /dev/sdx1
+
+   Your drive is now ready for its life as a backup drive.
+
+Auto-mounting the backup drive
+   The idea of using a Pi for your backup server is, in part, that it'll always be on. But if something
+   does happen (a power failure, for example, or accidental shutdown) then you want your backup drive to
+   be re-mounted automatically or else any attempt to backup will fail.
+
+   To setup auto-mounting for your drive, first create a standard location for it to be mounted. Drives
+   are usually mounted to locations like /media or /run/media, which is fine, but for simplicity just
+   create a directory for it at the root of your filesystem:
+$ sudo mkdir /backupdrive
+
+   And then edit /etc/fstab with root privileges in the text editor of your choice. Add this line:
+LABEL=backupdrive     /backupdrive    ext4   user,rw  0 0
+
+   And finally mount the drive:
+$ sudo mount -a
+
+The initial backup
+   The first backup you do is the largest and slowest backup because everything that you want backed up
+   is getting copied to your drive. Subsequent backups are much smaller and faster because only new
+   files (or blobs) or changes to files get copied over.
+
+   First, install rdiff-backup on the client computer (the one to be backed up to the Pi). It's
+   available for the major operating systems.
+
+   To make sure that your future backups go as expected, make your first backup using the same command
+   and same setup that you intend to use for the incremental backups. That means you shouldn't
+   disconnect the big drive from the Pi and plug it into the client so that it goes faster; perform
+   every backup the same way every time, so that you know exactly how to automate it later.
+
+   On the Pi, make a directory for the folder you are about to backup from your client. Assuming you
+   want to backup the client's home directory, create the a mirror of that folder on the backup drive:
+$ sudo mkdir -p /backupdrive/home/seth
+
+   And then make sure that the same user owns the directory:
+$ chown seth:users /backupdrive/home/seth
+
+   This assumes that user seth exists both on the client and on the Pi. You don't have to do it that way
+   (rdiff-backup can sign into the Pi as a different user), but it sometimes makes it easier to manage
+   when the backups are mirrors of the source.
+
+   This also assumes that you are backing up your home directory. That's usually a good place to start
+   (I assume that if you're running Linux, then you can download and replace the base system for free),
+   but you might want to leave out large files that you don't need to backup. List files and folders to
+   exclude from backups in a file called .excludes in your home directory. At the very least, you can
+   probably safely exclude your trash directory:
+$ echo "$HOME/.local/.local/share/Trash" && $HOME/.excludes
+
+   The basic rdiff-backup command from your client computer, where 192.168.3.14 is the IP address of
+   your Pi:
+
+   $ rdiff-backup --terminal-verbosity 8 --print-statistics \
+   --exclude-globbing-filelist $HOME/.excludes \
+   /home/seth/ seth@192.168.3.14::/backupdrive/home/seth/
+
+   That command should kick off a lengthy rsync process in which all files are discovered to not exist
+   on the backup drive, and therefore are copied from the client to the Pi. If it failed, check the
+   permissions involved; your user (on the Pi) must be able to write to the backup drive. Also, your
+   user must be able to successfully SSH into the Pi remotely.
+
+Auto login
+   Since our aim is to automate this process, the login process that kicks off backups must also happen
+   without intervention. It's easy to make SSH login automatic; just use ssh key login. This can be done
+   as a single step with ssh-copy-id, which should be in your Pi distro's repository). To use a special
+   key just for this backup server, use the ssh config file to specify what key to use.
+
+Cron job
+   Assuming everything has worked so far, there's no reason an unattended backup should fail. To make
+   that happen, take the same command you used for the initial backup and assign it to a cronjob. This
+   is generally done with the command cronjob -e:
+
+   0 */6 * * * rdiff-backup --exclude-globbing-filelist /home/seth/.excludes \
+   /home/seth/ seth@192.168.3.14::/backupdrive/seth/
+
+   That cronjob runs the backup command every six hours (on the hour). You can adjust the frequency
+   according to your needs.
+
+Restore data
+   Now that the backup has been automated, there's only one command you actually need to remember: how
+   to restore a file from the backups you are so dutifully making.
+
+   The simplest restore command is as simple as an rsync or scp:
+
+   $ rdiff-backup --restore-as-of now \
+   seth@192.168.3.14::/backupdrive/seth/paint/tux.svg \
+   ~/paint/tux.svg
+
+   This command restores from the backup server the most recent version of tux.svg to the same path on
+   your client machine. Notice that you don't have to worry about special file paths to account for
+   versions; if you want the most recent version, you just restore the same path that is missing or that
+   you have corrupted, and let rdiff-backup resolves that request to the most recent version.
+
+   But the --restore-as-of option is more flexible than that. Maybe the version of the file you need is
+   from five days ago:
+
+   $ rdiff-backup --restore-as-of 5D
+   seth@192.168.3.14::/backupdrive/seth/paint/tux.svg \
+   ~/paint/tux.svg
+
+   There are several other means of restoring files, and they're all listed in the official
+   rdiff-backup documentation, but in practice I have found that the --restore-as-of option is the
+   one that gets used most often. In the less common circumstances that you know the exact day and time
+   of the last good version of a file and need to pull it very specifically from your backups,
+   rdiff-backup handles that for you too; you just have to get the rather unwieldy diff filename, stored
+   alongside your backup data on the backup drive.
+
+   For example:
+   $ rdiff-backup 192.168.3.14::/backupdrive/seth/rdiff-backup-data/increments/ \
+   paint.2016-01-24T06:06:00-07:00.diff.gz $HOME
+
+   This restores the file paint from the backup performed at 6:06 a.m. on January 24. It does not place,
+   of course, just the diff data of that file into your home directory, but a fully reconstructed
+   version of the file. That's what rdiff-backup is for.
+
+Back it up
+   Backing up is important, and your old Pi can help. Set it up today and you won't be sorry.
+
+
+---
+https://www.thepolyglotdeveloper.com/2016/02/create-raspberry-pi-automatic-network-backup-server/
+Create A Raspberry Pi Automatic Network Backup Server
+February 5, 2016
+
+   I have a few Raspberry Pi units that I've picked up over the years. As of now I have a RPi 256MB, RPi
+   512MB and a RPi2 1024MB unit. I'm currently using the faster model as a RetroPie which I'll discuss
+   in a future article, but for the older models I have them doing server stuff. For example, I have my
+   256MB model acting as a network backup server that one of my computers automatically uploads to.
+
+   Here we're going to look at what it takes to get an automated backup server rolling with a Raspberry
+   Pi and how exactly it can be useful to you.
+
+   If you haven't already, it may be useful to you to check out my previous tutorial for configuring
+   a Raspberry Pi as a headless system. This guide will be using Raspbian as the Linux flavor, but we're
+   not going to go through the process of operating system installation and configuration in this guide.
+   It will be strictly relating to topics on backups and server configurations.
+
+   To handle our backups we're going to be using a nifty Unix and Linux tool called rsync.
+
+   Rsync defined by Wikipedia:
+     Rsync is a widely-used utility to keep copies of a file on two computer systems the same. It is
+     commonly found on Unix-like systems and functions as both a file synchronization and file transfer
+     program.
+
+   Because we're using rsync, Windows users should stop reading this guide because this backup solution
+   is going to be too painful a process for you to get set up with. Linux and Mac users should stick
+   around.
+
+   Let's look at common usage of rsync between a source and destination machine. The source will be my
+   Mac, but the destination will be the Raspberry Pi that contains Raspbian Linux.
+rsync -az source destination --progress --delete
+
+   The above line will copy a file or directory from the source to the destination. The --progress flag
+   indicates that we want to know the progress of the transfer because some files may be quite large.
+   The --delete flag indicates that should we rsync and a source file no longer exists when it did
+   previously, the remote copy will be removed. Finally the -a means archive and the -z means compress.
+
+   Let's make this example a little more specific. Check out the following line:
+rsync -az ~/Desktop pi@10.0.1.61:~/ --progress --delete
+
+   In the above example, I'd be uploading all files found on my desktop to the home directory of pi on
+   the remote Raspberry Pi. This includes creating the directory Desktop on the Raspberry Pi itself.
+
+   My favorite part of rsync is that it only copies what has changed vs a standard SCP that will
+   transfer files regardless making your backup process long and terrible.
+
+   This is cool so far, but there are a few inconveniences here:
+    1. We have to enter the password for the pi user every time we call the command
+    2. This is a manual process of backup
+
+   Let's start by correcting the password issue. It can be easily resolved by setting up a public and
+   private key pair on your local and remote machine.
+
+   Again, assuming you're using Mac or Linux, execute the following from your Terminal:
+ssh-keygen -t rsa
+
+   Leave the password blank when asked.
+
+   You should have two key files. Yes we didn't add a password to the private key. It may not be the
+   best in terms of security, but you could be in worse shape. Figure out what meets your needs on
+   private key security.
+
+   We need to upload the public key to the Raspberry Pi server. From your Terminal execute the
+   following:
+cat /path/to/public/key/id_rsa.pub | ssh pi@10.0.1.61 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
+
+   Remember to swap out my 10.0.1.61 IP with that of your actual Raspberry Pi.
+
+   The above command will create an .ssh directory in your Raspberry Pi home directory and append the
+   contents of id_rsa.pub to the authorized_keys file.
+
+   Try to SSH again. If all went well you should connect to the pi user without any form of password.
+
+   Next we want to automate this backup process. To do this we're going to use cron for Linux and
+   launchd for Mac to run scripts on a schedule. If you're unfamiliar with cron and launchd, you
+   essentially pick a re-occurring time and date and a script and it will run every time it hits
+   regardless if you've shut off your computer between runs.
+
+   Before we design the cron and launchd schedule, let's come up with a backup script called backup.sh:
+rsync -az ~/Desktop pi@10.0.1.61:~/ --progress --delete
+rsync -az ~/Pictures pi@10.0.1.61:~/ --progress --delete
+rsync -az ~/Documents pi@10.0.1.61:~/ --progress --delete
+
+   Yes, the above is doing three different rsync transactions. You can certainly rig something together
+   to do this all in one, but I find there to be nothing wrong with this approach.
+
+   Now that our script is made, we need to define our cron schedule for a Linux host. From the Terminal,
+   execute the following:
+crontab -e
+
+   Scheduling can be a tricky beast, but this might make it easier:
+Minute    Hour    Day of Month    Month    Day of Week    Script
+
+   So let's say we want to run our backups every thirty minutes of every day, of every month, of every
+   week. We might plugin something like this in for an entry:
+0,30    *    *    *    *    /path/to/backup.sh
+
+   This says it will execute on the zero minute and the thirty minute mark.
+
+   Now let's look at how to do this if you're on a Mac as your source machine. We need to create a file
+   ~/Library/LaunchAgents/com.nraboy.backup.plist with the following XML:
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+    <dict>
+        <key>Label</key>
+        <string>com.nraboy.backup</string>
+        <key>ProgramArguments</key>
+        <array>
+            <string>/path/to/backup.sh</string>
+        </array>
+        <key>StartInterval</key>
+        <integer>60</integer>
+    </dict>
+</plist>
+
+   You can change com.nraboy.backup if you don't want to name it as such. Just make sure the filename
+   matches the name given in the plist file. This file says that our backup scripts will run every sixty
+   seconds.
+
+   To make this plist file work, we need to load it and start it like so:
+launchctl load ~/Library/LaunchAgents/com.nraboy.backup.plist
+launchctl start com.nraboy.backup
+
+   You should be good to go now!
+
+   If you got this far and everything is working, you might notice that larger backups are killing your
+   network bandwidth. This is because by default rsync will try to transfer at the fastest speed
+   possible, making all other network activities pretty much unusable while it is happening. You can fix
+   this by setting a limit. For example you can do something like:
+rsync -az source destination --bwlimit=5000 --progress --delete
+
+   By setting --bwlimit=5000 we are limiting the transfer to 5MB per second. You probably want to fiddle
+   with this setting until you find a good spot. You wouldn't want backups to be so slow that the next
+   cycle comes around for another backup run.
+
+Conclusion
+   The usage of rsync is not particularly difficult as it is just a fancy copy command. The time
+   consuming part came in the form of task scheduling with cron and launchd scripts for Mac and Linux.
+   If you wanted to take this guide to the next level you could enhance your backup.sh script to do full
+   snapshots on certain events. Like maybe do standard backups hourly, but full snapshots organized by
+   timestamps once weekly.
+
+   The great thing about having an rsync server on a Raspberry Pi is that you can lock it in a drawer or
+   somewhere else that is out of sight because it is so small. Your backups will continue to happen for
+   as long as the Raspberry Pi is powered on and connected to the internet.
+
+
+---
+https://g33kr.net/how-tos/offsite-backups-raspberry-pi/
+Offsite backups with Raspberry Pi and a friend
+2015-09-30
+
+   Do you have a big Plex video library? Maybe a sizeable MP3 collection that you spent years
+   assembling? Or do you host your private ownCloud server at home? Regardless of what your data is,
+   chances are you've got some files at home that you'd rather not see disappear. Backups are great, but
+   where do you store your backups? At home, in the same place as your original copy? If you suffer an
+   unfortunate house fire, chances are good that your backup will get burned up along with your
+   original. You could back up to a cloud service, but with any significant amount of data to backup
+   there will be some monetary cost. And maybe certain recent revelations have made you a little
+   leery about putting your data in the cloud. Well, do you have a friend with a broadband Internet
+   connection? Why not backup to his house?
+
+   In this post, I'm going to run through how to setup a secure remote backup solution using one or more
+   Raspberry Pis (RPi), an external drive, and a friend's broadband Internet connection, using
+   rsync, OpenSSH, and OpenVPN. This configuration will create a mirror-copy backup of your
+   source computer, on whatever schedule you choose to set. The number of RPis needed really depends on
+   the system you're backing up. If you're running a flavor of Linux on your computer, most likely you
+   already have the tools available on that box to run the backup scripts. So you'll only need one
+   Raspberry Pi for the remote side. If you're running a version of Windows on your computer... I'm
+   sorry. But also, you'll need a second Raspberry Pi on your local network to send your backups to the
+   remote end.
+
+   The topology will look like this:
+ +----------+      +----------+
+ |  source  |      |  source  |
+ |  volume  |      |  volume  |
+ +----------+      +----------+
+       |                |
+ +----------+     +------------+
+ | Linux PC |     | Windows PC |
+ +----------+     | CIFS share |
+       |          +------------+
+       |                |
+      +=+        +--------------+
+      | |        | Raspberry Pi |
+      | |        | Samba client |
+      | |        +--------------+
+      | |               |
+      | |              +=+
+  ~~~~| |~~~~~~~~~~~~~~| |~~~~~~
+ (    |V|              |V|      )
+ (    |P|   Internet   |P|      )
+ (    |N|              |N|      )
+  ~~~~| |~~~~~~~~~~~~~~| |~~~~~~
+      +=+              +=+
+       |                |
++--------------+  +--------------+
+| Raspberry Pi |  | Raspberry Pi |
++--------------+  +--------------+
+       |                |
+ +-----------+     +-----------+
+ | Encrypted |     | Encrypted |
+ |   backup  |     |   backup  |
+ |   volume  |     |   volume  |
+ +-----------+     +-----------+
+
+   Fig. 1: Backup uses rsync over SSH, tunneled through a VPN.
+
+   The backup process uses the rsync program. There are a couple of different ways you could build a
+   solution. You could setup an rsync server on the remote Raspberry Pi and then rsync over VPN. Or you
+   could use SSH as the secure transport for rsync, eliminating the need for an rsync server. For this
+   configuration, we're going to take more of a layered hybrid approach.
+
+   We will use OpenVPN to setup an on-demand VPN tunnel between our backup source and target. We'll then
+   run rsync between the VPN endpoints, using SSH as the transport. This has the downside of being a
+   little slower than using an rsync server, and being just slightly slower than using SSH alone without
+   adding the overhead of VPN encryption. However, this solution has three upsides:
+    1. We don't have to leave a TCP port open on our home connection to allow SSH traffic through. We
+       could change the port from the standard TCP/22 to an obscure custom port, but it still might be
+       scanned. We will have to open a UDP port for our OpenVPN connection to use, but open UDP ports
+       are significantly harder to detect with network scanning tools than open TCP ports. And generally
+       speaking, malicious hackers usually don't bother looking for open UDP ports in a non-targeted,
+       opportunistic sweep because it's time-consuming and unreliable. This affords us some additional
+       security (albeit, through obscurity).
+    2. By using a VPN tunnel as a wrapper, we can restrict SSH access on the remote RPi to a single
+       remote IP: that of the other VPN endpoint. With SSH alone, we would have to assume that the
+       remote public NAT IP could change from time to time, and so we would have to allow SSH access
+       from a wider source scope, if not from any source.
+    3. Using a VPN tunnel as a wrapper for the SSH traffic adds an additional layer of security, and a
+       second factor of authentication for the connection.
+
+A few words about data security
+   This solution was designed to be as secure as possible. With any security measure, there is some
+   trade-off in convenience. Here are the caveats with this configuration:
+     * The backup volume is secured using LUKS partition-level encryption, and the passphrase is not
+       stored on the remote RPi. This prevents the remote volume from being automatically mounted, but
+       it also prevents someone from pulling your SD card and compromising your encryption key. However,
+       this means that if the remote RPi is rebooted or the drive disconnected, you will need to SSH to
+       the device and manually enter your encryption passphrase to re-mount the disk. This is a minor
+       inconvenience that provides a high degree on on-disk data security.
+     * In the configuration I'll provide, the remote RPi is not accessible via SSH from the remote LAN,
+       or even from the local console if someone were to connect a keyboard and monitor. The only way to
+       access a terminal on the remote RPi is to establish a VPN tunnel to it and SSH from your local
+       VPN endpoint. For this reason, remote support of your device will be limited to rebooting it with
+       a power cycle. But, this measure also prevents unauthorized users from logging into your system
+       and viewing the mounted backup volume and its decrypted contents.
+
+   So with your remote backup target, no sensitive information is stored on the Raspberry Pi's
+   unencrypted SD card. Your backup volume is encrypted and the passphrase is not stored anywhere on the
+   remote RPi. Any tampering with the remote backup target (i.e. rebooting, disconnecting the disk,
+   etc.) will simply result in an unmounting of the backup volume. The data on the volume can only be
+   read when the backup volume has been mounted and the encryption passphrase entered, and there is no
+   way for an unauthorized user even with physical access to view the disk in its mounted state.
+
+   In the worst case scenario where the backup target and disk are stolen, the most you are out is the
+   cost of the Raspberry Pi and external backup disk. Your data is safe (assuming you used a strong
+   encryption passphrase that is not easily guessed).
+
+A few words about network security
+   The data on your remote backup volume is secure. Now let's assume that your friend has been so kind
+   as to host your backup solution, and he thinks it's a great idea. He asks you to reciprocate and host
+   his backup on your network. Seems only fair, right? Sure, just keep one thing in mind. By hosting his
+   remote backup RPi on your network, you are giving him access to your internal LAN. Your friend could
+   (theoretically) fire up the VPN tunnel to his remote RPi, SSH into it, and then gain access to your
+   local network. Now, hopefully if you trust this person enough to host your backup volume, you trust
+   them enough not to compromise your network.
+
+   But still...
+
+   My advice would be to host your friend's remote backup RPi in a DMZ on your network. A DMZ with
+   access control that restricts the RPi from connecting to your local LAN, and possibly even to the
+   Internet in general (the remote RPi only needs incoming connections). If you don't have a firewall
+   with multiple interfaces that supports defining a DMZ network, my suggestion would be to work out
+   some other creative method for segregating your friend's Raspberry Pi from the rest of your LAN. Good
+   fences make good neighbors, and the same goes for firewall rules.
+
+The basics
+   To start with, you'll need one or two Raspberry Pi computers, and an SD card (micro SD for the RPi2)
+   and micro USB power supply for each RPi. You'll also need an external USB hard drive big enough to
+   contain a backup of your source data, and you probably want to put each RPi in a case of some kind.
+   For my remote RPi, I put it in a JBtek case and velcro'd the RPi to the side of my external
+   drive. This allowed me to keep the USB cable really short and minimize cable clutter. For the SD
+   card, you don't need anything huge. I typically use 8GB SD cards for RPi storage, unless larger cards
+   are available at a lower price. SD card prices are strange, sometimes a 32GB card is less than a 8GB
+   card.
+
+   You should image your SD card(s) with the latest version of Raspbian, and this tutorial assumes
+   you're using the built-in ethernet port, and you're configuring each RPi with a static IP address or
+   using a DHCP reservation to assign a fixed IP address.
+
+   I'm not going to go into great depth regarding installing Raspbian and doing the initial setup. You
+   can find useful information about installation here. You'll need to use the raspi-config tool to
+   enable the SSH server (under Advanced Options/SSH) on your remote RPi.
+
+   If you're running Linux on the source computer, you'll have to determine what account you want to use
+   for running your backup. If you want to perform a full system backup, you'll likely want to run the
+   backup as root so that it can read every file in /. If you only want to backup a specific partition
+   or directory, then you may be able to use a standard user account that has read access to the files
+   being backed up. On Debian-based distributions (including Ubuntu) the root account has no default
+   password and is unable to login. You'll need to set a strong password for root.
+
+   If you're running Windows on the source computer, you'll need to setup a network share or shares for
+   the files you want to backup. You should create a designated local, non-admin account on your
+   computer that has read-only access to the share(s) and underlying filesystems. Set a strong password
+   for this account.
+
+   On the remote RPi (and local RPi if you're running Windows), you will only use the root account. You
+   should set a strong password for the root account, login as root and delete the default pi account,
+   so that root is the only account on the system with login/shell access on the remote RPi.
+
+   If you need to set a static IP on your RPi, edit /etc/network/interfaces, remove the line that reads
+   iface eth0 inet dhcp, and add a configuration such as:
+iface eth0 inet static
+address 192.168.1.10
+netmask 255.255.255.0
+gateway 192.168.1.1
+network 192.168.1.0
+broadcast 192.168.1.255
+
+   Then issue the command service networking restart to pick up the new config.
+
+   For the initial setup and the seed copy, you'll have both endpoints (computer and RPi, or RPi and
+   RPi) connected to the same LAN. So you'll either need two DHCP reservations during setup, or to
+   configure both with static IPs. If the DHCP server on your network (and your friend's network)
+   supports reservations, I'd recommend just using a DHCP reservation for the remote side and leaving
+   the RPi set for DHCP. I also recommend against using WiFi for network connectivity, as wireless will
+   be an additional wildcard for troubleshooting and will certainly provide poorer network performance
+   than the 100Mbps wired interface. Network speed is going to play a particular role in making your
+   seed copy.
+
+Required packages
+   The first thing you'll need to do once you have imaged and base configured your RPi(s) is to install
+   the necessary packages on both the source and target computers. You will need the openvpn, easy-rsa,
+   and rsync packages. On Raspbian, easy-rsa is bundled with openvpn, but they are separate packages on
+   other distros. You can install these packages on Raspbian with the command:
+apt-get update
+apt-get install openvpn rsync
+
+DNS
+   Your local source computer (or local RPi) will need to make a VPN connection to the public IP address
+   of your friend's Internet connection, where it will be NAT'd to the remote RPi. With most residential
+   broadband providers, this IP is subject to change. You have two options:
+    1. Use an entry in your source computer's /etc/hosts file to resolve a remote server name to public
+       IP address, and update that entry manually should your friend's public IP address change, or
+    2. Use a dynamic DNS (DDNS) provider to have a public DNS name that always points to the current
+       IP of your friend's broadband connection.
+
+   If your friend's public IP doesn't change often (if at all), then option #1 is probably fine. If the
+   public IP tends to change fairly often, you'll probably want to opt for option #2. Raspbian includes
+   the ddclient package (apt-get install ddclient), which will provide a dynamic DNS client on your
+   remote RPi. You'll need to sign up with the DDNS service of your choice, and configure the
+   /etc/ddclient.conf accordingly.
+
+Setting up SSH
+   You will be authenticating SSH sessions from the source computer to the target computer using keys
+   rather than passwords. So you'll need to generate an SSH key. Run the following command on the source
+   computer (or local RPi, if your source is a Windows computer):
+ssh-keygen -t rsa -b 4096
+
+   Assuming you're generating the key as root set the default install location to /root/.ssh/backup. Do
+   not set a passphrase on this key. After the key is generated, you will need to copy the
+   /root/.ssh/backup.pub public key to /root/.ssh/authorized_keys on the remote RPi. You can do this
+   using the ssh-copy-id command:
+ssh-copy-id root@<remote RPi IP>
+
+   You'll be prompted for the root password on the remote RPi. After the key is copied, you should be
+   able to SSH without being prompted for a password. If not, check the permissions on /root/.ssh and
+   /root/.ssh/authorized_keys on the remote RPi. They should not be group- or world-writable. On the
+   local side, the /root/.ssh/backup RSA key should only be accessible by the root user:
+chmod 600 /root/.ssh/backup
+
+   Also check /etc/ssh/sshd_config on the remote RPi to ensure that PermitRootLogin yes,
+   RSAAuthentication yes, and PubkeyAuthentication yes are set. If any of these need to be changed,
+   restart SSH afterward.
+
+   On the source computer or local RPi, edit the ~/.ssh/config file for root (or whichever user will run
+   the backup scripts), and enter the following:
+Host backup
+    HostName 192.168.128.1
+    User root
+    Port 22
+    IdentityFile /root/.ssh/backup
+
+   For right now, continue connecting to the RPi by using the command:
+ssh root@<LAN IP address>
+
+   Later in this tutorial, once we get the OpenVPN tunnel setup, you'll be able to connect using the
+   simpler command:
+ssh root@backup
+
+OpenVPN configuration
+   On the source computer or local RPi, you'll need to first setup an entry in your /etc/hosts file.
+   This entry should have either the DDNS name that you have registered, or a real (or fake)
+   fully-qualified domain name (FQDN) for the remote RPi. The IP address for this entry should be the
+   local LAN IP that is currently assigned to the remote RPi. When the RPi is deployed, you'll change
+   this entry to your friend's public IP. The VPN client connection will use the hostname you set in
+   /etc/hosts. The entry should be in the format:
+192.168.1.23   remote.backup.net
+
+   Even if you're going to use DDNS for the remote RPi, for the initial setup and seed copy - since the
+   remote RPi will be on the local network and not at the IP address DDNS will report - you'll need to
+   setup this /etc/hosts entry. Once the seed copy is complete and you send the remote RPi offsite,
+   you'll just remove that entry from /etc/hosts and the name will resolve normally via DNS to the
+   public IP address.
+
+   Under Raspbian, when the openvpn package is installed it is enabled and started up. On the remote RPi
+   we want the OpenVPN service to start automatically, so that is fine. On the source computer or local
+   RPi, we only want the VPN tunnel to connect when it's needed. So if your local VPN endpoint is an RPi
+   or other Debian-based system, be sure to prevent OpenVPN from starting automatically:
+update-rc.d openvpn disable
+
+   Now you'll need to create some certificates to encrypt and authenticate your VPN connection. This can
+   be a somewhat involved process, and I'm going to just run through the highlights. If you'd like more
+   info on OpenVPN and creating certificates, check out this tutorial. You'll only need to go
+   through this cert generation process on the remote RPi side. Once you're done, you'll just copy a few
+   of the certificate files to the source computer or local RPi for the client side of the connection.
+
+   First, you're going to create a directory to build the keys and copy the easy-rsa starter files into
+   it. You're also going to create a symlink for the openssl config file, in case your openssl version
+   isn't detected properly:
+mkdir -p /etc/openvpn/easy-rsa/keys
+cp -rf /usr/share/easy-rsa/2.0/* /etc/openvpn/easy-rsa
+ln -s /etc/openvpn/easy-rsa/openssl-1.0.0.cnf /etc/openvpn/easy-rsa/openssl.cnf
+
+   Move into the easy-rsa directory:
+cd /etc/openvpn/easy-rsa
+
+   You'll need to edit the vars file and modify two parameters:
+export EASY_RSA="/etc/openvpn/easy-rsa"
+export KEY_SIZE=2048
+
+   Save the changes, and then do the following:
+source ./vars
+./clean-all
+
+   Now you'll build your certificate authority (CA) cert. You'll be prompted to provide some certificate
+   details. It really doesn't matter what you enter for country, province, city, organization,
+   organizational unit, or email. The only two fields that matter are the certificate name (which you
+   should call 'server') and the canonical name (CN), which should be the fully-qualified name you've
+   given to your remote RPi.
+./build-ca
+
+   You'll repeat the process to build the server certificate:
+./build-key-server server
+
+   Next you'll create your Diffie-Hellman (DH) key exchange file. This can take a while. You might want
+   to type this and then go make a sandwich:
+./build-dh
+
+   Now create a client certificate for your source computer or local RPi:
+./build-key client
+
+   And then finally, we're going to create a TLS-auth key for an additional layer of security, and then
+   copy the necessary keys to the /etc/openvpn directory:
+cd keys
+openvpn --genkey --secret ta.key
+cp dh2048.pem ca.crt server.crt server.key ta.key /etc/openvpn
+
+   You'll need to copy the ca.crt, client.crt, client.key, and ta.key files to the /etc/openvpn
+   directory on your source computer or local RPi, as well.
+
+   A WORD OF WARNING: Don't leave your ca.key file on your remote RPi. It's not needed there. My advice
+   is to backup all of your OpenVPN keys, and then rm -rf /etc/openvpn/easy-rsa rather than leaving it
+   laying around. At the very least, backup the ca.key file and delete it from the remote RPi.
+
+   Now with keys and certs in place, you just need to create some configuration files. On the remote
+   RPi, create /etc/openvpn/openvpn.conf:
+port 21999 #just a high, random port
+proto udp
+dev tun
+ca ca.crt
+cert server.crt
+key server.key
+dh dh2048.pem
+server 192.168.128.0 255.255.255.0
+ifconfig-pool-persist ipp.txt
+keepalive 10 120
+tls-auth ta.key 0
+comp-lzo
+max-clients 1
+user nobody
+group nogroup
+persist-key
+persist-tun
+status /var/log/openvpn-status.log
+log /var/log/openvpn.log
+verb 4
+mute 20
+
+   Now restart the openvpn service on the remote RPi:
+service restart openvpn
+
+   Ensure that the OpenVPN service started and is running on port 21999:
+netstat -an | more
+Active Internet connections (servers and established)
+Proto Recv-Q Send-Q Local Address           Foreign Address         State
+udp        0      0 0.0.0.0:21999           0.0.0.0:*               LISTEN
+
+   Now configure the client side on the source computer or local RPi. On Raspbian or another non-systemd
+   distro, you'll edit the /etc/openvpn/openvpn.conf file. For a systemd-based distro, edit the
+   /etc/openvpn/backup.conf file:
+client
+dev tun
+proto udp
+remote remote.backup.net 21999 # use the name you put in /etc/hosts
+resolv-retry infinite
+nobind
+user nobody
+group nogroup # this may be nobody, check your /etc/group
+persist-key
+persist-tun
+ca ca.crt
+cert client.crt
+key client.key
+tls-auth ta.key 1
+comp-lzo
+verb 3
+mute 20
+
+   On Raspbian or another non-systemd distro, start the OpenVPN client with the command:
+service openvpn start
+
+   For a systemd-based distro, start the openvpn@backup service:
+systemctl start openvpn@backup
+
+   Within a few moments, the tunnel should establish. Verify by using the ifconfig command. You should
+   see a tun0 interface:
+tun0: flags=4305<up,POINTOPOINT,RUNNING,NOARP,MULTICAST>  mtu 1500
+        inet 192.168.128.6  netmask 255.255.255.255  destination 192.168.128.5
+        unspec 00-00-00-00-00-00-00-00-00-00-00-00-00-00-00-00  txqueuelen 100  (UNSPEC)
+        RX packets 12165  bytes 15687148 (14.9 MiB)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 7096  bytes 773505 (755.3 KiB)
+        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+
+   Verify connectivity by pinging 192.168.128.1:
+[root@home /]# ping -c 4 192.168.128.1
+PING 192.168.128.1 (192.168.128.1) 56(84) bytes of data.
+64 bytes from 192.168.128.1: icmp_seq=1 ttl=64 time=29.3 ms
+64 bytes from 192.168.128.1: icmp_seq=2 ttl=64 time=33.5 ms
+64 bytes from 192.168.128.1: icmp_seq=3 ttl=64 time=35.6 ms
+64 bytes from 192.168.128.1: icmp_seq=4 ttl=64 time=33.1 ms
+
+--- 192.168.254.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3005ms
+rtt min/avg/max/mdev = 29.368/32.928/35.669/2.273 ms
+
+   At this point, you should now be able to SSH from the source computer (or local RPi) to the remote
+   RPi, using the command:
+ssh root@backup
+
+Encrypting the backup volume
+   Now we need to setup the encrypted backup volume. In the examples that follow, I'm working with the
+   assumption that your external USB disk is connected to the remote RPi. The disk will likely be
+   /dev/sda and the partition should be /dev/sda1. If you need to re-partition your backup disk, use
+   either the fdisk or parted commands to do so. If your source computer is running Linux, you could
+   connect your USB disk to that computer and then partition your disk and create the encrypted volume
+   using a GUI disk utility (such as the GNOME Disks tool), if you prefer. I'm going to assume you're
+   connecting the disk to the remote RPi and creating the volume from the CLI. To create the encrypted
+   volume on /dev/sda1, you'll use the cryptsetup command. This tool isn't installed by default on
+   Raspbian, so the first thing you'll need to do is install the cryptsetup package:
+apt-get install cryptsetup
+
+   Then you can create the encrypted volume:
+cryptsetup --verify-passphrase --cipher aes-cbc-essiv:sha256 --key-size 256 luksFormat /dev/sda1
+
+   Now you'll need to get the UUID of the volume you just encrypted. Do the following:
+ls -al /dev/disk/by-uuid
+
+   What you're looking for is a line in the output like this:
+lrwxrwxrwx 1 root root  10 Jan  1  1970 d5201310-4c76-49ab-a36d-46446f4415da -> ../../sda1
+
+   Select and copy that UUID. You'll need it in a second. The last thing to do here is to create a mount
+   point where we'll mount the backup volume:
+mkdir /mnt/backup
+
+Windows mounts
+   If the computer you're backing up is running Windows and you've got an RPi for the local VPN
+   endpoint, you'll need to mount the share(s) that you've created on the Windows computer, on the local
+   RPi so it can read them. First, you'll need to create a credentials file, containing the Windows user
+   credentials needed to access the share. Put these credentials in /root/.smbcreds and make sure the
+   file is owned by root, with 0600 permissions. The contents of the file should be:
+username=<your Windows username>
+password=<your Windows password>
+domain=<domain or workgroup>
+
+   Create a mount location for your Windows share(s):
+mkdir -p /mnt/windows/share1
+
+   Then create an entry in /etc/fstab to mount the share:
+//<Windows IP address>/<share name> /mnt/windows/share1 cifs auto,ro,credentials=/root/.smbcreds 0 0
+
+   You should now be able to mount the Windows share and view the files there:
+mount /mnt/windows/share1
+
+The scripts
+   You could do all of these tasks manually, but since a) they are repetitive, and b) you're going to
+   want to automate them, we'll setup some scripts to make things easier. The first thing you'll need is
+   a script to mount your backup volume, since we won't be mounting it automatically with /etc/fstab. On
+   your remote RPi, create a bash script with the following contents and name it something obvious like
+   mount-backup.sh. Move it to the /usr/sbin directory, make root the owner, and make sure only root can
+   execute it (chmod 700):
+#!/bin/bash
+cryptsetup luksOpen UUID=d5201310-4c76-49ab-a36d-46446f4415da backup # use your UUID here
+mount /dev/mapper/backup /mnt/backup
+
+   Now you should be able to mount your encrypted volume by typing mount-backup.sh and entering your
+   passphrase. Go ahead and do so now, you'll need the volume online for the seed backup later.
+
+   On the source computer or local RPi, you should create three scripts.
+    1. A script to bring up the VPN tunnel.
+    2. A script to bring down the VPN tunnel.
+    3. A script to backup from the source to the remote target.
+
+   The first two are going to be distribution-specific. Generally, it's going to be something like:
+service openvpn start
+
+   Or something like this, for systemd-based distributions:
+systemctl start openvpn@backup
+
+   Whichever command you used to bring up the VPN tunnel earlier in this tutorial, is the one you'll put
+   in these scripts. Make two scripts:
+
+   /usr/sbin/start-vpn.sh
+#!/bin/bash
+/usr/bin/systemctl start openvpn@backup
+
+   And /usr/sbin/stop-vpn.sh
+#!/bin/bash
+/usr/bin/systemctl stop openvpn@backup
+
+   Again set each script to be owned by root, with permissions of 0700. Test your scripts to ensure the
+   VPN tunnel goes up and down. Now let's create the actual backup script. This script will bring up the
+   VPN tunnel, wait 60 seconds for it to initialize, and then run a full system backup with rsync,
+   tunneled over SSH. Call this script /usr/sbin/remote-backup.sh, and once again make sure it is owned
+   by root with 0700 permissions:
+#!/bin/bash
+echo "Starting VPN..."
+/usr/sbin/start-vpn.sh
+echo "Waiting..."
+sleep 60
+cd /
+echo "Beginning rsync backup..."
+rsync -avz -e "ssh" --exclude /sys --exclude /tmp --exclude /run --exclude /proc --delete / root@backup:/mnt/b
+ackup
+echo "Shutting down VPN..."
+/usr/sbin/stop-vpn.sh
+
+   If you are backing up a mounted Windows share, your rsync line might be much simpler:
+rsync -avz -e "ssh" --delete /mnt/windows/share1 root@backup:/mnt/backup/share1
+
+   This will perform a mirror backup of the live system to the backup volume. Note the use of the
+   --delete option. This instructs rsync that if you delete a file on the source side, the file should
+   also be deleted from the remote side. You can choose to omit --delete from the line, and files that
+   are deleted locally will remain on the backup. However, keep in mind that unless you remove the files
+   manually, the disk space usage on your backup volume will continue to grow larger than the source as
+   new files are sync'd, and deleted files are never deleted. I wouldn't recommend using this system as
+   a versioned backup, but rather as just a weekly remote snapshot. If you want to do a versioned
+   backup, I would recommend using rsnapshot and an external USB disk locally connected to the
+   source system.
+
+Seeding the backup
+   Now it's time to create your seed copy. You'll do this with both the local source and the remote
+   target connected to the same LAN. After this seed copy is complete, only changes made to the source
+   will be sync'd to the remote end. To start your seed, just run your backup script manually:
+remote-backup.sh
+
+   And... wait. This first copy will take quite a while if you've got a lot of data. Remember, the RPi's
+   only have 100Mbps network interfaces. And if you're syncing a Windows share, the RPi has to read the
+   files from the share and then send them to the remote RPi using the same interface. So the bandwidth
+   is effectively reduced by half. Just have patience. If you have hundreds of gigabytes (or terabytes)
+   of data, this seed copy may take several days.
+
+Scheduling the backup
+   Once you have your backup script set, you'll want to add a cron job to run the backup weekly as root
+   (or whatever user you've designated for backups). You can do that either by adding a file to
+   /etc/cron.d containing:
+0  1  * * 6  root /usr/sbin/remote-backup.sh
+
+   Or you can edit root's crontab using the command crontab -e and add:
+0  1  * * 6  /usr/sbin/remote-backup.sh
+
+   Each of these examples runs a weekly job every Saturday at 1:00am. If you have an MTA setup on the
+   source system and an alias configured for root, cron will email you the transcript of the session. If
+   you don't have a mailer setup, you may want to add the following to the end of the cron line, to log
+   the session:
+> /root/last-backup.log
+
+   If you want to suppress all output, add the following instead:
+> /dev/null 2>&1
+
+   But of course, then you won't know if your backups are actually running or not.
+
+Securing the remote RPi
+   Now that everything is tested and the seed is created, let's secure the remote RPi before we send it
+   to your friend's house. For starters, we want to prevent any unauthorized users from making an SSH
+   connection to the RPi. Since the only valid SSH connection will come from the other end of the VPN
+   tunnel, edit the /etc/ssh/sshd_config file and change PermitRootLogin yes to PermitRootLogin no. Then
+   add the following to the bottom of the file:
+Match Address 192.168.128.6
+  PermitRootLogin yes
+
+   This will only allow root SSH access from 192.168.128.6 (the source end of the VPN tunnel). And since
+   no other accounts have shell/login access, that effectively disables remote login except over the
+   tunnel. Restart SSH for the change to take effect.
+service ssh restart
+
+   To disable local root login on the RPi's console, we simply need to remove all entries from the
+   /etc/securetty file (thus rendering no terminal secure, and therefore root cannot login). The easiest
+   way to do this is to backup the existing file and replace it with a blank file.
+mv /etc/securetty /etc/securetty.sav
+touch /etc/securetty
+
+   Once this is done, test access. Make sure you can not SSH to the remote RPi, except from the source
+   computer or local RPi, and only when the VPN tunnel is up. Plug a keyboard and monitor into the
+   remote RPi, and make sure you cannot login as root or any other user.
+
+   After all the testing is complete, run your remote-backup.sh script on your source computer or local
+   RPi, just to ensure that everything still works properly. If you've recently done your seed copy, the
+   sync should not take much time at all.
+
+Deploying the remote RPi
+   Now it's time to send your remote RPi and backup disk to your friend's house. On your end, the only
+   thing left to do is to edit or remove the /etc/hosts file entry you made previously to facilitate
+   your seed copy on the local LAN. Either change the entry to your friend's public IP address, or
+   remove it and use DDNS to resolve the name to IP.
+
+   At your friend's house, your RPi and hard drive should be put in a safe place, and connected to a
+   surge protector (good) or a UPS (better). If you elected to use a DHCP reservation, your friend just
+   needs to set that up in his DHCP server or router. Make note of the RPi's MAC address (ifconfig)
+   before you send it out. If you're using a static IP, remember to change that on your remote RPi
+   before you send it out the door. The only other thing required is for your friend to setup a NAT or
+   port forward from his public IP to your RPi, on UDP port 21999.
+
+   Once the RPi is connected and online, login to your source computer or local RPi and use your
+   start-vpn.sh script to bring up the VPN tunnel. It may take 20-30 seconds to establish, so be
+   patient. Once the tunnel is up, you should be able to ping 192.168.128.1. Then ssh root@backup to
+   connect to your remote RPi, and run your mount-backup.sh script. Enter your passphrase, and make sure
+   you can read the partition at /mnt/backup. If so, logout of the remote RPi, and use your stop-vpn.sh
+   script to bring the tunnel down.
+
+   Then you just have to wait until Saturday at 1:00am (or until whenever you scheduled your backup to
+   run), and check your log or email to make sure the backup completes properly. If so, you now have a
+   weekly snapshot of your computer, backed up securely offsite. Congratulations!
+
+Wrap up
+   This has been a complicated setup, and an insanely long post. Chances are good that I missed
+   something somewhere along the way. If you find mistakes or omissions, if something is unclear or you
+   think you may have a better way of doing it, shoot me an email. I'd love to hear from you.
+
+
+---
+https://www.howtogeek.com/139433/how-to-turn-a-raspberry-pi-into-a-low-power-network-storage-device/
+How to Turn a Raspberry Pi into a Low-Power Network Storage Device
+March 5th, 2013
+
+   Mix together one Raspberry Pi and a sprinkle of cheap external hard drives and you have the recipe
+   for an ultra-low-power and always-on network storage device. Read on as we show you how to set up
+   your own Pi-based NAS.
+   [INS: :INS]
+
+Why Do I Want to Do This?
+   The benefit of having an always-on network storage device is that it's extremely convenient to have
+   your data (or backup destination) always accessible to the computers both inside and outside your
+   network. The downside, in most instances, is that you're consuming a fair amount of power for the
+   convenience.
+
+   Our office server, for example, runs 24/7 and consumes almost $200 worth of power a year. A Raspberry
+   Pi-based network storage device on the other hand, consumes about $5 worth of power per year.
+
+   We'll be the first to grant you that a full fledged server is going to have more storage space and
+   the capability to do more work (such as transcoding a multi-terabyte video collection in a reasonable
+   span of time). For most people, however, the principle purpose of having an always-on computer
+   somewhere in the house is to serve as a file server and file backup repository. For such tasks the
+   Raspberry Pi is more than powerful enough and will save you a chunk of change in power use.
+
+What Do I Need?
+   This tutorial builds on our previous tutorial: The HTG Guide to Getting Started with Raspberry Pi
+   and we'll assume you've already completed that-in other words you already have your Raspberry Pi, got
+   it powered up, hooked to a mouse and keyboard, and you've installed Raspbian on it.
+
+   In addition to the gear you'll need from the Getting Started with Raspberry Pi tutorial, you'll only
+   the following hardware:
+     * One (at minimum) USB external hard drive for simple network backups and file serving
+
+   or
+     * Two (at minimum) USB external hard drives for local data redundancy
+
+   That's it! If you just want a simple network attached drive, you'll only need one hard drive. We
+   highly recommend using at least two hard drives in order to allow for local (at the Raspberry Pi)
+   data redundancy. For the purposes of this tutorial we're using a matching pair of Seagate Backup
+   Plus 1TB Portable External Hard Drives. They're super small, don't require an external power source,
+   and were on sale when we were shopping for parts.
+
+   You can use any external hard drives you have on hand but it's ideal to use small low-power drives if
+   possible since the whole theme of the project is to set up a tiny and low-power NAS you can just tuck
+   out of the way and forget about.
+
+   Before we continue, there are a couple design choices we made in terms of how we're configuring our
+   Raspberry Pi NAS that you should be aware of. While most users will want to follow along exactly as
+   we've done it, you may wish to tweak specific steps to better fit your needs and how you use the
+   computers on your network.
+   [INS: :INS]
+
+   First, we're using NTFS-formatted hard disks. Should the Raspberry Pi NAS fail for some reason or we
+   want to quickly copy information over a USB 3.0 connection instead of via the network, having
+   NTFS-formatted disks makes it dead simple to take the portable USB drives we're using on the NAS
+   build and plug them right into one of the many Windows machines we use every day.
+
+   Second, we're using Samba for our network shares, again because of the convenience of meshing the
+   Raspberry Pi NAS with our predominantly Windows network.
+
+Preparing for and Mounting the External Hard Drives
+   Once you have gathered up the hardware, followed along with the Getting Started with Raspberry Pi
+   tutorial to get up to speed (and are running Raspian) it's time to start setting up your Pi as a NAS.
+
+   The first order of business is to hook up the hard drives to the Raspberry Pi (or the attached USB
+   hub depending on your configuration and whether or not the hard drives are self-powered or externally
+   powered). Once the hard drives are attached and the Pi is powered up it's time to get working.
+
+   Note: We're using two hard drives. If you have decided to only use one hard drive simply disregard
+   all the commands in this section intended to mount/modify or otherwise interact with the second hard
+   drive.
+
+   We're going to be doing all of our work within the terminal. As such you can either work directly at
+   your Raspberry Pi using LXTerminal in Raspian or you can SSH into your Raspberry Pi using a tool like
+   Putty. Either way is fine.
+
+   Once you're at the command line the first thing you need to do is to add in support to Rasbian for
+   NTFS-formatted disks. To do so type the following command:
+
+     sudo apt-get install ntfs-3g
+
+   It'll take a minute or two for the packages to download, unpack, and install. Once the NTFS package
+   is installed it's time to look for the unmounted partitions of the attached external hard drives.
+
+     sudo fdisk -l
+
+   At minimum you should see two disks, if you've added in a secondary disk for data mirroring (as we
+   have) you should see three like so: 2013-02-28_110924
+
+   The first disk /dev/mmcb1k0 is the SD card inside the Raspberry Pi that houses our installation of
+   Raspbian. We're going to leave that one completely alone.
+
+   The second disk, /dev/sda is our first 1TB external hard drive. The third disk, /dev/sdb is our
+   second 1TB external hard disk. The actual partitions we're interested in on these two disks are
+   /sda1/ and /sdb1/, respectively. Make a note of the hard drive names.
+
+   Before we can mount the drives, we need to create a directory to mount the drives to. For the sake of
+   simplicity we're going to simply make directory called USBHDD1 and USBHDD2 for each drive. First we
+   have to make the drives. At the command line enter the following commands:
+
+     sudo mkdir /media/USBHDD1
+
+     sudo mkdir /media/USBHDD2
+
+   After you've created the two directories, it's time to mount the external drives to each location.
+   Again at the command line enter the following commands:
+
+     sudo mount -t auto /dev/sda1 /media/USBHDD1
+
+     sudo mount -t auto /dev/sdb1 /media/USBHDD2
+
+   At this point we have the two external hard drives mounted to the USBHDD1 and USBHDD2 directories,
+   respectively. It's time to add in a specific directory to both drives to hold our shared folders (for
+   the sake of keeping things tidy and compartmentalizing our work on the drives). Enter the following
+   commands:
+
+     sudo mkdir /media/USBHDD1/shares
+
+     sudo mkdir /media/USBHDD2/shares
+
+   Now it's time to install Samba so we can access the storage from elsewhere on the network. At the
+   command line enter:
+
+     sudo apt-get install samba samba-common-bin
+
+   When prompted to continue type Y and enter. Sit back and relax as everything unpacks and installs.
+   Once the Samba package finishes installing, it's time to do a little configuration. Before we do
+   anything else, let's make a backup copy of the Samba configuration file in case we need to revert to
+   it. At the command line, type the following command line:
+
+     sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.old
+
+   This simply creates a backup of the configuration file with the filename smb.conf.old and leaves it
+   in the same directory as the original configuration file.
+
+   Once we've created the backup it's time to do some basic editing in the Samba config file. Type the
+   following at the command line:
+
+     sudo nano /etc/samba/smb.conf
+
+   This will open the nano text editor and allow us to make some simple changes. If this is your first
+   time using nano, we would strongly suggest checking out The Beginner's Guide to Nano, the Linux
+   Command-Line Text Editor. You should see something like the following in your terminal window:
+
+   Nano is completely keyboard controlled, use the arrow keys to move the cursor to the location you
+   want to edit. As you click down through the configuration settings, you'll see a few worth making
+   note of or changing.
+
+   The first is the workgroup identifier, by default workgroup = WORKGROUP. If you're using a different
+   name for your home workgroup, go ahead and arrow over to change that now, otherwise leave it as the
+   default.
+
+   Our next stop is to turn on user authentication for our samba storage, otherwise anyone with general
+   access to our network (like guest Wi-Fi users) will be able to walk right in. Scroll down in the
+   Samba config file until you get to the section that reads:
+
+   Remove the # symbol from the security = user line (by highlighting it with the cursor and pressing
+   delete) to enable username/password verification for the Samba shares.
+
+   Next, we're going to add an entirely new section to the configuration file. Scroll all the way down
+   to the very bottom of the file and enter the following text:
+
+     [Backup]
+     comment = Backup Folder
+     path = /media/USBHDD1/shares
+     valid users = @users
+     force group = users
+     create mask = 0660
+     directory mask = 0771
+     read only = no
+
+   Note: Whatever you put in the brackets in the top line is going to be the name of the folder as it
+   appears on the network share. If you want another name other than "Backup" now is the time to edit
+   it.
+
+   Press CTRL+X to exit, press Y when asked if you want to keep changes and overwrite the existing
+   configuration file. When back at the command prompt enter the following command to restart the Samba
+   daemons:
+
+     sudo /etc/init.d/samba restart
+
+   At this point we need to add in a user that can access the Pi's samba shares. We're going to make an
+   account with the username backups and the password backups4ever. You can make your username and
+   password whatever you wish. To do so type the following commands:
+
+     sudo useradd backups -m -G users
+
+     sudo passwd backups
+
+   You'll be prompted to type in the password twice to confirm. After confirming the password, it's time
+   to add "backups" as a legitimate Samba user. Enter the following command:
+
+     sudo smbpasswd -a backups
+
+   Enter the password for the backup account when prompted. Once you have created the user account and
+   password you do not need to restart the Samba daemon again as we've already instructed it to be on
+   the lookout for authenticated users. We can now hop onto any Samba-capable machine on our network and
+   test connectivity to the network share.
+
+   From a nearby windows machine we opened up the Windows file explorer, clicked on Network, confirmed
+   that the hostname RASPBERRYPI was in the WORKGROUPS workgroup and clicked on the shared folder
+   Backups:
+
+   When prompted, enter the credentials you created in the previous step (if you're following along line
+   for line, the login is backups and the password is backups4ever).
+
+   Once your credentials are accepted, you will be treated to an empty folder as there isn't anything in
+   the share yet. To double check everything is working smoothly, let's create a simple file from the
+   computer we tested the connection with (in our case, the Windows 7 desktop). Create a txt file like
+   so:
+
+   Now, from the command line we have been working all this time, let's check to see if the file we
+   created on the Windows desktop appears properly within the share directory we created. At the command
+   line type the following command:
+
+     cd /media/USBHDD1/shares
+
+     ls
+
+   2013-02-28_131328
+
+   hello-is-it-me-you-are-looking-for.txt is in the directory; our simple shared directory experiment is
+   a success!
+
+   Before we leave this section of the tutorial, we only have one more thing to do. We need to configure
+   our Pi so that when it restarts it will automatically mount the external hard drives. To do so we
+   need to fire up the nano editor and make a quick edit. At the command line type:
+
+     sudo nano /etc/fstab
+
+   This will open up the file systems table in nano so we can add a few quick entries. Within the nano
+   editor add the following lines:
+
+     /dev/sda1 /media/USBHDD1 auto noatime 0 0
+
+     /dev/sda2 /media/USBHDD2 auto noatime 0 0
+
+   Press CTRL+X to exit, press Y to save, and overwrite the existing file.
+
+   If you're only using a single hard drive for simple network sharing with no redundancy, then that's
+   it! You're all done with the configuration process and can begin enjoying your ultra-low power NAS.
+
+Configuring Your Raspberry Pi NAS for Simple Data Redundancy
+   So far our Raspberry Pi NAS is hooked up to the network, file transfer works, but there's one glaring
+   thing missing. That secondary hard drive is configured but sitting entirely idle.
+
+   In this section of the tutorial we're going to use two simple but powerful Linux tools, rsync and
+   cron, to configure our Raspberry Pi NAS to perform a nightly data mirror from the /shares/ folder on
+   the primary drive to the /shares/ folder on the secondary drive. This isn't going to be a real time
+   RAID-like data mirroring, but a daily (or semi-daily) data backup to the secondary drive is a great
+   way to add another layer of data security.
+
+   First, we need to add rsync to our Rasbian installation. If this is your first time using rsync and
+   you'd like to get a better overview of the command, we recommend checking out How to Use rsync to
+   Backup Your Data on Linux.
+
+   At the command line enter the following command:
+
+     sudo apt-get install rsync
+
+   Once rsync is installed, it's time to set up a cron job to automate the process of copying files from
+   the USBHDD1 to USBHDD2. At the command line enter the following command:
+
+     crontab -e
+
+   The command will open up your cron scheduling table in the nano text editor which should be rather
+   familiar to you at this point in the tutorial.  Go ahead and scroll down to the bottom of the
+   document and enter the following line:
+
+     0 5 * * * rsync -av --delete /media/USBHDD1/shares /media/USBHDD2/shares/
+
+   This command specifies that every day at 5:00AM (the 0 5 part), every single day (* * *, wild cards
+   in the year, month, day spots), we want rsync to compare the two directories, copying everything from
+   HDD1 to HDD2 and deleting anything in the backup directory that no longer matches something in the
+   primary directory-i.e. if we have a movie file on HDD1 we delete, we also want that file to be
+   removed from the backup on the next synchronization.
+
+   The important part about configuring this command is that you select a time that doesn't interfere
+   with any other network activity to the shared folders you may have scheduled. For example, if you're
+   using your Raspberry Pi NAS as a backup destination for some sort of automated software that copies
+   your files to the NAS at 5AM every morning, then you need to either adjust the backup time in your
+   backup software or you need to adjust the time for the cron job on the Pi-but you can't have both the
+   remote backup dumping data onto the network share and the Raspberry Pi trying to sync that data
+   between local drives at the same time.
+
+   Once you've entered the crontab entry, click CTRL+X to exit and save the file. If you wish to run the
+   rsync immediately to get the data mirrored faster and make the initial cron job a little lighter on
+   the system, go ahead and enter the same rsync command you put into the crontab at the command line
+   like so:
+
+     rsync -av --delete /media/USBHDD1/shares /media/USBHDD2/shares/
+
+   That's it! All you need to do at this point is check in on your Raspberry Pi in the next day or two
+   to make sure that the scheduled job is firing off as expected and the data from /USBHDD1/shares/ is
+   appearing in /USBHDD2/shares/.
+
+   From here on out anything you put into your Raspberry Pi-powered NAS will be mirrored daily across
+   both hard drives.
+
+   Before we leave the topic completely, here are some additional How-To Geek articles you may wish to
+   check out to add more punch to your new Raspberry Pi-powered NAS:
+     * How to Backup Your Gmail Account Using Your Ubuntu PC-although the instructions are for
+       Ubuntu you can easily modify them for Rasbian to turn your Pi NAS into an automatic email backup
+       machine.
+     * What Files Should You Backup On Your Windows PC?-If you're not sure what files you should be
+       backing up to your NAS, this is a good place to start.
+     * How To Remotely Backup Your Data for Free with CrashPlan-CrashPlan is a free backup
+       application available for Windows, Mac, and Linux machines that makes it easy to schedule regular
+       backups to a NAS.
+
+     ________________________________________________________________________________________________
+
+   Have a Raspberry Pi project you'd love to see us undertake? Big or small, we love playing around with
+   the Pi-sound off in the comments with your ideas.
+
+
+---
+http://jeffskinnerbox.me/posts/2014/Feb/08/network-backups-via-rsync-and-rsnapshot/
+Network Backups via Rsync and Rsnapshot
+February 08, 2014
+
+Rsync and Rsnapshot
+   I got a 4 Terabyte Seagate Backup Plus hard drive as a Christmas
+   present and I plan to put it to use as a central backup for my Linux desktop, multiple Raspberry Pi,
+   my laptop, and anything else that my come along. My plan is to keep things simple but I wish to do
+   regular hourly, daily, weekly, and monthly incremental backups. This will give me the ability to
+   recover files from the past, but also to recover from a hardware failure or software install that has
+   gone very badly.
+
+   There are many backup tools you can pick from but I wanted to stick with something basic, widely
+   used, and simple. Rsync is one of the most widely used Linux backup solutions, and in fact, it is
+   often used by other backup tools as a foundational component. Rsync stands for remote
+   synchronization tool. Rsync is a UN*X command line utility, containing a special protocol and
+   algorithm, that synchronizes files and directories from one location to another while minimizing data
+   transfer by using fast incremental file transfers. (rsync has also been ported to Microsoft Windows,
+   Mac, and other operating systems.) The first time, rsync sends all the data over the network to your
+   backup machine. The benefit comes the next time you backup. Instead of sending all the files again,
+   rsync only transfers files that have been changed. If no files were changed, no files get
+   transferred. And when you want to recover data, you transfer just the specific files that you want
+   back to your machine (using rsync or scp or telnet or whatever).
+
+   It creates a full-blown snapshot for each run, but makes extensive use of hard links for
+   files that haven't changed, thereby greatly reduce the disk space required. That means you get
+   efficient, lightweight, incremental backups that look like exactly like full-blown copies (in every
+   way). This makes Rsnapshot a great choice for server backups. This easy-to-use utility is commonly
+   used for backing up data, but can synchronize files for any other purpose you choose to use it for.
+   Remote sync can be better than other backup methods because of its speed, and because it doesn't
+   require any special permissions to execute an rsync command. With just a small knowledge of the
+   command line, you can be backing up in no time with rsync. You can also use cron to periodically
+   create backups. To top it off, it also has a graphics front-end tool, call grsync, and
+   rsnapshot to create scheduled incremental backups, if so desired.
+
+Install the Hard Drive
+   The physical install of the external Seagate Backup Plus drive was simple, just plug it in. The
+   only caveat is to use a USB 3.0 port on the Linux box to make sure you get the fill speed out of
+   the drive. Using the supplied USB 3.0 cable is a must, since a USB 2.0 cable will force the drive to
+   operate at a slower speed. Check out USB 2.0 vs USB 3.0 to understand further.
+
+   Under my Ubuntu system, this external disk's file system will be automatically mounted located at
+   /media/jeff/"Seagate Backup Plus Drive". This nice and easy, but the disk is formated as a NTFS
+   (New Technology File System) which is a proprietary file system developed by Microsoft. For Linux
+   compatibility reasons, I want the disk to support a Linux ext3 file system. This will requiring
+   re-formating and mounting the new disk. To do this, I followed the procedures outlined in in the
+   article "Partition and format external hard drive as ext3 filesystem". I created a mount point
+   called /mnt/backup for the hard drive and place it in the fstab file so its mounted every time at
+   boot up.
+
+Install rsync, grsync, and rsnapshot
+   Rsync should already be installed on most Linux system. You can install it, and the grsync &
+   rsnapshot tools, using this command:
+sudo apt-get install rsync grsync rsnapshot
+
+Select Backup Storage Location
+
+   I want to create directory for the backups that are readable by all users, but writable by only root.
+   To do this, do the following:
+mkdir /mnt/backup
+chmod a+rwx /mnt/backup
+chmod o-w /mnt/backup
+
+Getting Familiar with rsync and Preparatory Work
+   In this section, we'll learn about some of rsync's features and get some foundational stuff done.
+
+Dry Running a rsync Command
+   Rsync has the potential of really messing up things and then doing an undo can be a tedious job.
+   Rsync can be run in a "dry run" mode to show you the output of the command. For example, this will
+   make a copy of ~/tmp:
+rsync -azv --dry-run /home/jeff/tmp/ /home/jeff/tmp/copy-of-tmp
+
+   If the output shows exactly what you want to do, then you can remove -dry-run option from your
+   command and re-run it for real.
+
+Test rsync on Local System
+   In an effort to try out rsync in the raw, I'll create some ad hoc backups of my desktop's home
+   directory. I want to preserves file timestamp, symbolic links, permissions, and owner/group. This can
+   be done using the rsync option -a. Additional options used are -z to enable compression, and -v to
+   provide verbose status output.
+sudo rsync -azv /home/jeff/src/rtl-sdr/ /mnt/backup/rsync-test1
+
+   The sudo is required since I have made /mnt/backup writable only by root. The presence or absence of
+   the terminating / within the rsync command line is important. The following two commands produce
+   different results:
+sudo rsync -azv /home/jeff/Documents/"My Maps"/ /mnt/backup/rsync-test2
+sudo rsync -azv /home/jeff/Documents/"My Maps" /mnt/backup/rsync-test3
+
+   The first takes the sources files and subdirectories and writes them directly to the destination
+   directory. The second does the same but the files and directories go within a directory called My
+   Maps. This is an important subtlety to remember!
+
+Testing rsync on a Remote System
+   In this case, my Linux desktop machine is the local system and RPi is the remote machine. The Linux
+   desktop has the external drive used for backups.
+sudo rsync -azv pi@RedRPi:/home/pi/src/nRF24L01 /mnt/backup/rsync-test4
+
+   This will first prompt you for a password for the sudo. You will get a subsequent prompt for the
+   login as pi on the RedRPi system, and then the data will be transfered to the external drive. But
+   when performing beyond your the firewall, you should use ssh, as shown below:
+sudo rsync -azv -e ssh pi@RedRPi:/home/pi/src/ /mnt/backup/rsync-test5
+
+   To setup ssh with rsync so that it can run automatically without prompting for the password, checkout
+   "How to Setup Rsync with SSH on UNIX / Linux (rsync without password)". This is sometime you will
+   want to do to support automatic, unattended backups. Basically, your going to do the following on the
+   machine that will store the backups:
+cd $HOME
+mkdir .ssh
+chmod 755 .ssh
+ssh-keygen -N "" -f /$HOME/.ssh/id_rsa
+ssh-copy-id -i /$HOME/.ssh/id_rsa.pub pi@RedRPi
+ssh-copy-id -i /$HOME/.ssh/id_rsa.pub pi@BlackRPi
+sudo bash
+cd /root
+mkdir .ssh
+chmod 755 .ssh
+ssh-keygen -N "" -f /root/.ssh/id_rsa
+ssh-copy-id -i /root/.ssh/id_rsa.pub pi@RedRPi
+ssh-copy-id -i /root/.ssh/id_rsa.pub pi@BlackRPi
+exit
+
+   Now repeat the example above:
+sudo rsync -azv -e ssh pi@RedRPi:/home/pi/src/ /mnt/backup/rsync-test5a
+
+   You should no longer be promoted for a password, except by the first sudo. (Once rsync is run under a
+   root login, this sudo will no longer be required).
+
+Exclude Files / Directories from rsync
+   In a typical backup situation, you might want to exclude one or more files (or directories) from the
+   backup. You might also want to exclude a specific file type from rsync. Let's run a backup of
+   pi@RedRPi:/home/pi/ but leave out the tmp and src directories.
+sudo rsync -azv -e ssh --exclude 'tmp' --exclude 'src' pi@RedRPi:/home/pi/ /mnt/backup/rsync-test6
+
+   You could also create a file that contains the exclude list tmp and src. This would look like:
+sudo rsync -azv --exclude-from 'exclude-list.txt' pi@RedRPi:/home/pi/ /mnt/backup/rsync-test6
+
+Running rsync as Root
+   The above examples works fine as long as the source login (in this case pi on the RedRPi system) has
+   the appropriate permissions. For example, this will fail:
+sudo rsync -azv -e ssh  pi@RedRPi:/root/ /mnt/backup/rsync-test7
+
+   It fails because the user pi doesn't have root permissions and the directory /root/ can only be
+   entered by the user root. You might want to attempt to do the following:
+sudo rsync -azv -e ssh root@RedRPi:/root/ /mnt/backup/rsync-test7
+
+   Now your asking to login to the remote system as user root. In this case you'll be prompted to
+   provide the RedRPi's root password, but the root login may not have a password
+
+   The way around all this is to use the --rsync-path option for rsync. This will work:
+sudo rsync -azv -e ssh --rsync-path="sudo rsync" pi@RedRPi:/root /mnt/backup/rsync-test7
+
+   The --rsync-path parameter specifies a path to rsync on the remote machine. So rsync will be executed
+   using sudo, giving it root user access privileges, and now the use of the pi login will gain access
+   to the /root directory. That is, on the remote machine, rsync is being run as root! This all requires
+   the proper set-up of ssh with password-less access, discussed earlier.
+
+Configuration of ssh to Eliminate Password Prompt and Warning Messages
+   Proper configuration of ssh will be needed to assure routine warning messages don't disrupt the
+   smooth operation of rsync / rsnapshot.
+
+   With the SSH protocol, it is the SSH client's responsibility to verify the identity of the host to
+   which it is connecting. The host identify is established by its SSH host key. Typically, the host key
+   is auto-created during initial SSH installation setup.
+
+   SSH protocol is designed to verify the host key against a local file (that file being
+   ~/.ssh/known_hosts) to ensure the integrity of the remote server. By default, the user is prompted to
+   accept a new key or warned when the host key changes (like after a server upgrade, DHCP server has
+   given that IP address to a different machine from the one that had it last time). This is a nice
+   defense against Man-In-The-Middle attacks, but it plays havoc on scripts. If a prompt occurs,
+   your script stops and waits for input.
+
+   There are two ways we can eliminate this. One is at the script level and the other is at the system
+   level. If we want to continue to prompt for host key checks, then we can add the configuration to our
+   script. This can be done with OpenSSH's -o option. Here's an example in which we run the hostname
+   command on a remote server:
+ssh -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -q user@host /usr/bin/hostname -s
+
+   To set this configuration system-wide, place these entries in ssh_config:
+StrictHostKeyChecking no
+UserKnownHostsFile /dev/null
+LogLevel QUIET
+
+   For our backup utility, we need to add the appropriate parameters to one of the ssh configuration
+   files listed below:
+     * System-wide SSH client configuration files (i.e. /etc/ssh/ssh_config - This files set the default
+       configuration for all users of OpenSSH clients on that desktop/laptop and it must be readable by
+       all users on the system.
+     * User-specific SSH client configuration files (i.e. $HOME/.ssh/config - This is user's own
+       configuration file which, overrides the settings in the global client configuration file,
+       /etc/ssh/ssh_config.
+
+   Add this to /etc/ssh/ssh_conf file to disable the host key checking and the warnings for all
+   users who access systems who's names end in 'RPi'.
+Host *RPi
+    StrictHostKeyChecking no
+    UserKnownHostsFile=/dev/null
+
+   In addition, add the following to the $HOME/.ssh/config file:
+UserKnownHostsFile  ~/.ssh/known_hosts
+
+   Make these changes active by restarting the ssh services via the command sudo service ssh restart.
+
+   With ssh properly configured, a command like
+sudo rsync -azv -e ssh --rsync-path="sudo rsync" pi@BlackRPi:/root/.rpi-firmware/ /mnt/backup/rsync-test8
+
+   This should run without requesting passwords, it will run on the remote as the root user, and warning
+   messages about differing "ECDSA host key" should not get in your way. It will run without user
+   intervention; just what we need for automated backups!
+
+Creating Backup Users on Remote Servers
+   On all the remote systems (i.e. RedRPi and BlackRPi) you need to create the login and establish its
+   ssh authentication keys.
+sudo adduser backup_user --disabled-password -u 400
+sudo mkdir /home/backup_user/.ssh
+sudo chmod 700 /home/backup_user/.ssh
+
+   Now create a rsync wrapper script:
+sudo mkdir /home/backup_user/bin
+sudo vim /home/backup_user/bin/rsync-wrapper.sh
+
+   Enter the following in this file to create the script:
+#!/bin/bash
+
+# This script is a wrapper around rsync, so that rsync can run as root,
+# and at the same time, eliminate any security risks.
+
+# Location of the Log file
+LOG="/home/backup_user/backup.log"
+
+# Place in the log file information concerning the execution of this script
+echo "rsync wrapper script executed on `date`" >> $LOG
+echo "options passed to rsync: " $@ >> $LOG
+echo "---------------------------------------------" >> $LOG
+
+# Now execute the script
+/usr/bin/sudo /usr/bin/rsync $@
+
+   Now change the mode and owner of this file:
+sudo chown backup_user:backup_user /home/backup_user/*
+sudo chown backup_user:backup_user /home/backup_user/bin/rsync-wrapper.sh
+sudo chmod 754 /home/backup_user/bin/rsync-wrapper.sh
+
+   backup_user is not root, and therefore, rsync can't freely move through the whole directory system ,
+   write files, and such. Linux does provide a way to give a user limited super-user privileges. To do
+   this for the backup_user, configure sudo such that it can run the rsynctool as root without being
+   being prompted for a password. For security reasons, we what only the these tools to have sudo
+   privileges. Using visudo command, edit the /etc/sudoers file by adding the following to
+   the bottom of the file.
+# allows this user to not need a password to sudo the specified command(s)
+backup_user    ALL=NOPASSWD:    /usr/bin/rsync
+
+Creating Backup Users for Backup Server
+   On the host server (i.e. desktop) you need to create the login (with a UID of less that 500)
+   which will run the rsync / rsnapshot utilities and establish its ssh authentication keys.
+sudo adduser backup_user -u 400
+sudo chown backup_user:backup_user /home/backup_user/*
+sudo su backup_user
+cd ~
+ssh-keygen -N "" -f ~/.ssh/id_rsa
+ssh-copy-id -i ~/.ssh/id_rsa.pub backup_user@RedRPi
+ssh-copy-id -i ~/.ssh/id_rsa.pub backup_user@BlackRPi
+exit
+
+   And just like the remote systems backup_user is not root, and therefore, the utilities it uses (rsync
+   and rsnapshot) can't freely move through the whole directory system , write files, and such. Again
+   using the visudo command, edit the /etc/sudoers file by adding the following to the bottom of
+   the file.
+# allows this user to not need a password to sudo the specified command(s)
+backup_user    ALL=NOPASSWD:    /usr/bin/rsync
+backup_user    ALL=NOPASSWD:    /usr/bin/rsnapshot
+
+Configuring rsnapshot for Incremental Backups
+   Our mission here is to use rsnapshot to create backups of both normal and protected/restricted files
+   from one server to another over ssh without enabling remote root access to either server while
+   maintaining original file attributes and permissions.
+
+   Where rsync does the actual file backups, rsnapshot is responsible for the overall management of the
+   backups. In my case, I want it to schedule a nested and rotating series of incremental backups for my
+   systems. I want the schedule and the backup increments to be:
+     * Every 4 hours, create an incremental backup, and store all of them for the past 24 hours
+     * Create a daily incremental backups (from the last hourly backup), and store a daily backup for
+       the past 7 days
+     * Create a weekly incremental backups, and store them for the past 4 weeks
+     * Create monthly incremental backups, and store for the past 3 months
+
+   When making the backups, the contents of /dev, /proc, /sys, /tmp, and /run should be excluded because
+   they are populated at boot (while the directories themselves are not created). The file /lost+found
+   is filesystem-specific and doesn't need to be copied. (Note: If you plan on backing up your system
+   somewhere other than /mnt or /media don't forget to add it to the list, to avoid an infinite loop.)
+
+   rsnapshot also provides a non-command-line method for excluding file, which is what I'm using.
+   Specifically, I have defined exclusion files for Linux and Windows based systems. For Linux, the file
+   is called rsync-exclude-desktop and rsync-exclude-RPi and look something like this:
+- /var/lib/pacman/sync/*
+- /lost+found
+- /media/*
+- /cdrom/*
+- /proc/*
+- /mnt/*
+- /run/*
+- /tmp/*
+- /sys/*
+- /dev/*
+
+   For Windows, the file is called rsync-exclude-windows:
+- /cygdrive/c/System\ Volume\ Information/*
+- /cygdrive/c/Windows/System32/winevt/*
+- /cygdrive/c/Windows/System32/catroot/*
+- /cygdrive/c/Windows/System32/catroot2/*
+- /cygdrive/c/Windows/System32/config/*
+- /cygdrive/c/Windows/ServiceProfiles/*
+- /cygdrive/c/ProgramData/Microsoft/*
+- /cygdrive/c/Windows/System32/wdi/*
+- /cygdrive/c/Windows/System32/wfp/*
+- /cygdrive/c/Windows/System32/sru/*
+- /cygdrive/c/proc/sys/Device/*
+- /cygdrive/c/proc/registry*
+- /cygdrive/c/Windows/Logs/*
+- /cygdrive/c/hiberfil.sys
+- /cygdrive/c/pagefile.sys
+- /cygdrive/c/swapfile.sys
+- /proc/sys/Sessions/
+- UsrClass.dat
+- ntuser*
+- NTUSER*
+- *Cache*
+- *cache*
+- *Lock*
+- *lock*
+- *LOG*
+- *log*
+- *.tmp
+
+   To implement the above backup rules (and many others), you need to edit a configuration file
+   located at /etc/rsnapshot.conf. Note: This file must only have tabs between arguments. No spaces.
+   (It's a quirk of rsnapshot that it requires tabs.) The configuration elements I edited are below
+   (/usr/share/doc/rsnapshot/examples/rsnapshot.conf.default.gz can be used as a starting point):
+# location where backups will be stored
+snapshot_root   /mnt/backup/
+
+# rsync command executed on the remote system
+cmd_rsync   /usr/bin/rsync
+
+# incremental backup rules
+retain      hourly  6
+retain      daily   7
+retain      weekly  4
+retain      monthly 3
+
+# rsnapshot's log file
+logfile /var/log/rsnapshot.log
+
+# All rsync commands have at least these options set.
+rsync_short_args    -aev
+rsync_long_args --delete --numeric-ids --relative --delete-excluded
+
+# ssh args passed
+ssh_args    -i /home/backup_user/.ssh/id_rsa
+
+# systems to be backed up, what high level directory name is to be used
+# and the additional arguments to pass to rsync
+backup  /   desktop/    exclude_file=/home/backup_user/rsync-exclude-desktop
+backup  backup_user@RedRPi:/    RedRPi/ exclude_file=/home/backup_user/rsync-exclude-RPi,+rsync_long_args=--rs
+ync-path=/home/backup_user/bin/rsync-wrapper.sh
+backup  backup_user@BlackRPi:/  BlackRPi/   exclude_file=/home/backup_user/rsync-exclude-RPi,+rsync_long_args=
+--rsync-path=/home/backup_user/bin/rsync-wrapper.sh
+backup  Sara@SaraPC:/   SaraPC/ exclude_file=/home/backup_user/rsync-exclude-windows,+rsync_long_args=--fake-s
+uper
+
+   In my backup scheme, I have several remote systems (i.e. RedRPi, BlackRPi, and SaraPC), and a backup
+   server itself (i.e. desktop). All system will use a common user called backup_user, who's only
+   purpose is to support the backup process. From the backup system, we'll be able to logon to each
+   remote system using the backup_user ssh public key. The main trick is to set sudoers on the remote
+   system such that it allow rsync root access to backup_user, and it tell rsnapshot to use additional
+   parameters when calling rsync. This all required to maintain the security of the remote systems, and
+   was discussed in the text above.
+
+Testing rsnapshot
+   rsnapshot provides an easy way to check that your configuration file doesn't contain any syntax
+   errors. Simply type:
+sudo rsnapshot configtest
+
+   If all is well, it will say 'syntax ok'. If there is a problem, it will spit errors at you. If you
+   get errors, check that you have separated items in the file using tabs (spaces are not allowed in the
+   configuration file).
+
+   The final step to test your configuration is to run rsnapshot in test mode, using the -t option:
+sudo rsnapshot -t hourly
+
+   This tells rsnapshot to simulate an "hourly" backup. It should print out the commands it will perform
+   when it runs for real. If all is well, then remove the -t and run it for real to create the initial
+   backup. This initial run is likely to run a long time, and shouldn't be do via cron as discussed
+   below.
+
+Scheduling (Automating) Backups in crontab
+   Linux cron is used to schedule commands to be executed periodically. You can setup
+   commands or scripts, which will be repeatedly run at a set time.
+
+   For crontab, I created a wrapper script and placed it in /home/backup_user/bin/rsnapshot-wrapper.sh:
+<code>   
+#!/bin/bash
+
+# This script is a wrapper around rsnapshot, so status information is logged
+# and notification are made via Pushover app.  It also makes sure the log file
+# doesn't grow too large.
+
+# Capture scripts start time
+STARTTIME=`date +%s`
+
+# Location of the Log file
+LOG="/home/backup_user/backup.log"
+
+# Number of lines in the log file required to trigger it's truncation
+MAXLINES=7000
+
+# Number of lines remaining in the log file after its truncated
+MINLINES=2000
+
+# Calculate the size of the Log file
+LOGSIZE=$( wc $LOG | awk '{ print $1 }' )
+
+# Place in the log file information concerning the execution of this script
+echo -e "\n\n+++++ rsnapshot script started on `date` +++++" >> $LOG
+echo "options passed to rsnapshot: " $@ >> $LOG
+
+# Now execute the script
+/usr/bin/sudo /usr/bin/rsnapshot "$@" >> $LOG 2>&1
+EXITSTATUS=$?
+
+# Capture scripts end time and calculate run time
+ENDTIME=`date +%s`
+INTERVAL=$((ENDTIME - STARTTIME))
+RUNTIME="$(($INTERVAL / 60)) min. $(($INTERVAL % 60)) sec."
+
+# Place time-stamped completion message in the Log
+echo "rsnapshot exited with status $EXITSTATUS" >> $LOG
+echo "+++++ rsnapshot ran" $RUNTIME "and script completed on `date` +++++" >> $LOG
+
+# Send status notification to Pushover app
+/home/jeff/bin/apprise -t "Incremental Backup Status" -m "Filesystem backup took $RUNTIME and completed on `da
+te` with exit status $EXITSTATUS.  Log file $LOG has $LOGSIZE lines."
+
+# Truncate the log file if needed
+if [ $LOGSIZE -ge $MAXLINES ]
+then
+    LINECUT=`expr $LOGSIZE - $MINLINES`
+    sed -i "1,$LINECUT d" $LOG
+    sed -i "1i ////////////////  File truncated here on `date`. //////////////// " $LOG
+fi
+</code>
+
+   Sometime, such as when upgrading my operating system, I want to perform a true full backup. That is,
+   a true copy and not using hard links to files that haven't changed. To do this, I create the
+   script below, which even prompts me for the system I wish to backup.
+
+<code>   
+#!/bin/bash
+
+#set -x
+
+# arguments to be used with rsync
+ARGS="-aev --delete --numeric-ids --relative --delete-excluded"
+EXCL_DESKTOP="--exclude-from=/home/backup_user/rsync-exclude-desktop --exclude=mnt/backup"
+EXCL_RPI="--exclude-from=/home/backup_user/rsync-exclude-RPi"
+EXCL_WINDOWS="--exclude-from=/home/backup_user/rsync-exclude-windows"
+REMOTE_WRAPPER="--rsync-path=/home/backup_user/bin/rsync-wrapper.sh"
+SSH_ARGS="--rsh=\"/usr/bin/ssh -o CheckHostIP=no -i /home/backup_user/.ssh/id_rsa\""
+
+# Location of the Log file
+LOG="/home/backup_user/backup.log"
+
+DIR=`date +%Y_%b_%d_%H_%M`
+
+while true; do
+    read -p "What would you like to backup? ('desktop', 'RedRPi', 'BlackRPi', or 'SaraPC')  " answer
+    case $answer in
+        'desktop' )
+            ARGUMENTS="$ARGS $EXCL_DESKTOP"
+            SOURCE="/."
+            DESTINATION="/mnt/backup/full-backup/desktop/$DIR"
+            break;;
+        'RedRPi' )
+            ARGUMENTS="$ARGS $EXCL_RPI $REMOTE_WRAPPER $SSH_ARGS"
+            SOURCE="backup_user@RedRPi:/"
+            DESTINATION="/mnt/backup/full-backup/RedRPi/$DIR"
+            break;;
+        'BlackRPi' )
+            ARGUMENTS="$ARGS $EXCL_RPI $REMOTE_WRAPPER $SSH_ARGS"
+            SOURCE="backup_user@BlackRPi:/"
+            DESTINATION="/mnt/backup/full-backup/BlackRPi/$DIR"
+            break;;
+        'SaraPC' )
+            ARGUMENTS="$ARGS $EXCL_WINDOWS --fake-super $SSH_ARGS"
+            SOURCE="Sara@SaraPC:/"
+            DESTINATION="/mnt/backup/full-backup/SaraPC/$DIR"
+            break;;
+        [Qq]* )
+            echo "Exiting script."
+            exit;;
+        * )
+            echo "Please answer 'desktop', 'RedRPi', 'BlackRPi', 'SaraPC' or 'q' to quit";;
+    esac
+done
+
+# Capture scripts start time
+STARTTIME=`date +%s`
+
+# Place in the log file information concerning the execution of this script
+echo -e "\n\n####" $answer "full-backup script started on `date` ####" >> $LOG
+echo -n "options passed to rsync: " >> $LOG
+echo "$ARGUMENTS $SOURCE $DESTINATION" >> $LOG
+
+# Now execute the script, also capture scripts end time, calculate run time,
+# and send status notification to Pushover app
+( STARTTIME=`date +%s` ; eval /usr/bin/rsync "$ARGUMENTS $SOURCE $DESTINATION" >> $LOG 2>&1 ;\
+EXITSTATUS=$? ;\
+echo "rsync terminated with exit status $EXITSTATUS." >> $LOG ;\
+echo "####" $answer "full-backup script completed at `date` ####" >> $LOG ;\
+ENDTIME=`date +%s` ;\
+INTERVAL=$((ENDTIME - STARTTIME)) ;\
+RUNTIME="$(($INTERVAL / 60)) min. $(($INTERVAL % 60)) sec." ;\
+/home/jeff/bin/apprise -t "Full Backup Status" -m "Filesystem backup took $RUNTIME and completed on `date` wit
+h exit status $EXITSTATUS." ) &
+
+echo "Full Backup Underway From '$SOURCE' To '$DESTINATION'"
+</code>
+
+   Under the backup_user account I established the Cron job for the backups. You can use sudo crontab -l
+   to list the contents of crontab. To update it, use crontab -e and enter the following (Also, restart
+   cron with sudo service cron restart to make sure the changes are in effect):
+<code>   
+# Each task to run has to be defined through a single line
+# indicating with different fields when the task will be run
+# and what command to run for the task
+#
+# To define the time you can provide concrete values for
+# minute (m), hour (h), day of month (dom), month (mon),
+# and day of week (dow) or use '*' in these fields (for 'any').#
+# Notice that tasks will be started based on the cron's system
+# daemon's notion of time and timezones.
+#
+# Output of the crontab jobs (including errors) is sent through
+# email to the user the crontab file belongs to (unless redirected).
+#
+# For example, you can run a backup of all your user accounts
+# at 5 a.m every week with:
+# 0 5 * * 1 tar -zcf /var/backups/home.tgz /home/
+#
+# Instead of the first five fields, one of eight special strings may be applied:
+# string         meaning
+# ------         -------
+# @reboot        Run once, at startup.
+# @yearly        Run once a year, "0 0 1 1 *".
+# @annually      (same as @yearly)
+# @monthly       Run once a month, "0 0 1 * *".
+# @weekly        Run once a week, "0 0 * * 0".
+# @daily         Run once a day, "0 0 * * *".
+# @midnight      (same as @daily)
+# @hourly        Run once an hour, "0 * * * *".
+#
+# Examples
+# @reboot <command> #Runs at boot
+# @yearly <command> #Runs once a year [0 0 1 1 *]
+#
+#
+#
+# For more information see the manual pages of crontab(5) and cron(8)
+#
+#     +------------- minutes (0 - 59)
+#     |      +----------- hour (0 - 23)
+#     |      |          +--------- day of month (1 - 31)
+#     |      |          |         +------- month (1 - 12)
+#     |      |          |         |         +----- day of week (0 - 6) (Sunday = 0)
+#     |      |          |         |         |            +--- command to be executed
+#     |      |          |         |         |            |
+#     |      |          |         |         |            |
+#     m      h         dom       mon       dow
+#   minute  hour  day-of-month  month   day-of-week   command
+      0     */4         *         *         *         /home/backup_user/bin/rsnapshot-wrapper.sh hourly
+     30      2          *         *         *         /home/backup_user/bin/rsnapshot-wrapper.sh daily
+     30     10          *         *         6         /home/backup_user/bin/rsnapshot-wrapper.sh weekly
+     30     14          1         *         *         /home/backup_user/bin/rsnapshot-wrapper.sh monthly
+
+</code>
+     
+   Finally, within some of the scripts above, you'll the utility apprise. This utility make use of the
+   push notification Pushover:
+   
+<code>   
+#!/bin/bash
+
+# This utility does a push notification to the service Pushover - https://pushover.net/
+
+APPTOKEN="<token>"
+USERKEY="<key>"
+
+# Parse command line options
+USAGE="Usage: `basename $0` [-h] -t title -m message"
+while getopts ht:m: OPT; do
+    case "$OPT" in
+        h)
+            echo $USAGE
+            exit 0
+            ;;
+        t)
+            TITLE=$OPTARG
+            ;;
+        m)
+            MESSAGE=$OPTARG
+            ;;
+        \?)
+            # getopts issues an error message
+            echo $USAGE >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Send message to Pushover to create notification
+curl --silent \
+    -F "token=$APPTOKEN" \
+    -F "user=$USERKEY" \
+    -F "message=$MESSAGE" \
+    -F "device=desktop" \
+    -F "title=$TITLE" \
+    -F "sound=spacealarm" \
+    https://api.pushover.net/1/messages.json | grep '"status":1' > /dev/null
+
+# Check the exit code to identify an error
+if [ $? -eq 0 ];
+    then
+        exit 0
+    else
+        echo "apprise failed"
+        exit 1
+fi
+</code>
+
+Increased Security
+   The final step is to lock all this down. To increase the security of the overall scheme, on the
+   remote systems and on the local system, remove the user password from the backup_user and set the
+   shell to a NOOP command.
+# increase security by deleting password and remove login shell
+sudo passwd --delete backup_user
+sudo usermod -s /bin/false backup_user
+
+Monitoring rsnapshot
+   Monitoring and testing is an essential part of any backup procedure. There's nothing worse than
+   finding out that your backup hasn't been working for six months on the day that your system crashes.
+   rsnapshot has a log file that records warnings and error messages. You can find/open it here:
+   /var/log/rsnapshot.log Inspect this log regularly to make sure your backup jobs are running smoothly.
+   You can increase or decrease the level of logging detail in the configuration file
+   /etc/rsnapshot.conf.
+
+Backup from Windows Machines to Linux
+   Backing up Windows systems has its own special challenges, but utilities exist to help. Cygwin is
+   a a collection of tools that provide a Linux look and feel environment for Windows. If you install
+   it, you can use linux commands and services on your Windows. Cygwin contains a package with its
+   version of rsync to make backups from the Windows based computer. With Cygwin's rsync and the
+   rsnapshot running on the Linux backup server, you can set up a remote backup for the Microsoft
+   Windows box.
+
+   To do the install the cygwin rsync, ssh, etc. tools required to support the rsnapshot backup, you'll
+   follow a similar design pattern used above for the Linux boxes. Follow this procedure:
+
+Install Cygwin Tools
+     * From the cygwin site, download and run the setup program. (Make sure to keep the setup
+       program, since it is used to install additional Cygwin packages, if you so desire.)
+     * Run your cygwin setup.exe and expand the categories to find "rsync" and "ssh". You'll find them
+       under the "Net" packages.
+     * When the install is complete, the rsync and ssh programs (and many more) will be located in
+       C:\cygwin64\bin. (This is equivalent to /bin when your running a bash shell in cygwin.)
+     * In Windows, open a Command Prompt (Admin) window. Within this window, get a bash shell via
+       the command C:\cygwin64\bin\bash. Next execute export Path=/bin:$PATH.
+
+Get ssh Operational
+     * Now make a home directory for the cygwin user, in my case this was mkdir /home/Sara and then cd
+       /home/Sara.
+     * Create a ssh public/private keys with the following command: ssh-keygen -t rsa.
+     * Now start up the ssh services by following the instructions of "Geek to Live: Set up a
+       personal, home SSH server".
+     * Find out the name of the windows system via hostname (it's SaraPC).
+     * In order to access the ssh server from the backup Linux box, the ssh port of 22 must be open in
+       the Windows Firewall. You can check ports status by attempting connect via ssh (e.g. ssh
+       Sara@SaraPC). If this command appears to hang or time out (as it did for me), the port is likely
+       blocked. You'll need to go to your Windows Firewall and open port 22.
+     * Transfer the public key for the backup_user on the Linux Backup server to
+       /home/Sara/.ssh/authorized_keys.
+     * Make sure that in the files /etc/ssh/sshd_config and /etc/ssh/ssh_config that you have
+       RSAAuthentication yes and PubKeyAuthentication yes.
+
+Test ssh and rsync
+     * On the Linux Backup server, login as the backup_user user.
+     * Test the connection via ssh Sara@SaraPC in a terminal window on the Linux box (note to self: Case
+       is important!). You should login without a password.
+     * Test rsync via the command sudo rsync -azv --fake-super Sara@SaraPC:/home/Sara
+       /mnt/backup/rsync-test9. You'll want to use the --fake-super option to suppress some issues
+       with group ids.
+     * Test the /etc/rsnapshot.conf given earlier by running rsnapshot hourly.
+
+Restore Files with rsnapshot
+   Restoring files are an no brainier because the backups are plain directories. You can open a file
+   browser or a terminal, enter a snapshot from a few hours/days/weeks/months ago, find a working
+   directory where your files are store, and copy them to where their needed. In other words, you can
+   use any regular tools on any snapshot. No need to "revert" or "restore" files from backup, or run any
+   special software. This is mighty convenient, intuitive, and fool proof.

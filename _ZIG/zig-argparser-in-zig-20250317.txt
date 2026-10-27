@@ -1,0 +1,283 @@
+filename: zig_argparser-in-zig_20250317.txt
+https://en.liujiacai.net/2022/12/14/argparser-in-zig/
+
+What I learn by implementing argparser in Zig
+2022-12-17
+
+   I've been working on a Zig project in my spare time for the last few weeks:
+     * [https://github.com/jiacai2050/simargs]jiacai2050/simargs: A simple, opinionated, struct-based argument
+       parser in Zig.
+
+   Here I want to share the experience learned during the development of simargs. Since simargs is my
+   second non-trivial project, and my experience of Zig is limited, so welcome to point out any mistakes
+   I made in this post. Let's begin.
+
+     Disclaimer: As a 3-year Rust developer, I will compare Zig with Rust in some sections.
+
+### Why reinvent the wheel ###
+   First of all, let me introduce the project background. There are actually many similar projects in
+   Zig community, but I'm not very satisfied with them. For example:
+     * Hejsil/zig-clap, similar to clap in the Rust ecosystem. But I don't like its usage. The
+       input of the parser is a help string, it parse the help string at comptime to get the option
+       fields that need to be parsed.
+     * MasterQ32/zig-args similar to zig-clap, making full use of the comptime. The difference is
+       that its input is struct, not a help string.
+
+const options = argsParser.parseForCurrentProcess(struct {
+	// This declares long options for double hyphen
+	output: ?[]const u8 = null,
+	@"with-offset": bool = false,
+	mode: enum { default, special, slow, fast } = .default,
+
+	// This declares short-hand options for single hyphen
+	pub const shorthands = .{
+		.S = "intermix-source",
+	};
+}, argsAllocator, .print) catch return 1;
+defer options.deinit();
+
+std.debug.print("executable name: {?s}\n", .{options.executable_name});
+
+std.debug.print("parsed options:\n", .{});
+inline for (std.meta.fields(@TypeOf(options.options))) |fld| {
+	std.debug.print("\t{s} = {any}\n", .{
+		fld.name,
+		@field(options.options, fld.name),
+	});
+}
+
+   I personally think usage of zig-args is more elegant than zig-clap's, using a big string as config
+   seems not very extensible for me.
+
+   However after check zig-args's implementation, I have no interests in using it for my project. Its
+   parsing logic is too complicated and feels very difficult to maintain.
+
+   In contrast, the implementation of zig-clap is much more elegant. It internally maintains a state
+   machine to parse the command line arguments.
+
+   State machine is very suitable for this kinds of event driven task. In case of readers haven't heard
+   of it, refer following post to learn more about it:
+     * [https://www.cognitect.com/blog/2017/5/22/restate-your-ui-using-state-machines-to-simplify-user-interface-development]Restate
+       Your UI: Using State Machines to Simplify User Interface Development
+
+   So you can think of simargs is a combination of these two projects:
+     * struct-based configuration
+     * Take full advantage of the [https://kristoff.it/blog/what-is-zig-comptime/]comptime feature
+     * Based on state machine, ensure the simplicity of parsing logic
+
+   After introduce project background, following sections will mainly summarize experience of coding in
+   Zig.
+
+### How to dynamically assign values to struct fields ###
+   In general, assignment to a struct field is straightforward, for example:
+foo.field = 123;
+
+   The first problem encountered in the development of simargs is how to dynamically assign values. The
+   field names of struct are obtained by parsing command line arguments, so it's a runtime value, but we
+   need a comptime field name to set against, how to address this conflict?
+
+   The answer is inline for:
+
+inline for (std.meta.fields(T)) |field| {
+	if (std.mem.eql(u8, field.name, long_name)) {
+		@field(opt, field.name) = ....;
+		break;
+	}
+}
+
+   Compared with for, inline for can unroll the loop body, and the unroll is required for comptime. so
+   snippet above can be rewritten as:
+
+// Suppose T have two fields: A and B
+if (std.mem.eql(u8, "A", long_name)) {
+	@field(opt, "A") = ....
+}
+
+if (std.mem.eql(u8, "B", long_name)) {
+	@field(opt, "B") = ....
+}
+
+   If we use for, the compiler will throw following errors:
+
+simargs.zig:507:33: error: values of type '[]const builtin.Type.StructField'
+must be comptime-known, but index value is runtime-known
+            for (std.meta.fields(T)) |field| {
+                 ~~~~~~~~~~~~~~~^~~
+
+### How to initialize a struct with unknown value ###
+   Question above solve how to assign fields dynamically, but there is one more basic question:
+How to initialize a struct with unknown value
+
+   Only after we have a struct variable, we can assign fields of it. So how to fix this?
+
+   The answer is undefined.
+
+   undefined is used to deal with the assignment problem when its current value is unknown, users can
+   only ensure its assignment before its first usage.
+
+     | As pointed out by andrewrk, the statement above is wrong.
+     | Assign a variable to undefined is a noop in Release mode, it will be whatever in that memory.
+
+   As a better C, Zig writes 0xaa bytes to undefined memory in Debug mode in order to catch bugs early,
+   and to help detect use of undefined memory in a debugger.
+
+   It needs to be clear that it is impossible to judge whether a variable is undefined or not. So it is
+   necessary to use an additional field to indicate whether a variable is initialized. This is how
+   simargs handle required option
+     * https://github.com/jiacai2050/simargs/blob/9779f5f48862594fe69b7298384a8b2dee729548/src/simargs.zig#L488
+
+### Type as first-class value ###
+   In Zig, type is first-class value and can be treated as ordinary data like u8. Zig has three
+   built-ins to operate on it:
+    1. @typeInfo(comptime T: type) std.builtin.Type Get concrete information about a type, similar to
+       reflection in other languages. Type is an enumeration value, Users can determine the specific
+       type through pattern matching
+    2. @Type(comptime info: std.builtin.Type) type The reverse operation of @typeInfo, which converts
+       Type into an abstract type.
+    3. @TypeOf(...) type Get the type of a value
+
+   Examples where types are first-class values can be seen all over Zig code, such as initializing a
+   linked list of strings:
+
+std.ArrayList([]const u8).init(allocator);
+
+   For Rust, it is
+Vec::<String>::new()
+
+   As you can see, special syntax is required to pass in type information in Rust, but there is no such
+   special syntax in Zig.
+
+### Dynamic dispatch: interface ###
+   In other programming languages, they usually provide a way to dispatch method dynamically, such as
+   interface in Java and trait in Rust. However, there is no support for this in Zig. There have been
+   related issue discussions in the community, but for now it's not supported directly:
+     * vtable abstraction of some kind. traits? oop? polymorphism? interfaces? #130
+     * comptime interfaces · Issue #1268 · ziglang/zig
+
+   But it does not mean that it cannot be implemented at all. In Zig, the type of a function parameter
+   can be anytype, which means that the specific type of this parameter will be deferred when the
+   function is called, similar to the generic in Rust.
+test "anytype demo" {
+	const a = addFortyTwo(@as(u32, 1));
+	try std.testing.expectEqual(u32, @TypeOf(a));
+
+	const b = addFortyTwo(@as(f32, 1));
+	try std.testing.expectEqual(f32, @TypeOf(b));
+}
+
+fn addFortyTwo(x: anytype) @TypeOf(x) {
+	return x + 42;
+}
+
+   The Writer in the standard library is implemented using this feature:
+pub fn bufferedWriter(underlying_stream: anytype) BufferedWriter(4096, @TypeOf(underlying_stream)) {
+	return .{ .unbuffered_writer = underlying_stream };
+}
+
+   However, the usage of anytype is limited, it can only be used in function parameter, cannot be used
+   in field of a struct , which means that we cannot save an "interface" in a struct.
+
+   When simargs was first implemented, it used argsWithAllocator to parse the command line parameters,
+   this function would return ArgIterator, but because it is a specific type, it is not very convenient
+   for testing. In order to overcome this, simargs now call std.process.argsAlloctor to get an array
+   [][:0]u8, so I can just construct this array directly in testing.
+
+   In deinit, based on how is invoked to determine if it's required to free resources:
+if (!@import("builtin").is_test) {
+	std.process.argsFree(self.allocator, self.raw_args);
+}
+
+   If it's in test, argsFree is ignored, and free is done in the test.
+
+   This method is essentially static dispatch, but is enough for simargs. For more information on how to
+   achieve dynamic dispatch in Zig, check post below:
+     * [https://zig.news/kristoff/easy-interfaces-with-zig-0100-2hc5]Easy Interfaces with Zig 0.10.0
+
+### How to debug comptime code ###
+   Generally, we can use traditional print for debug, for Zig is std.debug.print. But it doesn't work
+   for comptime.
+
+   Zig provides @compileLog to solve the print problem, but it will print []const u8 as ASCII code,
+   which is not very intuitive, we can overcome this using std.fmt.comptimePrint. For example:
+@compileLog(comptime std.fmt.comptimePrint("field name:{s}\n", .{field.name}));
+
+### How to get mutable pointer ###
+   When using a for to loop a slice/array, the captured value is a copy of its value. If you want to
+   modify this value inside the loop, use this:
+	var arr = [_]i32{ 1, 2, 3 };
+
+	for (arr) |*item| {
+		std.debug.print("{any}\n", .{@TypeOf(item)});
+	}
+
+   Another thing to note is that after Zig 0.10, taking the address of struct literal will return an
+   immutable pointer.
+
+   You need to first declare this struct using var in order to get a mutable pointer:
+     * [https://ziglang.org/download/0.10.0/release-notes.html#Address-of-Temporaries-Now-Produces-Const-Pointers]
+
+### Awkward expectEqual ###
+   When writing tests, expectEqual is a most used function to make assertion, but there is a "bug" in
+   Zig at present:
+     * https://github.com/ziglang/zig/issues/12451
+
+   This means that expectEqual will compare slice by pointer, not content. Others may say just use
+   expectEqualSlices, but what if the slice is a field of a struct?
+
+   At this time, we can only compare fields of struct one by one if it contains composite values.
+     * https://github.com/jiacai2050/simargs/blob/9440badce0e5438cea05c76b6d1bae381043d632/src/simargs.zig#L555
+
+### Document ###
+   Up to now, the Zig documentation is basically useless, so when developing, it is inevitable to look
+   at the source code of the standard library. Readers should be clear about this.
+
+   Fortunately, the quality of the standard library is relatively high, we can learn what idiomatic Zig
+   code looks like when reading.
+
+   I usually grep pub fn to see what methods are exposed by a certain file, and I can easily find its
+   usage in unit tests nearby. The packages commonly used in my development are:
+     * std.mem, slice related operations
+     * std.fmt, format conversion, string splicing
+
+   A little trick, for function that returns []u8, there is usually another one returning [:0]u8, this
+   is convenient for interacting with C. For example:
+     * std.fmt.allocPrint, std.fmt.allocPrintZ
+     * std.mem.join, std.mem.joinZ
+
+### ZLS ###
+   Zig is currently the only option for writing Zig with IDE support.
+     | As pointed out by matu3ba, there is a new project to create ctags for Zig:
+     | * gpanders/ztags: Generate tags files for Zig projects
+
+   Compared with rust-analyzer, ZLS is less stable and practical. It often happens that jump to
+   definition cannot work after some editing. In this case, we can do nothing but restart.
+
+   But fortunately, the core developer of rust-analyzer, matklad has started coding in Zig recently,
+   and has begun to contribute to ZLS. I believe that ZLS will become more and more stable in
+   future.
+
+### Zig-mode ###
+   I'm an Emacs user, and luckily there is a zig-mode, but there is one annoying problem with
+   format-on-save. It will hang Emacs when you save, which make editing experience very poor. The
+   corresponding PR has already been created, but it has not been merged into the main branch. You can
+   cherry-pick to your Emacs config if it hurts you:
+     * Proposal: use reformatter.el for `zig fmt` · Issue #39 · ziglang/zig-mode
+
+### Summary ###
+   Generally speaking, the experience of coding in Zig is good. There are various tools for
+   editing/testing/debugging. Although they are not perfect, they do not affect normal use.
+
+   Problems may arise, users should be aware of this. After all, Zig is still an unstable language.
+
+   Actually, I don't really care when 1.0 will come out, the Zig team are already doing great work,
+   especially the 0.10's self-hosted compiler. I just hope more useful features will be added in the
+   language to avoid bugs such as memory safety and concurrency, which is a big selling-point of Rust.
+
+   By implementing simargs, I have a deep understanding of the characteristics of Zig, especially
+   comptime. Only for this point, I feel time of last few weekends is valuable.
+
+   If this project can help enrich the Zig ecosystem a little bit, that would be even better.
+
+
+---
+

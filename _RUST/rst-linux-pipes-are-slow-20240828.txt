@@ -1,0 +1,304 @@
+filename: rst_linux-pipes-are-slow_20240828.txt
+https://qsantos.fr/2024/08/25/linux-pipes-are-slow/
+
+Linux Pipes are Slow
+August 25, 2024
+
+vmsplice is too fast
+   Some programs use a particular system call "vmsplice" to move data faster through a pipe. Francesco
+   already did a deep dive on using vmsplice to make things fast. However, while experimenting with
+   it, I noticed that, when not using vmsplice, Linux pipes are slower than what I would have expected.
+   Since you cannot always use it, I wanted to understand exactly why that was, and whether it could be
+   improved.
+
+   The reason I want to move data through pipes is that I am writing a program encode/decode Morse
+   code blazingly fast.
+
+   To get a point of reference, the obvious candidate is the Fizz Buzz throughput competition at the
+   Code Golf StackExchange. There are two kinds of solutions:
+    1. the ones that manage to reach up to a few gigabytes per second, with neil's reaching 8.4
+       GiB/s;
+    2. the ones which largely surpass that, from tkluck's at 15.5 GiB/s to ais523's at 60.8
+       GiB/s, to david's at 208.3 GiB/s using multiple cores.
+
+   The difference between the first and the second group is that the second is using vmsplice, while the
+   first is not. But how can using vmsplice enable such a large gain in performance? My intuition
+   about vmsplice is that it allows you to avoid copying data to and from kernel space. Surely, copying
+   data cannot be slower than generating it? Even assuming it is not faster, and that you have to copy
+   the data twice to get it through the pipe, you would assume a throughput gain of 3×, at best. But
+   here, we have 7, even just looking at single-core solutions.
+
+   Something is missing in my mental model, I want to know what.
+
+   First, I'll need to perform my own measurements to easily compare with what I'll do afterward.
+   Compiling and running aie523's solution on my computer, I get:
+$> ./fizzbuzz | pv >/dev/null
+96.4GiB 0:00:01 [96.4GiB/s]
+
+   With david's solution, I reach 277 GB/s when using 7 cores (40 GB/s per core).
+
+   Now, to understand what's going on, we need to find the answer to these questions:
+    1. How fast can we write data ideally?
+    2. How fast can we actually write data to a pipe?
+    3. How does vmsplice help?
+
+Writing Data in the Ideal Wonderland
+   First, let's consider the program below, which just copies data without doing any system call. I use
+   std::hint::black_box to stop the compiler from noticing that we are not using the result. Without
+   this, the compiler would optimize the program to nothing.
+
+fn main() {
+	let dst = [0u8; 1 << 15];
+	let src = [0u8; 1 << 15];
+	let mut copied = 0;
+	while copied < (1000 << 30) {
+		std::hint::black_box(dst).copy_from_slice(&src);
+		copied += src.len();
+	}
+}
+
+   On my system, this runs at 167 GB/s. This is consistent with the speed of writing to L1 cache for my
+   CPU.
+
+   When profiling this with ftrace, we see that 99.9% of the time is spent in
+   __memset_avx512_unaligned_erms, directly called by main, and calling no other functions. The
+   flamegraph is pretty much flat. If you do not feel like running a full-fledged profiler, you can just
+   use gdb and hit Ctrl+C at a random time:
+
+$> cargo build --release
+$> gdb target/release/copy
+...
+(gdb) run
+...
+^C (hitting Ctrl+C)
+Program received signal SIGINT, Interrupt.
+__memset_avx512_unaligned_erms () at ../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:236
+...
+=> 0x00007ffff7f15dba     f3 aa      rep stos %al,%es:(%rdi)
+
+   In any case, note that we are using AVX-512. The reference to memset in the names can be surprising,
+   but this is just because part of the logic is common with memcpy. The implementation is in a
+   generic file dedicated to SIMD vectorization that supports SSE, AVX2 and AVX-512. In our case,
+   the AVX-512 specialization is used.
+
+   As an aside, note that the implementation of memcpy in glibc uses vm_copy to copy pages directly
+   on Mach-based systems (mostly Apply products) uses a kernel feature to copy pages directly.
+
+   However, AVX-512 is quite niche. According to Steam's hardware survey (section "Other Settings"),
+   only about 12% of Steam users have it. In fact, Intel only included AVX-512 for consumer-grade
+   processors in the 11th generation; and now reserves it for servers. AMD CPUs support AVX-512 since
+   the Ryzen 7000 series (Zen 4).
+
+   So I tested this same program while disabling AVX-512. For this, I used the Linux kernel option
+   clearcpuid=304. I was able to check that it used __memset_avx2_unaligned_erms using the gdb and
+   Ctrl+C trick. I then did the same to disable AVX2 with clearcpuid=304,avx2,avx, making it use
+   __memset_sse2_unaligned_erms.
+
+   Although SSE2 is always available on x86-64, I also disabled the cpuid bit for SSE2 and SSE to see if
+   it could nudge glibc into using scalar registers to copy data. I immediately got a kernel panic. Ah,
+   well.
+
+   When using AVX2, the throughput was... 167 GB/s. When using only SSE2, the throughput was... still 167
+   GB/s. To an extent, it makes sense: even SSE2 is quite enough to fully use the bus and saturate L1
+   bandwidth. Using wider registers only helps when performing ALU operations.
+
+   The conclusion from this experiment is that, as long as vectorization is used, I should reach 167
+   GB/s.
+
+Actually Writing Data to a Pipe
+   So, let's look at what happen when we write to a pipe instead of to user space memory:
+
+use std::io::Write;
+use std::os::fd::FromRawFd;
+fn main() {
+	let vec = vec![b'\0'; 1 << 15];
+	let mut total_written = 0;
+	let mut stdout = unsafe { std::fs::File::from_raw_fd(1) };
+	while let Ok(n) = stdout.write(&vec) {
+		total_written += n;
+		if total_written >= (100 << 30) {
+			break;
+		}
+	}
+}
+
+   We then measure the throughput using:
+$> cargo run --release | pv >/dev/null
+
+   On my computer, this reaches 17 GB/s. This is 10 times as slow as just writing to a buffer! How can a
+   system call which basically writes to a kernel buffer be so much slower? And no, context switches
+   don't take that much time.
+
+   So let's do some profiling of this program.
+   ./zeroes | pv >/dev/null Profiling of ./zeroes Reset Zoom Search ic
+   tr..
+
+   __GI___libc_write vfs_write _r.. _copy_from_iter clear_page_erms ksys_write __memcg_kmem..
+   get_page_from_freelist __mutex_lock.constprop.0 zeroes::main copy_page_from_iter mutex_spin_on_owner
+   __alloc_pages copy_user_enhanced_fast_string zeroes do_syscall_64 entry_SYSCALL_64_after_hwframe
+   rmqueu.. pipe_write main _raw_s..
+
+   Note that __GI___libc_write is the glibc wrapper that performs the system call. It and everything
+   below is in user land. Everything above is in the kernel.
+
+   As expected, we are spending virtually all our time calling write. In particular, we are spending 95%
+   of our time inside pipe_write. Inside this function, we are spending 36% of our total time in
+   __alloc_pages, which provisions new memory pages for the pipe. We cannot just reuse a handful of
+   pages in a loop because pv moves these pages using splice to /dev/null, which consume them.
+
+   Next to it are __mutex_lock.constprop.0 that takes 25% of the time and _raw_spin_lock_irq that takes
+   5%. They lock the pipe for writing.
+
+   This leaves just 20% of the time for the copying of data itself in copy_user_enhanced_fast_string.
+   But, even with only 20% of the CPU time, we would expect to be able to move 167 GB/s * 20% = 33 GB/s.
+   It means that, even taken separately, this function is still twice as slow as
+   __memset_avx512_unaligned_erms, which was used in the program that just wrote to user space memory.
+
+   What is copy_user_enhanced_fast_string doing to be so slow? We need to dig deeper. For this, I
+   disassembled my Linux kernel, and looked at that function.
+
+$> grep -w copy_user_enhanced_fast_string /usr/lib/debug/boot/System.map-6.1.0-18-amd64
+ffffffff819d3d90 T copy_user_enhanced_fast_string
+$> objdump -d --start-address=0xffffffff819d3d90 vmlinuz | less
+
+vmlinuz:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+ffffffff819d3d90 <.text+0x9d3d90>:
+
+ffffffff819d3d90:        90                   nop
+ffffffff819d3d91:        90                   nop
+ffffffff819d3d92:        90                   nop
+ffffffff819d3d93:        83 fa 40             cmp $0x40,%edx
+ffffffff819d3d96:        72 48                jb  0xffffffff819d3de0
+ffffffff819d3d98:        89 d1                mov %edx,%ecx
+ffffffff819d3d9a:        f3 a4                rep movsb %ds:(%rsi),%es:(%rdi)
+ffffffff819d3d9c:        31 c0                xor %eax,%eax
+ffffffff819d3d9e:        90                   nop
+ffffffff819d3d9f:        90                   nop
+ffffffff819d3da0:        90                   nop
+ffffffff819d3da1:        e9 9a dd 42 00       jmp 0xffffffff81e01b40
+...
+ffffffff81e01b40:        c3                   ret
+
+   The NOP instructions at the beginning and at the end of the function allow ftrace to insert tracing
+   instructions when needed. This lets it collect data about specific kernel function calls without
+   inducing any slow down for kernel functions that are not being profiled. The CPU instruction decoding
+   pipeline takes care of NOP early, so they have basically no impact on performance (other than taking
+   room in the L1i cache).
+
+   I do not know why the JMP is not just a RET, however.
+
+   In any case, the CMP test and JB jump handle the case of buffers that are smaller than 64 bytes by
+   jumping to another function that copy 8 bytes at a time with 64-bit registers, then 1 byte at a time
+   with 8 bit register in two loops. For large buffers, the copying is handled by a REP MOV instruction.
+   That's definitely not vectorized code.
+
+   In fact, this function is not implemented in C but directly in Assembly! This means that there is
+   no need to look at the result of compilation; we can just look at the source code. And it's not just
+   a missed optimization when compiling, it was written like that.
+
+   But is the lack of vector instruction the only reason why copy_user_enhanced_fast_string is twice as
+   slow as __memset_avx512_unaligned_erms? To check this, I adapted the initial Rust program to
+   explicitly use REP MOVS:
+
+use std::arch::asm;
+
+fn main() {
+	let src = [0u8; 1 << 15];
+	let mut dst = [0u8; 1 << 15];
+	let mut copied = 0;
+	while copied < (1000u64 << 30) {
+		unsafe {
+			asm!(
+				"rep movsb",
+				inout("rsi") src.as_ptr() => _,
+				inout("rdi") dst.as_mut_ptr() => _,
+				inout("ecx") 1 << 15 => _,
+			);
+		}
+		copied += 1 << 15;
+	}
+}
+
+   The throughput is 80 GB/s. This is a factor 2 slow down, exactly what we observe with the kernel
+   function!
+
+   Now, we know that the Linux kernel is not using SIMD to copy memory and that this makes
+   copy_user_enhanced_fast_string twice as slow as it could be.
+
+   But why is that? Over at Stack Overflow, Peter Cordes explains that using SSE/AVX instructions is
+   not worth it in most cases, because of the cost of saving and restoring the SIMD context.
+
+   In summary: the kernel is spending quite a bit of time on managing memory, and it is not even using
+   SIMD when actually copying the bytes. This is the source of the 10× slow-down we see when comparing
+   with the ideal case.
+
+vmsplice to the Rescue
+   We now have an upper bound (167 GB/s to write the data in memory once) and a lower bound (17 GB/s
+   when using write on a pipe). Let's look in details at the effect of usng vmsplice. It mitigates the
+   cost of using a pipe by moving entire buffers from user space to the kernel without copying them.
+
+   To understand how it works, again, read the excellent article by Francesco. We'll be using the
+   ./write program from that article to get a minimal example of using vmsplice. This program just
+   writes an infinite number of 'X's. This will simplify the profiling by not having any time dedicated
+   to compute Fizz Buzz data or something else.
+
+   ./write actually achieves 210 GB/s, well above our upper bound, but that's because the program is
+   kind of cheating by reusing the same buffers to pass to vmsplice. For anything other than a stream of
+   constant bytes, we will actually have to fill the buffers with new data, which is where the upper
+   bound actually applies. In any case, we only care about what vmsplice does:
+   ./write -write_with_vmsplice -huge_page -busy_loop | ./read -read_with_splice -busy_loop Profiling of
+   ./write Reset Zoom Search ic __iov_iter_get_pages_a.. internal_get_user.. write import_i.. __import..
+   i.. do_syscall_64 mutex_spin_on_owner osq.. _cop.. __mutex_lock.constprop.0
+   entry_SYSCALL_64_after_hwframe __do_sys_vmsplice wa.. add_to_pipe iovec_.. iov_iter_get_pages2
+   vmsplice
+
+   Like with write, we are spending a significant amount of time (37%) in __mutex_lock.constprop.0.
+   However, there is no _alloc_pages and no _raw_spin_lock_irq. And, instead of
+   copy_user_enhanced_fast_string, we find add_to_pipe, import_iovec and iov_iter_get_pages2. From this,
+   we can see that how vmsplice bypasses the expensive parts of the write system call.
+
+   As an aside, I was a bit surprised about the effect of the buffer size, especially when not using
+   vmsplice. It looks like minimizing the number of system calls is not always the most important thing
+   to do.
+
+    What   Buffer size Throughput (GB/s) System calls Instructions ins/syscall
+   ./write 32768       99                3276822      7373684904   2250
+   ./write 65536       150               1638466      5438514152   3319
+   ./write 131072      207               819270       4288897413   5235
+   zeroes  32768       17                3276800      31859864089  9723
+   zeroes  65536       13                1638400      31750857264  19379
+   zeroes  131072      12                819200       35002733773  42728
+
+Wrapping Up
+   There you have it. Writing to a pipe is ten times slower than writing to raw memory. And this is
+   because, when writing to a pipe, we need to spend a lot of time taking a lock, and we cannot use
+   vector instructions efficiently.
+
+   In principle, we could move data at 167 GB/s, but we need to avoid the cost of locking the buffer,
+   and the cost of saving and restoring the SIMD context. This is exactly what splice and vmsplice do.
+   They are often described as avoiding copying data between buffers, and this is true, but, most
+   importantly, they completely bypass the conservative kernel code with extensive procedures and scalar
+   code.
+    1. Of course, they need to write code fast enough for exploit what vmsplice enables, but the point
+       is that the first group's performance is limited by not using vmsplice.
+    2. All benchmarks were performed on my personal desktop computer, which features a 7950X3D and DDR5
+       RAM overclocked to 6000T/s. And I am running Debian 12 with a 6.1.0-18-amd64 Linux kernel. CPU
+       mitigations were disabled using the Linux kernel option mitigations=off.
+       As mentioned by ais523, it is important to pin the processes to specific cores. I have used
+       logical cores 27 and 29, but I trim taskset -c 27 and taskset -c 29 from the commands in this
+       article for the sake of readability. Look into
+       /sys/devices/system/cpu/cpu*/acpi_cppc/highest_perf to know the relative performance of your
+       cores.
+    3. See "L1 Cache write" in the last row of the second table from the bottom of the LanOC review.
+       This gives 2,518.4 GB/s for all 16 physical cores, or 157.4 GB/s per physical core.
+    4. I had to install linux-image-6.1.0-18-amd64-dbg to get the file
+       /usr/lib/debug/boot/System.map-6.1.0-18-amd64 with the symbols.
+    5. Someone at Hacker News has the answer!
+
+
+---
+

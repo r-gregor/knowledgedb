@@ -1,0 +1,253 @@
+filename: c-isdigit-multi-implementation-with-bits-fidlings-20250801.txt
+https://nrk.neocities.org/articles/isdigit-multi-implementation
+
+isdigit: simple function, multiple implementation
+09 Jul 2022
+
+isdigit is a very simple function which tells you weather a character is a digit or not. But the simplicity
+is deceiving, at least on the C standard library.
+
+You see, pretty much all the functions in <ctype.h> is either useless or rather difficult to use correctly
+due to the following reasons:
+
+ 0. They're locale dependant. This means you will get different results on the same input depending on the
+    system locale.
+ 1. The is* variants don't actually return a boolean (i.e 0 or 1), instead they return 0 on failure but any
+    non-zero value on success.
+    What the... I mean to be fair, this doesn't matter on most cases such as if (isdigit(ch)), however code
+    like this: int v[2]; v[isdigit(ch)] = 0; is broken and has to be converted to v[!!isdigit(ch)].
+ 2. If the argument to these functions aren't representable in unsigned char (or EOF) then the behavior is
+    undefined.
+    What the fuck (?!) This means innocent looking code like: char ch = getchar(); if (isdigit(ch)) is
+    actually UB since user might input some negative character and you must cast the argument if (isdigit
+    ((unsigned char)ch)) to avoid triggering UB.
+
+Due to these braindeaths, it's very common for people to roll their own ctype macros, such as
+#define ISDIGIT (X) ((X) >= '0' && (X) <= '9'). While this is the obvious implementation, is this actually the
+best one?
+
+Today I want to take a look at a couple different ways to implement the function isdigit and analyze some of
+the performance characteristic of them. Such nano-optimizations is unlikely to matter on most software, but
+this was done mostly out of scratching my own curiosity.
+
+Some assertions
+Before diving in, I'd like to assert a couple different things about the functions we're going to implement
+which differ from the standard C ones:
+
+  * We only care about ASCII, no locale braindeath.
+  * We take in an unsigned char as our argument.
+  * Dealing with EOF is not necessary. ^[i]
+  * Preferably, but not necessarily, return a boolean.
+
+With these out of the way, let's begin.
+
+EOF has it's own set of braindeaths which I don't want to get into on this article.
+
+The simple version
+The simple version simply checks weather ch falls between '0' to '9' or not:
+
+int isdigit_simple(unsigned char ch) {
+	return ch >= '0' && ch <= '9';
+}
+
+This has a couple nice properties:
+  * It returns a boolean.
+  * The code is very easy to read and reason about.
+  * The logic would work even on Unicode codepoints. ^[i]
+
+Pretty much the only downside of this approach is that the code is "branch-y", which can cause performance
+penalties if the processor mispredicts the branch.
+
+Assuming we change the function to take a uint32_t argument instead of an unsigned char. And of course, when
+I say it would "work" on Unicode codepoints, I mean that it's going to pick out the ASCII digits out of
+there, not digits of other languages.
+
+The lookup table version
+To overcome the branching, a rather popular approach is to have a "Look-up-table" (aka LUT) so that no
+branching needs to occur:
+
+int isdigit_lut256(unsigned char ch) {
+	static const unsigned char lut[256] = {
+		['0'] = 1, ['1'] = 1, ['2'] = 1, ['3'] = 1, ['4'] = 1,
+		['5'] = 1, ['6'] = 1, ['7'] = 1, ['8'] = 1, ['9'] = 1,
+	};
+	return lut[ch];
+}
+
+This solves the branching problem, however it introduces a whole bunch of other problems:
+
+  * This logic will not work on Unicode codepoints (unless you want to take up gigabytes of memory for the
+    LUT).
+  * It requires memory access, which can be insanely costly if the data wasn't already in the CPU's cache.
+    This means that the performance of this function isn't reliable, it might turn out to be really fast, or
+    it might turn out to be slower than the simple version in case of a cache-miss.
+  * The LUT takes up 256 bytes, which can pollute the CPU's data cache and cause adverse performance effect
+    on the calling code.
+
+That's a lot of downsides just to avoid a branch.
+
+The compact lookup table version
+This version compresses the LUT by assigning each character it's own bit rather than a whole byte. Unlike the
+above two, this version is not very commonly found in practice (and for good reasons).
+
+int isdigit_lut32(unsigned char ch) {
+	enum { UBITS = sizeof(unsigned int) * 8 }; /* assumes CHAR_BIT == 8 */
+	static const unsigned int lut[256 / UBITS] = {
+		['0' / UBITS] = 1023U << ('0' % UBITS),
+	};
+	return lut[ch / UBITS] & (1U << (ch % UBITS));
+}
+
+The code seem a bit scary if you're unfamiliar with bit-twiddling, but it's basically converting the byte
+table above to a bit table instead.
+
+This version basically inherits all of the problem with original LUT approach:
+
+  * The performance is still unreliable as it depends on memory access.
+  * It still pollutes the data cache, although a bit less (since the LUT is 32 bytes now instead of 256
+    bytes).
+  * Indexing into the table requires ~3 more instructions. Note that the right-hand operand of the division
+    and modulo are constant power of 2s. Which means good compilers will optimize them away to shifts.
+  * The returned value is no longer a boolean. It will return non-zero on success, not necessarily 1.
+
+Overall I suspect this version to be the worst out of all.
+
+The bithack version
+This version uses some basic bithacking to achieve branchlessness (is this a word?) and thus avoids all the
+memory access related problems found on the LUT variants. Lo and behold:
+
+int isdigit_bithacks(unsigned char ch) {
+	unsigned int ge0 = (unsigned int)ch + ((0xFFU - '0') + 1);
+	unsigned int gt9 = (unsigned int)ch +  (0xFFU - '9');
+	return (ge0 ^ gt9) >> 8;
+}
+
+Are you beholding? Have you beheld? In case you're done behelding, I'd like to explain how this variants
+works. While the trick used here is rather basic, I have never seen this variant be used anywhere and thus
+think it's worth an explanation.
+
+The very first thing to realize is that the logic used here is kinda retarded. Instead of checking weather ch
+is between '0' and '9' it instead:
+
+  * Checks weather ch is greater than or equal to '0'.
+  * Checks weather ch is greater than '9'.
+  * Then finally it XOR-s the result together.
+
+I say this is retarded because I don't think anyone naturally thinks like this. But it works out because:
+
+  * If ch is less than '0', both the condition would be false. 0 ^ 0 gives us 0.
+  * If ch is greater-or-eq to '0' but no greater than '9', it means ch falls between '0' and '9'. Thus ge0
+    check would be true and gt9 check would be false. And XOR-ing 1 ^ 0 will give us 1.
+  * If ch is greater than '9' then it must be also greater-or-eq to '0'. Meaning both the flags will be true.
+    And XOR-ing 1 ^ 1 gives us 0.
+
+Okay, so now that the logic is out of the way, it's time to explain the magic numbers.
+
+Since we're talking in an unsigned char as argument, it means that when ch gets promoted to an unsigned int,
+the 9th bit will be clear. We use this bit as a "trap bit".
+
+Now to prepare our "magic number". We need an integer with all the least significant 8 bits set to 1, 0xFF.
+Now if we want to check weather ch is greater than '9' (which is 57 in decimal) we simply need to subtract it
+from 0xFF.
+
+      0xFF: 00000000 11111111
+       '9': 00000000 00111001
+0xFF - '9': 00000000 11000110  /* magic */
+
+This gives us our "magic number", which is setup in such a way that if you add anything greater than '9' to
+it, the carry will propagate onto the 9th bit.
+
+Let's see this in action, first let's add '4' (52 in decimal) to our magic number.
+
+  magic: 00000000 11000110
++   '4': 00000000 00110100
+----------------------------
+         00000000 11111010
+
+As expected, the 9th bit remains 0 since '4' is not greater than '9'. Let's try it with a value which is
+greater than '9'. I've picked 'A' for this purpose, which is 65 in decimal:
+
+  magic: 00000000 11000110
++   'A': 00000000 01000001
+---------------------------
+         00000001 00000111
+
+Tada! The 9th bit is set! This should explain how the gt9 check works. The ge0 check works the same way, but
+since we want to check greater or equal we add 1 to our magic number instead.
+
+And finally the >> 8 simply clears out the garbage bits, and as a consequence gives us a nice boolean return
+value. And now with that out of the way, we can return back to analyzing the performance implications.
+
+This pretty much has all the good quality we're looking for:
+
+  * It's branchless.
+  * Returns a boolean.
+  * No memory access means reliable performance.
+  * The logic can be adjusted to work on Unicode codepoints. (The 33rd bit would have to act as the "trap"
+    bit).
+
+So what's the catch? Well, it's branchless...
+While being branchless is typically a good thing since we avoid paying for misprediction penalties this also
+means that we cannot get the benefit of good predictions either. So the branch predictor cannot hurt us, but
+neither can it help us. This may end up costing us some throughput on predicable inputs.
+
+Benchmarks
+Enough hypothesis, time for some benchmarks!
+
+Now, keep in mind that in order to benchmark properly you need to benchmark from multiple different angle
+(both internal and external), do enough iterations and then do proper statistical analysis. But because I'm
+not writing a research paper, I've opted not to do that, so take these results with a grain of salt.
+
+System info: 3700x processor, 3200mhz 16-18-18-32 8x2 memory, GNU/Linux OS.
+
+First I want to see how these functions perform when called just once. This is to try and see weather the
+hypothesis of unreliable performance of the LUT variants due to cache-miss was correct or not. The results:
+
+-------------------------------
+Variant    Avg         2% lows
+-------------------------------
+simple     0.000042    0.000054
+lut256     0.000379    0.000491
+lut32      0.000393    0.000749
+bithacks   0.000041    0.000051
+-------------------------------
+
+The results for the "simple" and "bithacks" version are quite noisy and vary a good amount between runs even
+with 1024 iterations. However a couple things are consistent:
+
+  * Both the LUT variants perform about 10x worse than the bithacks and the simple version.
+  * The simple version seems to hold it's own. I don't know what the AMD guys did, but they apparently did
+    some black magic regarding branches. Results might differ on Intel CPUs.
+  * The bithacks version seems to beat the simple version most of the time, although by a very small margin.
+
+Now let's see how they perform in a loop on a 64KiB buffer filled with random bytes. Note that this is highly
+impractical since very rarely, if ever you will need to run a loop with only isdigit in there.
+
+-------------------
+Variant    Avg
+-------------------
+simple     0.038810
+lut256     0.017070
+lut32      0.037540
+bithacks   0.036480
+-------------------
+
+These results are much more consistent. Surprising, perhaps no one, the "lut256" variant crushes it and the
+"simple" and "lut32" variant performs the worst.
+
+The "bithacks" variant seems to beat the "simple" and "lut32" variant, but keep in mind that the random input
+makes things harder to predict and thus makes this benchmark biased against the "simple" variant.
+
+Conclusion
+  * The "lut32" variant doesn't seem to be worth it in either test.
+  * Unless you've benchmarked this to be your bottleneck, stick to the "simple" variant. Especially on CPUs
+    with good branch predictors.
+  * In a vacuum, the "lut256" seems to give high throughput once the LUT has been loaded onto the CPU cache.
+    However we didn't measure if the 256 byte LUT has any adverse effect on the calling code due to polluting
+    the data cache.
+  * The bithacks variant gives rather reliable performance, consider using it if your use-case is sensitive
+    towards latency and/or jitter.
+
+
+---
+

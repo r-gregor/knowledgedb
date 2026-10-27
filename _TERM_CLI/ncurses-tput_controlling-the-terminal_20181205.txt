@@ -1,0 +1,209 @@
+filename: ncurses-tput_controlling-the-terminal_20181205.txt
+https://hackaday.com/2018/11/28/linux-fu-controlling-the-terminal/
+
+Linux Fu: Controlling the Terminal
+December 5, 2018
+
+   A Linux terminal has a lot more features than the TeleType of yore. On a TeleType, text spews out and
+   scrolls up and is gone forever. A real terminal can use escape characters to do navigate around and
+   emulate most of what you like about GUIs. However, doing this at the lowest level is a chore and
+   limits portability. Luckily, all the hard work has already been done.
+
+   First, there’s a large database of terminal capabilities available for you to use: terminfo.  And in
+   addition, there’s a high-level library called curses or ncurses that simplifies writing programs to
+   control the terminal display. Digging deep into every nook and cranny of ncurses could take years.
+   Instead, I’m going to talk about using a program that comes with ncurses to control the terminal,
+   called tput. Using these two commands, you can figure out what kind of terminal you’re dealing with,
+   and then manipulate it nearly to your heart’s content. Let’s get started!
+
+About terminfo
+   The most fundamental question you have to ask is what kind of terminal are you talking to. The answer
+   is in the $TERM environment variable and if you ask your shell to print that variable, you’ll see
+   what it thinks you are using: echo $TERM.
+   For example, a common type is vt100 or linux console. This is usually set by the system and you
+   shouldn’t change it unless you have a good reason. In theory, of course, you could manually process
+   this information but it would be daunting to have to figure out all the way to do something like
+   clear the screen on the many terminals Linux understands.
+
+   That’s why there’s a terminfo database. On my system, there are 43 files in /lib/terminfo (not
+   counting the directories) for terminals with names like dumb, cygwin, ansi, sun, and xterm. Looking
+   at the files isn’t very useful since they are in a binary format, but the infocmp program can reverse
+   the compilation process. Here’s part of the result of running infocmp and asking for the definition
+   of a vt100:
+
+vt100|vt100-am|dec vt100 (w/advanced video),
+       am, mc5i, msgr, xenl, xon,
+        cols#80, it#8, lines#24, vt#3,
+        acsc=``aaffggjjkkllmmnnooppqqrrssttuuvvwwxxyyzz{{||}}~~,
+        bel=^G, blink=\E[5m$<2>, bold=\E[1m$<2>,
+        clear=\E[H\E[J$<50>, cr=\r, csr=\E[%i%p1%d;%p2%dr,
+
+   This might not look much better than the binary version. But you can probably guess that it is
+   telling you, in part, that the bell character (bel) is Control-G (^G). You can also probably guess
+   that \E is an escape character and puzzle out how to make characters bold or clear the screen. Some
+   of the data is structural such as 24 lines and 80 columns of output. The capabilities (like xon for
+   using XON/XOFF protocol) are a bit harder to puzzle out without looking it up.
+
+   The exact meanings, though, aren’t important. Because we are going to use higher-level constructs to
+   tell tput what we want and it — or at least the ncurses library — will look up the data in terminfo
+   and then do the right thing.
+
+Using tput for Information
+   I’m not sure where the name tput came from — you have to assume it is “terminal put.” But you can use
+   tput to get information, too. For example, instead of looking at $TERM, you can say tput longname.
+   You can learn other things, too. For example, how wide is the terminal (in characters)? tput cols.
+
+   This is especially handy for terminals under X Windows that might change size. In a script you can
+   trap the WINCH event to run some code when the terminal resizes, which can be very handy. Other
+   things you can read is the number of lines and the number of colors.
+
+   For example, assuming you have fortune installed, you might want a little fortune window that updates
+   every 30 seconds. It would be nice, though to have the fortune center even if the screen changes
+   size.
+   
+#!/bin/bash
+# Simple centered fortune
+TIMEOUT=30
+
+do_print() {
+  w=$(tput cols)
+  h=$(tput lines)
+  n=${#text}
+  spaces=$(( ($w-$n)/2 ))
+  lines=$(( $h/2 ))
+  clear
+  for I in `seq 1 $lines`
+  do
+   echo
+  done
+  for I in `seq 1 $spaces`
+  do
+    echo -n ' '
+  done
+  echo $text
+}
+
+while true
+do
+  text=$(fortune -n $(tput cols) -s )
+  do_print
+  sleep ${TIMEOUT:-30}
+done
+
+   This works pretty well. When a fortune appears it will be in the center of the window. I do all the
+   drawing in do_print because I have future plans for that function.
+
+   The fortune command tells it to only give us short fortunes and the definition of short is the width
+   of the screen according to tput. I use a few bash-specific techniques here including expression
+   evaluation, string length(${#text}), and default parameters
+
+   You’ll notice, though, if you resize the window, the fortune won’t be in the right place until a new
+   one appears. How can we fix that?
+
+Use a WINCH
+   Turns out, the program should get a SIGWINCH signal when the terminal resizes. I say “should” because
+   there are cases where this doesn’t occur, for example in some emacs shells. (In fact, a lot of this
+   breaks in emacs.) There are probably other setups that could have problems, too. However, assuming
+   the code gets SIGWINCH, it is easy to handle it. This line of code should take care of it: trap
+   do_print WINCH
+
+   The only problem is, it doesn’t work right for this script. The script spends most of its time
+   sleeping and it will only get the signal when it wakes up. But by that time, you’ll also get a new
+   fortune, so while it does the right thing, it either does it with the new fortune or it does it with
+   the old fortune and is immediately overwritten.
+
+   The answer is to sleep less. However, it is rude to the rest of the system to simply sit and spin, so
+   I change the sleep to this:
+# Can't just sleep for timeout
+# because we won't get SIGWINCH when sleeping
+# If you want faster response, sleep less
+TO=${TIMEOUT:-30}
+TO=$(( $TO * 2 ))
+for I in `seq 1 ${TO}`
+do
+   sleep 0.5
+done
+
+   This is a little over complex because I wanted to sleep for 500 milliseconds instead of a full
+   second. The less you sleep the more responsive the script is to changes. However, the more system
+   resources you waste, so it is a tradeoff.
+
+Formatting
+   Learning the size of the screen is pretty useful. But you can also use tput to format text:
+     * blink – Blinking text
+     * bold – Bold text
+     * invis – Invisible text
+     * rev – Reverse video
+     * rms0 – End standout mode
+     * rmul – End underlined text
+     * setab – Background color
+     * setaf -Foreground color
+     * sgr0 – Turn off all attributes
+     * smso – Start standout mode
+     * smul – Start underlined mode
+
+   The colors take a number ranging from 0 black to 7 white. A value of 9 resets the default color. Try
+   changing the echo $text line to look like this:
+tput setab 7   # white background
+tput setaf 4   # blue text
+tput bold
+echo $text
+tput sgr0
+
+   Unfortunately, you can’t use color names unless you define them yourself. If you don’t like using
+   separate tput calls for each item, you can use the -S option and a here document:
+tput -S << tputEOF
+  setab  7  # white
+  setaf  3  # blue
+  bold
+tputEOF
+
+   You still have to put one item per line, though. I can’t say why standout and underline mode have a
+   specific end code and the rest you just have to use sgr0 to turn everything off.
+
+Erasing and Saving
+   I used clear to clear the screen but I could have used tput clear. In fact, on some systems clear is
+   an alias to tput and the program is smart enough to know if you call it as clear it should clear the
+   screen and exit.
+
+   There are a few commands that let you either clear parts of the screen or save and recall the screen:
+     * clear – Clear the whole screen
+     * ed – Clear to end of screen
+     * el – Clear to end of line
+     * el1 – Clear to start of the line
+     * rmcup – Restore saved screen
+     * smcup – Save screen and clear
+
+   You can try tput smcup from the command line if you want to see it work. Just issue the command, do
+   some things, and then issue tput rmcup. If you want to color the whole screen, try this in the
+   fortune script, replacing the clear command:
+tput setab 2
+tput clear
+
+   Then take out the setab command further down.
+
+Cursor Control
+   The last item is to be able to move the cursor under program control:
+     * civis – Set cursor invisible
+     * cnorm – Set normal cursor
+     * cud1 – Move down one line
+     * cup – Set row and column
+     * cuu1 – Move cursor up one line
+     * home – Move cursor to top left
+     * rc – Restore saved cursor position
+     * sc – Save cursor position
+
+   You could do a better job on the script now, to position the print location to the right place by
+   replacing both for loops in do_print with: tput cup $lines $spaces.
+
+Other Ideas
+   Using tput you can easily create things like progress bars or display data by pages without relying
+   on external pager programs. Of course, if you need something too fancy, you probably ought to go with
+   a GUI program or a dialog-box library. Of course, there are many of these for Linux: dialog, cdialog,
+   zenity, kdialog, and easybashgui come to mind.
+
+   But sometimes you can’t, don’t want to, or just don’t need to get involved with more complex
+   libraries. For simply putting text somewhere up on the screen, it’s hard to beat tput.
+
+
+---

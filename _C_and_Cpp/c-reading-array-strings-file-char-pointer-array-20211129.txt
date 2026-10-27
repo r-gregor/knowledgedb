@@ -1,0 +1,160 @@
+filename: c_reading-array-strings-file-char-pointer-array_20211129.txt
+https://bytes.com/topic/c/answers/535188-reading-array-strings-file-char-pointer-array-c
+
+Reading array of strings from file with char pointer array in C
+
+   Question: Is it possible to use a char pointer array ( char *<name>[] ) to read an array of strings
+   from a file in C?
+
+   Given: code is written in ANSI C; I know the exact nature of the strings to be read (the file will be
+   written by only this program); file can be either in text or binary (preferably binary as the files
+   may be read repeatedly); the amount and size of strings in the array won't be known until run time
+   (in the example I have it in the code explicitly, but in practice the arguments will be taken in
+   though argv)
+   Basically, I'm dumping the input arguments into a file and rereading them back out.
+
+   Expand|Select|Wrap|Line Numbers
+
+<code>
+#include <stdio.h>
+#include <string.h>
+
+int binsize(char name[], int size[]) {
+	FILE *fp;
+	if ((fp = fopen(name, "rb")) == 0) {
+		fprintf(stderr, "Unable to open %s", name);
+		return 1;
+	}
+
+	fread(size, sizeof(size[0]), 1, fp);
+	fclose(fp);
+	return 0;
+}
+
+int readbin(char name[], char *strings[]) {
+	FILE *fp;
+	int i;
+	int size[1];
+	if ((fp = fopen(name, "rb")) == 0) {
+		fprintf(stderr, "Unable to read %s", name);
+		return 1;
+	}
+
+	fread(size, sizeof(size[0]), 1, fp);
+	int stringlengths[size[0]];
+	fread(stringlengths, sizeof(stringlengths[0]), size[0], fp);
+
+	for (i = 0; i < size[0]; i++) {
+		fread(&strings[i], sizeof(char), stringlengths[i], fp);
+	}
+
+	fclose(fp);
+	return 0;
+}
+
+int writebin(char name[],  char *strings[], int numberofstrings) {
+	FILE *fp;
+	int i;
+
+	if ((fp = fopen(name, "wb")) == 0) {
+		fprintf(stderr, "Unable to write to %s", name);
+		return 1;
+	}
+
+	fwrite(&numberofstrings, sizeof(numberofstrings), 1, fp);
+	int stringlengths[numberofstrings];
+
+	for (i = 0; i < numberofstrings; i++)
+		stringlengths[i] = strlen(strings[i]) + 1; /* + 1 because strlen does not include '\0' */
+
+	fwrite(stringlengths, sizeof(stringlengths[0]), numberofstrings, fp);
+
+	for (i = 0; i < numberofstrings; i++)
+		fwrite(strings[i], sizeof(char), stringlengths[i], fp);
+
+	fclose(fp);
+	return 0;
+}
+
+int main(int argc, char *argv[]) {
+	char *strings[] = {"Howdy", "ADAS", "hjkl"};
+	writebin("test.bin", strings, 3);
+	int size[1];
+	binsize("test.bin", size);
+	char *readstrings[size[0]];
+	readbin("test.bin", readstrings);
+	printf("%s\n", &readstrings[0]);
+	system("PAUSE");
+	return(0);
+}
+</code>
+
+   The code above compiles, but it has a few quirks. First the ouput:"HOWDADAShjkl", note the Y is
+   stripped from HOWDY, and the seperate strings are all combined into one big one. If "printf("%s\n",
+   &readstrings[0]);" has the 0 changed to 1, the output is "ADAShjkl". I have checked the output of the
+   fprints and fwrites and they both are coming out fine with 6, 5, 5. Also, note the & needed for
+   string array in printf and fread. They shouldn't need it since they are being passed a pointer, but
+   the program barfs it isn't there.
+   For example, this works fine.
+
+int main() {
+	char *strings[] = {"Howdy", "ADAS", "hjkl"};
+	printf("%s\n", strings[0]);
+	system("PAUSE");
+	return(0);
+}
+
+   I have also tried using a text based file and using fscanf(<filepointer>, "%s", <char *array[]>); and
+   the same situation occurs. I also can't use a multidimensional char array since the functions have to
+   have a fixed number of columns/strings in order for it to compile. Would a pointer to pointer to char
+   array work? Or is the only option to use malloc/calloc and read the whole thing in through a buffer
+   and then scanf it back out (please, no!).
+
+***
+   You can't read data into a char * because a char * is a pointer to data and unless you allocate some
+   data to it you have no-where to store the data you read.
+
+   The reason you second example works is because data has been allocated to the pointer in the
+   assignment statement in the DATA segment of the program.
+
+   You have you pointers and arrays confused, to start with the simple ones.
+
+int size[1];
+   Appears a lot. There is little point in declaring an array of size 1, you may as well declare
+int size;
+   and use the & operator to get a pointer to it when required.
+
+int readbin(char name[], char *strings[]);
+   This is a slightly archaich way of declaring a function and many people today believe confusing, this
+   declaration is directly equivilent to
+int readbin(char *name, char **strings);
+   
+   leading on to
+for (i = 0; i < size[0]; i++) {
+	fread(&strings[i], sizeof(char), stringlengths[i], fp);
+
+   strings is of type char ** so strings[i] is of type char * and &strings[i] is of type char **
+   (again). What this call actually does is read the data from the file and place it in the location
+   reserved string[i] which is supposed to be a char * and there is 4 bytes in size.
+
+Since &string[1] = &string[0] + 4
+   when you read the second string you over write the last 2 bytes of string[0] (y and the zero
+   terminator. On the final write to &string[2] you write off the end of data allocated to string which
+   my system detected and raised an exception.
+
+   fread expects a void *, you need to pass type char * (since you are using a char array) and you need
+   to allocate data to that array. You have passed the function an array of char * not allocated to
+   anything, this should fix it
+for (i = 0; i < size[0]; i++) {
+ 	strings[i] = malloc(stringlengths[i]);
+ 	fread(strings[i], sizeof(char), stringlengths[i], fp);
+}
+
+   But note you will need to free the memory once you have finished with it.
+   You have a similar error where you call printf, you pass &readstrings[0] but readstrings is of type
+   char * array so readstrings[0] is a char * but &readstrings[0] is a char **. You pass a char ** to
+   printf but it is expecting a char *.
+
+
+---
+

@@ -1,0 +1,92 @@
+filename: go_dodging-the-go-loop-trap_20230726.txt
+https://flak.tedunangst.com/post/dodging-the-go-loop-trap
+
+dodging the go loop trap
+24 Jul 2023
+
+   One of the traps in go is the reuse of loop variables, confounding novices and even catching the
+   unwary expert. It's so bad they may even change the language to fix it.
+
+   It's never much bothered me, personally or particularly, but it did recently bite me, and I reflected
+   on why that may be. Because I avoid a particular idiom that's common to many instances of the bug.
+
+slow
+   We want to say hello to all our friends. The simple way to do this is a loop.
+
+msg := "hello"
+for _, friend := range friends {
+	sendTo(friend, msg)
+}
+
+   But this is slow. If somebody isn't home, all the friends after them in the list need to wait.
+
+zoom
+   We can use lots of goroutines to go zoom zoom.
+
+for _, friend := range friends {
+	go sendTo(friend, msg)
+}
+
+   And... this is fine. So far.
+
+   But let's say we want to know when all the deliveries are done.
+
+var wg sync.WaitGroup
+for _, friend := range friends {
+	wg.Add(1)
+	go func() {
+		sendTo(friend, msg)
+		wg.Done()
+	}()
+}
+wg.Wait()
+
+   And now we're trapped. There's only one friend variable, constantly changing as we go through the
+   loop, with the most likely result one of our friends will get half a dozen messages, while the other
+   five receive nothing, to the annoyance of both groups.
+
+fixed
+   The fix is simple, just pass the argument before it changes.
+
+for _, friend := range friends {
+	wg.Add(1)
+	go func(friend string) {
+		sendTo(friend, msg)
+		wg.Done()
+	}(friend)
+}
+
+dodging
+   Another way to fix this is to remove the anonymous function from the loop body. If it's necessary or
+   convenient to close over some additional state, such as wg in this example, a function local lambda
+   can be used.
+
+var wg sync.WaitGroup
+sendFn := func(friend string) {
+	sendTo(friend, msg)
+	wg.Done()
+}
+for _, friend := range friends {
+	wg.Add(1)
+	go sendFn(friend)
+}
+wg.Wait()
+
+   We're still sharing wg as intended, but there's no possibility to accidentally close over anything in
+   the loop.
+
+thoughts
+   Out of habit and personal style, I almost never make loop bodies into anonymous functions. If I need
+   to do something in a loop, I put the code in a real function, and call the function. And thus have
+   avoided this particular trap for many years without really thinking about it. It happened to bite me
+   recently because I was making a quick hack to make a slow loop go zoom, and probably would have
+   refactored to move the loop body into a function, but the intermediate step was full of danger.
+
+   If your preferred style involves lots of little functions closing over lots of loop variables, I can
+   see this trap being a more serious issue.
+
+   Some day we can hope to have the technology to prevent unintentional reuse of loop variables.
+
+
+---
+

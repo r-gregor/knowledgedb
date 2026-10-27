@@ -1,0 +1,168 @@
+http://codingwithspike.wordpress.com/2012/08/02/making-a-truly-portable-cygwin-install-working-around-drive-letter-and-file-permission-issues/
+
+Making a truly portable Cygwin install, working around drive letter and file
+permission issues.
+Posted on August 2, 2012 by rally25rs — 13 Comments ¡
+
+Cygwin in itself is actually fairly portable. There are several other blogs
+and write-ups out there about installing it to a USB key. However, what
+they don’t tell you is that while your Cygwin might be runnable from your
+USB key, or other portable drive, you will run into user permission issues
+as you use it on different systems.
+
+I ran into this issue pretty quickly using Cygwin installed on an external
+USB hard drive between my home and work computers. I would create a file on
+one machine, then try to edit it on another, but Cygwin would say I didn’t
+have permissions, and would list the file owner as “????????”. After a little
+digging, it turns out that just because you can run Cygwin from multiple
+machines, it is actually trying to coordinate who you are with Windows
+itself. So since I am 2 different users on 2 different machines (and on
+an ActiveDirectory domain at work, but not at home), Cygwin treats me as 2
+different users, so I can’t access my own files that I created on one machine
+from another machine. In addition, since I have separate Windows user names
+on each machine, Cygwin tries to put me in separate home directories for each.
+
+It isn’t very pretty, but I eventually came up with a solution to this problem,
+so when I run Cygwin, whatever user I am currently logged in as in Windows
+will automatically be added to the same group in Cygwin. Then I can use group
+level permissions in Cygwin to make sure I can always access my own files.
+
+This all centers around running Cygwin from a .bat file, which includes
+some extras to set up your user permissions. So start by making a file named
+“Run Cygwin.bat” (or whatever you want to call it). Place this file on your
+portable / USB drive. Initially, add this to the file:
+
+    @echo off
+
+    REM Get current drive letter into WD.
+    for /F %%A in ('cd') do set WD=%%~dA
+
+This will get the current drive letter for your USB drive, so whatever
+machine you plug into, you don’t have to worry what letter Windows maps it to.
+
+Next add:
+
+    REM Store any existing mounts, unmount them, and replace with mounts to
+    current drive letter.
+    cygwin\bin\mount -m | cygwin\bin\sed s/mount/"%WD%\/cygwin\\/bin\\/mount"/
+    > cygwin\tmp\mount.log
+    cygwin\bin\umount -U
+    cygwin\bin\mount -f %WD%cygwin/ /
+    cygwin\bin\mount -f %WD%cygwin\bin /usr/bin
+    cygwin\bin\mount -f %WD%cygwin\lib /usr/lib
+
+    REM Set some general environment variables
+    set path=%path%;%WD%cygwin\bin;%WD%cygwin\usr\X11R6\bin
+    set ALLUSERSPROFILE=%WD%ProgramData
+    set ProgramData=%WD%ProgramData
+    set CYGWIN=nodosfilewarning
+
+Admittedly, the first part of this was copy/pasted from someone else’s
+guide on making Cygwin portable. I don’t know that it actually does much
+useful. The second chunk changes some of the environment variables to point
+to our portable Cygwin drive.
+
+I should point out that my portable drive has Cygwin installed in the \cygwin
+folder, and I also created a \ProgramData off the root of the drive. Sometimes
+Cygwin likes to write stuff to your system’s ProgramData folder, so it is
+nice to point that to the Cygwin portable drive, instead of saving info to
+just the machine you are on.
+
+Next, add this to your .bat file:
+
+    REM This specifies the login to use.
+    set USERNAME=YOUR_USER_NAME
+    set HOME=/home/%USERNAME%
+    set GROUP=None
+    set GRP=
+
+Replace “YOUR_USER_NAME” with the user name that you want Cygwin to use. Cygwin
+will show the file owner as this user name, and that will also be the name
+of your home directory.
+
+Now, the idea here is that when you run this bat file, it is going to get your
+current Windows login, no matter what machine you are on, and it is going
+to map that Windows user to the Cygwin user and group that you indicated in
+that section.
+
+Now add this to your .bat file, which is what does the hard part:
+
+    REM If this is the current user's first time running Cygwin, add them
+    to /etc/passwd
+    for /F %%A in ('cygwin\bin\mkpasswd.exe -c ^| cygwin\bin\gawk.exe -F":"
+    '{ print $5 }'') do set SID=%%A
+    findstr /m %SID% cygwin\etc\passwd
+    if %errorlevel%==1 (
+    echo Adding a user for SID: %SID%
+    for /F %%A in ('cygwin\bin\gawk.exe -F":" '/^%GROUP%/ { print $3 }'
+    cygwin/etc/group') do set GRP=%%A
+    )
+    if "%GRP%" neq "" (
+    echo Adding to Group number: %GRP%
+    cygwin\bin\printf.exe
+    "\n%USERNAME%:unused:1001:%GRP%:%SID%:%HOME%:/bin/bash" >>
+    cygwin\etc\passwd
+    )
+    set GRP=
+    set SID=
+    set GROUP=
+
+These commands use the Cygwin “mkpasswd.exe” program to get your SID for
+your current Windows user, and adds it into Cygwin’s \etc\passwd file,
+mapping the SID to your specified username and group.
+
+Again, not that I have Cygwin installed in the \cygwin folder off the root
+of my portable drive. If you choose a different path, then you will have to
+edit the paths in this bit of script.
+
+This next pair of commands is something that I like to add, just because we
+cna be on a different drive letter on any given system.
+
+    REM Make a symlink from /curdrive to the current drive letter.
+    cygwin\bin\rm.exe /curdrive
+    cygwin\bin\ln.exe -s %WD% /curdrive
+
+This makes a symlink from “/curdrive” to our current drive letter. That way you
+can always “cd /curdrive” to get to your current drive letter. Otherwise, you
+will find yourself hunting for the drive letter in “/cygdrive/{drive_letter}/”.
+
+Next, add this to your .bat file:
+
+    REM Actually run the bash instance.
+    cygwin\bin\bash --login -i
+
+This of course actually runs Cygwin. You will now be logged in as your
+specified user, and should end up in a home directory with the same username
+you specified in this .bat file, instead of your Windows user name.
+
+The bat file will halt at this point until you exit the Cygwin session. We
+need to add this final but to the end of the .bat file to do some cleanup. It
+will execute after you exit the Cygwin session.
+
+    REM Cleanup and replace pre-existing mounts.
+    cygwin\bin\rm.exe /curdrive
+    cygwin\bin\umount -U
+    cygwin\bin\bash cygwin\tmp\mount.log
+    cygwin\bin\rm cygwin\tmp\mount.log
+
+We remove our symlink to “/curdrive” since it will be remapped, potentially
+to a different drive letter, on the next run anyway.
+
+And that is it! Now any time you want to run your portable Cygwin, just
+execute your “Run Cygwin.bat” file that we created here, and you should
+always be running as the same user and in the same group.
+
+As an additional note, when you run this .bat file in Windows, it will usually
+come up in a pretty small command shell window. You can add some lines to
+your .bat file to change the default width and height of this window. At
+the TOP of your .bat file, add the lines:
+
+    REM Set screen dimensions.
+    mode con: cols=120 lines=40
+
+Here you can specify the number of rows and columns for the command shell
+window, so it can always start the same size. The hard part is if you run
+from different resolution displays. For example if you sometimes run from
+a large external LCD display, and sometimes from a small netbook, then you
+won’t be able to get a good default size here. I have another blog post
+about always getting Cygwin to run fullscreen, on any resolution.

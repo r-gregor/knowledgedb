@@ -1,0 +1,145 @@
+filename: wiki.archlinux_disk_cloning_20160210.txt
+https://wiki.archlinux.org/index.php/disk_cloning
+
+Disk cloning
+Disk cloning is the process of making an image of a partition or of an entire hard drive. This can be
+useful for copying the drive to other computers and for backup and recovery purposes.
+
+Using dd
+The dd command is a simple, yet versatile and powerful tool. It can be used to copy from source to
+destination, block-by-block, regardless of their filesystem types or operating systems. A convenient
+method is to use dd from a live environment, as in a Live CD.
+Warning: As with any command of this type, you should be very cautious when using it; it can destroy
+data. Remember the order of input file (if=) and output file (of=) and do not reverse them! Always ensure
+that the destination drive or partition (of=) is of equal or greater size than the source (if=).
+
+Cloning a partition
+From physical disk /dev/sda, partition 1, to physical disk /dev/sdb, partition 1.
+# dd if=/dev/sda1 of=/dev/sdb1 bs=512 conv=noerror,sync
+
+Warning: If output file of= (sdb1 in the example) does not exist, dd will create a file with this name
+and will start filling up your root file system!
+
+Cloning an entire hard disk
+From physical disk /dev/sdX to physical disk /dev/sdY
+# dd if=/dev/sdX of=/dev/sdY bs=512 conv=noerror,sync
+This will clone the entire drive, including the MBR (and therefore bootloader), all partitions, UUIDs,
+and data.
+
+- noerror instructs dd to continue operation, ignoring all read errors. Default behavior for dd is to halt
+at any error.
+- sync fills input blocks with zeroes if there were any read errors, so data offsets stay in sync.
+- bs=512 sets the block size to 512 bytes, the "classic" block size for hard drives. If and only if your
+hard drives have a 4 Kib block size, you may use "4096" instead of "512". Also, please read the warning
+below, because there is more to this than just "block sizes" -it also influences how read errors propagate.
+
+Warning: The block size you specify influences how read errors are handled. Read below.
+
+The dd utility technically has an "input block size" (IBS) and an "output block size" (OBS). When you
+set bs, you effectively set both IBS and OBS. Normally, if your block size is, say, 1 Mib, dd will read
+1024*1024 bytes and write as many bytes. But if a read error occurs, things will go wrong. Many people seem
+to think that dd will "fill up read errors with zeroes" if you use the noerror,sync options, but this is
+not what happens. dd will, according to documentation, fill up the OBS to IBS size after completing its
+read, which means adding zeroes at the end of the block. This means, for a disk, that effectively the
+whole 1 Mib would become messed up because of a single 512 byte read error in the beginning of the read:
+12ERROR89 would become 128900000 instead of 120000089.
+If you are positive that your disk does not contain any errors, you could proceed using a larger block
+size, which will increase the speed of your copying several fold. For example, changing bs from 512 to
+64 Ki changed copying speed from 35 MB/s to 120 MB/s on a simple Celeron 2.7 GHz system. But keep in
+mind that read errors on the source disk will end up as block errors on the destination disk, i.e. a
+single 512-byte read error will mess up the whole 64 Kib output block.
+Tip: If you would like to view dd progressing, use the status=progress option. See dd for details.
+
+Note:
+To regain unique UUIDs of an ext2/3/4 filesystem, use tune2fs /dev/sdXY -U random on every partition.
+Partition table changes from dd are not registered by the kernel. To notify of changes without rebooting,
+use a utility like partprobe (part of GNU Parted).
+
+Backing up the MBR
+The MBR is stored in the the first 512 bytes of the disk. It consist of 3 parts:
+The first 446 bytes contain the boot loader.
+The next 64 bytes contain the partition table (4 entries of 16 bytes each, one entry for each primary
+partition). The last 2 bytes contain an identifier
+
+To save the MBR as mbr.img:
+# dd if=/dev/sdX of=/path/to/mbr_file.img bs=512 count=1
+To restore (be careful: this could destroy your existing partition table and with it access to all data
+on the disk):
+# dd if=/path/to/mbr_file.img of=/dev/sdX
+
+If you only want to restore the boot loader, but not the primary partition table entries, just restore
+the first 446 bytes of the MBR:
+# dd if=/path/to/mbr_file.img of=/dev/sdX bs=446 count=1
+
+To restore only the partition table, one must use:
+# dd if=/path/to/mbr_file.img of=/dev/sdX bs=1 skip=446 count=64
+
+You can also get the MBR from a full dd disk image:
+# dd if=/path/to/disk.img of=/path/to/mbr_file.img bs=512 count=1
+
+Create disk image
+1. Boot from a live media.
+2. Make sure no partitions are mounted from the source hard drive.
+3. Mount the external HD
+4. Backup the drive.
+
+# dd if=/dev/sdX conv=sync,noerror bs=64K | gzip -c  > /path/to/backup.img.gz
+
+If necessary (e.g. when the format of the external HD is FAT32) split the disk image in volumes (see
+also the split man pages).
+# dd if=/dev/sdX conv=sync,noerror bs=64K | gzip -c | split -a3 -b2G - /path/to/backup.img.gz
+
+If there is not enough disk space locally, you may send the image through ssh:
+# dd if=/dev/sdX conv=sync,noerror bs=64K | gzip -c | ssh user@local dd of=backup.img.gz
+
+5. Save extra information about the drive geometry necessary in order to interpret the partition table
+stored within the image. The most important of which is the cylinder size.
+# fdisk -l /dev/sdX > /path/to/list_fdisk.info
+
+Note: You may wish to use a block size (bs=) that is equal to the amount of cache on the HD you are
+backing up. For example, bs=8192K works for an 8 MiB cache. The 64 Kib mentioned in this article is
+better than the default bs=512 bytes, but it will run faster with a larger bs=.
+
+Restore system
+To restore your system:
+# gunzip -c /path/to/backup.img.gz | dd of=/dev/sdX
+When the image has been split, use the following instead:
+# cat /path/to/backup.img.gz* | gunzip -c | dd of=/dev/sdX
+
+Disk cloning software
+See also Backup programs#Non-incremental backups.
+
+Disk cloning in Arch
+Partclone provides utilities to save and restore used blocks on a partition and supports ext2, ext3,
+ext4, hfs+, reiserfs, reiser4, btrfs, vmfs3, vmfs5, xfs, jfs, ufs, ntfs, fat(12/16/32), exfat. Optionally,
+an ncurses interface can be used. Partclone is available in the community repository.
+Partimage, an ncurses program, is available in the community repos. Partimage does not currently support
+ext4 or btrfs filesystems. NTFS is experimental.
+
+Disk cloning outside of Arch
+If you wish to backup or propagate your Arch install root, you are probably better off booting into
+something else and clone the partition from there. Some suggestions:
+PartedMagic has a very nice live cd/usb with PartImage and other recovery tools.
+Mindi is a linux distribution specifically for disk clone backup. It comes with its own cloning program,
+Mondo Rescue.
+
+Acronis True Image is a commercial disk cloner for Windows. It allows you to create a live (from
+within Windows), so you do not need a working Windows install on the actual machine to use it. After
+registration of the Acronis software on their website, you will be able to download a Linux-based Live
+CD and/or plugins for BartPE for creation of the Windows-based live CD. It can also create a WinPE Live
+CD based on Windows. The created ISO Live CD image by Acronis doesn't have the hybrid boot ability and
+cannot be written to USB storage as a raw file.
+
+FSArchiver allows you to save the contents of a file system to a compressed archive file. Can be found
+on the System Rescue CD.
+
+Clonezilla is an enhanced partition imager which can also restore entire disks as well as
+partitions. Clonezilla is included on the Arch Linux installation media.
+Redo Backup and Recovery is a Live CD featuring a graphical front-end to partclone.
+External Links
+
+Wikipedia:List of disk cloning software
+Arch Linux forum thread
+
+
+---

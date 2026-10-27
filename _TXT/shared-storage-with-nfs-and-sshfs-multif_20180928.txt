@@ -1,0 +1,261 @@
+filename: shared-storage-with-nfs-and-sshfs-multif_20180928.txt
+http://www.admin-magazine.com/HPC/Articles/Shared-Storage-with-NFS-and-SSHFS
+
+Shared Storage with NFS and SSHFS
+
+   HPC systems require shared filesystems to function effectively. Two really good choices
+   for both small and large systems are NFS and SSHFS.
+
+   Up to this point, my series on HPC fundamentals has covered [17]PDSH, to run commands in parallel
+   across the nodes of a cluster, and [18]Lmod, to allow users to manage their environment so they can
+   specify various versions of compilers, libraries, and tools for building and executing applications.
+   One missing piece is how to share files across the nodes of a cluster.
+
+   File sharing is one of the cornerstones of client-server computing, HPC, and many other
+   architectures. You can perhaps get away without it, but life just won’t be easy any more. This
+   situation is true for clusters of two nodes or clusters of thousands of nodes. A shared filesystem
+   allows all of the nodes to “see” the exact same data as all other nodes. For example, if a file is
+   updated on cluster node03, the updates show up on all of the other cluster nodes, as well.
+
+   Fundamentally, being able to share the same data with a number of clients is very appealing because
+   it saves space (capacity), ensures that every client has the latest data, improves data management,
+   and, overall, makes your work a lot easier. The price, however, is that you now have to administer
+   and manage a central file server, as well as the client tools that allow the data to be accessed.
+
+   Although you can find many shared filesystem solutions, I like to keep things simple until something
+   more complex is needed. A great way to set up file sharing uses one of two solutions: the Network
+   File System (NFS) or SSH File System (SSHFS).
+
+NFS
+   NFS, the most widely used HPC filesystem, is very easy to set up and performs reasonably well for
+   small to medium-sized clusters as the primary storage. You can even use it for larger clusters if
+   your applications don’t read and write to it (e.g., /home).
+
+   The classic NFS approach to a shared directory is to export a directory or directories from the NFS
+   server to compute nodes (clients). In general, any directory or directories can be exported. At a
+   minimum, you should share /home. A special directory, such as /shared, might also be exported to the
+   nodes. Given that I have already installed software to /usr/local/, I tend to export that directory
+   in addition to /home.
+
+   A bonus of sharing /home is that the user’s home directories include SSH keys. The cluster can be
+   configured to use passwordless SSH to make running multinode applications much, much easier.
+
+   Installing NFS on your system varies by distribution. If it isn’t installed by default, you can
+   google for instructions. The compute nodes can be configured just as NFS clients, but the server that
+   holds the filesystems to be exported should be configured as an NFS server.
+
+   On the NFS server, the first step is to specify the filesystems (directories) that are to be exported
+   to the compute nodes. The /etc/exports file lists the filesystems and the permissions, such as:
+/usr/local   192.168.0.1(ro) 192.168.0.2(ro)
+/home        192.168.0.1(rw) 192.168.0.2(rw)
+
+   In this example, two filesystems are shared (first entry on each line), each to only two nodes –
+   192.168.0.1 and 192.168.0.2 – with a blank space between each host. Also, /usr/local is shared
+   (exported) as a read-only filesystem to the nodes, and /home/ is shared as read-write. You can use IP
+   addresses (which are best for static addresses) or hostnames.
+
+   A more advanced option is to export the filesystems to a range of IP addresses or to all IP address:
+/usr/local   192.168.0.0/255.255.255.0(ro)
+/home        192.168.*.*(rw,sync,no_root_squash) 192.168.0.2(rw,sync,no_root_squash)
+
+   For this case, the first line allows multiple IP address to be specified to all the machines with IP
+   addresses between 192.168.0.0 and 192.168.0.255.
+
+   The second line uses wild cards in the IP addresses, along with some extra options. An explanation of
+   the options include:
+     * ro: The clients can mount the exported filesystem as read only.
+     * rw: The clients can mount the exported filesystem as read-write.
+     * sync: Forces the data from the clients to be stored on the NFS server before the acknowledgment
+       is sent.
+     * no_subtree_check: Prevents subtree checking. If the shared directory is a subdirectory, NFS
+       performs a scan of every directory above it to verify its permissions and details. Disabling the
+       subtree check might increase the reliability of NFS, but reduce security.
+     * no_root_squash: Allows root to connect to the designated directory, which is useful if root
+       access is needed on the clients.
+
+   The filesystems will be exported automatically if the NFS server is rebooted, but you can use the
+   exportfs command to export or unexport the filesystems listed in /etc/exports manually.
+
+   On the NFS clients, you mount the exported filesystems with the mount command, as you would on any
+   other filesystem. You can also list the filesystems that you want to mount in the /etc/fstab file.
+   The format of the /etc/fstab entry for NFS filesystems is well documented.
+
+   Using /etc/fstab allows you to tune how the node mounts the filesystem, which means you can tune the
+   filesystem on the client for performance. The list of [19]nfs options is fairly extensive, so I won’t
+   covered it here. Additionally, the fairly recent article [20]Optimizing Your NFS Filesystem for
+   performance covers many of these options.
+
+   One command that is very useful for managing and monitoring NFS filesystems is showmount, which
+   allows you to list the client name or IP address of the client and the mounted directory in host:dir
+   format. The command
+showmount -e [host]
+
+   tells you what filesystems the NFS server is exporting from the specific host, which is useful when
+   run from NFS clients.
+
+   NFS has been around a long time, has known failure modes, is a standard in the *nix world, and is
+   easy to manage. It is very useful for small, medium, or even large clusters. You have a great deal of
+   control over how the filesystems are exported to the clients. However, NFS versions before version 4
+   had no real security. Even NFS v4 requires security outside the NFS protocol. If you are concerned
+   about intercepting data and general security, which all of us should be, then perhaps NFS isn’t the
+   best option. The next section presents an alternative that has more security.
+
+SSHFS
+   Filesystem in Userspace (FUSE) offer several attractive features. Such filesystems are easy to
+   code because they are in user space (have you tried getting a filesystem into the kernel?) and
+   provide lots of flexibility. SSHFS uses FUSE to create a filesystem that can be shared by
+   transmitting the data via SSH.
+
+   The SSHFS FUSE-based userspace client mounts and interacts with a remote filesystem as though the
+   filesystem were local (i.e., shared storage). It uses sftp as the transfer protocol, so it’s as
+   secure as SFTP. (I’m not a security expert nor do I play one on TV, so I can’t comment on the
+   security of SSH.) SSHFS can be very handy for working with remote filesystems, especially if you only
+   have SSH access to the remote system. Moreover, you don't need to add or run a special client tool on
+   the client nodes or a special server tool on the storage node; SSH just needs to be active on your
+   system. Almost all firewalls allow port 22 access, so you don’t have to configure anything extra
+   (e.g., NFS or CIFS). Just be sure to open port 22 on the firewall, and all the other ports can be
+   blocked.
+
+   SSHFS is not part of the typical installation, so the next sections present how to install and check
+   that FUSE and SSHFS are working.
+
+
+---
+http://www.admin-magazine.com/HPC/Articles/Shared-Storage-with-NFS-and-SSHFS/(offset)/2
+
+FUSE and SSHFS on Linux
+
+   The first step for any FUSE-based filesystem is to make sure that FUSE itself is included in the
+   kernel or supplied as a module. Many distributions already come with FUSE built-in. A simple way to
+   know whether FUSE has been built for your distro or kernel is to check whether the modules are loaded
+   into memory.
+$ lsmod
+Module                  Size  Used by
+fuse                   73530  0
+...
+
+   The next step is to install SSHFS, either with the package management tools for your distribution or
+   from source. If you need to build it from source, the same simple build steps of many open source
+   applications apply,
+$ ./configure --prefix=/usr
+$ make
+% make install
+
+   where the last step is performed as root. Just be sure to read the SSHFS page for package
+   prerequisites. Notice that I installed SSHFS into /usr. The SSHFS binary is installed into /usr/bin,
+   which is in the standard path (handy tip).
+
+   To make sure everything is installed correctly, you can simply try the sshfs -V command as a user (no
+   root needed):
+$ sshfs -V
+SSHFS version 2.5
+FUSE library version: 2.8.3
+fusermount version: 2.8.3
+using FUSE kernel interface version 7.12
+
+   This example is on an old desktop system, so the software versions are on the old side.
+
+Testing SSHFS with Linux
+
+   Now that SSHFS is installed, you can test it. For this example, I will use SSHFS to mount a directory
+   named CLUSTERBUFFER2 (Listing 1) from the desktop onto a test system as /home/laytonjb/DATA. First, I
+   need to create the directory on the test system:
+[laytonjb@test8 ~]$ mkdir DATA
+[laytonjb@test8 ~]$ cd DATA
+[laytonjb@test8 DATA]$ ls -s
+total 0
+
+   Listing 1: CLUSTERBUFFER2 Content
+[laytonjb@home4 CLUSTERBUFFER2]$ ls -s
+total 3140
+   4 BLKTRACE/                       4 NFSIOSTAT/   296 SE_strace.ppt
+   4 CHECKSUM/                       4 NPB/           4 STRACE/
+  32 Data_storage_Discussion.doc     4 OLD/           4 STRACE_NEW_PY/
+   4 FS_AGING/                       4 OTHER2/        4 STRACENG/
+   4 FS_Scan/                        4 PAK/           4 STRACE_PY/
+ 324 fs_scan.tar.gz                164 pak.tar.gz     4 STRACE_PY2/
+   4 IOSTAT/                         4 PERCEUS/       4 STRACE_PY_FILE_POINTER/
+1300 LWESFO06.pdf                    4 REAL_TIME/   944 Using Tracing Tools.ppt
+   4 LYLE_LONG/                      4 REPLAYER/
+
+   An empty mountpoint (directory) is recommended, because when the remote filesystem is mounted, it
+   will “cover up” any files in the directory (this is also true for NFS).
+
+   Mounting a filesystem using SSHFS can be done by any user with no admin intervention. The basic form
+   of the SSHFS command is:
+$ sshfs user@home:[dir] [local dir]
+
+   For this example, the following command was used:
+[laytonjb@test8 ~]$ sshfs 192.168.1.4:/home/laytonjb/DATA /home/laytonjb/DATA
+laytonjb@192.168.1.4's password:
+
+   Notice that the full paths for both the remote directory and the local directory were used. Also
+   notice that that the password on the desktop (the storage server) had to be used. This could be
+   avoided with the use of passwordless SSH and SSH keys.
+
+   To make sure everything was mounted correctly, take a look at the content of the local directory on
+   the test system (Listing 2).
+
+   Listing 2: Local Directory on Test System
+[laytonjb@test8 ~]$ cd DATA
+[laytonjb@test8 DATA]$ ls -s
+total 3140
+   4 BLKTRACE                        4 NFSIOSTAT    296 SE_strace.ppt
+   4 CHECKSUM                        4 NPB            4 STRACE
+  32 Data_storage_Discussion.doc     4 OLD            4 STRACE_NEW_PY
+   4 FS_AGING                        4 OTHER2         4 STRACENG
+   4 FS_Scan                         4 PAK            4 STRACE_PY
+ 324 fs_scan.tar.gz                164 pak.tar.gz     4 STRACE_PY2
+   4 IOSTAT                          4 PERCEUS        4 STRACE_PY_FILE_POINTER
+1300 LWESFO06.pdf                    4 REAL_TIME    944 Using Tracing Tools.ppt
+   4 LYLE_LONG                       4 REPLAYER
+
+   SSHFS can be used on both secured and unsecured networks and by users without administrator
+   intervention. As long as the user has permissions for the remote directory, then SSHFS can be used.
+   Most importantly, you should pay attention to the mapping of user IDs (UIDs) and group IDs (GIDs)
+   between systems. If the permissions on the client system don’t match the server system, some mapping
+   may be required between the two systems. SSHFS has the ability to read a file that contains mapping
+   information and then take care of the mapping between the systems if needed.
+
+   Both SSHFS and SSH have a number of tuning options that affect performance. In a previous
+   exercise, multiple options were tested and compared with NFS on two systems. Using the defaults for
+   SSHFS, SSH, and NFS, NFS had much better streaming and input/output operations per second (IOPS)
+   performance than SSHFS. With caching, large reads, and the use of a fast compression algorithm named
+   Arcfour, SSH performance matched that of NFS for both streaming and IOPS tests.
+
+   A second round of tests was performed by adjusting network and TCP tuning options. When coupled with
+   the previous SSHFS and SSH parameters, SSHFS performance exceeded NFS for both streaming and IOPS
+   tests. However, Arcfour is not recommenced for use anymore, so when the encryption algorithm was
+   changed to the default AES-128 encryption, the resulting SSHFS performance could not meet that of
+   NFS in streaming or IOPS tests.
+
+   To try to regain the performance, a “compress” SSHFS option was used, which brought the SSHFS
+   performance close to NFS, but not quite. However, it does illustrate that you can get very close to
+   NFS performance with some tuning options.
+
+
+---
+http://www.admin-magazine.com/HPC/Articles/Shared-Storage-with-NFS-and-SSHFS/(offset)/4
+
+Summary
+
+   Shared filesystems are almost 100% mandatory for HPC. Although you can run applications without one,
+   it is not pleasant. Shared filesystems allow a constant view of user data across all nodes in the
+   cluster and can make admin tasks easier.
+
+   Two main options, particularly if you are just starting out, are NFS and SSHFS. NFS has been around a
+   long time, and the failure modes are pretty well understood. It also comes with every distribution of
+   Linux. NFSv4 is the latest and has lots of possibilities for clusters. It is also fairly simple to
+   tune NFS for your workloads and your configuration.
+
+   SSHFS is a bit of a dark horse for clusters. However, it offers the possibility of a shared
+   filesystem using SSH, which can help with security because only port 22 needs to be open (which you
+   need for MPI application communications, anyway). SSHFS also uses SFTP encryption from one node to
+   another. Combined with encrypted devices, you can have an end-to-end encrypted shared data service.
+
+   SSHFS is very tunable, and you can attain performance very close, if not equal, to NFS. I have not
+   tested SSHFS at any scale larger than 32 clients and one data server, but it was quite stable and
+   worked very well. If you need to go to a larger node count, I recommend you test SSHFS first before
+   making a commitment.
+
+---

@@ -1,0 +1,265 @@
+fname: limit-cpu-memory-usage-linux-process-20260608.txt
+https://www.tecmint.com/limit-cpu-memory-usage-linux-process/
+
+How to Stop Linux Processes from Using Excessive CPU and RAM
+June 5, 2026
+
+   A process suddenly consuming 99% of your CPU at 2 AM can turn a stable server into a slow,
+   unresponsive mess. The good news is that Linux gives you several ways to prevent this from happening
+   before it becomes a problem.
+
+   Maybe it´s a backup job, a software build, or a misbehaving application that starts using all
+   available CPU resources. In many cases, killing the process isn´t the best solution. You may
+   simply want to limit how much CPU or memory it can use so the rest of the system continues running
+   normally.
+
+   In this article, you´ll learn four practical ways to control CPU and memory usage for Linux
+   processes.
+
+Why You´d Want to Throttle a Process
+   A Linux server is usually running many services at the same time, such as a web server, a database,
+   scheduled jobs, monitoring tools, and background applications. If one process suddenly starts
+   consuming all available CPU resources, the entire system can become slow and unresponsive.
+
+   In some situations, killing the process is not the right solution. For example, you may be running a
+   large database backup, video conversion, software compilation, or data-processing job that needs to
+   be completed successfully. Instead of stopping it, you can limit how much CPU or memory it is allowed
+   to use.
+
+   The same idea applies to memory usage. If an application has a memory leak or is consuming more RAM
+   than expected, setting limits can prevent it from affecting other services until a permanent fix is
+   available.
+
+Method 1: Use cpulimit to Cap CPU Usage
+   When you need a quick and simple way to limit CPU consumption, cpulimit is one of the easiest tools
+   available. It works by temporarily pausing and resuming a process many times per second, keeping its
+   average CPU usage below a specified percentage.
+
+   To install cpulimit on Linux, use the following appropriate command for your specific Linux
+   distribution.
+
+$> sudo apt install cpulimit         [On Debian, Ubuntu and Mint]
+$> sudo dnf install cpulimit         [On RHEL/CentOS/Fedora and Rocky/AlmaLinux]
+$> sudo emerge -a sys-apps/cpulimit  [On Gentoo Linux]
+$> sudo apk add cpulimit             [On Alpine Linux]
+$> sudo pacman -S cpulimit           [On Arch Linux]
+$> sudo zypper install cpulimit      [On OpenSUSE]
+$> sudo pkg install cpulimit         [On FreeBSD]
+
+   Before applying a limit, you need the process ID of the running application.
+
+   For example, to find the PID of Firefox:
+$> pidof firefox
+
+   Example output:
+3271
+
+   To restrict the process to 30% CPU usage:
+$> sudo cpulimit --pid 3271 --limit 30
+
+   Here´s what the options mean:
+     * --pid 3271 targets the process with PID 3271.
+     * --limit 30 limits CPU usage to 30% of a single CPU core.
+
+   On a system with multiple CPU cores, the percentage is calculated per core. For example, 30% on a
+   four-core system is roughly equivalent to 7.5% of the machine´s total CPU capacity.
+
+   To run it in the background, add an ampersand (&) at the end:
+$> sudo cpulimit --pid 3271 --limit 30 &
+
+   If you receive a "Process not found" message, the process may have restarted with a new PID, so
+   simply run pidof again and use the updated PID.
+
+   You can also launch a new application with a CPU limit already applied.
+$> sudo cpulimit --limit 40 -e make -- make -j4
+
+   In this command:
+     * -e make tells cpulimit which executable to monitor.
+     * --limit 40 restricts CPU usage to 40%.
+     * make -j4 starts the compilation job.
+
+   This approach is particularly useful on shared systems where build jobs should not consume all
+   available CPU resources.
+
+   While cpulimit is great for quick CPU throttling, it does not control memory usage. In the next
+   method, we´ll use Linux´s built-in scheduling tools to reduce a process´s CPU priority so it
+   naturally gets fewer resources when the system is busy.
+   If this helped you stop a process from eating your server alive, share it with a sysadmin who´s still
+   playing whack-a-mole with runaway jobs.
+
+Method 2: Use nice and renice to Lower the Scheduling Priority
+   Unlike cpulimit, which actively restricts CPU usage, nice and renice work by influencing how the
+   Linux scheduler allocates CPU time. Instead of putting a strict cap on usage, they simply tell the
+   system: "this process is less important than others". When the system is busy, lower-priority
+   processes get fewer CPU cycles.
+
+   This makes nice ideal for background tasks like backups, archiving, log processing, or batch jobs
+   that should not interfere with interactive work such as SSH sessions, editors, or web services.
+
+   The nice priority range goes from:
+     * -20 = highest priority (runs first).
+     * 0 = default priority.
+     * 19 = lowest priority (runs last).
+
+   Regular users can only increase the nice value (lower priority), but only root can assign negative
+   values.
+
+   To run a command with reduced priority, for example, to run the backup job with a nice value of 15,
+   meaning the system will only give it CPU time when higher-priority processes are not using it.
+$> nice -n 15 tar -czf /backup/home.tar.gz /home/
+
+   If a process is already running, you can adjust its priority using renice:
+$> sudo renice -n 19 -p 3271
+
+   Example output:
+3271 (process ID) old priority 0, new priority 19
+
+   Here:
+     * -n 19 sets the new nice value (lowest priority).
+     * -p 3271 targets the process ID.
+
+   It is important to understand that nice does not limit CPU usage directly. A low-priority process can
+   still use 100% CPU if the system is idle. However, the moment other processes need CPU time, the
+   scheduler will prefer them over the low-priority job.
+
+Method 3: Use cgroups to Set Hard CPU and Memory Limits at Kernel Level
+   The cgroups (control groups) are the foundation of Linux resource management. Unlike tools like
+   cpulimit or nice, which operate at the user level, cgroups enforce limits directly in the Linux
+   kernel, which means a process cannot bypass or "outgrow" these limits.
+
+   First, check whether your system is running cgroups v2:
+$> mount | grep cgroup
+
+   If you see something like this, you are on v2:
+$> cgroup2 on /sys/fs/cgroup type cgroup2 (rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot)
+
+   Now create a new cgroup for your process:
+$> sudo mkdir /sys/fs/cgroup/mygroup
+
+   To restrict the group to 512 MB of RAM:
+$> echo "536870912" | sudo tee /sys/fs/cgroup/mygroup/memory.max
+
+   To allow 20% of one CPU core (200000 out of 1000000):
+$> echo "200000 1000000" | sudo tee /sys/fs/cgroup/mygroup/cpu.max
+
+   Now assign a running process (PID 3271) to this cgroup:
+$> echo 3271 | sudo tee /sys/fs/cgroup/mygroup/cgroup.procs
+
+   The process is now hard-limited to 512MB RAM and 20% of one CPU core. If it tries to allocate more
+   memory than the ceiling, the kernel OOM killer fires and terminates it.
+
+   If you´d rather the process get throttled on memory rather than killed, set memory.swap.max to 0 to
+   disable swap for the group and use a swap file strategy separately. Either way, it cannot escape the
+   cage.
+
+   If this finally made cgroups click for you, send this to someone still wondering why their container
+   is getting OOM-killed.
+
+Method 4: Use systemd to Limit Services with Resource Directives
+   If your process runs as a systemd service, this is usually the cleanest and most production-friendly
+   option. Instead of manually dealing with PIDs or cgroups, systemd handles everything for you using
+   built-in resource controls.
+
+   Under the hood, systemd still uses cgroups v2, but it manages them automatically, so you don´t need
+   to manually create or assign anything.
+
+   Let´s say you want to limit the nginx service so it cannot consume more than 50% CPU and 1 GB RAM.
+   So, you need to create a drop-in override file without editing the original unit:
+$> sudo systemctl edit nginx
+
+   Inside the file, add:
+CPUQuota=50%
+MemoryMax=1G
+
+   Reload systemd and restart the service:
+$> sudo systemctl daemon-reload
+$> sudo systemctl restart nginx
+
+   Verify the limits are applied:
+$> sudo systemctl show nginx | grep -E 'CPUQuota|MemoryMax'
+
+   Example output:
+CPUQuota=50%
+MemoryMax=1073741824
+
+   What these settings mean:
+     * CPUQuota=50% - Limits the service to half of one CPU core´s capacity (systemd normalizes this
+       across cores).
+     * MemoryMax=1G - Sets a hard memory limit. If the service exceeds this, the kernel will trigger the
+       OOM killer for that service.
+
+   For a softer memory limit that triggers a warning log but doesn´t kill the process, use MemoryHigh
+   instead, which throttles allocation and logs the event without terminating the service.
+
+   If you see CPUQuota=0 in the output, the directive didn´t apply, so check that you saved the override
+   to /etc/systemd/system/nginx.service.d/override.conf and that the daemon-reload ran cleanly.
+   If this saved your nginx from eating your whole server, share it with your team before someone else
+   learns the hard way.
+
+Method 5: Use ulimit to Set Per-Session and Per-User Resource Limits
+   The ulimit is a simple but powerful way to control what a shell session or a user is allowed to do.
+   Unlike cgroups or systemd, it does not manage services system-wide. Instead, it works at the shell
+   level, meaning it affects everything you start from that terminal session.
+
+   This makes it especially useful for shared servers where you want to protect the system from a single
+   user running runaway processes or consuming too many resources.
+
+   To see what your current session is allowed to do:
+$> ulimit -a
+
+   Example output:
+core file size          (blocks, -c) 0
+data seg size           (kbytes, -d) unlimited
+scheduling priority             (-e) 0
+file size               (blocks, -f) unlimited
+pending signals                 (-i) 7824
+max locked memory       (kbytes, -l) 64
+max memory size         (kbytes, -m) unlimited
+open files                      (-n) 1024
+pipe size            (512 bytes, -p) 8
+POSIX message queues     (bytes, -q) 819200
+real-time priority              (-r) 0
+stack size              (kbytes, -s) 8192
+cpu time               (seconds, -t) unlimited
+max user processes              (-u) 7824
+virtual memory          (kbytes, -v) unlimited
+file locks                      (-x) unlimited
+
+   To restrict how much memory processes in this shell can use:
+$> ulimit -v 1048576
+
+   After setting this, any program launched from this terminal cannot exceed the defined memory limit.
+
+   To enforce limits across login sessions, you need to configure system-wide security limits.
+$> sudo nano /etc/security/limits.conf
+
+   Then add entries like:
+deploy soft nproc 200
+deploy hard nproc 500
+deploy hard as 2097152
+
+   What these limits mean:
+     * soft nproc 200: warns at 200 processes but doesn´t enforce
+     * hard nproc 500: hard cap at 500 processes
+     * hard as 2097152: hard cap on address space at 2GB, in KB
+
+   The deploy user will see these limits enforced on every login after that. ulimit changes in
+   /etc/security/limits.conf require a new login session to take effect. If you change them and test
+   immediately in the same shell, nothing changes.
+   If ulimit just saved your shared server from a fork bomb, share this with the team before someone
+   else finds out the hard way.
+
+Conclusion
+   You now have five practical tools to control how much CPU and memory a Linux process can use:
+     * cpulimit for quickly capping CPU usage of a running process
+     * nice and renice for lowering scheduling priority so a process gets fewer CPU cycles under load
+     * cgroups v2 for strict, kernel-level limits on CPU and memory
+     * systemd directives for clean, service-level resource control
+     * ulimit for per-user and per-session safety limits
+
+   Pick one process on your system right now (a backup job, a build script, a log shipper) and cap it
+   with cpulimit or a systemd CPUQuota. Watch what happens to system load before and after. That
+   ten-minute exercise will stick with you longer than reading about it.
+
+
+---

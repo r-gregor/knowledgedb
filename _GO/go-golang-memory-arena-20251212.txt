@@ -1,0 +1,243 @@
+filename: go-golang-memory-arena-20251212.txt
+https://uptrace.dev/blog/golang-memory-arena
+
+Golang memory arenas [101 guide]
+December 08, 2022
+
+Go 1.20 release added a new experimental arena package that provides memory arenas. You can use memory arenas
+to improve performance by reducing the number of allocations and deallocations that need to occur during
+runtime.
+
+Garbage collection overhead
+Go is a garbage-collected language and so it can automatically free allocated objects for you. Go runtime
+achieves that by periodically running a garbage-collection algorithm that frees unreachable objects. Such
+automatic memory management simplifies the writing of Go applications and ensures memory safety.
+
+However, large Go programs have to spend a significant amount of CPU time doing garbage collection. In
+addition, the memory usage is often larger than necessary, because Go runtime delays garbage collection as
+long as possible to free more memory in a single run.
+
+Memory arenas
+Memory arenas allow to allocate objects from a contiguous region of memory and free them all at once with
+minimal memory management or garbage collection overhead.
+
+You can use memory arenas in functions that allocate a large number of objects, process them for a while, and
+then free all of the objects at the end.
+
+Memory arenas is an experimental feature available in Go 1.20 behind the GOEXPERIMENT=arenas environment
+variable:
+
+GOEXPERIMENT=arenas go run main.go
+
+The API and implementation of memory arenas is completely unsupported and Go team makes no guarantees about
+compatibility or whether it will even continue to exist in any future release.
+
+For example:
+
+import "arena"
+
+type T struct {
+	Foo string
+	Bar [16]byte
+}
+
+func processRequest(req *http.Request) {
+	// Create an arena in the beginning of the function.
+	mem := arena.NewArena()
+
+	// Free the arena in the end.
+	defer mem.Free()
+
+	// Allocate a bunch of objects from the arena.
+	for i := 0; i < 10; i++ {
+		obj := arena.New[T](mem)
+	}
+
+	// Or a slice with length and capacity.
+	slice := arena.MakeSlice[T](mem, 100, 200)
+}
+
+If you want to use the object allocated from an arena after the arena is freed, you can Clone the object to
+get a shallow copy allocated from the heap:
+
+mem := arena.NewArena()
+
+obj1 := arena.New[T](mem) // arena-allocated
+obj2 := arena.Clone(obj1) // heap-allocated
+fmt.Println(obj2 == obj1) // false
+
+mem.Free()
+
+// obj2 can be safely used here
+
+You can also use memory arenas with the reflect package:
+
+var typ = reflect.TypeOf((*T)(nil)).Elem()
+
+mem := arena.NewArena()
+defer mem.Free()
+
+value := reflect.ArenaNew(mem, typ)
+fmt.Println(value.Interface().(*T))
+
+When to use memory arenas?
+Performance critical code. For performance-critical code, it may be beneficial to allocate a memory arena and
+manage the memory manually to reduce the overhead of the garbage collector.
+
+Memory pooling. You can use memory arenas to implement a memory pool, where a fixed amount of memory is
+allocated at startup and reused for subsequent allocations, improving performance by reducing allocation
+overhead.
+
+Large data structures. For large data structures that need to be allocated and deallocated frequently, using
+a memory arena can improve performance by reducing the overhead of individual memory allocations and
+deallocations.
+
+Address sanitizer
+To detect invalid usage patterns, you can use memory arenas with the address sanitizer (asan) and the memory
+sanitizer (msan).
+
+For example, the following program uses the object after the arena is freed:
+
+package main
+
+import (
+	"arena"
+)
+
+type T struct {
+	Num int
+}
+
+func main() {
+	mem := arena.NewArena()
+	o := arena.New[T](mem)
+	mem.Free()
+	o.Num = 123 // incorrect: use after free
+}
+
+You can run the program with the address sanitizer to get a detailed error message:
+$> go run -asan main.go
+
+accessed data from freed user arena 0x40c0007ff7f8
+fatal error: fault
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x40c0007ff7f8 pc=0x4603d9]
+
+goroutine 1 [running]:
+runtime.throw({0x471778?, 0x404699?})
+    /go/src/runtime/panic.go:1047 +0x5d fp=0x10c000067ef0 sp=0x10c000067ec0 pc=0x43193d
+runtime.sigpanic()
+    /go/src/runtime/signal_unix.go:851 +0x28a fp=0x10c000067f50 sp=0x10c000067ef0 pc=0x445b8a
+main.main()
+    /workspace/main.go:15 +0x79 fp=0x10c000067f80 sp=0x10c000067f50 pc=0x4603d9
+runtime.main()
+    /go/src/runtime/proc.go:250 +0x207 fp=0x10c000067fe0 sp=0x10c000067f80 pc=0x434227
+runtime.goexit()
+    /go/src/runtime/asm_amd64.s:1598 +0x1 fp=0x10c000067fe8 sp=0x10c000067fe0 pc=0x45c5a1
+
+Slices
+You can allocate slices using MakeSlice method:
+
+// Alloc []string
+slice := arena.MakeSlice[string](mem, length, capacity)
+
+If a slice must be grown to accommodate new elements, you need to allocate a new slice or the slice will be
+moved to the heap when growing with append:
+
+slice := arena.MakeSlice[string](mem, 0, 0) // empty slice from the arena
+slice = append(slice, "") // the slice is on the heap now
+
+You might also consider using other data structures instead of slices, for example, a linked list can be
+grown without an issue.
+
+Maps
+Currently, Go arenas don't support maps, but you can create a user-defined generic map that allows optionally
+specifying an arena for use in allocating new elements.
+
+Beware of the string
+Go memory arenas don't allow to allocate strings directly, but you can get around by allocating a []byte and
+using unsafe:
+
+src := "source string"
+
+mem := arena.NewArena()
+defer mem.Free()
+
+bs := arena.MakeSlice[byte](mem, len(src), len(src))
+copy(bs, src)
+str := unsafe.String(&bs[0], len(bs))
+
+Such arena-allocated strings can't be used after you free the arena, so be careful when allocating strings
+from arenas and use address sanitizer
+
+Nil arenas
+Nil arenas are not valid, for example, you can't do this to allocate from the heap when using arenas:
+
+obj := arena.New[Object](nil)
+
+You also can't have an Allocator interface, because arena.New is a package method. As a result, code-paths
+for arena/non-arena code must be separate.
+
+Performance
+By using memory arenas, Google has achieved savings of up to 15% in CPU and memory usage for a number of
+large applications, mainly due to reduction in garbage collection CPU time and heap memory usage.
+
+You can achieve even better results in small toy applications. For example, you can take the Binary Trees
+example from Benchmark Games and change the code to use memory arenas:
+
+[diff]
+
++// Allocate an empty tree node, using an arena if provided.
++func allocTreeNode(a *arena.Arena) *Tree {
++       if a != nil {
++               return arena.New[Tree](a)
+        } else {
+                return &Tree{}
+        }
+ }
+
+Then compare the performance of the code without memory arenas:
+
+shell
+$> /usr/bin/time go run arena_off.go
+77.27user 1.28system 0:07.84elapsed 1001%CPU (0avgtext+0avgdata 532156maxresident)k
+30064inputs+2728outputs (551major+292838minor)pagefaults 0swaps
+
+With the code that uses memory arenas:
+
+$> GOEXPERIMENT=arenas /usr/bin/time go run arena_on.go
+35.25user 5.71system 0:05.09elapsed 803%CPU (0avgtext+0avgdata 385424maxresident)k
+48inputs+3320outputs (417major+63931minor)pagefaults 0swaps
+
+The code that uses memory arenas not only runs faster, but also uses less memory:
+
+------------------------------------------
+Metric     Without arenas     With areans
+------------------------------------------
+User       77.27              35.25
+System     1.28               5.71
+Elapsed    0:07.84            0:05.09
+RSS        532156k            385424k
+------------------------------------------
+
+Memory arenas in Uptrace
+Uptrace is an open source APM tool written in Go. You can use it to monitor applications and set up alerts to
+receive notifications via email, Slack, Telegram, and more.
+
+Uptrace Overview
+Since Uptrace receives data from OpenTelemetry in large batches (1k-10k items), it could use memory arenas to
+allocate large number of spans and metrics without involving garbage collector.
+
+Another allocation-heavy part of the app that could benefit from memory arenas is Protobuf decoding, which
+also decodes spans and metrics in large batches.
+
+Conclusion
+Memory arenas can be a useful tool for improving performance of Go programs, but they should be used with
+caution, as managing memory manually can be complex and error-prone. It's important to carefully consider the
+specific needs of your program before deciding to use a memory arena.
+
+Acknowledgements
+This post is based on arena package proposal by Dan Scales and arena performance experiment by thepudds.
+
+
+---
+

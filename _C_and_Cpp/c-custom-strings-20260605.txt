@@ -1,0 +1,317 @@
+filename: c-custom-strings-20260605.txt
+https://www.bytesbeneath.com/p/custom-strings-in-c
+
+Custom Strings in C
+Feb 02, 2024
+
+Because <string.h> is horrible.
+
+   Null-terminated strings are a cause of some serious errors and increased complexity. In this article,
+   I´ll show you how to create a simple String type that will relieve these problems.
+
+Problem: Always Checking For '\0'
+   I won´t go into depth on this one. You can imagine that having to check for the terminating character
+   adds unwanted complexity to any functions dealing with strings in C.
+
+   The Bytes Beneath is a reader-supported publication. To receive new posts and support my work,
+   consider becoming a free or paid subscriber.
+
+Problem: Buffer Overruns
+   Buffer overruns are possible due to C´s direct memory access. Let´s look at a small example program:
+
+#include <stdio.h>
+
+static struct {
+	char str[10];
+	int num;
+} values;
+
+int main(void) {
+	values.num = 420;
+	sprintf(values.str, "%s", "0123456789abcd");
+	printf("%d\n", values.num);
+	return 0;
+}
+
+   I put two variables into a struct so they don´t get re-ordered by the compiler.
+
+   The integer num will appear at least 10 bytes from the start of the char array str. Due to alignment,
+   num most likely appear 12 bytes after the start of str.
+
+   In the image below, I have placed labels above the memory. a401 in hexadecimal is 420 in decimal:
+
+   When "0123456789abcd" is is placed at the position str, we get this result:
+
+   As you can see, we have clobbered the first 2 bytes of num. We have inadvertently modified the value
+   to be 6364 in hexadecimal which is 25699 in decimal.
+
+   This can happen with any pointer, though it´s a more common bug with regular strings due to the way
+   we use textual data. In inserting into and formatting strings, we increase the likelihood of this
+   class of bug.
+
+   This program doesn´t give any warnings, by the way. Even on the most strict warning settings (-Wall
+   -Wextra -pedantic).
+
+   To Microsoft´s credit, they do warn the user about using sprintf. The MSVC compiler will recommend
+   using sprintf_s. sprintf_s has the buffer length as one of the parameters. There is also snprintf,
+   which provides the same protection - though differs in the return type.
+
+   This memory overwriting issue is not solved by just using these functions. For example, what about if
+   we want to iterate through some data and add something from it to a string? I´ll show a brief
+   example:
+
+char *my_str = malloc(10);
+char *my_data = malloc(5);
+sprintf(my_data, "%s", "012345");
+
+for (int i = 0; i < 100; i += 1) {
+	my_str[i] = 0x77;
+}
+
+   In my testing, my_str appears in memory shortly before my_data.
+
+   As with the sprintf example, my_str is overwritten with bytes of 0x77.
+
+Solution: The Custom String Type
+
+   The String type is defined as such:
+
+typedef struct {
+	size_t len;
+	char *data;
+} String;
+
+   In my version, we keep the null-terminator, and we also store the length. This allows us to create
+   String functions that are compatible with:
+   - C Standard Library
+   - Any 3rd Party libraries that expect a null-terminated char array.
+
+   Before we dive into the implementation, let´s review some usage code:
+Allocator a = ...;
+
+String s1 = String("This is my cool string.");
+String s2 = String("And here is another one.");
+
+String cs = str_concat(s1, s1, &a);
+
+printf("'%s'\n", cs.data);
+// => 'This is my cool string.And here is another one.'
+
+String *split = str_split(s1, String(" "), &a);
+
+size_t len = array_length(split);
+for (size_t i = 0; i < len; i += 1) {
+	printf("'%s'\n", split[i].data);
+}
+// => 'This'
+// => 'is'
+// => 'my'
+// => 'cool'
+// => 'string.'
+
+String joined = str_join(split, String(","), &a);
+printf("'%s'\n", joined.data);
+// => 'This,is,my,cool,string.'
+
+String view = str_substring_view(s1, String("my"), &a);
+printf("'%s'\n", view.data);
+// => 'my cool string.'
+// As views don´t alter or clone, the printf will not terminate correctly.
+
+   There´s much more you can do, but we´ll leave it there for now.
+
+   As you can see, our string usage is much simpler than the standard C string functions.
+
+   No weird strtok loop to split a string. Easily join strings together. Great.
+
+   Below is a simple and not necessarily great (it´s a first-pass) implementation:
+
+typedef struct {
+	size_t len;
+	char *data;
+} String;
+
+#define String(x) (String){strlen(x), x}
+
+String str_init(size_t len, Allocator *a) {
+	String s = {
+		.len = len,
+		.data = a->alloc(len + 1, a->context),
+	};
+	s.data[len] = 0;
+	return s;
+}
+
+String str_concat(String s1, String s2, Allocator *a) {
+	size_t len = s1.len + s2.len;
+	String s = str_init(len, a);
+	memcpy(s.data, s1.data, s1.len);
+	memcpy(&s.data[s1.len], s2.data, s2.len);
+	return s;
+}
+
+String str_substring(String s, size_t start, size_t end, Allocator *a) {
+	String r = {0};
+	if (end <= s.len && start < end) {
+		r = str_init(end - start, a);
+		memcpy(r.data, &s.data[start], r.len);
+	}
+	return r;
+}
+
+bool str_contains(String haystack, String needle) {
+	bool found = false;
+	for (size_t i = 0, j = 0; i < haystack.len && !found; i += 1) {
+		while (haystack.data[i] == needle.data[j]) {
+			j += 1;
+			i += 1;
+			if (j == needle.len) {
+				found = true;
+				break;
+			}
+		}
+	}
+	return found;
+}
+
+size_t str_index_of(String haystack, String needle) {
+	for (size_t i = 0; i < haystack.len; i += 1) {
+		size_t j = 0;
+		size_t start = i;
+		while (haystack.data[i] == needle.data[j]) {
+			j += 1;
+			i += 1;
+			if (j == needle.len) {
+				return start;
+			}
+		}
+	}
+	return (size_t)-1;
+}
+
+// NOTE: this does not terminate the string with a 0 as that would destroy the original string.
+String str_substring_view(String haystack, String needle) {
+	String r = {0};
+	size_t start_index = str_index_of(haystack, needle);
+	if (start_index < haystack.len) {
+		r.data = &haystack.data[start_index];
+		r.len = needle.len;
+	}
+	return r;
+}
+
+bool str_equal(String a, String b) {
+	if (a.len != b.len) {
+		return false;
+	}
+	return memcmp(a.data, b.data, a.len) == 0;
+}
+
+String str_replace(String s, String match, String replacement, Allocator *a) {
+	String r = {0};
+	// TODO
+	return r;
+}
+
+String str_view(String s, size_t start, size_t end) {
+	if (end < start || end - start > s.len) {
+		return (String){0};
+	}
+	return (String){end - start, s.data + start};
+}
+
+String str_clone(String s, Allocator *a) {
+	String r = {0};
+	if (s.len) {
+		r.data = a->alloc(s.len, a->context);
+		r.len = s.len;
+		memcpy(r.data, s.data, s.len);
+	}
+	return r;
+}
+
+String *str_split(String s, String delimiter, Allocator *a) {
+	String *arr = 0;
+	size_t start = 0;
+	for (size_t i = 0; i < s.len; i += 1) {
+		if (s.data[i] != delimiter.data[0]) {
+			continue;
+		}
+
+		if (memcmp(&s.data[i], delimiter.data, delimiter.len) == 0) {
+			// Allocate array if we haven´t yet.
+			if (!arr) {
+				arr = array(String, a);
+			}
+
+			// Clone the substring before the delimiter.
+			size_t end = i;
+			String cloned = str_substring(s, start, end, a);
+			array_append(arr, cloned);
+			start = end + delimiter.len;
+		}
+	}
+	// Get the last segment.
+	if (start + delimiter.len < s.len) {
+		String cloned = str_substring(s, start, s.len, a);
+		array_append(arr, cloned);
+	}
+	return arr;
+}
+
+String *str_split_view(String s, String delimiter, Allocator *a) {
+	String *arr = 0;
+	size_t start = 0;
+	for (size_t i = 0; i < s.len; i += 1) {
+		if (s.data[i] != delimiter.data[0]) {
+			continue;
+		}
+
+		if (memcmp(&s.data[i], delimiter.data, delimiter.len) == 0) {
+			if (!arr) {
+				arr = array(String, a);
+			}
+
+			size_t end = i;
+			String view = str_view(s, start, end);
+			array_append(arr, view);
+			start = end + delimiter.len;
+		}
+	}
+	if (start + delimiter.len < s.len) {
+		String view = str_view(s, start, s.len);
+		array_append(arr, view);
+	}
+	return arr;
+}
+
+String str_join(String *s, String join, Allocator *a) {
+	ArrayHeader *h = array_header(s);
+
+	size_t total_length = s->len * join.len;
+	for (size_t i = 0; i < h->len; i += 1) {
+		total_length += s[i].len;
+	}
+
+	char *mem = a->alloc(total_length + 1, a->context);
+	size_t offset = 0;
+	for (size_t i = 0; i < h->len; i += 1) {
+		memcpy(&mem[offset], s[i].data, s[i].len);
+		offset += s[i].len;
+
+		if (i == h->len - 1) {
+			break;
+		}
+
+		memcpy(&mem[offset], join.data, join.len);
+		offset += join.len;
+	}
+
+	mem[total_length] = 0;
+
+	return (String){total_length, mem};
+}
+
+
+---
+

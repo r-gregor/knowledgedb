@@ -1,0 +1,326 @@
+filename: c_assemblers_20230511.txt
+https://maskray.me/blog/2023-05-08-assemblers
+
+Assemblers
+2023-05-08
+
+   This article provides a description of popular assemblers and their architecture-specific
+   differences.
+
+Assemblers
+   GCC generates assembly code and invokes GNU Assembler (also known as "gas"), which is part of GNU
+   Binutils, to convert the assembly code into machine code. The GCC driver is also capable of accepting
+   assembly input files. Due to GCC's widespread use, GNU Assembler is arguably the most popular
+   assembler.
+
+   Within the LLVM project, the LLVM integrated assembler is a library that is linked by Clang, llvm-mc,
+   and lld (for LTO purposes) to generate machine code. It supports a wide range of GNU Assembler syntax
+   and can be used as a drop-in replacement for GNU Assembler.
+
+   On the Windows platform, the Microsoft Macro Assembler (MASM) is widely used.
+
+Architectures
+
+x86
+   There are two main branches of syntax: Intel syntax and AT&T syntax. AT&T syntax is derived from
+   PDP-11 and exhibits several key differences:
+	* The operand list is reversed compared to Intel syntax.
+	* The four-part generic addressing mode is written as displacement(base,index,scale) instead of
+	[base+index*scale+disp] in Intel syntax.
+	* Immediate values are prefixed with $, while registers are prefixed with %.
+	* The mnemonics have a suffix indicating the operand size, e.g. b for 1 byte, w for 2 bytes (Word),
+	d for 4 bytes (Dword), and q for 8 bytes (Qword).
+
+   Although the sigils add some complexity to the language, they do provide a distinct advantage: symbol
+   references can be parsed without ambiguity. Many x86 instructions take an operand that can be a
+   register or a memory location. With sigils, parsing becomes unambiguous, as demonstrated by examples
+   such as subl var, %eax and subl $1, %eax.
+
+$> gcc -S a.c
+$> cat a.s
+...
+		movl	var(%rip), %eax
+		addl	$3, %eax
+
+$> gcc -S -masm=intel a.c
+$> cat a.s
+...
+		.intel_syntax noprefix
+...
+		mov		eax, DWORD PTR var[rip]
+		add		eax, 3
+
+   Intel syntax is generally concise, except for the verbose size directives (e.g., DWORD PTR). It is
+   widely utilized in the Windows environment and within the reverse engineering community.
+
+   However, Intel syntax has a flaw related to ambiguity, as it prevents the use of variable names that
+   collide with registers (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=53929).
+
+$> cat ambiguous.c
+int *rip, rax;
+int foo() { return rip[rax]; }
+
+$> gcc -S -masm=intel ambiguous.c -o -
+...
+		mov		rax, QWORD PTR rip[rip]
+		mov		edx, DWORD PTR rax[rip]
+
+$> gcc -c -masm=intel ambiguous.c
+/tmp/ccEOMwm6.s: Assembler messages:
+/tmp/ccEOMwm6.s:28: Error: invalid use of register
+/tmp/ccEOMwm6.s:29: Error: invalid use of register
+
+   I believe it would be beneficial if the designers added sigils to Intel syntax to disambiguate symbol
+   references from registers. The absence of AT&T-style line noise makes Intel syntax code much more
+   readable. Unfortunately, Intel syntax is less popular in software code due to GCC defaulting to AT&T
+   syntax (Please, really, make -masm=intel the default for x86.
+
+   Using as -msyntax=intel -mnaked-reg allows parsing the input in Intel syntax without a register
+   prefix. This is similar to including a .intel_syntax noprefix directive in the input.
+
+   With llvm-mc -x86-asm-syntax=intel, the input can be parsed in Intel syntax. Using
+   -output-asm-variant=1 will print instructions in Intel syntax.
+
+   For x86 architecture, NASM is another popular assembler.
+
+MIPS
+   Modifiers are utilized to describe different access types of a symbol. This serves as a bonus as it
+   prevents symbol references from being mistaken as register names. However, the function call-like
+   syntax can appear verbose.
+
+lui		a0, %tprel_hi(tls)
+add		a0, a0, tp, %tprel_add(tls)
+lw		a0, %tprel_lo(tls)(a0)
+lui		a1, %hi(var)
+lw		a2, %lo(var)(a1)
+
+Power ISA
+   Power ISA assembly may seem unusual, as general-purpose registers are not prefixed with the r prefix.
+   Whether an integer denotes a register or an immediate value depends on its position as an operand in
+   an instruction. I find that this difference slightly affects readability.
+
+   Similar to x86, postfix modifiers are used to describe different access kinds of a symbol.
+
+addis 5, 13, tls@tprel@ha
+lwz 5, tls@tprel@l(5)
+addis 3, 2, var@toc@ha
+addi 2, 2, var@toc@l
+
+AArch64
+   Prefix modifiers are used to describe various access types of a symbol. Personally, this is the
+   modifier syntax that I prefer the most.
+
+add		x8, x8, :tprel_hi12:tls
+add		x8, x8, :tprel_lo12_nc:tls
+adrp	x8, fp
+ldr		x8, [x8, :lo12:fp]
+
+RISC-V
+   The modifier syntax is copied from MIPS.
+
+   The documentation is available on
+   https://github.com/riscv-non-isa/riscv-asm-manual/blob/master/riscv-asm.md.
+
+Interaction with compiler drivers
+   By default, Clang employs the LLVM integrated assembler for most targets. However, we can opt for
+   using an external assembler by specifying -fno-integrated-as.
+
+   We can instruct GCC to pass assembler options to gas using -Wa,. For example, gcc -c -Wa,-L a.c
+   passes the -L option to gas.
+
+   However, it is important to note that Clang has limited support for -Wa, options when the LLVM
+   integrated assembler is used. This turns out to be fine as many -Wa, options aren't really needed.
+
+Inline assembly
+   Certain compilers allow the inclusion of assembly code within a high-level language.
+
+   The most widely used implementation is GCC Basic Asm and Extended Asm. On Windows, MSVC
+   supports inline assembly for x86-32 but not for x86-64 and Arm.
+
+   Clang supports both GCC and MSVC inline assembly. Clang's MSVC inline assembly can be utilized with
+   x86-64.
+
+   Some compilers provide additional variants of inline assembly. Here are some relevant links:
+	* Free Pascal https://wiki.freepascal.org/Asm
+	* D https://dlang.org/spec/iasm.html
+	* Jai https://jai.community/t/inline-assembly/139
+	* Nim https://nim-lang.github.io/Nim/manual.html#statements-and-expressions-assembler-statement
+
+   My most wanted feature for GCC inline assembly is x86: Support a machine constraint to get raw
+   symbol name.
+
+Notes on GNU Assembler
+   // is the universal comment marker that is available on all ports. Ports may support additional
+   comment markers, e.g. #.
+
+   .file and .loc directives are used to create the .debug_line section. If -g is specified and none of
+   .file and .loc is used, gas synthesizes debug information:
+	* .debug_info: DW_TAG_compile_unit tags
+	* .debug_line
+	* .debug_ranges or .debug_rnglists
+
+   .cfi* directives are used to create .eh_frame or .debug_frame.
+
+   GNU Assembler implements "INDEFINITE REPEAT BLOCK DIRECTIVES: .IRP AND .IRPC" from MACRO-11.
+
+.rept 3
+  ret
+.endr
+# => ret; ret; ret
+.irpc i,012
+  movq $\i, %rax
+.endr
+# => movq $0, %rax; movq $1, %rax; movq $2, %rax
+.irp i,%rax,%rbx,%rcx
+  movq \i, %rax
+.endr
+# => movq %rax, %rax; movq %rbx, %rax; movq %rcx, %rax
+
+   Unfortunately none of the directives can implement for (int i = 0; i < 20; i++). .irpc i,0123456789
+   gives just 10 iterations while .irp i,0,1,2,3,4,5,... is tedious and error-prone.
+
+   That said, we can define a macro that expands to a sequence of strings: 0, (0+1), ((0+1)+1),
+   (((0+1)+1)+1), ...
+
+$> cat a.s
+.data
+.macro iota n, i=0
+.if \n-\i
+.byte \i
+iota \n, "(\i+1)"
+.endif
+.endm
+iota 16
+
+$> as a.s -o a.o
+$> readelf -x .data a.o
+Hex dump of section '.data':
+  0x00000000 00010203 04050607 08090a0b 0c0d0e0f ................
+
+   "(\i+1)" creates a new expression but doesn't evaluate it. To evaluate the new expression, we can use
+   the % operator in the alternate macro mode available since 2004.
+
+$> cat a.s
+.data
+.altmacro
+.macro iota n, i=0
+.if \n-\i
+.byte \i
+iota \n, %(\i+1)
+.endif
+.endm
+iota 16
+
+$> as a.s -o a.o
+$> readelf -x .data a.o
+Hex dump of section '.data':
+  0x00000000 00010203 04050607 08090a0b 0c0d0e0f ................
+
+   .if, .ifdef, and .ifndef directives allow us to write conditional code in assembly tests without
+   using a C preprocessor. I often use .ifdef to combine positive tests and negative tests in one file.
+
+# RUN: llvm-mc %s | FileCheck %s
+# RUN: not llvm-mc --defsym ERR=1 %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=ERR
+# CHECK: ...
+## positive tests
+.ifdef ERR
+# ERR: ...
+## negatives tests
+.endif
+
+   GNU Assembler has supported .incbin since 2001-07 (hey, C/C++ #embed). The review thread
+   mentioned that .incbin had been supported by some other assemblers.
+
+   In the binutils-gdb repository, opcodes/ contains information on how to assemble and disassemble
+   instructions, but a lot of instruction code also lives on gas/config/tc-$arch.c.
+
+Notes on LLVM assembly and machine code emission
+   Clang has the capability to output either assembly code or an object file. Generating an object file
+   directly without involving an assembler is referred to as "direct object emission."
+
+   To provide a unified interface, MCStreamer is created to handle the emission of both assembly code
+   and object files. The two primary subclasses of MCStreamer are MCAsmStreamer and MCObjectStreamer,
+   responsible for emitting assembly code and machine code respectively.
+
+   Now, let's see who communicates with the MCStreamer API.
+
+   In the data flow pipeline for compilation C/C++ code -> LLVM IR -> MachineInstr -> MCInst -> assembly
+   code/machine code, LLVMAsmPrinter calls MCStreamer API to emit assembly code or machine code.
+
+   In the case of an assembly input file, LLVM creates an MCAsmParser object (LLVMMCParser) and a
+   target-specific MCTargetAsmParser object. The MCAsmParser is responsible for tokenizing the input,
+   parsing assembler directives, and invoking the MCTargetAsmParser to parse an instruction. Both the
+   MCAsmParser and MCTargetAsmParser objects can call MCStreamer API to emit assembly code or machine
+   code.
+
+   For an instruction parsed by the MCTargetAsmParser, if the streamer is an MCAsmStreamer, the MCInst
+   will be pretty-printed. If the streamer is an MCELFStreamer (other object file formats are similar),
+   MCELFStreamer::emitInstToData will use ${Target}MCCodeEmitter from LLVM${Target}Desc to encode the
+   MCInst, emit its byte sequence, and records needed relocations.
+
+Notes on LLVM integrated assembler
+
+LLVM-specific directives
+
+   .lto_discard is an LLVM-specific directive that ignores label and symbol attributes for specified
+   symbols. LLVMLTO uses the directive to ignore non-prevailing symbols in module-level inline assembly
+   during regular LTO (e.g., module asm ".weak foo"\nmodule asm ".equ foo,bar").
+
+   .lto_set_conditional sym1, sym2 is an LLVM-specific directive that is a variant of assignment (.set,
+   .equ, .equiv). sym1 is defined only if sym2 is defined. If we create an alias for a symbol defined by
+   module-level inline assembly, we can avoid creating the symbol if the aliasee is dropped by LTO.
+
+   z/OS uses IBM High Level Assembler (HLASM). IBM added some support to LLVMMCParser in 2021.
+
+Inline assembly
+   In general, inline assembly is parsed by LLVMMCParser for validation and formatting purposes. In
+   addition, knowing the number of instructions helps implement precise branch relaxation. Parsing can
+   be disabled for certain targets by default, and the parsing can be explicitly disabled by using the
+   -fno-integrated-as option.
+
+MSVC inline assembly
+   __asm blocks are parsed for Windows target triples. This extension is available on other targets by
+   specifying -fasm-blocks or the broad -fms-extensions. An __asm statement is represented as a
+   clang::MSAsmStmt object. clang::Parser::ParseMicrosoftAsmStatement parses the inline assembly string
+   and calls llvm::AsmParser::parseMSInlineAsm. It is worth noting that the string may be modified
+   during this process. For a clang::MSAsmStmt object, LLVM IR is generated through
+   clang::CodeGen::CodeGenFunction::EmitAsmStmt.
+
+Assembler relaxation
+
+foo: nop; jmp foo
+
+   With clang --target=x86_64 -c -mrelax-all (llvm-mc -mc-relax-all), LLVM integrated assembler uses the
+   5-byte encoding instead of the relaxable 2-byte encoding.
+1
+
+foo: c.beqz a0, foo
+
+   With clang --target=riscv64 -c -mrelax-all, LLVM integrated assembler splits the instruction into
+   two: bnez a0, .+6; j foo.
+
+Generated debug information
+   If -g is specified and none of .file and .loc is used, LLVM integrated assembler synthesizes debug
+   information.
+
+.debug_line creation
+
+   After parsing an instruction or directive, MCObjectStreamer::emitBytes is called to emit bytes. If we
+   have seen a .loc directive (either user-specified or synthesized), we create a temporary label at the
+   current location and add a MCDwarfLineEntry entry to the current section.
+
+   After the file is parsed, MCObjectStreamer::finishImpl calls MCDwarfLineTable::emit to emit
+   .debug_line.
+
+   For each line entry, MCDwarfLineTable::emitOne computes how to increment the location and the line
+   number. MCObjectStreamer::emitDwarfAdvanceLineAddr emits DW_LNE_set_address to set the address for
+   the first entry. For the other entries, MCObjectStreamer::emitDwarfAdvanceLineAddr selects one of the
+   opcodes in decreasing precedence: DW_LNS_copy, standard opcode, DW_LNS_const_add_pc plus standard
+   opcode, DW_LNS_advance_pc.
+
+   There was a "fast path" (if (AddrDelta->evaluateAsAbsolute(Res, getAssemblerPtr()))) to emit a byte
+   sequence instead of a MCDwarfLineAddrFragment.
+
+
+---
+

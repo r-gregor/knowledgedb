@@ -1,0 +1,218 @@
+filename: c-compound-literals-in-c-20250609.txt
+https://dev.to/pauljlucas/compound-literals-in-c-5d5
+
+Compound Literals in C
+Posted on Feb 9, 2024
+
+Introduction
+Among other things, C99 added compound literals for arrays, structs, and unions. Just as 42 specifies an int
+literal, a compound literal specifies a literal for an array, struct, or union. Consider:
+
+struct point {
+	int x, y;
+};
+
+typedef struct point point_t;
+
+void draw_circle( point_t center, unsigned radius );
+
+Rather than having to create a temporary object like:
+point_t p = { 1, 2 };
+draw_circle( p, 5 );
+
+a point_t literal can be specified "inline":
+draw_circle( (point_t){ 1, 2 }, 5 );
+
+That is, you put the type of the literal you want to specify between () and follow that by {} enclosing the
+type's value(s). The syntax is similar to a cast, but the result is an lvalue - more later.
+
+The syntax is the same for arrays:
+void print_list( char const *list[] );
+
+void f() {
+	// ...
+	print_list( (char const*[]){ "hello", "world", NULL } );
+}
+
+Specifying Values
+Values between {} can be specified the same as always, that is either in declaration order or via designated
+initializers. For structs or unions, a designated initializer is a . followed by the name of a member:
+p = (point_t){ .x = 1, .y = 2 };
+
+For arrays, a designated initializer is an index between []. For example:
+int *const a = (int[]){ [3] = 42 };
+
+... would create an array [0,0,0,42].
+
+When using designated initializers:
+	For structs or unions, members may be specified in any order; values for members not specified are
+	initialized to 0.
+
+    For arrays, indices may be specified in any order; values for indices not specified are initialized to 0.
+
+To specify 0 for all values:
+    Use { 0 }, e.g., (point_t){ 0 }.
+    Starting in C23, you can omit the 0, e.g., (point_t){}.
+
+Compound Literals are Lvalues
+As mentioned earlier, even though the syntax of compound literals is similar to casts, compound literals are
+different in a fundamental way: unlike casts, compound literals are lvalues. Briefly:
+
+	An lvalue is a value, can (but not must) appear on the left-hand-side (hence, L-value) of = (the
+	assignment operator), and can have its address taken via & (the address-of operator).
+
+For compound literals, the important point is that you can take their address via &. For example, if previous
+draw_circle() function were instead declared as:
+void draw_circle( point_t const *center, unsigned radius );
+
+then you could do:
+draw_circle( &(point_t){ 1, 2 }, 5 );
+
+that is put & in front. This is quite convenient for large structs: simply pass the pointer instead of copying
+the entire struct.
+
+Compound Literal Lifetime
+For an object that has a name, the lifetime of the object is either forever (if declared at global scope) or
+is limited to the scope in which it's declared. It's the same for compound literals. For example, if you were
+to do:
+
+point_t *p;
+
+do {
+	p = &(point_t){ 1, 2 };
+} while (0);                   // Lifetime of literal ends here.
+
+printf( "%d\n", p->x );        // Undefined behavior.
+
+Accessing the pointed-to compound literal declared inside the scope via p outside the scope would result in
+undefined behavior. The lesson is: the lifetime of a compound literal must be at least as long as any pointer
+to it.
+
+Starting in C23, you can optionally insert a storage class like static:
+  p = &(static point_t){ 1, 2 };
+
+that will make it last forever (just like a static local variable inside a function).
+
+For completeness, const, constexpr, register, and thread_local may also be used.
+
+Named Function Arguments
+Suppose you have a function that puts some text on the screen in a particular typeface, size, and color at a
+particular location:
+
+void put_text( char const *text, typeface_t typeface, unsigned size, color_t color, point_t loc );
+
+void f() {
+	// ...
+	put_text( "hello, world!", TYPE_HELVETICA, 12,
+			COLOR_BLACK, (point_t){ 10, 50 } );
+}
+
+While calls to such a function are fairly clear, you might occasionally have to look at the function
+declaration to remember the order in which to specify the arguments. For such functions, it would be nice if
+you could specify the arguments by name (hence the order wouldn't matter). But how?
+
+To do this, we can use a struct containing the arguments and change the declaration of put_text() to use it:
+
+struct put_text_args {
+	char const *text;
+	typeface_t  typeface;
+	unsigned    size;
+	color_t     color;
+	point_t     loc;
+};
+
+typedef struct put_text_args put_text_args_t;
+
+void put_text( put_text_args_t const *args );
+
+void f() {
+	// ...
+	put_text( &(put_text_args_t){
+		.text = "hello, world!",
+		.typeface = TYPE_HELVETICA,
+		.size = 12,
+		.color = COLOR_BLACK,
+		.loc = (point_t){ 10, 50 }
+	} );
+}
+
+    Assume that typeface_t and color_t are enumerations. For this example, their definition doesn't matter.
+
+While that's better, it's kind of ugly to have to specify &(put_text_args_t){}. To hide the ugliness, we can
+use a macro:
+
+#define PUT_TEXT(...) \
+	put_text( &(put_text_args_t){ __VA_ARGS__ } )
+
+void f() {
+	// ...
+	PUT_TEXT(
+		.text = "hello, world!",
+		.typeface = TYPE_HELVETICA,
+		.size = 12,
+		.color = COLOR_BLACK,
+		.loc = (point_t){ 10, 50 }
+	);
+}
+
+	The name of the macro can match the name of the function and not cause an infinite preprocessor macro
+	expansion loop because the preprocessor will not expand a macro that references itself.
+
+Default Arguments
+Now suppose you want to make some of those arguments have default values. It turns out you can specify the
+same designated initializer more than once and the value of the last one "wins":
+
+#define PUT_TEXT_DEFAULTS       \
+	.typeface = TYPE_HELVETICA, \
+	.size = 12,                 \
+	.color = COLOR_BLACK
+
+#define PUT_TEXT(...) \
+	put_text( &(put_text_args_t){ PUT_TEXT_DEFAULTS, __VA_ARGS__ } )
+
+void f() {
+	// ...
+	PUT_TEXT(
+		.text = "hello, world!",
+		.size = 24,
+		.loc = (point_t){ 10, 50 }
+	);
+}
+
+The PUT_TEXT_DEFAULTS macro defines the desired default values that are used in PUT_TEXT(). If __VA_ARGS__
+contains a matching designated initializer such as .size, it will override the value specified by
+PUT_TEXT_DEFAULTS.
+
+While this works, your compiler will likely give a "initializer overrides prior initialization of this
+subobject" warning since it usually means you made a mistake. To fix that, we can temporarily disable the
+warning by using _Pragma:
+
+#ifdef __GNUC__
+#define OVERRIDE_ARGS(FN,...)                                       \
+	_Pragma( "GCC diagnostic push" )                                \
+	_Pragma( "GCC diagnostic ignored \"-Winitializer-overrides\"" ) \
+	FN( &(FN##_args_t){ FN##_defaults, __VA_ARGS__ } )              \
+	_Pragma( "GCC diagnostic pop" )
+#else
+// ... OVERRIDE_ARGS() for other compilers ...
+#endif
+
+#define PUT_TEXT(...)  OVERRIDE_ARGS( put_text, __VA_ARGS__ )
+
+Since warnings are compiler-specific, you have to #define OVERRIDE_ARGS() for each compiler you plan to use.
+
+Not in C++
+Compound literals are not part of any C++ standard; however, many compilers support them as an extension. Note
+also that their lifetime is shorter in C++: it extends only until the end of the expression (not scope) in
+which they're used. As such, code that would be perfectly OK in C may result in undefined behavior in C++.
+
+Of course, C++ has constructors that can often replace the need for compound literals. My advice is not to use
+compound literals in C++.
+
+Conclusion
+Compound literals are quite handy for creating objects "inline" eliminating what otherwise would have been
+temporary variables. As shown, they can also be used to enable passing arguments to functions by name.
+
+
+---
+

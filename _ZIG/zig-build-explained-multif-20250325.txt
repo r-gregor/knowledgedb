@@ -1,0 +1,1273 @@
+filename: zig_build-explained-multif_20250325.txt
+https://zig.news/xq/zig-build-explained-part-1-59lf
+
+zig build explained - part 1
+
+   The Zig build system is still missing documentation and for a lot of people, this is a killer
+   argument not to use it. Others often search for recipies to build their project, but also struggle
+   with the build system.
+
+   This series is an attempt to give an in-depth introduction into the build system and how to use it.
+
+   We start at the very beginning with a freshly initialized Zig project and will work our way towards
+   more complex projects. On the way, we will learn how to use libraries and packages, add C code, and
+   even how to create our own build steps.
+
+Disclaimer
+   I will expect you to have at least some basic experience with Zig already, as i will not explain
+   syntax or semantics of the Zig language. I will also link to several points in the standard library
+   source, so you can see where all of this comes from. I recommend you to read the source of the
+   build system, as most of it is self-explanatory if you start digging after functions you see in the
+   build script. Everything is implemented in the standard library, there is no hidden build magic
+   happening.
+
+Getting started
+   We create a new project by making a new folder, and invoke zig init-exe in that folder.
+
+   This will give us the following build.zig file (of which i stripped off the comments):
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const target = b.standardTargetOptions(.{});
+	const mode = b.standardReleaseOptions();
+
+	const exe = b.addExecutable("fresh", "src/main.zig");
+	exe.setTarget(target);
+	exe.setBuildMode(mode);
+	exe.install();
+
+	const run_cmd = exe.run();
+	run_cmd.step.dependOn(b.getInstallStep());
+	if (b.args) |args| {
+		run_cmd.addArgs(args);
+	}
+
+	const run_step = b.step("run", "Run the app");
+	run_step.dependOn(&run_cmd.step);
+}
+
+Basics
+   The core idea of the build system is that the Zig toolchain will compile a Zig program (build.zig)
+   which exports a special entry point (pub fn build(b: *std.build.Builder) void) that will be called
+   when we invoke zig build.
+
+   This function will then create a directed acyclic graph of std.build.Step nodes, where each
+   Step will then execute a part of our build process.
+
+   Each Step has a set of dependencies that need to be made before the step itself is made. As a user,
+   we can invoke certain named steps by calling zig build step-name or use one of the predefined steps
+   (for example install).
+
+   To create such a step, we need to invoke Builder.step:
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const named_step = b.step("step-name", "This is what is shown in help");
+}
+
+   This will create us a new step step-name which will be shown when we invoke zig build --help:
+[felix@denkplatte-v2 c2978668]$ zig build --help
+Usage: zig build [steps] [options]
+
+Steps:
+  install (default)           Copy build artifacts to prefix path
+  uninstall                   Remove build artifacts from prefix path
+  step-name                   This is what is shown in help
+
+General Options:
+  ...
+
+   Note that this Step still doesn't do anything except putting that nice little entry into zig build
+   --help and allowing us to invoke zig build step-name.
+
+   Step follows the same interface pattern as std.mem.Allocator and requires the implementation of a
+   single make function. This will be invoked when the step is made. For our step created here, that
+   function does nothing.
+
+   Now we need to build ourself a nice little Zig program:
+
+Compiling Zig source
+   To compile an executable with the build system, the Builder exposes Builder.addExecutable which
+   will create us a new LibExeObjStep. This Step implementation is a convenient wrapper around zig
+   build-exe, zig build-lib, zig build-obj or zig test depending on how it is initialized. More on this
+   will come later in this article.
+
+   Now let's create a step that compiles us our src/main.zig file (which was previous created by zig
+   init-exe):
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("fresh", "src/main.zig");
+
+	const compile_step = b.step("compile", "Compiles src/main.zig");
+	compile_step.dependOn(&exe.step);
+}
+
+   We added a few lines here. First of all, const exe = b.addExecutable("fresh", "src/main.zig"); will
+   create a new LibExeObjStep that will compile src/main.zig into a file called fresh (or fresh.exe on
+   Windows).
+
+   The second thing added is compile_step.dependOn(&exe.step);. This is how we build our dependency
+   graph and declare that when compile_step is made, exe also needs to be made.
+
+   You can check this out by invoking zig build, then zig build compile. The first invocation will do
+   nothing, but the second one will output some compilation messages.
+
+   This will always compile in Debug mode for the current machine, so for a first starter, this is
+   probably enough. But if you want to start publishing your project, you might want to enable cross
+   compilation:
+
+Cross compilation
+   Cross compilation is enabled by setting the target and build mode of our program:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("fresh", "src/main.zig");
+
+	exe.setBuildMode(.ReleaseSafe);
+	exe.setTarget(...);
+
+	const compile_step = b.step("compile", "Compiles src/main.zig");
+	compile_step.dependOn(&exe.step);
+}
+
+   Here, exe.setBuildMode(.ReleaseSafe); will pass -O ReleaseSafe to the build invocation.
+   exe.setTarget(...); will set what -target ... will see. But! LibExeObjStep.setTarget requires a
+   std.zig.CrossTarget as a parameter, which you want typically to be configurable.
+
+   Luckily, the build system provides us with two convenience functions for that:
+     * Builder.standardReleaseOptions
+     * Builder.standardTargetOptions
+
+   These functions can be used like this to make both the build mode and the target available as a
+   command line option:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("fresh", "src/main.zig");
+
+	const target = b.standardTargetOptions(.{});
+	exe.setTarget(target);
+
+	const mode = b.standardReleaseOptions();
+	exe.setBuildMode(mode);
+
+	const compile_step = b.step("compile", "Compiles src/main.zig");
+	compile_step.dependOn(&exe.step);
+}
+
+   If you now invoke zig build --help, you'll get the following section in the output which was
+   previously empty:
+
+Project-Specific Options:
+  -Dtarget=[string]           The CPU architecture, OS, and ABI to build for
+  -Dcpu=[string]              Target CPU features to add or subtract
+  -Drelease-safe=[bool]       Optimizations on and safety on
+  -Drelease-fast=[bool]       Optimizations on and safety off
+  -Drelease-small=[bool]      Size optimizations on and safety off
+
+   The first two are added by standardTargetOptions, the others are added by standardReleaseOptions.
+   These options can now be used when invoking our build script:
+
+$> zig build -Dtarget=x86_64-windows-gnu -Dcpu=athlon_fx
+$> zig build -Drelease-safe=true
+$> zig build -Drelease-small
+
+   As you can see, for a boolean option, we can omit the =true and just set the option itself.
+
+   But we still have to invoke zig build compile, as the default invocation is still not doing anything.
+   Let's change this!
+
+Installing artifacts
+   To install anything, we have to make it depend on the install step of the Builder. This step is
+   always created and can be accessed via Builder.getInstallStep(). We also need to create a new
+   InstallArtifactStep that will copy our exe artifact to the install directory (which is usually
+   zig-out):
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("fresh", "src/main.zig");
+
+	const install_exe = b.addInstallArtifact(exe);
+	b.getInstallStep().dependOn(&install_exe.step);
+}
+
+   This will now do several things:
+     * It will create a new InstallArtifactStep that copies the compilation result of exe to $prefix/bin
+     * As the InstallArtifactStep (implicitly) depends on exe, it will build exe as well
+     * It will make the InstallArtifactStep when we call zig build install (or just zig build for short)
+     * The InstallArtifactStep registeres the output file for exe in a list that allows uninstalling it
+       again
+
+   When you now invoke zig build, you'll see that a new directory zig-out was created which kinda looks
+   like this:
+
+zig-out
++-- bin
+    +-- fresh
+
+   You can now run ./zig-out/bin/fresh to see this nice message:
+
+info: All your codebase are belong to us.
+
+   Or you can uninstall the artifact again by invoking zig build uninstall. This will delete all files
+   created by zig build install, but not directories!
+
+   As the install process is a very common operation, it has two short hands to make the code shorter:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("fresh", "src/main.zig");
+	b.installArtifact(exe);
+}
+
+   or even shorter:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("fresh", "src/main.zig");
+	exe.install();
+}
+
+   All of the last three code snippets will do exactly the same, but with less and less granularity of
+   control.
+
+   If you ship a project with several applications built, you might want to create several separate
+   install steps and depend on them manually instead of just invoking exe.install(), but usually that's
+   just the right thing to do.
+
+   Note that we can also install any other file with Builder.installFile (or others, there are a lot
+   of variants) and Builder.installDirectory
+
+   Now a single part is missing from understanding the initial build script to full extend:
+
+Running built applications
+   For development user experience and general convenience, it's pratical to run programs directly from
+   the build script. This is usually exposed via a run step that can be invoked via zig build run.
+
+   To do this, we need a std.build.RunStep which will execute any executable we can run on the
+   system:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("fresh", "src/main.zig");
+
+	const run_step = std.build.RunStep.create(exe.builder, "run fresh");
+	run_step.addArtifactArg(exe);
+
+	const step = b.step("run", "Runs the executable");
+	step.dependOn(&run_step.step);
+}
+
+   RunStep has several functions that will add values to the argv of the executed process:
+     * addArg will add a single string argument to argv.
+     * addArgs will add several strings at the same time
+     * addArtifactArg will add the result file of a LibExeObjStep to argv
+     * addFileSourceArg will add any file generated by other steps to the argv.
+
+   Note that the first argument must be the path to the executable we want to run. In this case, we want
+   to run the compiled output of exe.
+
+   As running build artifacts is also a very common step, we can shortcut this code:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("fresh", "src/main.zig");
+
+	const run_step = exe.run();
+
+	const step = b.step("run", "Runs the executable");
+	step.dependOn(&run_step.step);
+}
+
+   When we now invoke zig build run, we'll see the same output as running the installed exe ourselves:
+
+info: All your codebase are belong to us.
+
+   Note that there's a important difference here: When using the RunStep, we run the executable from
+   ./zig-cache/o/b0f56fa4ce81bb82c61d98fb6f77b809/fresh instead of zig-out/bin/fresh! This might be
+   relevant if you load files relative to the executable path.
+
+   RunStep is very flexibly configurable and allows passing data on stdin to the process as well as
+   verifying the output on stdout and stderr. You can also change the working directory or environment
+   variables.
+
+   Oh, and another thing:
+   If you want to pass arguments to your process from the zig build command line, you can do that by
+   accessing Builder.args:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("fresh", "src/main.zig");
+
+	const run_step = exe.run();
+	if (b.args) |args| {
+		run_step.addArgs(args);
+	}
+
+	const step = b.step("run", "Runs the executable");
+	step.dependOn(&run_step.step);
+}
+
+   This allows you passing in argument that follow a -- on the cli:
+
+$> zig build run -- -o foo.bin foo.asm
+
+Conclusion
+   This first chapter of this series should already enable you to fully understand the build script at
+   the start of this article and also to create your own build scripts.
+
+   Most projects don't even need more than building, installing and running some Zig executables, so
+   you're good to go with this!
+
+
+---
+https://zig.news/xq/zig-build-explained-part-2-1850
+
+zig build explained - part 2
+
+   The Zig build system is still missing documentation and for a lot of people, this is a reason not to
+   use it. Others often search for recipies to build their project, but also struggle with the build
+   system.
+
+   This series is an attempt to give an in-depth introduction into the build system and how to use it.
+
+   To get started, you should check out the first article which gives an overview and introduction
+   into the build system. In this chapter, we're going to tackle C and C++ projects and how to solve
+   common tasks.
+
+Disclaimer
+   I will expect you to have at least some basic experience with Zig already, as i will not explain
+   syntax or semantics of the Zig language. I will also link to several points in the standard library
+   source, so you can see where all of this comes from. I recommend you to read the source of the
+   build system, as most of it is self-explanatory if you start digging for functions you see in the
+   build script. Everything is implemented in the standard library, there is no hidden build magic
+   happening.
+
+Note
+   From here on, i will always just provide a minimal build.zig that will explain what is necessary to
+   solve a single problem. If you want to learn how to glue all these files together into a nice and
+   comfy build file, read the first article.
+
+Note
+   You will find all source files referenced in the build scripts in this Git repository. So if you
+   want to try building those examples, just go ahead!
+
+Building C code on the command line
+   Zig features two ways to build C source which can be easily confused when to use which.
+
+Using zig cc
+   Zig ships clang, the LLVM c compiler. The first one here is zig cc or zig c++ which is a near-1:1
+   frontend to clang. I will only cover this topic shortly, as we cannot directly access those features
+   from build.zig (and we don't need to!).
+
+   zig cc, as said, is the clang frontend exposed. You can directly set your CC variable to zig cc and
+   use Makefiles, CMake or other build systems with zig cc instead of gcc or clang, allowing you to
+   utilize the full cross compilation experience of Zig for already existing projects. Note that this is
+   the theory, as a lot of build systems cannot handle spaces in the compiler name. A workaround for
+   that problem is a simple wrapper script or tool that will just forward all arguments to zig cc.
+
+   Assuming we have a project build from main.c and buffer.c, we can build it with the following
+   command line:
+$> zig cc -o example buffer.c main.c
+
+   This will build us a nice executable called example (on Windows, you should use example.exe instead
+   of example). Contrary to normal clang, Zig will insert a -fsanitize=undefined by default, which will
+   catch your use of undefined behaviour.
+
+   If you do not want to use this, you have to pass -fno-sanitize=undefined or use an optimized release
+   mode like -O2.
+
+   Cross-compilation with zig cc is as easy as with Zig itself:
+$> zig cc -o example.exe -target x86_64-windows-gnu buffer.c main.c
+
+   As you see, just passing a target triple to -target will invoke the cross compilation. Just make sure
+   you have all your external libraries prepared for cross-compilation as well!
+
+Using zig build-exe and others
+   The other way to build a C project with the Zig toolchain is the same way as building a Zig project:
+$> zig build-exe -lc main.c buffer.c
+
+   The main difference here is that you have to pass -lc explicitly to link to libc, and the executable
+   name will be derived from the first file passed. If you want to use a different executable name, pass
+   --name example to get the example file again.
+
+   Cross-compilation is also the same, just pass -target x86_64-windows-gnu or any other target triple:
+
+$> zig build-exe -lc -target x86_64-windows-gnu main.c buffer.c
+
+   You will notice that with this build command, Zig will automatically attach the .exe extension to
+   your output file and will also generate a .pdb debug database. If you pass --name example here, the
+   output file will also have the correct .exe extension, so you don't have to think about this here.
+
+Building C code from build.zig
+   So how can we build our small two-file example with build.zig?
+
+   First, we need to create a new compilation target:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("example", null);
+    exe.install();
+}
+
+   Then, we a add our two C files via addCSourceFile:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("example", null);
+	exe.addCSourceFile("main.c", &[_][]const u8 {});
+	exe.addCSourceFile("buffer.c", &[_][]const u8 {});
+	exe.install();
+}
+
+   The first argument addCSourceFile is the name of the C or C++ file to add, the second argument is a
+   list of command line options to use for this file.
+
+   Note that we pass null to addExecutable, as we don't have a Zig source file we want to build.
+
+   If we now invoke zig build, we'll get a nasty error message:
+
+error(compilation): clang failed with stderr: /tmp/ba0d5c93/main.c:1:10: fatal error: 'stdio.h' file not found
+
+error(compilation): clang failed with stderr: /tmp/ba0d5c93/buffer.c:1:10: fatal error: 'stdlib.h' file not found
+
+/tmp/ba0d5c93/main.c:1:1: error: unable to build C object: clang exited with code 1
+/tmp/ba0d5c93/buffer.c:1:1: error: unable to build C object: clang exited with code 1
+
+   This is because we didn't link libc. Let's add this quickly:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("example", null);
+	exe.addCSourceFile("main.c", &[_][]const u8 {});
+	exe.addCSourceFile("buffer.c", &[_][]const u8 {});
+	exe.linkLibC();
+	exe.install();
+}
+
+   Now, invoking zig build will just run fine and produce a nice little executable in zig-out/bin.
+   Sweet, we've build our first little C project with Zig!
+
+   If you want to skip checking for undefined behaviour in your C code, you have to add the option to
+   your invocation:
+
+// main.c is fine, we just want a normal build
+exe.addCSourceFile("main.c", &[_][]const u8{});
+
+// buffer.c has a bug somewhere we don't care about right now.
+// just ignore the UBsan here:
+exe.addCSourceFile("buffer.c", &[_][]const u8{"-fno-sanitize=undefined"});
+
+Using external libraries
+   Usually, C projects depend on other libraries, often pre-installed on Unix systems or available via
+   package managers.
+
+   To demonstrate that, we create a small tool that will download a file via the curl library that
+   will print the contents of that file to the standard output:
+
+#include <stdio.h>
+#include <curl/curl.h>
+
+static size_t writeData(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+	size_t written;
+	written = fwrite(ptr, size, nmemb, stream);
+	return written;
+}
+
+int main(int argc, char **argv) {
+	if(argc != 2)
+		return 1;
+
+	char const * url = argv[1];
+	CURL * curl = curl_easy_init();
+	if (curl == NULL)
+		return 1;
+
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeData);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, stdout);
+	CURLcode res = curl_easy_perform(curl);
+	curl_easy_cleanup(curl);
+
+	if(res != CURLE_OK)
+		return 1;
+
+	return 0;
+}
+
+   To build this, we need to provide the right arguments to the compiler for include paths, libraries
+   and whatsoever. Luckily, Zig has builtin integration for pkg-config we can use:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("downloader", null);
+	exe.addCSourceFile("download.c", &[_][]const u8{});
+	exe.linkLibC();
+	exe.linkSystemLibrary("libcurl"); // add libcurl to the project
+	exe.install();
+}
+
+   Let's build the program and invoke it with an URL:
+
+$> zig build
+./zig-out/bin/downloader  https://mq32.de/public/ziggy.txt
+
+   If you don't want to invoke pkg-config, but just pass an argument to link a library, you can use
+   linkSystemLibraryName, which will just append the argument to -l on the command line interface. This
+   might be needed when you perform a cross-compile.
+
+Configuring the paths
+   As we cannot use pkg-config for cross-compilation projects or we want to use prebuilt propietary
+   libraries like the BASS audio library, we need to configure include paths and library paths.
+
+   This is done via the functions addIncludeDir and addLibPath:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("player", null);
+	exe.addCSourceFile("bass-player.c", &[_][]const u8{});
+	exe.linkLibC();
+	exe.addIncludeDir("bass/linux");
+	exe.addLibPath("bass/linux/x64");
+	exe.linkSystemLibraryName("bass");
+	exe.install();
+}
+
+   Both addIncludeDir and addLibPath can be called many times to add several paths to the compiler.
+   Those functions will not only affect C code, but Zig code as well, so @cImport will have access to
+   all headers available in the include path.
+
+Include paths per file
+   So if we need to have different include paths per C file, we need to solve that a bit differently:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("example", null);
+	exe.addCSourceFile("multi-main.c", &[_][]const u8{});
+	exe.addCSourceFile("multi.c", &[_][]const u8{ "-I", "inc1" });
+	exe.addCSourceFile("multi.c", &[_][]const u8{ "-I", "inc2" });
+	exe.linkLibC();
+	exe.install();
+}
+
+   As we can still pass any C compiler flags via addCSourceFile, we can also set include dirs here
+   manually.
+
+   The example above is very constructed, so you might be wondering why you might need something like
+   this. The answer is that some libraries have very generic header names like api.h or buffer.h and you
+   want to use two different libs which share header names.
+
+Building a C++ project
+   We only covered C files until now, but building a C++ project isn't much harder. You still use
+   addCSourceFile, but just pass a file that has a typical C++ file extension like cpp, cxx, c++ or cc:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("example", null);
+	exe.addCSourceFile("main.c", &[_][]const u8{});
+	exe.addCSourceFile("buffer.cc", &[_][]const u8{});
+	exe.linkLibC();
+	exe.linkLibCpp();
+	exe.install();
+}
+
+   As you can see, we also need to call linkLibCpp which will link the c++ standard library shipped with
+   Zig.
+
+   And that's pretty much all you need to know about building C++ files, there is not much more magic to
+   it.
+
+Specifying the language versions
+   Imagine you create a huge project and you have very old and newer C or C++ files and they might be
+   written in different language standards. For this, we can use the compiler flags to pass -std=c90 or
+   -std=c++98:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("example", null);
+	exe.addCSourceFile("main.c", &[_][]const u8{ "-std=c90"}); // use ANSI C
+	exe.addCSourceFile("buffer.cc", &[_][]const u8{ "-std=c++17" });  // use modern C++
+	exe.linkLibC();
+	exe.linkLibCpp();
+	exe.install();
+}
+
+Conditional compilation
+   Compared to Zig, C and C++ have very tedious ways of doing conditional compilation. Due to the lack
+   of lazy evaluation, sometimes files have to be included/excluded based on the target. You also have
+   to provide macro defines to enable/disable certain project features.
+
+   Both variants are easy to handle with the Zig build system:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const target = b.standardTargetOptions(.{});
+	const use_platform_io = b.option(bool, "platform-io", "Uses the native api instead of the C wrapper") orelse true;
+
+	const exe = b.addExecutable("example", null);
+	exe.setTarget(target);
+	exe.addCSourceFile("print-main.c", &[_][]const u8{});
+	if (use_platform_io) {
+		exe.defineCMacro("USE_PLATFORM_IO", null);
+		if (exe.target.isWindows()) {
+			exe.addCSourceFile("print-windows.c", &[_][]const u8{});
+		} else {
+			exe.addCSourceFile("print-unix.c", &[_][]const u8{});
+		}
+	}
+	exe.linkLibC();
+	exe.install();
+}
+
+   With defineCMacro we can define our own macros like we pass them with the -D compiler flag. The first
+   argument is the macro name, the second value is an optional that, if not null, will set the value of
+   the macro.
+
+   Conditional inclusion of files is as easy as using an if, as you do exactly this. Just don't call
+   addCSourceFile based on any constraint you want to define in your build script. Only include for a
+   certain platform? Check out the above script how to do that. Include a file based on the system time?
+   Maybe a bad idea, but it's possible!
+
+Compiling huge projects
+   As most C (and even worse, C++) projects have a huge amount of files (SDL2 has 411 C files and 40 C++
+   files), we have to find a easier way to build them. Calling addCSourceFile 400 times just doesn't
+   scale well.
+
+   So the first optimization we can do here, is putting our c and c++ flags into their own variable:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const flags = [_][]const u8{
+		"-Wall",
+		"-Wextra",
+		"-Werror=return-type",
+	};
+	const cflags = flags ++ [_][]const u8{
+		"-std=c99",
+	};
+
+	const cxxflags = cflags ++ [_][]const u8{
+		"-std=c++17", "-fno-exceptions",
+	};
+
+	const exe = b.addExecutable("example", null);
+	exe.addCSourceFile("main.c", &cflags);
+	exe.addCSourceFile("buffer.cc", &cxxflags);
+	// ... and here: thousand of lines more!
+	exe.linkLibC();
+	exe.install();
+}
+
+   This allows easy sharing of the flags between different components of a project and between different
+   languages.
+
+   There is another variant of addCSourceFile which is called addCSourceFiles. Instead of a file name,
+   it takes a slice of file names to all source files buildable. This allows us to collect all files in
+   a certain folder:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) !void {
+	var sources = std.ArrayList([]const u8).init(b.allocator);
+
+	// Search for all C/C++ files in `src` and add them
+	{
+		var dir = try std.fs.cwd().openDir("src", .{ .iterate = true });
+
+		var walker = try dir.walk(b.allocator);
+		defer walker.deinit();
+
+		const allowed_exts = [_][]const u8{ ".c", ".cpp", ".cxx", ".c++", ".cc" };
+		while (try walker.next()) |entry| {
+			const ext = std.fs.path.extension(entry.basename);
+			const include_file = for (allowed_exts) |e| {
+				if (std.mem.eql(u8, ext, e))
+					break true;
+			} else false;
+			if (include_file) {
+				// we have to clone the path as walker.next() or walker.deinit() will override/kill it
+				try sources.append(b.dupe(entry.path));
+			}
+		}
+	}
+
+	const exe = b.addExecutable("example", null);
+	exe.addCSourceFiles(sources.items, &[_][]const u8{});
+	exe.linkLibC();
+	exe.install();
+}
+
+   As you can see, we can easily search for all files in a certain folder, match on the file name and
+   add them to our source collection. We then just have to call addCSourceFiles once per file collection
+   and are ready to rock.
+
+   You can make nice rules to match the exe.target and folder name to include only generic files and the
+   right ones for your platform based on that. But this exercise is left to the reader.
+
+   Note: Other build systems care for file names, the Zig one doesn't! For example, you cannot have two
+   files called data.c in a qmake project! Zig doesn't care, add as many files with the same name as you
+   want, just make sure they are in different folders.
+
+Compiling Objective C
+   I totally forgot! Zig does not only support building C and C++, but also supports building Objective
+   C via clang!
+
+   The support is not on the level of a C or C++, but at least on macOS you can already compile
+   Objective C programs and add frameworks:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) !void {
+	const exe = b.addExecutable("example", null);
+	exe.addCSourceFile("main.m", &[_][]const u8{});
+	exe.linkFramework("Foundation");
+	exe.install();
+}
+
+   Here, linking libc is implicit, as adding a Framework will automatically force libc to be linked.
+   Isn't this cool?
+
+Mixing C and Zig source code
+   Now, a final chapter: Mixing C code and Zig code!
+
+   To do this, we simply set the second parameter in addExecutable to a file name and we hit compile!
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) !void {
+	const exe = b.addExecutable("example", "main.zig");
+	exe.addCSourceFile("buffer.c", &[_][]const u8{});
+	exe.linkLibC();
+	exe.install();
+}
+
+   And that's all that needs to be done! Or is it?
+
+   Well, there is actually one case that isn't supported well right now:
+   The entry point of your application must be in Zig code right now, as the root file has to export a
+   pub fn main(...) ....
+
+   So if you port over code from a C project to Zig and you want to go for that way, you have to forward
+   argc and argv to your C code and rename the main in C to some other function (for example oldMain)
+   and call it from Zig. If you need argc and argv, you can get them via std.process.argsAlloc. Or even
+   better: Rewrite your entry point in Zig and remove some C from your project!
+
+Conclusion
+   You should be ready now to port over pretty much any C/C++ project you have to build.zig assuming you
+   only build a single output file.
+
+   If you need more than one build artifact, for example a shared library and a executable, you should
+   read the next article which is about composing several projects in one build.zig to create a
+   convenient build experience.
+
+
+---
+https://zig.news/xq/zig-build-explained-part-3-1ima
+
+zig build explained - part 3
+
+   The Zig build system is still missing documentation and for a lot of people, this is a reason not to
+   use it. Others often search for recipies to build their project, but also struggle with the build
+   system.
+
+   This series is an attempt to give a in-depth introduction into the build system and how to use it.
+
+   To get started, you should check out the first article which gives an overview and introduction
+   into the build system. In this chapter, we're going to tackle compositon of several projects as well
+   as preparing a release.
+
+Disclaimer
+   I will expect you to have at least some basic experience with Zig already, as i will not explain
+   syntax or semantics of the Zig language. I will also link to several points in the standard library
+   source, so you can see where all of this comes from. I recommend you to read the source of the
+   build system, as most of it is self-explanatory if you start digging for functions you see in the
+   build script. Everything is implemented in the standard library, there is no hidden build magic
+   happening.
+
+Note
+   From here on, i will always just provide a minimal build.zig that will explain what is necessary to
+   solve a single problem. If you want to learn how to glue all these files together into a nice and
+   comfy build file, read the first article.
+
+Composite projects
+   There are a lot of simple projects out there that consist of only a single executable. But as soon as
+   one starts to write a library, it has to be tested, and it's typical to write one or more example
+   applications. Complexity also rises when people start to use external packages, C libraries,
+   generated code and so on.
+
+   This articles tries to cover all of these use cases and will explain how to compose several programs
+   and libraries with build.zig.
+
+Packages
+   But what are packages? A package in the Zig world is a Zig source tree that can be consumed by
+   another project. A package can be imported similar to how files are imported by using the @import
+   statement:
+
+// this is "main.zig"
+const std = @import("std");         // imports the "std" package
+const ihex = @import("ihex");       // imports the "ihex" package
+const tools = @import("tools.zig"); // imports the file "tools.zig"
+
+pub fn main() !void {
+	const data = try tools.loadFile("foo.ihex");
+	const hex_file = try ihex.parse(data);
+	std.debug.print("foo.ihex = {}\n", .{ hex_file });
+}
+
+   In this case, we import two packages (std and ihex) and use one other local file tools.zig. But how
+   do these import statements differ semantically?
+
+   Not much, actually! File imports are just using relative paths to include other Zig files. Packages
+   however use names. These names are given on the command line like this:
+$> zig build-exe --pkg-begin ihex ihex.zig --pkg-end main.zig
+
+   The first argument to --pkg-begin is the name of the package. This is what we can later import from
+   main.zig The second argument is the file that will be imported. This is pretty neat, as it allows us
+   to import a source tree by name without knowing the path to it. It also allows us to store the
+   package whereever we want, even outside of our source tree.
+
+   The cool thing is that packages can also be nested and their names are only locally visible to a
+   single source tree. This means that a package foo can import another package called foo which uses
+   totally different files. This is done by nesting --pkg-begin ... --pkg-end declarations inside each
+   other.
+
+Libraries
+   But Zig also knows the term library. But didn't we already talk about external libraries already?
+
+   Well, in the Zig world, a library is a precompiled static or dynamic library exactly like they are
+   the C/C++ world. Libraries usually come with header files that can be included (be it .h or .zig) and
+   a binary file which we can link against (typically .a, .lib, .so or .dll).
+
+   Common examples for such a library is zlib or SDL.
+
+   Contrary to packages, a library has to be linked by either
+     * (static libraries) passing the file name on the command line
+     * (dynamic libraries) using -L to add the folder of the library to the search path and using -l to
+       actually link it.
+
+   From Zig, we need to import the headers of the library then by either using a package if the headers
+   are in Zig or using @cImport for C headers.
+
+Tooling
+   If our projects grow more and more, there will be a point when the use of tools are required in the
+   build process. These tools typically done some of these tasks:
+     * Generating some code (e.g. parser generators, serializers, or library headers)
+     * Bundling the application (e.g. generating an APK, bundle the application, ...)
+     * Creating asset packs
+     * ...
+
+   With Zig, we have the power to not only utilize existing tools in the build process, but also compile
+   our own (or even external) tools for the current host and run them.
+
+   But how do we do all of this in build.zig?
+
+Adding packages
+   Adding packages is typically done with the function addPackage on our LibExeObjStep. This
+   function takes a std.build.Pkg structure that describes how the package looks like:
+
+pub const Pkg = struct {
+	name: []const u8,
+	path: FileSource,
+	dependencies: ?[]const Pkg = null,
+};
+
+   As we can see, it has three members:
+     * name is the package name we can use on @import()
+     * path is a FileSource that defines the root file of the package. This is typically just a path
+       to your file, like vendor/zig-args/args.zig
+     * dependencies is an optional slice of packages this package requires. If we use more complex
+       packages, this is often required.
+
+   This is a personal recommendation:
+   I usually create a struct/namespace called pkgs at the top of my build.zig that looks kinda like
+   this:
+
+const pkgs = struct {
+	const args = std.build.Pkg{
+		.name = "args",
+		.source = .{ .path = "libs/args/args.zig" },
+		.dependencies = &[_]std.build.Pkg{},
+	};
+
+	const interface = std.build.Pkg{
+		.name = "interface",
+		.source = .{ .path = "libs/interface.zig/interface.zig" },
+		.dependencies = &[_]std.build.Pkg{},
+	};
+
+	const lola = std.build.Pkg{
+		.name = "lola",
+		.source = .{ .path = "src/library/main.zig" },
+		.dependencies = &[_]std.build.Pkg{
+			interface,
+		},
+	};
+};
+
+   This way i can see all packages used in this build file at one central point.
+
+   To add these packages, we simply add them to our LibExeObjSteps like this:
+
+const exe = b.addExecutable("lola", "src/frontend/main.zig");
+exe.addPackage(pkgs.lola);
+exe.addPackage(pkgs.args);
+...
+
+   If you only use one or two packages, it's also a good pattern to just declare them locally:
+
+const exe = b.addExecutable("ftz", "src/main.zig");
+exe.addPackage(.{
+	.name = "args",
+	.source = .{ .path = "./deps/args/args.zig" },
+});
+
+exe.addPackage(.{
+	.name = "network",
+	.source = .{ .path = "./deps/network/network.zig" },
+});
+
+   You can also use addPackagePath which will construct the package for you. Imho, the version with
+   addPackage is cleaner, though.
+
+Adding libraries
+   Adding libraries is comparatively easy, but we need to configure more paths.
+
+   Note: We covered most of this in the previous article, but let's go over it again quickly:
+
+   Let's assume we want to link to libcurl to our project, as we want to download some files.
+
+  System libraries
+   For unixoid systems, we can usually just use our system package manager to link against the system
+   library. This is done by calling linkSystemLibrary which will use pkg-config to figure out all
+   paths on it's own:
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("url2stdout", "src/main.zig");
+	exe.linkLibC();
+	exe.linkSystemLibrary("curl");
+	exe.install();
+}
+
+   For Linux systems this is the preferred way of linking external libraries.
+
+  Local libraries
+   But you can also link a library you vendor as binaries. For this, we need to call several functions.
+   But first, let's take a look at how such a library might look like:
+
+./vendor/libcurl
++-- include
+|   +-- curl
+|       +-- curl.h
+|       +-- curlver.h
+|       +-- easy.h
+|       +-- mprintf.h
+|       +-- multi.h
+|       +-- options.h
+|       +-- stdcheaders.h
+|       +-- system.h
+|       +-- typecheck-gcc.h
+|       +-- urlapi.h
++-- lib
+|   +-- libcurl.a
+|   +-- libcurl.so
+|   +-- ...
++-- bin
+|   +-- ...
++-- share
+    +-- ...
+
+   What we can see here is that the path vendor/libcurl/include contains our headers and the folder
+   vendor/libcurl/lib contains both a static library (libcurl.a) and a shared/dynamic one (libcurl.so).
+
+   Linking dynamically
+   To link libcurl, we need to add the include path first, then provide zig with a prefix to the library
+   and the library name:
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("chapter-3", "src/main.zig");
+	exe.linkLibC();
+	exe.addIncludeDir("vendor/libcurl/include");
+	exe.addLibPath("vendor/libcurl/lib");
+	exe.linkSystemLibraryName("curl");
+	exe.install();
+}
+
+   addIncludeDir adds the folder to the search path so Zig will find the curl/curl.h file. Note that
+   we could also pass "vendor/libcurl/include/curl" here, but you should usually check what your library
+   actually wants.
+
+   addLibPath will do the same for library files. This means that Zig will now also search the
+   folder "vendor/libcurl/lib" for libraries.
+
+   Finally linkSystemLibraryName will then tell Zig to search for a library named "curl". If you've
+   been paying attention, you'll notice that the file in the listing above is called libcurl.so and not
+   curl.so. On unixoid systems it's common to prefix library files with lib, so you don't pass that to
+   the system. On Windows, the library would've been called curl.lib or similar.
+
+   Linking statically
+   When we want to link a library statically, we have to do that a bit different:
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("chapter-3", "src/main.zig");
+	exe.linkLibC();
+	exe.addIncludeDir("vendor/libcurl/include");
+	exe.addObjectFile("vendor/libcurl/lib/libcurl.a");
+	exe.install();
+}
+
+   The call to addIncludeDir didn't change, but suddenly we don't call a function with link anymore? You
+   might already know this, but: Static libraries are actually just a collection of object files. On
+   Windows, this also pretty similar, afaik MSVC also uses the same toolset.
+
+   Thus, static libraries are just passed into the linker like object files via addObjectFile and
+   will be unpacked by it.
+
+   Note: Most static libraries have some transitive dependencies. In the case of my libcurl build, those
+   are nghttp2, zstd, z and pthread, which we then need to link manually again:
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("chapter-3", "src/main.zig");
+	exe.linkLibC();
+	exe.addIncludeDir("vendor/libcurl/include");
+	exe.addObjectFile("vendor/libcurl/lib/libcurl.a");
+	exe.linkSystemLibrary("nghttp2");
+	exe.linkSystemLibrary("zstd");
+	exe.linkSystemLibrary("z");
+	exe.linkSystemLibrary("pthread");
+	exe.install();
+}
+
+   We can continue linkinking more and more libraries statically and pulling in the full dependency
+   tree.
+
+  Linking a library by source
+   But we also have a very different way of linking libraries with the Zig toolchain:
+
+   We can just compile them ourselves!
+
+   This gives us the benefit that we can much much easier cross-compile our programs. For this, we need
+   to convert the libraries build files into our build.zig. This typically requires a pretty good
+   understanding of both build.zig and the build system your library uses. But let's assume the library
+   is super-simple and just consists of a bunch of C files:
+
+pub fn build(b: *std.build.Builder) void {
+	const cflags = [_][]const u8{};
+
+	const curl = b.addSharedLibrary("curl", null, .unversioned);
+	curl.addCSourceFile("vendor/libcurl/src/tool_main.c", &cflags);
+	curl.addCSourceFile("vendor/libcurl/src/tool_msgs.c", &cflags);
+	curl.addCSourceFile("vendor/libcurl/src/tool_dirhie.c", &cflags);
+	curl.addCSourceFile("vendor/libcurl/src/tool_doswin.c", &cflags);
+
+	const exe = b.addExecutable("chapter-3", "src/main.zig");
+	exe.linkLibC();
+	exe.addIncludeDir("vendor/libcurl/include");
+	exe.linkLibrary(curl);
+	exe.install();
+}
+
+   With this, we can use both addSharedLibrary and addStaticLibrary to add libraries to our
+   LibExeObjStep.
+
+   This is especially convenient as we can use setTarget and setBuildMode to compile from everywhere to
+   everywhere.
+
+Using tools
+   Using tools in your workflow is typically required when you need some precompilation in the form of
+   bison, flex, protobuf or others. Other use cases for tooling is transforming the output
+   file to a different format (e.g. firmware images) or bundling your final application.
+
+  System tools
+   Using pre-installed system tools is quite easy, just create yourself a new step with
+   addSystemCommand:
+
+pub fn build(b: *std.build.Builder) void {
+	const cmd = b.addSystemCommand(&[_][]const u8{
+		"flex",
+		"--outfile=lines.c",
+		"lines.l",
+	});
+
+	const exe = b.addExecutable("chapter-3", null);
+	exe.linkLibC();
+	exe.addCSourceFile("lines.c", &[_][]const u8{});
+	exe.install();
+	exe.step.dependOn(&cmd.step);
+}
+
+   Here you can see that we just pass an array of options into addSystemCommand that will reflect our
+   command line invocation. After that, we create our executable file as we are already used to and just
+   add a step dependency on our cmd by using dependOn.
+
+   We can also do the other way round and add a nice little info about our program when we compile it:
+
+pub fn build(b: *std.build.Builder) void {
+	const exe = b.addExecutable("chapter-3", "src/main.zig");
+	exe.install();
+
+	const cmd = b.addSystemCommand(&[_][]const u8{"size"});
+	cmd.addArtifactArg(exe);
+
+	b.getInstallStep().dependOn(&cmd.step);
+}
+
+   size is a neat tool that will output information about the code size of our executable, this
+   might look like this:
+
+   text    data     bss     dec     hex   filename
+  12377     620     104   13101    332d   /chapter-3/zig-cache/o/558561c5f79d7773de9744645235aa0d/chapter-3
+
+   As you can see, we use the addArtifactArg here, as a addSystemCommand will just return a
+   std.build.RunStep. This allows us to incrementally build our full command line, composed of any
+   LibExeObjStep output, FileSource or just verbatim arguments.
+
+  Fresh-made tools
+   The cool thing is: We can obtain a std.build.RunStep from a LibExeObjStep as well:
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const game = b.addExecutable("game", "src/game.zig");
+
+	const pack_tool = b.addExecutable("pack", "tools/pack.zig");
+
+	const precompilation = pack_tool.run(); // returns *RunStep
+	precompilation.addArtifactArg(game);
+	precompilation.addArg("assets.zip");
+
+	const pack_step = b.step("pack", "Packs the game and assets together");
+	pack_step.dependOn(&precompilation.step);
+}
+
+   This build script will first compile a executable named pack. This executable will then be called
+   with the file of our game and assets.zig as command line arguments.
+
+   When invoking zig build pack, we now run tools/pack.zig. This is pretty cool, as we can also compile
+   the tools we need from scratch. For the best dev experience, you can even compile "external" tools
+   like bison from source, thus having no dependencies on the system!
+
+Putting it all together
+   All of this can be intimidating at first, but if we look at a larger example of a build.zig, we can
+   see that a good build file structure will help us a lot.
+
+   The following build script will compile a fictional tool that can parse a input file via a lexer
+   generated by flex, will then use curl to to connect to a server and will deliver some files there.
+   The project will be bundled into a single zip file when we invoke zig build deploy. A normal zig
+   build invocation will only prepare a local debug install that isn't packed.
+
+const std = @import("std");
+
+pub fn build(b: *std.build.Builder) void {
+	const mode = b.standardReleaseOptions();
+	const target = b.standardTargetOptions(.{});
+
+	// Generates the lex-based parser
+	const parser_gen = b.addSystemCommand(&[_][]const u8{
+		"flex",
+		"--outfile=review-parser.c",
+		"review-parser.l",
+	});
+
+	// Our application
+	const exe = b.addExecutable("upload-review", "src/main.zig");
+	{
+		exe.step.dependOn(&parser_gen.step);
+		exe.addCSourceFile("review-parser.c", &[_][]const u8{});
+
+		// add zig-args to parse arguments
+		exe.addPackage(.{
+			.name = "args-parser",
+			.source = .{ .path = "vendor/zig-args/args.zig" },
+		});
+
+		// add libcurl for uploading
+		exe.addIncludeDir("vendor/libcurl/include");
+		exe.addObjectFile("vendor/libcurl/lib/libcurl.a");
+
+		exe.setBuildMode(mode);
+		exe.setTarget(target);
+		exe.linkLibC();
+		exe.install();
+	}
+
+	// Our test suite
+	const test_step = b.step("test", "Runs the test suite");
+	{
+		const test_suite = b.addTest("src/tests.zig");
+		test_suite.step.dependOn(&parser_gen.step);
+		test_suite.addCSourceFile("review-parser.c", &[_][]const u8{});
+
+		// add libcurl for uploading
+		test_suite.addIncludeDir("vendor/libcurl/include");
+		test_suite.addObjectFile("vendor/libcurl/lib/libcurl.a");
+
+		test_suite.linkLibC();
+
+		test_step.dependOn(&test_suite.step);
+	}
+
+	const deploy_step = b.step("deploy", "Creates an application bundle");
+	{
+		// compile the app bundler
+		const deploy_tool = b.addExecutable("deploy", "tools/deploy.zig");
+		{
+			deploy_tool.linkLibC();
+			deploy_tool.linkSystemLibrary("libzip");
+		}
+
+		const bundle_app = deploy_tool.run();
+		bundle_app.addArg("app-bundle.zip");
+		bundle_app.addArtifactArg(exe);
+		bundle_app.addArg("resources/index.htm");
+		bundle_app.addArg("resources/style.css");
+
+		deploy_step.dependOn(&bundle_app.step);
+	}
+}
+
+   As you can see, it's a lot of code, but with the use of blocks, we can structure the build script
+   into logical groups.
+
+   If you might wonder why we don't set a target for deploy_tool and test_suite:
+   Both are meant to be run on the host platform, not on the target machine.
+   And deploy_tool also sets a fixed build mode, as we want to go fast, even we build a debug build of
+   our application.
+
+Conclusion
+   After this wall of text, you now should be able to build pretty much any project you want. We have
+   learned how to compile Zig applications, how to add any kind of external libraries to them, and even
+   how to postprocess our application for release management.
+
+   We can also build C and C++ projects with a tiny bit of work and deploy them everywhere, you don't
+   have to use zig build for Zig projects only.
+
+   Even if we mix projects, tools and everything. A single build.zig file can satisfy our needs. But
+   soon you will notice... Build files get repetetive soon, and some packages or libraries require quite
+   a bit of code to set up properly.
+
+   So look out for the next article, where we will learn how to modularize our build.zig file, create
+   convenient sdks for Zig and even how to make our own build steps!
+
+
+---
+

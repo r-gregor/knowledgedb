@@ -1,0 +1,178 @@
+filename: zig_using-c-libraries_20250326.txt
+https://medium.com/@eddo2626/lets-learn-zig-4-using-c-libraries-in-zig-5fcc3206f0dc
+
+Let's Learn Zig #4 - Using C Libraries in Zig
+Oct 7, 2023
+
+   Did you know that Zig can use C libraries easily?
+
+   We are back exploring the wonderful world of Zig programming! Today we will cover a very exciting Zig
+   feature, using C libraries. It does not take much to notice that one of Zig's goal is to make systems
+   programming more accessible, which means that it should serve as a replacement to C; this is a big
+   undertaking, so it is crucial for Zig to integrate nicely with existing C projects. Zig accomplishes
+   this in a very straightforward and easy to understand manner.
+
+   To use C libraries we just need to import them.
+
+const c = @cImport({
+	@cInclude("stdio.h");
+});
+
+   In the previous example we are just importing stdio.h, but you can also import additional libraries
+   in just one import.
+
+const c = @cImport({
+	@cInclude("stdio.h");
+	@cInclude("stdlib.h");
+});
+
+   We can use the c libraries that we imported with the const variable that we assigned the library
+   imports into. Let's look at some example code that uses printf from stdio and malloc from stdlib.
+   Before, do note that these C functions have return values and that your Zig code must handle them,
+   either by using them or using the "_" notation to ignore the value, in our case, we will be
+   displaying them to confirm that the C function worked as expected. Printf will return the amount of
+   characters that were printed, meanwhile, malloc returns a pointer to the memory that has been
+   allocated.
+
+[main.zig]
+const std = @import("std");
+const c = @cImport({
+	@cInclude("stdio.h");
+	@cInclude("stdlib.h");
+});
+
+pub fn main() !void {
+	var ret = c.printf("hello from c world!\n");
+	std.debug.print("C call return value: {d}\n", .{ret});
+	const buf = c.malloc(10);
+	if (buf == null) {
+		std.debug.print("ERROR while allocating memory!\n", .{});
+		return;
+	}
+	std.debug.print("buf address: {any}\n", .{buf});
+	c.free(buf);
+}
+
+   From the previous code, I want to highlight a good low level programming practice; it is generally a
+   good idea after calling malloc to check that it was successful in allocating memory and if not then
+   we should handle the error appropriately, in this case displaying an error message and exiting is
+   enough. Also, do not forget to free the memory once it is no longer needed by the program.
+
+   You are not limited to just the popular C libraries, you can also cImport libraries that you or your
+   team has written. Let's take a look at an example of this.
+
+[foo.c]
+#include "foo.h"
+int foo_add(int x, int y) {
+	int sum = 0;
+	sum = x + y;
+	return sum;
+}
+
+[foo.h]
+#ifndef FOO_H
+#define FOO_H
+int foo_add(int, int);
+#endif
+
+   First we define a C source, foo.c and a header file, foo.h with a simple function that takes two
+   numbers and returns their sum.
+
+   Note that we are following a fairly simple C project file structure with an include folder having our
+   header file and the source folder having our C source code.
+   Current project file structure
+
+   To use our newly created C foo_add function in Zig we must import it as we previously learned and
+   call it, making sure we manage its return value.
+
+[main.zig]
+const c = @cImport({
+	@cInclude("foo.h");
+});
+pub fn main() !void {
+	const x = 5;
+	const y = 3;
+	var sum = c.foo_add(x, y);
+	std.debug.print("the sum of x and y is: {d}\n", .{sum});
+}
+
+   Now, we need to modify our build.zig file, we will be exploring the build.zig file in more detail in
+   a future "Let's Learn Zig" blog post; but for now, we can add the following code inside of our build
+   function.
+
+	const exe = b.addExecutable(.{
+		.name = "learn-zig-4",
+		.root_source_file = .{ .path = "src/main.zig" },
+		.target = target,
+		.optimize = optimize,
+	});
+	exe.addCSourceFile(.{
+		.file = .{
+			.path = "src/foo.c",
+		},
+		.flags = CFlags,
+	});
+	exe.addIncludePath(.{
+		.path = "include/",
+	});
+
+   This build code is just adding our C source and include file to our build, so the executable that we
+   are generating is able to find the C source and header while building. This highlights another
+   exciting Zig feature, you can use Zig as a build system. You can build both Zig and C projects with
+   build.zig.
+
+   Already have an existing C project? You can add new code in Zig and use the Zig build system, no
+   longer is there a need to learn or maintain weird make files since Zig build is written in Zig!
+
+   Your complete build.zig file should look like this:
+
+[build.zig]
+const std = @import("std");
+const CFlags = &.{};
+
+pub fn build(b: *std.Build) void {
+	const target = b.standardTargetOptions(.{});
+	const optimize = b.standardOptimizeOption(.{});
+	const exe = b.addExecutable(.{
+		.name = "learn-zig-4",
+		.root_source_file = .{ .path = "src/main.zig" },
+		.target = target,
+		.optimize = optimize,
+	});
+	exe.addCSourceFile(.{
+		.file = .{
+			.path = "src/foo.c",
+		},
+		.flags = CFlags,
+	});
+	exe.addIncludePath(.{
+		.path = "include/",
+	});
+	b.installArtifact(exe);
+	const run_cmd = b.addRunArtifact(exe);
+	run_cmd.step.dependOn(b.getInstallStep());
+	if (b.args) |args| {
+		run_cmd.addArgs(args);
+	}
+	const run_step = b.step("run", "Run the app");
+	run_step.dependOn(&run_cmd.step);
+	const unit_tests = b.addTest(.{
+		.root_source_file = .{ .path = "src/main.zig" },
+		.target = target,
+		.optimize = optimize,
+	});
+	const run_unit_tests = b.addRunArtifact(unit_tests);
+	const test_step = b.step("test", "Run unit tests");
+	test_step.dependOn(&run_unit_tests.step);
+}
+
+   Which is not much different than the default build.zig that is generated when creating a new zig
+   executable project, we just added a block of code to include our C source and header.
+
+   The goal of this tutorial was to get new Zig programmers up to speed on how they are able to expand
+   current C projects with Zig and how easy it is to use C functions in Zig! In a future blog post we
+   will be covering everything you need to know about the build.zig file! Stay tuned!
+
+
+---
+

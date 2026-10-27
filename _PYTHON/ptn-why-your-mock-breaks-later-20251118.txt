@@ -1,0 +1,119 @@
+filename: ptn-why-your-mock-breaks-later-20251118.txt
+https://nedbatchelder.com/blog/202511/why_your_mock_breaks_later.html
+
+Why your mock breaks later
+Sunday, 16 November 2025
+
+   An overly aggressive mock can work fine, but then break much later. Why?
+
+   In Why your mock doesn't work I explained this rule of mocking:
+
+   *** Mock where the object is used, not where it's defined. ***
+
+   That blog post explained why that rule was important: often a mock doesn't work at all if you do it
+   wrong. But in some cases, the mock will work even if you don't follow this rule, and then it can
+   break much later. Why?
+
+   Let's say you have code like this:
+
+# user.py
+def get_user_settings():
+	with open(Path("~/settings.json").expanduser()) as f:
+		return json.load(f)
+		def add_two_settings():
+			settings = get_user_settings()
+			return settings["opt1"] + settings["opt2"]
+
+You write a simple test:
+
+def test_add_two_settings():
+	# NOTE: need to create ~/settings.json for this to work:
+	#   {"opt1": 10, "opt2": 7}
+	assert add_two_settings() == 17
+
+   As the comment in the test points out, the test will only pass if you create the correct
+   settings.json file in your home directory. This is bad: you don't want to require finicky
+   environments for your tests to pass.
+
+   The thing we want to avoid is opening a real file, so it's a natural impulse to mock out open():
+
+# test_user.py
+from io import StringIO
+from unittest.mock import patch
+
+@patch("builtins.open")
+def test_add_two_settings(mock_open):
+	mock_open.return_value = StringIO('{"opt1": 10, "opt2": 7}')
+	assert add_two_settings() == 17
+
+   Nice, the test works without needing to create a file in our home directory!
+
+                                                Much later...
+
+   One day your test suite fails with an error like:
+   ...
+     File ".../site-packages/coverage/python.py", line 55, in get_python_source
+       source_bytes = read_python_source(try_filename)
+     File ".../site-packages/coverage/python.py", line 39, in read_python_source
+       return source.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+              ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+   TypeError: replace() argument 1 must be str, not bytes
+
+   What happened!? Coverage.py code runs during your tests, invoked by the Python interpreter. The mock
+   in the test changed the builtin open, so any use of it anywhere during the test is affected. In some
+   cases, coverage.py needs to read your source code to record the execution properly. When that
+   happens, coverage.py unknowingly uses the mocked open, and bad things happen.
+
+   *** When you use a mock, patch it where it's used, not where it's defined. ***
+
+   In this case, the patch would be:
+
+@patch("myproduct.user.open")
+def test_add_two_settings(mock_open):
+	... etc ...
+
+   With a mock like this, the coverage.py code would be unaffected.
+
+   Keep in mind: it's not just coverage.py that could trip over this mock. There could be other
+   libraries used by your code, or you might use open yourself in another part of your product. Mocking
+   the definition means anything using the object will be affected. Your intent is to only mock in one
+   place, so target that place.
+
+Postscript
+   I decided to add some code to coverage.py to defend against this kind of over-mocking. There is a
+   lot of over-mocking out there, and this problem only shows up in coverage.py with Python 3.14. It's
+   not happening to many people yet, but it will happen more and more as people start testing with 3.14.
+   I didn't want to have to answer this question many times, and I didn't want to force people to fix
+   their mocks.
+
+   From a certain perspective, I shouldn't have to do this. They are in the wrong, not me. But this will
+   reduce the overall friction in the universe. And the fix was really simple:
+open = open
+
+   This is a top-level statement in my module, so it runs when the module is imported, long before any
+   tests are run. The assignment to open will create a global in my module, using the current value of
+   open, the one found in the builtins. This saves the original open for use in my module later,
+   isolated from how builtins might be changed later.
+
+   This is an ad-hoc fix: it only defends one builtin. Mocking other builtins could still break
+   coverage.py. But open is a common one, and this will keep things working smoothly for those cases.
+   And there's precedent: I've already been using a more involved technique to defend against
+   mocking of the os module for ten years.
+
+Even better!
+   No blog post about mocking is complete without encouraging a number of other best practices, some of
+   which could get you out of the mocking mess:
+     * Use autospec=True to make your mocks strictly behave like the original object: see Why your
+       mock still doesn't work.
+     * Make assertions about how your mock was called to be sure everything is connected up properly.
+     * Use verified fakes instead of auto-generated mocks: Fast tests for slow services: why you
+       should use verified fakes.
+     * Separate your code so that computing functions like our add_two_settings don't also do I/O. This
+       makes the functions easier to test in the first place. Take a look at Function Core,
+       Imperative Shell.
+     * Dependency injection lets you explicitly pass test-specific objects where they are needed instead
+       of relying on implicit access to a mock.
+
+
+---
+

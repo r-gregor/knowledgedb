@@ -1,0 +1,279 @@
+filename: go_lcs_20200410.txt
+https://tepid.org/tech/go-lcs/
+
+LCS in Golang
+March 7, 2015
+
+   One of the fundamental algorithms in Computing Science is the LCS, or Longest Common Subsequence.
+   This post will not attempt to explain the algorithm to any great degree. There are any number of
+   references available to show how the algorithm works, as well as reference implementations
+   you can obtain.
+
+   Here we will look at the implementation of a Golang version of LCS, which will would ultimately allow
+   us to generate a Unix "unidiff" style output for two given files. As you start looking at the
+   available implementations of LCS, you quickly find that they are basically always implemented on
+   pairs of strings. The algorithm itself is easy enough to generalize to objects and types beyonds
+   strings and characters, but... well, it's just not done for you.
+
+   Usually at this point, the software engineering contingent that comes from a language with generics
+   starts shouting about the lack of generics in Golang being a very big problem. While I agree that
+   generics can be handy at times, I really hate them with a passion. Most of the time they are not
+   required, and using them just because you can, usually results in grossly inefficient and bloated
+   code. Also, I've yet to see an implementation of generics that is not either written in a
+   disgustingly incomprehensible syntax, nor also suffers from run time typing issues; either by tossing
+   type safety out the window, or using run-time checks and tossing exceptions at run time. Oh yeah, I
+   hate exceptions as well... but that's another topic.
+
+   So, let's get started in having a look at the LCS implementations as given in some of the links
+   above. I won't bother to identify which came from which (feel free to lookup the references
+   yourself). The first implementation looks like the following:
+func LCS1(a, b string) (int, string) {
+    arunes := []rune(a)
+    brunes := []rune(b)
+    aLen := len(arunes)
+    bLen := len(brunes)
+    lengths := make([][]int, aLen+1)
+    for i := 0; i <= aLen; i++ {
+        lengths[i] = make([]int, bLen+1)
+    }
+
+    // row 0 and column 0 are initialized to 0 already
+    for i := 0; i < aLen; i++ {
+        for j := 0; j < bLen; j++ {
+            if arunes[i] == brunes[j] {
+                lengths[i+1][j+1] = lengths[i][j] + 1
+            } else if lengths[i+1][j] > lengths[i][j+1] {
+                lengths[i+1][j+1] = lengths[i+1][j]
+            } else {
+                lengths[i+1][j+1] = lengths[i][j+1]
+            }
+        }
+    }
+
+    // read the substring out from the matrix
+    s := make([]rune, 0, lengths[aLen][bLen])
+    for x, y := aLen, bLen; x != 0 && y != 0; {
+        if lengths[x][y] == lengths[x-1][y] {
+            x--
+        } else if lengths[x][y] == lengths[x][y-1] {
+            y--
+        } else {
+            s = append(s, arunes[x-1])
+            x--
+            y--
+        }
+    }
+    // reverse string
+    for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+        s[i], s[j] = s[j], s[i]
+    }
+    return len(s), string(s)
+}
+
+   As we can see, this version of LCS is rather specific to taking string's as input, and operates on
+   rune's within. There are some nice properties with implementation. It works on UTF-8 characters. So
+   it is "internationalized" right from the get go. A win for Golang in my opinion. A possibly easier to
+   read version might be something like this:
+func Max(more ...int) int {
+    max_num := more[0]
+    for _, elem := range more {
+        if max_num < elem {
+            max_num = elem
+        }
+    }
+    return max_num
+}
+
+func LCS2(str1, str2 string) (int, string) {
+    len1 := len(str1)
+    len2 := len(str2)
+
+    table := make([][]int, len1+1)
+    for i := range table {
+        table[i] = make([]int, len2+1)
+    }
+
+    i, j := 0, 0
+    for i = 0; i <= len1; i++ {
+        for j = 0; j <= len2; j++ {
+            if i == 0 || j == 0 {
+                table[i][j] = 0
+            } else if str1[i-1] == str2[j-1] {
+                table[i][j] = table[i-1][j-1] + 1
+            } else {
+                table[i][j] = Max(table[i-1][j], table[i][j-1])
+            }
+        }
+    }
+    return table[len1][len2], Back(table, str1, str2, len1-1, len2-1)
+}
+
+//http://en.wikipedia.org/wiki/Longest_common_subsequence_problem
+func Back(table [][]int, str1, str2 string, i, j int) string {
+    if i == 0 || j == 0 {
+        return ""
+    } else if str1[i] == str2[j] {
+        return Back(table, str1, str2, i-1, j-1) + string(str1[i])
+    } else {
+        if table[i][j-1] > table[i-1][j] {
+            return Back(table, str1, str2, i, j-1)
+        } else {
+            return Back(table, str1, str2, i-1, j)
+        }
+    }
+}
+
+   As you can see, it is very similar to the first one, but this one uses recusion to reverse the final
+   answer. It also has a helper function Max() to make a part of the innermost loop more readable. Of
+   course, nothing we've done here has helped in making this function more generic. If anything, we've
+   made it worse by introducing helper functions that would need to be modified and re-implemented for
+   each type we wish to use LCS on. One could possibly forgive this extra readability, if the
+   performance was faster, or about the same as the slightly less readable version. As a future
+   benchmark run will show, the difference between LCS1 and LCS2 is only about 4%, with LCS2 being
+   slightly slower.
+
+   Let's find a simple method to make this function more generic. I really want to use it on arrays of
+   strings, to be able to compare two sets of files. In order to make this function generic, I'm first
+   going to assume that we will be working with sequences of int's. As a method to interface (yes, the
+   irony is not lost on me) with this new LCS3 function, we'll define an interface like so:
+type Interface interface {
+    Keys() []int
+}
+
+   This tells the compiler that we will be dealing with types that implement a Keys() function that
+   returns a slice of int's. Note, in Go, interfaces are implicit, in the sense that any type that
+   implements a Keys() []int function, adheres to this interface, and can be used in places that expects
+   this interface. IE: types that you as the implementor of LCS3() do not know about at implementation
+   time. Let us translate the LCS function to use this new interface:
+func LCS3(a, b Interface) (int, []int) {
+    aKeys := a.Keys()
+    bKeys := b.Keys()
+
+    lengths := make([][]int, len(aKeys)+1)
+    for i := 0; i <= len(aKeys); i++ {
+        lengths[i] = make([]int, len(bKeys)+1)
+    }
+
+    // row 0 and column 0 are initialized to 0 already
+    for i := 0; i < len(aKeys); i++ {
+        for j := 0; j < len(bKeys); j++ {
+            if aKeys[i] == bKeys[j] {
+                lengths[i+1][j+1] = lengths[i][j] + 1
+            } else if lengths[i+1][j] > lengths[i][j+1] {
+                lengths[i+1][j+1] = lengths[i+1][j]
+            } else {
+                lengths[i+1][j+1] = lengths[i][j+1]
+            }
+        }
+    }
+
+    // read the substring out from the matrix
+    s := make([]int, 0, lengths[len(aKeys)][len(bKeys)])
+    for x, y := len(aKeys), len(bKeys); x != 0 && y != 0; {
+        if lengths[x][y] == lengths[x-1][y] {
+            x--
+        } else if lengths[x][y] == lengths[x][y-1] {
+            y--
+        } else {
+            s = append(s, aKeys[x-1])
+            x--
+            y--
+        }
+    }
+
+    ReverseIntSlice(s)
+
+    return len(s), s
+}
+
+func ReverseIntSlice(s []int) []int {
+    for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+        s[i], s[j] = s[j], s[i]
+    }
+
+    return s
+}
+
+   As you can see, it looks remarkably similar to LCS1(). The nice thing about this version is that it
+   works exclusivly with integers. Most compilers are exceedingly good at being able to optimize working
+   on arrays of integers. So I am hopeful that this will end up being faster. However, you say, we now
+   need to translate every instance of this problem into an array of integers. Would this not be slower
+   than LCS1() or LCS2() for simple string input? Also, how do you translate strings to []int to use
+   with this? This all seems too complicated.
+
+   The key to making this usable for a set of strings lies in the interface definition we did earlier.
+   Let's define a new type and function:
+type RuneSlice []rune
+
+func (p RuneSlice) Keys() []int {
+    s := make([]int, 0, len(p))
+
+    for _, r := range p {
+        s = append(s, int(r))
+    }
+    return s
+}
+
+   We define a type RuneSlice and a Keys() []int function for this type. We can now use instances of
+   this type to call LCS3(). Note, this function is not "fast". It creates a []int and appends a copy of
+   each rune to this new slice. Let's use this type to implement LCS3String():
+func LCS3String(a, b string) (int, string) {
+
+    _, runes := LCS3(RuneSlice(a), RuneSlice(b))
+    str := make([]rune, 0, len(runes))
+    for _, r := range runes {
+        str = append(str, rune(r))
+    }
+
+    return len(str), string(str)
+}
+
+   As you can see, a very small adaptor function can be created to create the necessary input and
+   translate the output back to what is expected. But surely, this must be slower than either LCS1() and
+   LCS2(). Fortunately, benchmarking shows that this version is about 5% faster than the previously
+   faster LCS1 function.
+
+   So here we are, with a largely generic LCS function. How do we use this function to be able to
+   implement an LCS function that takes []string type arguments? One thing to notice is that we can use
+   an optimization, and instead of dealing with arrays of strings, we can use a checksum for each string
+   instead. The implementation looks something like:
+type StringSlice []string
+
+func (p StringSlice) Keys() []int {
+    f := fnv.New32a()
+
+    hash := make([]int, 0, len(p))
+    for i := range p {
+        f.Reset()
+        f.Write([]byte(p[i]))
+        hash = append(hash, int(f.Sum32()))
+    }
+    return hash
+}
+
+   Note, this particular implementation is not generic (again!). It actually explicitly uses the 32-bit
+   version of the fnv-a hash. If we wished, we could implement a HashKeys() version that also
+   implemented a method to retrieve a pointer to the hash.Hash interface to use, at which point the hash
+   function that would be used would be generic, and could be replaced by other implementations.
+
+   Below is a quick benchmark run for the various implementations. Note, BenchmarkLCS4 and BenchmarkLCS5
+   are implementations that test finding the LCS from arrays of strings. The benchmarks 1-3 are testing
+   the various LCS functions that work on a set of strings (finding the longest common subsequence of
+   runes/characters).
+$ go test -bench=. github.org/weingart/lcs
+testing: warning: no tests to run
+PASS
+BenchmarkLCS1      10000        128831 ns/op
+BenchmarkLCS2      10000        134044 ns/op
+BenchmarkLCS3      10000        102317 ns/op
+BenchmarkLCS4      10000         66528 ns/op
+BenchmarkLCS5      10000         70554 ns/op
+ok      github.org/weingart/lcs 5.309s
+
+   The code is not complete, and could use some cleanup for it to be more generally useful, as well as
+   use more love on the front that generates diffs, such that it would be able to output textual diffs
+   that are patch(1) compatible.
+     ________________________________________________________________________________________________
+
+
+---

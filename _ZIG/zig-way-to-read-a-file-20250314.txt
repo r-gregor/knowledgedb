@@ -1,0 +1,81 @@
+filename: zig_way-to-read-a-file_20250314.txt
+https://ziggit.dev/t/the-zig-way-to-read-a-file/4663
+
+The "Zig way" to read a file
+June 9, 2024
+
+   Hi all -
+   Apologies if this seems too silly a question but here goes ...
+
+   I'm trying to find the "Zig way" of reading a file.
+   What I'm after is the Zig equivalent of C's int main ( int argc, char* argv[ ] ) where Zig counts the
+   arguments and prints an error if there aren't enough.
+
+   I've used Google but none of the several bits of code I found worked for me (maybe because they're
+   from previous Zig versions).
+
+   I also tried looking at the "File" code in Zig's standard library but that didn't help. So, I'm
+   hoping someone can give the idiomatic code for reading a file.
+
+***
+   If I understand you correctly you are primarily looking for how to get the command line arguments and not
+   how to read a file.
+
+   For commandline arguments you can use:
+std.process.argsAlloc(..)
+
+   and don't forget to do
+std.process.argsFree(..)
+
+***
+   You can read a file like this:
+
+const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+	std.log.err("Failed to open file: {s}", .{@errorName(err)});
+	return;
+};
+
+defer file.close();
+
+while(file.reader().readUntilDelimiterOrEofAlloc(allocator, '\n', std.math.maxInt(usize)) catch |err| {
+	std.log.err("Failed to read line: {s}", .{@errorName(err)});
+	return;
+}) |line| {
+	defer allocator.free(line);
+	_ = line; // Do something with the line
+}
+
+   As for the allocator, you can just use a general purpose allocator. It's not the most efficient, but
+   it should be good enough, and it can detect some memory bugs, like memory leaks(in debug mode it even
+   gives stacktraces for where the memory was allocated):
+
+var gpa = std.heap.GeneralPurposeAllocator(.{.thread_safe=true}){};
+const allocator = gpa.allocator();
+
+defer gpa.deinit() == .leak) {
+	std.log.err("Memory leak", .{});
+};
+
+***
+     just use a general purpose allocator. It's not the most efficient, but it should be good enough
+
+   Worth knowing that there's an open issue for adding an optimal allocator, which the GPA will
+   switch to using in Fast/Small release modes. So we shouldn't expect its current relative inefficiency
+   in those modes to last.
+
+   Good reasons not to use the GPA:
+     * Some other allocator makes more sense (arena etc)
+     * You have real inefficiency problems stemming from the GPA, meaning:
+          + It's losing you money
+          + Users are going to complain (your game is stuttering)
+
+   Bad reasons not to use the GPA:
+     * You read on a forum that it isn't very fast
+     * You want to shave some nanoseconds off a benchmark right now, damn the torpedos
+
+   Catching memory bugs during development is very important. You don't want to forgo that to save a few
+   cycles in production, which you'll get back on a later release anyway.
+
+
+---
+

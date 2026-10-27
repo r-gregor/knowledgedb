@@ -1,0 +1,375 @@
+filename: go-how-capacity-hints-work-20251222.txt
+https://www.grobinson.net/2023/09/30/how-capacity-hints-work-in-go/
+
+How capacity hints work in Go
+30 September 2023
+
+   Today we will look at what capacity hints are in Go and how they work for slices and maps. We will
+   see that when creating slices the Go runtime always allocates the requested capacity. However when
+   creating maps the Go runtime uses lazy allocation for small hints, and allocates more capacity than
+   hinted for large hints. Hopefully by the end of this page you will have a much better understanding
+   of how both slices and maps work internally and how their memory is allocated and resized by the Go
+   runtime.
+
+What is capacity?
+   In Go, slices have a length and a capacity. The length of a slice is the number of elements in the
+   slice, while its capacity is the maximum number of elements that could be stored in the slice before
+   having to resize it.
+
+   Why do slices need to be resized? Well, remember that a slice is a contiguous block of memory. Once a
+   slice has reached it's capacity there may not be any free memory at the end of the slice for more
+   elements, as the adjacent memory may have been allocated to other variables. This means the Go
+   runtime must allocate a larger block of contiguous memory somewhere else, copy all the data from the
+   old block of memory to the new block of memory, and then update the slice to point to the new block
+   of memory instead.
+
+   For example, the following code creates a slice of 8 ints. Here both the length and the capacity are
+   the same:
+
+a := make([]int, 8)
+fmt.Println(a)              // prints [0 0 0 0 0 0 0 0]
+fmt.Println(len(a), cap(a)) // prints 8 8
+
+   However to store more than 8 ints in this slice would require resizing it. The built-in append
+   function does just that:
+
+a = append(a, 1)
+fmt.Println(a) // prints [0 0 0 0 0 0 0 0 1]
+fmt.Println(len(a), cap(a)) // prints 9 16
+
+   Here append has doubled the capacity of from 8 ints to 16 ints by allocating a new, larger block of
+   contiguous memory, copying all the data from the old block of memory to the new block of memory, and
+   then updating the slice header to point to the new block of memory.
+
+   Unlike slices, maps do not have a capacity as such, although they do use contiguous blocks of memory
+   to store data much like slices. These are known as buckets. However, also unlike slices, while we can
+   use the cap function to get the capacity of a slice we cannot use the same function to get the
+   capacity of a map:
+
+m := make(map[string]string)
+fmt.Println(len(m), cap(m))
+
+   And attempting to do so will throw a compile-time error:
+// invalid argument: m (variable of type map[string]string) for cap
+
+   While getting the capacity of a map is not permitted by the compiler, getting the number of key/value
+   pairs in the map using the len function is allowed just fine:
+
+m := make(map[string]string)
+m["foo"] = "bar"
+fmt.Println(len(m)) // prints 1
+
+   An explanation for this comes from a comment from Russ Cox where he explains that unlike slices,
+   the capacity of a map is an estimate, not a guarantee of being able to store capacity key/value
+   pairs without resizing. We will see for ourselves why this is the case later on.
+
+What are capacity hints?
+   Capacity hints are optional arguments that can be passed to the built-in make function to specify the
+   capacity of a slice (the amount of elements that can be stored in the slice before it needs to be
+   resized) or an approximation of the number of key/value pairs that will be stored in the map. For
+   example:
+
+// create a slice with capacity for 64 ints
+a := make([]int, 0, 64)
+
+// create a map with capacity for approximately 64 key/value pairs
+m := make(map[int]int, 64)
+
+   However capacity hints actually work very differently for slices and maps.
+
+How do capacity hints work for slices?
+   When creating a slice, the Go runtime always allocates the requested capacity in the hint, ignoring
+   the length completely. We will see that no matter what size we use as a capacity hint, make allocates
+   capacity × sizeof(int) bytes of memory:
+
+make([]int, 0)      // 0 bytes
+make([]int, 0, 64)  // 512 bytes
+make([]int, 0, 128) // 1024 bytes
+make([]int, 0, 512) // 4096 bytes
+
+   To understand why make always allocates capacity × sizeof(int) bytes let's take a look at an example.
+   Any example will work, but to keep it simple let's create a slice of 0 ints, but ask for capacity to
+   store up to 64 ints before the slice needs to be resized:
+
+b := make([]int, 0, 64)
+fmt.Println(b)              // prints []
+fmt.Println(len(b), cap(b)) // prints 0 64
+
+   Let's now disasemble the compiled code to see how it works.
+
+   When we create the slice we pass two arguments to make. These arguments are the length of the slice
+   (0) and its capacity (64). Here we can see that the ebx register is xored with itself (0) for the
+   length of the slice and 0x40 (64) is moved to the ecx register for the capacity of the slice. With
+   the arguments set in their respective registers, the program then uses the call instruction to call
+   the runtime.makeslice function:
+
+main.go:8    0x49cbe6    488d0553750000      lea rax, ptr [rip+0x7553]
+main.go:8    0x49cbed    31db                xor ebx, ebx
+main.go:8    0x49cbef    b940000000          mov ecx, 0x40
+main.go:8    0x49cbf4    e8c710fbff          call $runtime.makeslice
+
+   Let's look at the code for the runtime.makeslice function. It's actually very simple. It works out
+   how many bytes are needed to be allocated for the contiguous block of memory (in this case 512 bytes
+   as there are 64 ints of 8 bytes each), it then checks that the length is positive and less than the
+   capacity, and then it simply allocates the 512 bytes from the memory allocator:
+
+func makeslice(et *_type, len, cap int) unsafe.Pointer {
+	mem, overflow := math.MulUintptr(et.Size_, uintptr(cap))
+	if overflow || mem > maxAlloc || len < 0 || len > cap {
+		// NOTE: Produce a 'len out of range' error instead of a
+		// 'cap out of range' error when someone does make([]T, bignumber).
+		// 'cap out of range' is true too, but since the cap is only being
+		// supplied implicitly, saying len is clearer.
+		// See golang.org/issue/4085.
+		mem, overflow := math.MulUintptr(et.Size_, uintptr(len))
+		if overflow || mem > maxAlloc || len < 0 {
+			panicmakeslicelen()
+		}
+		panicmakeslicecap()
+	}
+
+	return mallocgc(mem, et, true)
+}
+
+   This is how we know the Go runtime always allocates the requested capacity in the hint.
+
+How do capacity hints work for maps?
+   Unlike slices, maps do not have a capacity as such. Although they also use contiguous blocks of
+   memory (known as buckets) to store data, the number of key/value pairs that can be stored in a map
+   before it must be resized is not its capacity. Instead, maps are resized when the average bucket
+   reaches 80% utilization. This is known as the load factor.
+
+   Also unlike slices, the capacity hint for a map is an approximation of the number of key/value pairs
+   that will be stored in the map, however it does not strictly specify how many buckets or bytes of
+   memory will be allocated. Rather, the Go runtime uses lazy allocation of a single bucket for small
+   hints, and allocates more capacity than hinted at initialization time for large hints to keep the
+   load factor below 6.5 (80% utilization).
+
+   The following table shows how many buckets are allocated for increasing capacity hints:
+
+Capacity | Buckets  | K/V pairs
+1        |        1 |        8
+2        |        1 |        8
+4        |        1 |        8
+8        |        1 |        8
+16       |        4 |       32
+32       |        8 |       64
+64       |       16 |      128
+128      |       32 |      256
+256      |       64 |      512
+512      |      128 |     1024
+1024     |      256 |     2048
+2048     |      512 |     4096
+4096     |     1024 |     8192
+
+   In Go, an individual bucket can store up to 8 key/value pairs. This number is fixed. Let's see how
+   it works for both small and large capacity hints.
+
+Small hints
+   The Go runtime uses lazy allocation of a single bucket for small hints. To see how this works let's
+   first create a map without a capacity:
+
+make(map[string]string)
+
+   When we disassemble this code we can see that it calls the runtime.makemap_small function:
+
+main.go:8    0x49cbd4    e86717f7ff      call $runtime.makemap_small
+main.go:8    0x49cbd9    4889442418      mov qword ptr [rsp+0x18], rax
+
+   The code for the makemap_small function is even simpler than makeslice. It allocates a new hmap
+   struct, which contains all the metadata for a map, initializes the hash seed, and then returns.
+   However it never allocates any memory for the buckets which means h.buckets is nil. But if memory
+   isn't allocated for the buckets when the map is created, then when it is allocated?
+
+// makemap_small implements Go map creation for make(map[k]v) and
+// make(map[k]v, hint) when hint is known to be at most bucketCnt
+// at compile time and the map needs to be allocated on the heap.
+func makemap_small() *hmap {
+	h := new(hmap)
+	h.hash0 = fastrand()
+	return h
+}
+
+   To answer this question let's add a key/value pair to the map:
+
+m["foo"] = "bar"
+
+   If we disassemble this code a second time we can see it calls a function mapassign_faststr
+   immediately after makemap_small:
+
+main.go:8    0x49cbd8    e86317f7ff      call $runtime.makemap_small
+main.go:8    0x49cbdd    4889442420      mov qword ptr [rsp+0x20], rax
+main.go:9    0x49cbe2    4889c3          mov rbx, rax
+main.go:9    0x49cbe5    488d0d4f8a0100  lea rcx, ptr [rip+0x18a4f]
+main.go:9    0x49cbec    bf03000000      mov edi, 0x3
+main.go:9    0x49cbf1    488d05a8a30000  lea rax, ptr [rip+0xa3a8]
+main.go:9    0x49cbf8    e82354f7ff      call $runtime.mapassign_faststr
+
+   The code for mapassign_faststr is much larger than what is shown here, but we can see that when
+   h.buckets is nil it allocates a single bucket:
+
+func mapassign_faststr(t *maptype, h *hmap, s string) unsafe.Pointer {
+	if h == nil {
+		panic(plainError("assignment to entry in nil map"))
+	}
+	...
+	if h.buckets == nil {
+		h.buckets = newobject(t.Bucket) // newarray(t.bucket, 1)
+	}
+	...
+}
+
+   This is what we mean by lazy allocation of a single bucket for small hints. But how small is a small
+   hint? The answer is any capacity hint up to and including bucketCnt, which in Go has a fixed value of
+   8.
+
+Large hints
+   When using a capacity hint larger than bucketCnt, the Go runtime allocates more capacity than hinted
+   at initialization time instead of using lazy allocation as with small hints. To see how this works
+   let's create a map with a capacity hint of 16 this time:
+
+m := make(map[string]string, 16)
+m["foo"] = "bar"
+
+   If we disassemble this code we can see that it calls a different function runtime.makemap (remember
+   that for small hints the compiler calls runtime.makemap_small instead):
+
+main.go:8    0x49cbd8    488d05c1a30000  lea rax, ptr [rip+0xa3c1]
+main.go:8    0x49cbdf    bb10000000      mov ebx, 0x10
+main.go:8    0x49cbe4    31c9            xor ecx, ecx
+main.go:8    0x49cbe6    e8b517f7ff      call $runtime.makemap
+
+   The code for makemap is quite a lot larger than runtime.makemap_small:
+
+// makemap implements Go map creation for make(map[k]v, hint).
+// If the compiler has determined that the map or the first bucket
+// can be created on the stack, h and/or bucket may be non-nil.
+// If h != nil, the map can be created directly in h.
+// If h.buckets != nil, bucket pointed to can be used as the first bucket.
+func makemap(t *maptype, hint int, h *hmap) *hmap {
+	mem, overflow := math.MulUintptr(uintptr(hint), t.Bucket.Size_)
+	if overflow || mem > maxAlloc {
+		hint = 0
+	}
+
+	// initialize Hmap
+	if h == nil {
+		h = new(hmap)
+	}
+	h.hash0 = fastrand()
+
+	// Find the size parameter B which will hold the requested # of elements.
+	// For hint < 0 overLoadFactor returns false since hint < bucketCnt.
+	B := uint8(0)
+	for overLoadFactor(hint, B) {
+		B++
+	}
+	h.B = B
+
+	// allocate initial hash table
+	// if B == 0, the buckets field is allocated lazily later (in mapassign)
+	// If hint is large zeroing this memory could take a while.
+	if h.B != 0 {
+		var nextOverflow *bmap
+		h.buckets, nextOverflow = makeBucketArray(t, h.B, nil)
+		if nextOverflow != nil {
+			h.extra = new(mapextra)
+			h.extra.nextOverflow = nextOverflow
+		}
+	}
+
+	return h
+}
+
+   Let's disect it one line at a time.
+
+   First it calculates how many bytes may need to be allocated to store hint buckets (remember that hint
+   is 16). How many bytes is this?
+
+mem, overflow := math.MulUintptr(uintptr(hint), t.Bucket.Size_)
+
+   Well, each individual bucket in a map is represented as a bmap struct:
+
+// A bucket for a Go map.
+type bmap struct {
+	// tophash generally contains the top byte of the hash value
+	// for each key in this bucket. If tophash[0] < minTopHash,
+	// tophash[0] is a bucket evacuation state instead.
+	tophash [bucketCnt]uint8
+	// Followed by bucketCnt keys and then bucketCnt elems.
+	// NOTE: packing all the keys together and then all the elems together makes the
+	// code a bit more complicated than alternating key/elem/key/elem/... but it allows
+	// us to eliminate padding which would be needed for, e.g., map[int64]int8.
+	// Followed by an overflow pointer.
+}
+
+   And for a map[string]string each bmap is 272 bytes:
+    1. 8 bytes for tophash (an array of bucketCnt 1 byte unsigned ints).
+    2. 16 bytes for each key and each value (the size of a string header). There are 8 key/value pairs
+       per bucket, so 256 bytes to store all keys and all values as ((16 × 8) × 2) = 256.
+    3. 8 bytes for the overflow pointer.
+
+   This adds up to a total size of 272 bytes per bucket. If the hint is 16, we can multiply 272 by 16
+   and get a total of 4,352 bytes. However, it has not actually allocated any memory for the buckets
+   yet. Instead, it first works out the minimum number of buckets actually needed to be within the load
+   factor of 6.5 (80% utilization):
+
+// Find the size parameter B which will hold the requested # of elements.
+
+// For hint < 0 overLoadFactor returns false since hint < bucketCnt.
+B := uint8(0)
+for overLoadFactor(hint, B) {
+	B++
+}
+h.B = B
+
+   For a hint of 16, B is 2. Note that B is not the number of buckets, but log2 the number of buckets.
+   The reason for this is that makeBucketArray allocates 1<<b buckets. If B is 2, then it will
+   allocate 4 buckets for a total memory allocation of 1,088 bytes (272 × 4). Having worked out how many
+   buckets are needed to be within the load factor, it then allocates the bucket array:
+
+// allocate initial hash table
+// if B == 0, the buckets field is allocated lazily later (in mapassign)
+// If hint is large zeroing this memory could take a while.
+if h.B != 0 {
+	var nextOverflow *bmap
+	h.buckets, nextOverflow = makeBucketArray(t, h.B, nil)
+	...
+}
+
+   There are no overflow buckets so the if condition is false and h is returned:
+
+if nextOverflow != nil {
+	h.extra = new(mapextra)
+	h.extra.nextOverflow = nextOverflow
+}
+
+   And that is the end of makemap.
+
+   Now if we quickly return to the table from earlier we can see that for a capacity hint of 16 we have
+   4 buckets which can store up to a theoretical maximum of 32 key/value pairs:
+
+Capacity | Buckets  | K/V pairs
+1        |        1 |        8
+2        |        1 |        8
+4        |        1 |        8
+8        |        1 |        8
+16       |        4 |       32
+
+   However, in practice the map will be resized before reaching 100% utilization.
+
+   You should be able to repeat this process for different capacity hints and get the same number of
+   buckets as in the table.
+
+Summary
+   Capacity hints are optional arguments that can be passed to the built-in make function to specify the
+   capacity of a slice, or an approximation of the number of key/value pairs that will be stored in the
+   map. However, capacity hints actually work very differently depending on whether you are creating a
+   slice or a map. When creating slices the Go runtime always allocates the requested capacity. However,
+   when creating maps the Go runtime uses lazy allocation of a single bucket for small hints, and
+   allocates more capacity than hinted for large hints to keep the average number of key/value pairs per
+   bucket below the load factor and avoid resizing the map unncessarily.
+
+
+---
+

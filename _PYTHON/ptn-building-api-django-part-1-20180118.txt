@@ -1,0 +1,570 @@
+filename: python_building-api-django-part-1_20180118.txt
+https://tag1consulting.com/blog/building-api-django-20-part-i
+
+Building An API With Django 2.0: Part I
+January 15, 2018
+
+Introduction
+   We’ve helped build many interesting websites at Tag1. Historically, we started as a Drupal shop in
+   2007, heavily involved in the ongoing development of [11]that popular PHP-based CMS. We also design
+   and maintain the infrastructures on which many of these websites run. That said, we’ve long enjoyed
+   applying our knowledge and skills for building sustainable and high-performing systems to different
+   technologies as well. In this blog series, we’re going to build a backend API server for managing
+   users on a high-traffic website using the Python-based [12]Django framework. We’re going to assume
+   you’re generally comfortable with Python, but new to Django.
+
+   In this first blog of the series, we’ll build a simple registration and login system which can be
+   used by a single page app, or a mobile app. Coming from a Drupal CMS background, it can initially be
+   surprising to learn that such a simple task requires additional libraries and custom code. This is
+   because Django is a framework, not a CMS. As you read through this first blog, you’ll gain a general
+   understanding of how Django works, and how to add and use libraries. We’ll create a stateless REST
+   API, using JSON Web Tokens for authentication. And we’ll tie it all together with consistent paths.
+   You can follow along and write out the code yourself, or view it online on [13]GitHub.
+
+   Future blogs in this series will add support for two-factor authentication and unit testing, allowing
+   us to automatically verify that all our functionality is working as designed.
+
+Dependencies
+
+Django
+   As of this writing (January 2018), there are two logical releases of [14]Django to consider for a new
+   project. Django 1.11 is [15]designated as an LTS release, receiving security and data loss fixes into
+   2020. It’s also the last Django release that supports Python 2.7, and therefore a logical choice if
+   you are dependent on Python 2 for any reason. The [16]latest release is 2.0, overall a surprisingly
+   small change from 1.11 but also not an LTS release either.
+
+   For this project, we are intentionally doing all development in Python 3, and have selected the
+   latest release, Django 2.0. We are aware that Django 2.0 support will end in early 2019, and are
+   planning to start our Django 2.1 upgrade in late 2018.
+
+   Django is a well documented project, and they have a thorough explanation of their [17]release cycles
+   and version numbering on their website, plenty of information for you to make an informed decision
+   for your own project.
+
+Django REST Framework
+   Django was first created in 2005 as a web framework, a couple of years before the iPhone helped
+   popularize the mobile web. It was not inherently designed as a backend for Single Page Apps as we’re
+   going to build in this tutorial. Fortunately, the [18]Django REST Framework is a package that adds
+   most of the missing pieces. We’re using [19]version 3.7, the latest at this time.
+
+Django REST Framework JWT Auth
+   One of the less standard requirements of this project is the use of a client-side session due to the
+   extreme number of user sessions being handled. There’s [20]a number of authentication libraries
+   listed as supported in the Django REST Framework documentation, of which the most promising for our
+   needs is the [21]Django REST Framework JWT Auth package.
+
+   Note: There’s an argument against using JWT in a 2016 blog titled, [22]Stop using JWT for sessions.
+   It’s a well presented argument, and yet its conclusions are debatable. “Stateless JWT tokens cannot
+   be invalidated or updated…" -- we will provide an example of both invalidating and updating tokens
+   (in the latter case we re-issue a new token, but the effect is the same as the client only tracks the
+   latest cookie). “...and will introduce either size issues or security issues depending on where you
+   store them." -- this ultimately will depend on your implementation and requirements: if you need very
+   little state -- as our case -- the size is not going to be an issue. Larger sessions, within reason,
+   may also be possible through compressing the payload.
+
+Django OTP
+   There are a few potential solutions for enhancing Django authentication with One-Time Passwords
+   ("OTP"). Ultimately, we will go with [23]Django OTP for this application because it offers the
+   time-based one-time password ("TOTP") device support we need, as well as offering a solution for
+   emergency codes should someone lose their OTP device. On the downside, the middleware authentication
+   implementation it provides requires sessions. Fortunately, it proved easy enough to re-implement
+   authentication support in the JWT payload, a process we will document in the next blog post in this
+   series.
+
+Djoser
+   The goal of our API server is to provide a user management endpoint. This requires functionality for
+   creating new accounts, replacing lost passwords, and these sorts of common user-related tasks. Again,
+   there are a few libraries available for this, from which we’ve selected [24]Djoser. The codebase is
+   clean, it works with Django 2.0, it supports JWT, and it allows a [25]custom user model.
+
+   Looking for Django experts?
+   Tag1 Consulting loves Django. Let us help you out!
+   [26]Tell Us About Your Project!
+
+Registration
+   Our API will provide user registration and management services for a single page app. As explained
+   above, we’ve selected Djoser to help us accomplish these tasks. To get started, we’re going to set up
+   a new project within a virtual environment -- this means all dependencies will be installed local to
+   our project instead of system-wide.
+
+   We create a new empty directory, and inside it set up our virtual environment within a hidden .venv
+   directory. The virtual environment directory name was chosen to match Github’s default .gitignore for
+   Python projects:
+$ mkdir building-an-api-with-django
+$ cd building-an-api-with-django/
+$ pip install virtualenv
+Collecting virtualenv
+  Downloading virtualenv-15.1.0-py2.py3-none-any.whl (1.8MB)
+    100% |################################| 1.8MB 533kB/s
+Installing collected packages: virtualenv
+Successfully installed virtualenv-15.1.0
+$ virtualenv --version
+15.1.0
+$ virtualenv .venv
+Using base prefix '/usr/local'
+New python executable in /building-an-api-with-django/.venv/bin/python3.6
+Also creating executable in /building-an-api-with-django/.venv/bin/python
+Installing setuptools, pip, wheel...done.
+$ source .venv/bin/activate
+
+   Note: Sourcing activate will add (.venv) to our shell prompt, letting us know that we're working
+   inside a virtual Python environment. Anywhere in this tutorial where you're supposed to do something
+   in your virtual environment, we leave the (.venv) prefix to make that clear.
+
+   Now we need to install some of our requirements inside our virtual environment. We’ll get started
+   with Django, Django REST Framework, and Djoser:
+# install Django
+(.venv) $ pip install django
+Collecting django
+  Downloading Django-2.0.1-py3-none-any.whl (7.1MB)
+    100% |################################| 7.1MB 199kB/s
+Collecting pytz (from django)
+  Downloading pytz-2017.3-py2.py3-none-any.whl (511kB)
+    100% |################################| 512kB 552kB/s
+Installing collected packages: pytz, django
+Successfully installed django-2.0.1 pytz-2017.3
+# install Django REST Framework
+(.venv) $ pip install djangorestframework
+Collecting djangorestframework
+  Downloading djangorestframework-3.7.7-py2.py3-none-any.whl (1.1MB)
+    100% |################################| 1.1MB 673kB/s
+Installing collected packages: djangorestframework
+Successfully installed djangorestframework-3.7.7
+# install Djoser
+(.venv) $ pip install djoser
+Collecting djoser
+  Downloading djoser-1.1.5-py3-none-any.whl
+Collecting django-templated-mail (from djoser)
+  Using cached django_templated_mail-1.0.0-py3-none-any.whl
+Installing collected packages: django-templated-mail, djoser
+Successfully installed django-templated-mail-1.0.0 djoser-1.1.5
+
+   We’re finally ready to get started on our new project:
+(.venv) $ django-admin startproject ourspa
+(.venv) $ ls -a
+.        .git        .venv        README.md
+..        .gitignore    LICENSE        ourspa
+(.venv) $ cd ourspa
+(.venv) $ ls
+manage.py    ourspa
+
+   Inside our new project directory, we will wire in Djoser’s built in user registration functionality
+   and confirm that this is working. First, we’ll update ourspa/settings.py, adding the Django REST
+   Framework and Djoser to our INSTALLED_APPS section, leaving all but one of the defaults there as well
+   for now. Specifically, we’ll remove 'django.contrib.sessions', so we don’t forget that our API
+   doesn’t have session support. When done, the section will look like this:
+INSTALLED_APPS = [
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+    'rest_framework',
+    'djoser',
+]
+
+   Next, we’ll wire up routes to the Djoser views, giving us a basic user registration API. Edit
+   ourspa/urls.py to look as follows:
+from django.urls import include, re_path
+urlpatterns = [
+    re_path(r'^api/', include('djoser.urls')),
+]
+
+   Now we can create our test database (Django will use Sqlite3 by default, very handy for development):
+(.venv)$ python manage.py migrate
+Operations to perform:
+  Apply all migrations: admin, auth, contenttypes
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying auth.0001_initial... OK
+  Applying admin.0001_initial... OK
+  Applying admin.0002_logentry_remove_auto_add... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+
+   Finally, let’s fire up Django’s development server so we can confirm everything is working as
+   expected.
+
+   Note: If you’re developing on a remote server, you’ll first need to permit access to the development
+   server at that domain name or IP by editing [27]ALLOWED_HOSTS within ourspa/settings.py.)
+(.venv) $ python manage.py runserver
+Performing system checks...
+System check identified no issues (0 silenced).
+January 05, 2018 - 08:07:43
+Django version 2.0.1, using settings 'ourspa.settings'
+Starting development server at http://127.0.0.1:8000/
+Quit the server with CONTROL-C.
+
+   You can point your web browser to http://127.0.0.1:8000/api/ and be pleasantly surprised that you’ve
+   already set up endpoints for creating, editing, and deleting users, as well as resetting lost
+   passwords.
+
+   Note: Testing with a web browser and other API development tools is highly recommended, but we’ll
+   keep things simple in this tutorial and rely on cURL from the command line as it nicely illustrates
+   how things work, and is available on all operating systems.
+
+   The following command demonstrates the creation of a user through our new API:
+# create an ‘example’ user
+$ curl -X POST 127.0.0.1:8000/api/users/create/ --data 'username=example&password=mysecret'
+{"email":"","username":"example","id":1}
+
+   We can confirm that we truly did create a new user with a direct access to our Sqlite3 database. By
+   default, Django has created an Sqlite3 database file in your project’s top level directory, called
+   db.sqlite3. From the command line, we can view the contents of the default auth_user Django user
+   table, confirming that our user was in fact created:
+$ sqlite3 db.sqlite3 -header "SELECT * FROM auth_user;"
+id|password|last_login|is_superuser|username|first_name|email|is_staff|is_active|date_joined|last_name
+1|pbkdf2_sha256$100000$QnXcNeCrbv1z$i7W/FAxaptxOtqvm33KZ5SGL+fnZmicHkR6ekA3Q44k=||0|example|||0|1|2018-01-05 0
+8:39:32.243331|
+
+Custom User Model
+   It turns out there are fields in Django’s default auth_user table that we aren’t going to use. We
+   could simply ignore them, but it makes this tutorial more helpful if we provide an example of
+   creating a custom user model, getting rid of the fields we won’t be using. We’re going to simplify
+   our API to just have an email address and a password, and use them together to allow user logins.
+
+   We need a Django App within our project for managing our custom user model. We’ll name our new app
+   “spauser", short for “single page app user". Django provides a helper for quickly getting started.
+   From our top level project directory, we execute the following command:
+(.venv) $ python manage.py startapp spauser
+(.venv) $ ls spauser/
+__init__.py    apps.py        models.py    views.py
+admin.py    migrations    tests.py
+
+   Inside this App, we’ll modify models.py, defining a custom schema for our simpler user model. We will
+   define two new classes, SpaUserManager and SpaUser. Inside SpaUserManager we define two standard
+   Django functions for user creation, create_user and create_superuser. We enforce that a unique,
+   non-blank email be provided, raising an error if not.
+
+   For the SpaUser class we inherit from Django's [28]AbstractBaseUser class. We create columns for the
+   user’s email address, as well as boolean flags indicating if the user is_active and/or is_admin. We
+   don’t need to create a field for the password, as we inherit this through the AbstractBaseUser.
+   Finally, we tell Django that the email field is our [29]USERNAME_FIELD in our custom user module.
+
+   The resulting spauser/models.py file now looks as follows:
+from django.db import models
+from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
+class SpaUserManager(BaseUserManager):
+    def create_user(self, email, password=None):
+        """
+        Creates and saves a User with the given email and password.
+        """
+        if not email:
+            raise ValueError('Users must have an email address')
+        user = self.model(
+            email=self.normalize_email(email),
+        )
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+    def create_superuser(self, email, password):
+        """
+        Creates and saves a superuser with the given email and
+        password.
+        """
+        user = self.create_user(
+            email,
+            password=password,
+        )
+        user.is_admin = True
+        user.save(using=self._db)
+        return user
+class SpaUser(AbstractBaseUser):
+    email = models.EmailField(verbose_name='email address', max_length=255, unique=True)
+    is_active = models.BooleanField(default=True)
+    is_admin = models.BooleanField(default=False)
+    objects = SpaUserManager()
+    USERNAME_FIELD = 'email'
+    def __str__(self):
+        return self.email
+
+   In order to use this new model, we’ll need to enable our custom App in ourspa/settings.py, adding it
+   to the end of the INSTALLED_APPS list:
+INSTALLED_APPS = [
+    …
+   ‘spauser’,
+]
+
+   We also need to tell Django that we’re using a custom user model, defining [30]AUTH_USER_MODEL in our
+   ourspa/settings.py. We add it to the end of the settings file, as it’s something we’re adding, not
+   changing, within the file:
+AUTH_USER_MODEL = 'spauser.SpaUser'
+
+   And while technically, upgrades are possible from one user model to another, it’s far simpler to
+   delete and recreate our database with this new model. Our project is under active development so
+   we’ll take the simplest route and delete db.sqlite3, create new Django migrations from our new model,
+   and finally use them to create a new database:
+(.venv) $ rm db.sqlite3
+(.venv) $ python manage.py makemigrations spauser
+Migrations for 'spauser':
+  spauser/migrations/0001_initial.py
+(.venv) $ python manage.py migrate
+Operations to perform:
+  Apply all migrations: admin, auth, contenttypes, spauser
+Running migrations:
+...
+ Applying spauser.0001_initial... OK
+
+   Restart the dev server (python ./manage.py runserver) and then let’s try the same cURL command we ran
+   before and see what happens.
+$ curl -X POST 127.0.0.1:8000/api/users/create/ --data 'username=example&password=mysecret'
+{"email":["This field is required."]}
+
+   We get an error because we’re no longer using the username field, and instead need to use email. So,
+   let’s try this again setting the proper fields:
+$ curl -X POST 127.0.0.1:8000/api/users/create/ --data 'email=me@example.com&password=mysecret'
+{"email":"me@example.com","id":1}
+
+   And as simple as that, we’re able to create a new user, proving that the new user model is active and
+   working. Now, let’s once again look directly at our user table to confirm we have in fact removed the
+   unnecessary columns. Django has named our table spauser_spauser, so we view it as follows:
+$ sqlite3 db.sqlite3 -header "SELECT * FROM spauser_spauser;"
+id|password|last_login|email|is_active|is_admin
+1|pbkdf2_sha256$100000$IaIFa1yojwX3$RlcyLipH0IQad5z1pgPAyzrjMaz4ixHnUGngdos80C0=||me@example.com|1|0
+
+   This confirms that we are down to a bare minimum of fields: id, password, last_login, email,
+   is_active, and is_admin.
+
+   Is it taking too long?
+   Contact Tag1 Consulting to optimize your Python code.
+   [31]Tell Us About Your Project!
+
+JWT Login
+   Now that you’ve created a user, the next step is to actually log in with this user. Reviewing the
+   paths returned at http://127.0.0.1:8000/api/ you’ll see there’s no obvious endpoint for logging in.
+   Djoser supports token-based logins, but we’ve not set these up yet.
+
+   Rather than use Django REST Framework’s default [32]TokenAuthentication scheme, we’ve decided to use
+   [33]JSON Web Tokens, or JWT. First, we’ll use pip to install the necessary package.
+(.venv) $ pip install djangorestframework-jwt
+Collecting djangorestframework-jwt
+  Downloading djangorestframework_jwt-1.11.0-py2.py3-none-any.whl
+Collecting PyJWT=1.5.2 (from djangorestframework-jwt)
+  Downloading PyJWT-1.5.3-py2.py3-none-any.whl
+Installing collected packages: PyJWT, djangorestframework-jwt
+Successfully installed PyJWT-1.5.3 djangorestframework-jwt-1.11.0
+
+   Next, we’ll wire up a route to the JWT views [34]per the documentation, allowing login. For this, we
+   edit ourspa/urls.py, adding a second entry to the urlpatterns list, which now looks like:
+urlpatterns = [
+    re_path(r'^api/', include('djoser.urls')),
+    re_path(r'^api/', include('djoser.urls.jwt')),
+]
+
+   After this, we also need to tell the Django REST Framework that we’re going to use JWT for
+   authentication. We’ll add the following to the end of our ourspa/settings.py:
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'rest_framework_jwt.authentication.JSONWebTokenAuthentication',
+    ),
+}
+
+   Finally, we’ll need to perform basic JWT configuration. Specifically, we need to tell the framework
+   how long a given token should be considered valid. We again edit ourspa/settings.py. First, we’ll
+   import datetime by adding it below where os is already imported, so this section now looks like:
+# Build paths inside the project like this: os.path.join(BASE_DIR, ...)
+import os
+import datetime
+
+   Then, we’ll use datetime to give our JSON Web Tokens a limited lifetime. Add the following to the end
+   of our ourspa/settings.py so our tokens will expire after 15 minutes:
+JWT_AUTH = {
+    'JWT_EXPIRATION_DELTA': datetime.timedelta(minutes=15),
+}
+
+   It is now possible to create users and log in through our API. This is accomplished by creating a
+   JWT: a token created and cryptographically signed by the Python server. The Single Page App will
+   obtain these tokens, and then provide them on all subsequent API requests as proof that the given
+   user has authenticated. The following demonstrates how we can obtain a JWT from the command line:
+$ curl -X POST 127.0.0.1:8000/api/jwt/create/ --data 'email=me@example.com&password=mysecret'
+{"token":"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoxLCJ1c2VybmFtZSI6Im1lQGV4YW1wbGUuY29tIiwiZXhwIjo
+xNTE1MTUyMTI2LCJlbWFpbCI6Im1lQGV4YW1wbGUuY29tIn0.Onwte3YUd7gID2Ui4xycEAdNA70W3R9QuZJoW0YgiNw"}
+
+   We can use this token to access an authentication-protected API call. But first, we’ll try without
+   the token to see that authentication really is required.
+$ curl 127.0.0.1:8000/api/me/
+{"detail":"Authentication credentials were not provided."}
+
+   Now, we’ll call the same path, but this time we’ll include our JWT in the header.
+$ curl 127.0.0.1:8000/api/me/ -H 'Authorization: JWT eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoxLCJ1
+c2VybmFtZSI6Im1lQGV4YW1wbGUuY29tIiwiZXhwIjoxNTE1MTUyMTI2LCJlbWFpbCI6Im1lQGV4YW1wbGUuY29tIn0.Onwte3YUd7gID2Ui4x
+ycEAdNA70W3R9QuZJoW0YgiNw'
+{"id":1,"email":"me@example.com"}
+
+Custom Paths
+   The next step helps a little with API discoverability, providing more obvious and consistent paths.
+   But the real reason we’re doing this is we’re going to introduce custom permissions on external views
+   when we add two-factor authentication in the next blog of this series.
+
+   Note: Djoser has [35]documentation for all the paths it provides. We’re only going to implement a
+   subset of these -- the rest remain an exercise for the reader. Specifically, we’re going to enable
+   views for creating users, logging in, viewing the user, and deleting the user. You’ll almost
+   certainly want to also include the rest of the functionality Djoser provides, which includes user
+   activation, the ability to change a username or password, and the ability to reset a password.
+   Depending on your use-case, you may also need to add back JWT verification.
+
+   We’ll define our custom routes in spauser/urls.py, a new file we need to create. We have to look in
+   Djoser’s source code to find the [36]View definitions. For now, we’re specifically interested in the
+   following Djoser views: [37]UserView, [38]UserCreateView, and [39]UserDeleteView. For handling user
+   logins, we’ll also need the [40]ObtainJSONWebToken and [41]RefreshJSONWebToken views from the Django
+   REST Framework JWT codebase.
+
+   Our new user paths will all be consistently organized under /api/user/. We’ll import an identically
+   named views.py from djoser and rest_framework_jwt both, so we’ll give them each a unique name when we
+   import them. The individual urlpatterns will invoke the appropriate view class, and we’ll assign a
+   name for each which we’ll use when we write unit tests in a future blog in this series.
+
+   The resulting spauser/urls.py looks as follows:
+from django.conf.urls import re_path
+from djoser import views as djoser_views
+from rest_framework_jwt import views as jwt_views
+urlpatterns = [
+    # Views are defined in Djoser, but we're assigning custom paths.
+    re_path(r'^user/view/$', djoser_views.UserView.as_view(), name='user-view'),
+    re_path(r'^user/delete/$', djoser_views.UserDeleteView.as_view(), name='user-delete'),
+    re_path(r'^user/create/$', djoser_views.UserCreateView.as_view(), name='user-create'),
+    # Views are defined in Rest Framework JWT, but we're assigning custom paths.
+    re_path(r'^user/login/$', jwt_views.ObtainJSONWebToken.as_view(), name='user-login'),
+    re_path(r'^user/login/refresh/$', jwt_views.RefreshJSONWebToken.as_view(), name='user-login-refresh'),
+]
+
+   Finally, we need to wire in our new routes. Edit ourspa/urls.py and replace both includes of
+   djoser.urls with a single include of our newly defined urls. When done, the entire file reads as
+   follows:
+from django.urls import include, re_path
+urlpatterns = [
+    re_path(r'^api/', include('spauser.urls')),
+]
+
+   If you now attempt to login at the old path, you’ll see a 404 error as this route is no longer valid:
+[05/Jan/2018 13:47:04] "POST /api/jwt/create/ HTTP/1.1" 404 2817
+
+   Instead, we must now use our newly created paths. The following demonstrates logging in and viewing
+   our user with these new paths:
+# log in and obtain a JWT
+$ curl -X POST 127.0.0.1:8000/api/user/login/ --data 'email=me@example.com&password=mysecret'
+{"token":"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoxLCJ1c2VybmFtZSI6Im1lQGV4YW1wbGUuY29tIiwiZXhwIjo
+xNTE1MTYxMDQwLCJlbWFpbCI6Im1lQGV4YW1wbGUuY29tIn0.I6pbQW4eKaeDotVCZdvF3QsyxmVYezE28xo3sbqV_mE"}
+# use our JWT to access an authentication-protected path
+$ curl 127.0.0.1:8000/api/user/view/ -H 'Authorization: JWT eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkI
+joxLCJ1c2VybmFtZSI6Im1lQGV4YW1wbGUuY29tIiwiZXhwIjoxNTE1MTYxMDQwLCJlbWFpbCI6Im1lQGV4YW1wbGUuY29tIn0.I6pbQW4eKae
+DotVCZdvF3QsyxmVYezE28xo3sbqV_mE'
+{"id":1,"email":"me@example.com"}
+
+JWT Logout
+   As JSON Web Tokens are stored client-side, it’s not immediately obvious how to invalidate one,
+   thereby logging out the user. As a partial solution, it’s generally recommended that individual
+   tokens have a short lifespan, requiring the client to regularly renew the token. Each time they
+   renew, you have a chance to deny the request, effectively logging them out. Fortunately, we can do
+   better than that.
+
+   In the REST Framework JWT documentation there’s mention of a [42]JWT_GET_USER_SECRET_KEY
+   configuration option. With a little more digging, we find [43]a Github Issue providing some technical
+   detail on just how this might work. Ultimately the idea is instead of a single server-wide secret
+   key, we use a per-user secret key to sign our tokens. All we need to do is change a user’s secret
+   key, and all outstanding JWT’s for that user become instantly invalid, logging them out.
+
+   For this to work, we’ll need to add to our user model, providing a per-user field where we can store
+   a randomly generated secret key. We’ll use uuid to generate these unique per-user codes. We’ll add a
+   new jwt_secret field to our SpaUser model in spauser/models.py, using [44]uuid.uuid4() to auto-fill
+   it with a random secret whenever we create a new user.
+import uuid
+class SpaUser(AbstractBaseUser):
+    email = models.EmailField(verbose_name='email address', max_length=255, unique=True)
+    is_active = models.BooleanField(default=True)
+    is_admin = models.BooleanField(default=False)
+    jwt_secret = models.UUIDField(default=uuid.uuid4)
+
+   Rather than provide an upgrade path for any existing user, we’re going to enjoy the developer’s
+   luxury and delete our existing database then recreate it. First though, we’ll create a new migration
+   supporting our new jwt_secret field.
+(.venv) $ python ./manage.py makemigrations
+Migrations for 'spauser':
+  spauser/migrations/0002_spauser_jwt_secret.py
+    - Add field jwt_secret to spauser
+
+   Then we can drop and recreate our database.
+(.venv) $ rm db.sqlite3
+(.venv) $ python ./manage.py migrate
+Operations to perform:
+  Apply all migrations: admin, auth, contenttypes, otp_static, otp_totp, spauser
+Running migrations:
+  Applying spauser.0001_initial... OK
+  ...
+  Applying spauser.0002_spauser_jwt_secret... OK
+
+   We need a helper function allowing the REST Framework JWT library to access this new field. We’ll add
+   the following simple function to spauser/models.py:
+def jwt_get_secret_key(user_model):
+    return user_model.jwt_secret
+
+   We also need to tell the REST Framework JWT library to use our new function. We define
+   JWT_GET_USER_SECRET_KEY in our JWT_AUTH dictionary within ourspa/settings.py, which now looks as
+   follows:
+JWT_AUTH = {
+    'JWT_EXPIRATION_DELTA': datetime.timedelta(minutes=15),
+    'JWT_GET_USER_SECRET_KEY': 'spauser.models.jwt_get_secret_key',
+}
+
+   Now if we create a couple of users, we can see that they each have a different jwt_secret.
+$ curl -X POST 127.0.0.1:8000/api/user/create/ --data 'email=me@example.com&password=mysecret'
+{"email":"me@example.com","id":1}
+$ curl -X POST 127.0.0.1:8000/api/user/create/ --data 'email=you@example.com&password=yoursecret'
+{"email":"you@example.com","id":2}
+(.venv) $ sqlite3 db.sqlite3 "SELECT jwt_secret FROM spauser_spauser"
+6a65bfe375a946e78b5ed42aeb348f5c
+d5cf5536978446728ae930151d8afe94
+
+   This improves our overall JWT security, and gives us a mechanism by which it’s possible to
+   proactively log a user out, without simply waiting for the JSON Web Token to expire.
+
+   We add a SpaUserLogoutAllView function to spauser/views.py to provide a user-controlled example of
+   this functionality. For permissions we set IsAuthenticated, as a user has to be logged in first in
+   order to log out. We’ll expect an HTTP POST, from which we’ll pull the user out of the request
+   object, and update their user.jwt_secret with a new random secret key.
+import uuid
+from rest_framework import views, permissions, status
+from rest_framework.response import Response
+class SpaUserLogoutAllView(views.APIView):
+    """
+    Use this endpoint to log out all sessions for a given user.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    def post(self, request, *args, **kwargs):
+        user = request.user
+        user.jwt_secret = uuid.uuid4()
+        user.save()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+   Finally, we need to add a route in spauser/urls.py. We’ll add the path under user/delete, to read as
+   follows:
+from spauser import views
+    re_path(r'^user/logout/all/$', views.SpaUserLogoutAllView.as_view(), name='user-logout-all'),
+
+   Note: We’ve explicitly chosen to call our function LogoutAll, as this will affect all existing
+   sessions for the current user. We don’t have a way to force a log out a single user-session. In other
+   words, if the user is logged in on both his phone and laptop, and uses this to log out from one
+   device he will also be logged out of the other device at the same time.
+
+   Need to build an API?
+   We can help you architect and implement a winning solution.
+   [45]Tell Us About Your Project!
+
+Conclusion
+   We now have an API with consistently named paths that your single page app can use to register users
+   and manage their logins. We’ve implemented authentication with JSON Web Tokens, and enhanced them to
+   support user logout. You can find all the code used in this blog at [46]the following URL.
+
+   In the next blog in this series we will enhance our API by adding support for one-time passwords.
+   This will require learning more about JSON Web Tokens so we can build a custom JWT payload. Our
+   two-factor authentication implementation will support TOTP (Time-based One-Time Password) devices,
+   and will provide emergency codes in case a user loses their phone. We’ll learn more about Django REST
+   Framework’s permission model, adding a custom permission that requires people to first log in
+   normally and then also verify their two-factor device before loading certain API paths.

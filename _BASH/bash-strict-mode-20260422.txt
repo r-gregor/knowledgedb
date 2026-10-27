@@ -1,0 +1,255 @@
+filename: bash-strict-mode-20260422.txt
+https://linuxize.com/post/bash-strict-mode/
+
+Bash Strict Mode: set -euo pipefail Explained
+Apr 20, 2026
+
+Enabling Bash strict mode with set -euo pipefail at the top of a shell script
+By default, a Bash script will keep running after a command fails, treat unset variables as empty strings,
+and hide errors inside pipelines. That is convenient for one-off commands in an interactive shell, but
+inside a script it is a recipe for silent corruption: a failed backup step that still reports success,
+an unset path that expands to rm -rf /, a curl | sh pipeline that swallows a 500 error.
+
+Bash strict mode is a short set of flags you put at the top of a script to make the shell fail loudly
+instead. This guide explains each flag in set -euo pipefail, shows what it changes with real examples,
+and covers the cases where you need to turn it off.
+The Strict Mode Line
+
+You will see this line at the top of many modern shell scripts:
+
+[script.sh]
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+Each flag addresses a different class of silent failure:
+  * set -e exits immediately when a command returns a non-zero status.
+  * set -u treats references to unset variables as an error.
+  * set -o pipefail makes a pipeline fail if any command in it fails, not just the last.
+  * IFS=$'\n\t' narrows word splitting so unquoted expansions do not split on spaces.
+
+You can enable the options separately, but in practice they are almost always used together.
+
+set -e: Exit on Error
+Without set -e, a failing command in a script does not stop execution. The script happily continues to
+the next line:
+
+[no-strict.sh]
+#!/usr/bin/env bash
+cp /does/not/exist /tmp/dest
+echo "Backup complete"
+
+Running it prints both the error and the success message:
+$> ./no-strict.sh
+
+output
+
+cp: cannot stat '/does/not/exist': No such file or directory
+
+Backup complete
+The script exits with status 0, so any caller thinks the backup worked. Adding set -e changes the behavior:
+
+[strict.sh]
+#!/usr/bin/env bash
+set -e
+cp /does/not/exist /tmp/dest
+echo "Backup complete"
+
+$> ./strict.sh
+$> echo $?
+
+output
+
+cp: cannot stat '/does/not/exist': No such file or directory
+1
+
+The script stops at the failing cp, never prints "Backup complete", and exits with a non-zero
+status. Anyone scheduling this through cron or a CI pipeline now gets a real failure signal.
+
+Opting Out for a Single Command
+Sometimes you expect a command to fail and want to handle the result yourself. Append || true to tell
+set -e to ignore the exit status of that one command:
+	grep "pattern" config.txt || true
+
+You can also use if or &&, which set -e treats as deliberate checks:
+
+	if ! grep -q "pattern" config.txt; then
+		echo "pattern missing"
+	fi
+
+This is the canonical way to check for something without exiting the script when it is not there.
+
+set -u: Fail on Unset Variables
+A classic shell footgun is a typo in a variable name. Without strict mode, Bash silently expands the
+misspelled variable to an empty string:
+
+[unset.sh]
+#!/usr/bin/env bash
+TARGET_DIR="/var/backups"
+rm -rf "$TARGE_DIR/old"
+
+The script deletes /old because $TARGE_DIR is empty. With set -u, the same script exits before the rm runs:
+
+[unset-strict.sh]
+#!/usr/bin/env bash
+set -u
+TARGET_DIR="/var/backups"
+rm -rf "$TARGE_DIR/old"
+
+output
+
+./unset-strict.sh: line 4: TARGE_DIR: unbound variable
+
+Handling Optional Variables
+Environment variables that may or may not be set need a default to play nicely with set -u. The
+${VAR:-default} syntax provides one without touching the original:
+	PORT="${PORT:-8080}"
+	echo "Listening on $PORT"
+
+If $PORT is unset or empty, the script uses 8080. If it is set, the original value is kept.
+
+set -o pipefail: Catch Failures Inside Pipelines
+By default, the exit status of a pipeline is the exit status of the last command. Everything to the left
+can fail silently:
+	curl https://bad.example.com/data | tee data.txt
+
+If curl fails with a 404, the pipeline still exits 0 because tee wrote its (empty) input successfully. With
+set -o pipefail, the pipeline adopts the first non-zero exit status from any command in it:
+
+pipefail.sh
+[#!/usr/bin/env bash]
+set -o pipefail
+curl https://bad.example.com/data | tee data.txt
+echo "Exit: $?"
+
+output
+
+curl: (6) Could not resolve host: bad.example.com
+Exit: 6
+
+This is the one flag that fixes the most "my script said it succeeded but clearly did not" bugs,
+and it is the one most often forgotten when people add just set -e.
+
+IFS: Safer Word Splitting
+The Internal Field Separator (IFS) controls how Bash splits unquoted expansions into words. The default
+is space, tab, and newline, which means a filename with a space in it gets split into two arguments:
+
+	files="one two.txt three.txt"
+	for f in $files; do
+		echo "$f"
+	done
+
+output
+
+one
+two.txt
+three.txt
+
+Setting IFS=$'\n\t' removes the space from the separator list. You still get clean splitting on newlines
+(useful for reading find or ls output) and on tabs (useful for TSV data), but spaces inside values
+are preserved.
+
+Even with a narrower IFS, always quote your expansions ("$var", "${array[@]}"). IFS tightening is a
+safety net, not a replacement for quoting.
+
+When Strict Mode Gets in the Way
+Strict mode is opinionated, and a few situations push back. The most common one is reading a file line
+by line with a while loop and a counter:
+
+	count=0
+	while read -r line; do
+		count=$((count + 1))
+	done < input.txt
+
+That works fine, but if you increment with ((count++)) inside set -e, the script exits on the first
+iteration because ((count++)) returns the pre-increment value (0), which Bash treats as a failure. Use
+count=$((count + 1)) or ((count++)) || true to stay compatible.
+
+Another common case is probing for a command:
+
+	if ! command -v jq >/dev/null; then
+		echo "jq is not installed"
+		exit 1
+	fi
+
+Using command -v inside an if is safe even under set -e, because set -e does not trigger on commands in
+conditional contexts.
+
+If you need to temporarily disable a flag for a specific block, turn it off and back on:
+
+	set +e
+	some_flaky_command
+	result=$?
+	set -e
+
+This is cleaner than sprinkling || true everywhere when you have a block of commands that need softer
+error handling.
+
+A Minimal Strict Script Template
+Use this as a starting point for new scripts:
+
+[template.sh]
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+# Script body goes here.
+
+It is four lines, and it catches the majority of silent failures that cause shell scripts to misbehave
+in production.
+
+Quick Reference
+--------------------------------------------------------------------
+Flag               What it does
+--------------------------------------------------------------------
+set -e             Exit when any command returns a non-zero status
+set -u             Treat unset variables as an error
+set -o pipefail    A pipeline fails if any command in it fails
+IFS=$'\n\t'        Word-split only on newline and tab, not on spaces
+set +e / set +u    Turn the matching flag back off for a block
+command || true    Ignore the exit status of a single command
+${VAR:-default}    Provide a default for optional variables
+--------------------------------------------------------------------
+
+Troubleshooting
+Script exits silently with no error message
+A command is failing under set -e without printing anything. Run the script with bash -x script.sh to
+trace execution and see which line aborts.
+
+unbound variable on a variable that sometimes is set
+Replace the reference with ${VAR:-} to provide an empty default, or ${VAR:-fallback} to provide a
+meaningful one.
+
+Pipeline fails on a command that is supposed to stop early
+Commands like head can cause the producer to receive SIGPIPE, which pipefail treats as a failure. Either
+redesign the pipeline or wrap the producer in || true when the early exit is expected.
+
+Strict mode breaks a sourced script
+The set flags apply to the current shell. If you source a script that expects the old behavior, either
+fix the sourced script or wrap the source call between set +e and set -e.
+
+FAQ
+Should every Bash script use strict mode?
+For scripts that run unattended (cron jobs, CI steps, deployment scripts), yes. For short interactive
+helpers, the flags are still useful, but the cost of a missed edge case is lower.
+
+Does strict mode work in sh or dash?
+set -e and set -u are POSIX, so they work in any compliant shell. set -o pipefail is a Bash extension
+that also works in Zsh and Ksh, but not in pure POSIX sh or dash.
+
+Is set -e really that unreliable?
+set -e has well-known edge cases, especially around functions and subshells. It is not a replacement
+for explicit error handling in critical paths, but combined with pipefail and -u it catches far more
+bugs than it causes.
+
+How do I pass set -euo pipefail to a one-liner?
+Use bash -euo pipefail -c 'your command' when invoking Bash from another program such as ssh or a Makefile.
+
+Conclusion
+set -euo pipefail and a tighter IFS catch many of the silent failures that make shell scripts hard to
+trust. Pair strict mode with clear error handling using Bash functions and a proper shebang line when
+you want scripts to fail early and predictably.
+
+
+---
+

@@ -1,0 +1,350 @@
+filename: jv_guide-to-java9-compile-jar-run-modules_20200804.txt
+https://sites.google.com/a/athaydes.com/renato-athaydes/posts/guidetojava9-compilejarrun
+
+A practical guide to Java 9 - compile, jar, run
+Apr 28, 2017
+
+   The java and javac commands are rarely used by Java programmers... build tools like Maven and Gradle
+   make that mostly unnecessary.
+   However, as of writing (April 2017), both Maven and Gradle still don't provide full support for Java
+   9, so if you want to start using Java 9 now, or if you just want to know how it will all work behind
+   the scenes when you finally start using it with your favourite tool, it is a good thing to learn how
+   to call java, javac and jar to manage your Java code.
+   The purpose of this guide is to show how these command have changed from the previous Java versions
+   (and they did change substantially in Java 9) and how you can already use them to manage your
+   applications. It will also discuss the new tools, jdeps and jlink.
+   It is assumed that you have at least a little bit of familiarity with previous versions of the
+   java/javac/jar command and with the Java 9 module system.
+   If you need to learn the basics of the new module system, check [52]The State of the Module System,
+   which gives a pretty good overview of it.
+
+Getting Java 9
+   Before getting started with the Java 9 commands, you need to get Java 9!
+   You can download it from the [58]Oracle website, but I'd recommend using [59]SdkMAN! instead because
+   besides making it trivial to upgrade Java (and many other packages), it lets you switch between Java
+   versions with ease (so you can continue using your current tools without trouble).
+   You can install SdkMAN! with this command (inspect the bash script [60]here):
+curl -s "https://get.sdkman.io" | bash
+
+   Then, install Java 9:
+
+   Check what's the latest available version with  sdk list java
+
+sdk install java 9ea163
+
+   Now, as long as you have other Java versions installed, you can switch between them with  sdk use
+   java <version>.
+
+Compiling/Running the old way
+   With Java 9 installed, the first thing to do is to write some code to try our tools!
+   If we don't use a module descriptor, everything looks pretty much the same as before!
+   Take this simple Java class:
+   src/app/Main.java
+ package app;
+ public class Main {
+    public static void main( String[] args ) {
+        System.out.println( "Hello Java 9" );
+    }
+ }
+
+   Now, as we're not really using any Java 9 feature yet, we can pretty much compile it as we always
+   did:
+javac -d out src/app/Main.java
+
+   This will create a class file at out/app/Main.class. To run that, you do it, again, just like in all
+   previous versions:
+java -cp out app.Main
+
+   Which prints the expected message, Hello Java 9.
+
+   By the way, the "hello world" program takes around 0.1 seconds to run with Java 9 on my machine (it's
+   a few years old Macbook Pro).
+
+   Not bad for a language that needs to boot up a whole VM to run.
+
+   Now, let's create a Greeting library, also without any Java 9 feature yet, to see how that works.
+   Create the following file:
+   greeting/src/lib/Greeting.java
+ package lib;
+ public class Greeting {
+     public String hello() {
+         return "Hi there!";
+     }
+ }
+
+   Change the app.Main class to use this mini library:
+   src/app/Main.java
+ package app;
+ import lib.Greeting;
+ public class Main {
+     public static void main( String[] args ) {
+         System.out.println( new Greeting().hello() );
+     }
+ }
+
+   Compile the Greeting lib:
+javac -d greeting/out greeting/src/lib/Greeting.java
+
+   We want to show how to use legacy, non-modular, pre-Java 9 libraries, so let's jar this library
+   without a Java 9 module descriptor or anything (you could do this with the Java 8 compiler, or even
+   some earlier version), just to make sure that this still works:
+mkdir libs
+jar cf libs/lib.jar -C greeting/out .
+
+   This will create the libs/lib.jar file containing just the lib.Greeting class (and an auto-generated
+   manifest file).
+   You can inspect the jar with the tf option:
+jar tf libs/lib.jar
+
+   Which should print:
+   META-INF/
+   META-INF/MANIFEST.MF
+   lib/
+   lib/Greeting.class
+   Now to compile app.Main, we need to tell the compiler where to find the lib.Greeting class.
+   We can do that using the good old cp (classpath) option for now:
+javac -d out -cp libs/lib.jar src/app/Main.java
+
+   Same thing to run the program:
+java -cp out:libs/lib.jar app.Main
+
+   In MS Windows, remember to replace the : separator in the command above with ;
+
+   We could package the app into a jar as well, of course:
+jar cf libs/app.jar -C out .
+
+   And then, run it with:
+java -cp 'libs/*' app.Main
+
+   This is a good time to see what our current project directory structure looks like so far:
+   .
+   +-- greeting
+   | +-- out
+   | |   +-- lib
+   | |       +-- Greeting.class
+   | +-- src
+   |     +-- lib
+   |         +-- Greeting.java
+   +-- libs
+   |   +-- app.jar
+   |   +-- lib.jar
+   +-- out
+   |   +-- app
+   |       +-- Main.class
+   +-- src
+       +-- app
+           +-- Main.java
+
+Modularizing the application
+   So far, nothing new (which is a great thing, as most of what you know is still valid).
+   But now, let's finally start modularizing our application by creating a [61]module descriptor (always
+   called module-info.java and placed under the root source directory):
+   src/module-info.java
+ module com.app {
+ }
+
+   The command to compile a Java 9 module is a little bit different from what we saw previously. Trying
+   to use the same command as before and just adding the module file to the list of files to compile
+   causes an error:
+javac -d out -cp 'libs/lib.jar' src/module-info.java src/app/Main.java # doesn't work
+
+   src/app/Main.java:3: error: package lib does not exist
+   import lib.Greeting;
+             ^
+   src/app/Main.java:7: error: cannot find symbol
+       System.out.println( new Greeting().hello() );
+                               ^
+   symbol: class Greeting
+   location: class Main
+   2 errors
+   So, what's going on? By just adding the module descriptor, our code no longer compiles. To understand
+   why, we need to understand unnamed modules.
+
+The unnamed module
+   Any class that is not loaded from a named module is automatically made part of the [62]unnamed
+   module. In our case above, before creating a module descriptor, our code was not part of any module,
+   hence it was associated with the unnamed module. The unnamed module is a compatibility mechanism,
+   basically, that allows code that has not been migrated to Java 9 and modularized yet to be used by
+   Java 9 applications. For this reason, code belonging to the unnamed module have rules akin to Java 8
+   and earlier: it can see all packages exported by all other modules, and all packages of the unnamed
+   module are exported (ie. visible from other modules).
+   Once a module descriptor is added to a module, its code is no longer part of the unnamed module and
+   therefore cannot see code from other modules unless it imports them! In the case above,
+   the com.app module does not explicitly require any module, so the greeting library module is not
+   visible to it. It can only "see" the java.base module's packages (which are a mandatory, implicit
+   requirement of all modules).
+   Java 9 modules, except for the elusive unnamed module discussed above, must declare which other
+   modules they require. In the case of the com.app module, the only requirement is the greeting
+   library. But, as you might have guessed, the greeting library (as well as any of the libraries you
+   use that do not support Java 9 yet) is not a Java 9 module, so how can we declare a requirement on
+   it?
+   Well, in cases like this, you need to know the name of the library's jar file. That's right, if you
+   have a dependency on a library that has not been converted to use Java 9 modules yet, you need to
+   know what the jar file for that library is called, because Java 9 will convert the file name to a
+   valid Java 9 module name.
+   This is called an automatic module.
+   Similarly to unnamed modules, automatic modules can read from all other modules, and all of its
+   packages are exported. But unlike the unnamed modules, it is possible to refer to automatic modules
+   by name from explicit modules.
+   To figure out the automatic module's name, the compiler converts non-alphabetic characters .'s, so
+   something like the slf4j-api-1.7.25.jar file would become the module name sl4j.api.
+   We gave the greetings' library jar a pretty bad name: lib.jar. To avoid requiring the lib library,
+   let's rename the jar file to greetings-1.0.jar:
+mv libs/lib.jar libs/greetings-1.0.jar
+
+   That's a much more standard file name, and now we can tell Java to turn this into an automatic module
+   with a somewhat acceptable name: greetings. And we can require it from the com.app module:
+   src/module-info.java
+ module com.app {
+     requires greetings;
+ }
+
+   Modules are not added to the classpath, like regular jar files... they use the new --module-path  (or
+   -p) option. So, we can now compile our modules with the following command:
+javac -d out -p 'libs/greetings-1.0.jar' src/module-info.java src/app/Main.java
+
+   Now, to run the app.Main class with the java command, we can use the new --module (-m) option, which
+   takes either a module name (in which case the Manifest file of the module must declare the
+   Main-Class attribute) or the pattern module-name/main-class:
+java -p 'libs/greetings-1.0.jar:out' -m com.app/app.Main
+
+   And, again, this prints the greeting, Hi there!.
+   To create and use the app.jar as a runnable jar, instead of the out dir, and using shorter options
+   for the java command to run that jar:
+jar --create -f libs/app.jar -e app.Main -C out .
+java -p libs -m com.app
+
+   Pretty good! The next step is to modularize the library(ies) used by our application as well.
+
+Modularizing libraries
+   To modularize a library, you can't do better than to start out by using jdeps, a static analysis tool
+   that is part of the Java SE distribution.
+   For example, to see the dependencies of our tiny Greetings library:
+jdeps -s libs/greetings-1.0.jar
+
+   greetings-1.0.jar -> java.base
+   As expected, the greetings library only depends on the java.base module.
+   We know that com.app depends on greetings. Let's try to get jdeps to tell us that by removing the
+   module-info.class file from the app.jar file first, then running jdeps on it:
+zip -d libs/app.jar module-info.class
+
+   deleting: module-info.class
+jdeps -s -cp libs/greetings-1.0.jar libs/app.jar
+
+   app.jar -> libs/greetings-1.0.jar
+   app.jar -> java.base
+   Perfect! But it gets better... we can even ask jdeps to auto-generate a module descriptor for a set
+   of jars. Just tell it where to save the generated files, for example, in generated-mods, and where
+   the jars are:
+jdeps --generate-module-info generated-mods libs/greetings-1.0.jar libs/app.jar
+
+   This creates two files, generated-mods/app/module-info.java and
+   generated-mods/greetings/module-info.java, with the following contents:
+   generated-mods/app/module-info.java
+ module app {
+     requires greetings;
+     exports app;
+ }
+
+   generated-mods/greetings/module-info.java
+ module greetings {
+     exports lib;
+ }
+
+   Very cool! We can now just add the auto-generated module descriptor for the greetings library in the
+   library's source code, re-package it and have a fully modular hello world application.
+javac -d greeting/out $(find greeting/src -name *.java)
+jar cf libs/greetings-1.0.jar -C greeting/out .
+
+   Now we have both the application and the library we were using fully modularized! After removing the
+   generated and binary files, our application structure now looks like this:
+   +-- greeting
+   |   +-- src
+   |       +-- lib
+   |       | +-- Greeting.java
+   |       +-- module-info.java
+   +-- libs
+   |   +-- app.jar
+   |   +-- greetings-1.0.jar
+   +-- src
+       +-- app
+       |   +-- Main.java
+       +-- module-info.java
+
+   One final improvement you may want to make is to rename the src folders with the module's full names
+   (or add a new level under src with the module's full names), as that's the new recommendation for
+   Java 9.
+
+   Notice that to be able to get good data from jdeps, you must provide the locations of the jars of all
+   transitive dependencies that are used in the application, so that it can create a full module graph.
+   An easy way to get the list of jars a library requires is to use this simple [63]Gradle script shown
+   below. It will print the location of the local jars for all dependencies of the libraries you add in
+   the dependencies section, downloading them if necessary (this example will show the jars for the
+   JavaSlang library, recently renamed [64]VAVR):
+   build.gradle
+ apply plugin: 'java'
+ repositories {
+     mavenLocal()
+     mavenCentral()
+ }
+ dependencies {
+     compile 'io.javaslang:javaslang:2.0.6'
+ }
+ task listDeps {
+     println configurations.compile*.absolutePath.join(' ')
+ }
+
+   If you don't have Gradle, you can use SDKMAN! (or your favourite package manager) to install it:
+sdk install gradle
+
+   To get the list of dependencies, run:
+gradle listDeps
+
+   Then, give the output to jdeps for analysis and auto-generation of module metadata.
+   This is the file jdeps outputs for javaslang.match:
+ module javaslang.match {
+     requires transitive java.compiler;
+     exports javaslang.match;
+     exports javaslang.match.annotation;
+     exports javaslang.match.generator;
+     exports javaslang.match.model;
+     provides javax.annotation.processing.Processor with
+             javaslang.match.PatternsProcessor;
+ }
+
+   As easy as it gets, so hopefully most Java libraries will be fully modularized within a short amount
+   of time.
+
+Creating a native runtime image
+   With jlink, Java applications can be distributed as native runtime images that do not require the
+   JVM to be installed in the target system to run.
+   
+   The following command creates an image for our com.app module without optimisations/compression or
+   stripping debug information:
+jlink -p $JAVA_HOME/jmods:libs --add-modules com.app \
+  --launcher start-app=com.app \
+  --output dist
+
+   A smaller distribution can be obtained by using some of jlink options like --strip-debug and
+   --compress:
+jlink -p $JAVA_HOME/jmods:libs --add-modules com.app \
+  --launcher start-app=com.app \
+  --strip-debug --compress=2 \
+  --output small-dist
+
+   On my machine, the size of the distributions, according to du -sh, are:
+du -sh small-dist dist
+
+   21M small-dist
+   35M dist
+   To launch the application, use the provided launcher in the bin directory:
+dist/bin/start-app
+
+   This time, without the help of the local java command, you should see the Hi there! message printed
+   out again from our com.app module, with the help of the greeting library!
+   And with that, we come to the end of this Java 9 guide. There is a lot more about Java 9 and its
+   module system that has not been covered in this guide, but I hope that this guide will show you most
+   of what you need to know to quickly get started with Java 9. Have fun!
+
+
+---

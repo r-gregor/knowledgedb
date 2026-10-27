@@ -1,0 +1,306 @@
+filename: c-allocating-memory-on-linux-and-windows-20250818.txt
+https://www.codeproject.com/Articles/1255908/Allocating-Memory-on-Linux-and-Windows
+
+Allocating Memory on Linux and Windows
+Aug 10, 2018
+
+How to allocate memory on Linux and Windows
+This post is about pretty low-level concepts, which sometimes "leak" (or rather bubble?) to surprisingly high
+levels of abstraction. It is not about malloc() and free(), or only tangentially so.
+
+First, a quick rehash of how the memory works on both systems.
+
+User-space processes on both Linux and Windows address the physical memory through virtual addresses. These
+addresses are mapped to the actual physical memory addresses with the help of hardware (MMU) that does the
+translation on each access. The mapping is not set up contiguously, but rather in 4096 bytes long chunks,
+which is a basic unit called a page. (There exists hardware with different page sizes, and there are so
+called huge pages on x86 that are larger, but this is out of scope).
+
+So, the kernel sets up a mapping, which conceptually looks like the below table (the addresses are for
+illustration only):
+
+Virtual               Physical
+...
+0x400000-0x400fff --> 0x09000000-0x09000fff
+0x401000-0x401fff --> 0x09001000-0x09001fff
+0x401000-0x401fff --> 0x0A500000-0x0A500fff
+...
+
+On the left are the regular addresses that your program stores in the pointers (like one you can get from
+malloc() or new), while on the right are real physical addresses that only the kernel knows. The right side
+is volatile and can change over the program lifetime, the left side is under your control.
+
+When you access an address like 0x4001180, the hardware sets the lowest 12 bits of it to 0 (resulting in the
+address 0x4001000), consults with this table, and reads the value from the real address + 0x180 in the
+physical memory (i.e., 0x09001180).
+
+This (different per process!) mapping is stored in the kernel memory, and since it can take a lot of it (to
+map 1GB you need to set up the mappings for 256k pages), the mapping is actually split into multiple tables,
+which are indexed into by different bits of the address (see here for the details). As said, the page table
+is accessible by the hardware that does the actual translation, and there are a few other implementation
+details that I will omit (hardware doesn't read it on each memory access, it has a small cache - called TLB -
+of last 64-512 lookups, which speeds up things greatly if the same virtual address range is accessed often.
+Jumping around different addresses too often is going to incur costly reads of the actual tables though).
+
+The table on the right side does not have to be contiguous. The table on the left side either, it can have
+holes, and if you try to access an address not found in the table, you are going to have a "segmentation
+fault". The kernel may also set up a mapping for a virtual address, but not yet allocate a physical page for
+it (or decide to move it to the paging file), in which case it marks the entry in the table appropriately and
+does it whenever a page fault (i.e., the actual access) occurs.
+
+Each page can have different attributes (enforced by the hardware), of which the basics are the flags
+governing the ability to read, write or execute the memory in that page. In theory, nothing prevents the
+kernel from mapping the same physical address twice with the different flags, but this is not exposed on
+Linux/Windows to the user space programs.
+
+So far, this is similar on both systems. However, each OS exposes different APIs to the user programs to
+manage the mapping.
+
+Windows
+Windows has VirtualAlloc/Free family of functions (in Win32 API at least) that are conceptually similar to
+malloc() / free(). A notable moment is that each page on Windows can be in one of three states: free - absent
+from any mapping, reserved - ready to be mapped, and committed - mapped to a page in the physical RAM or a
+place in the paging file on a disk. Thus the process of allocating the useful memory on Windows can be split
+into two steps:
+
+ 1. Reserving a virtual range not backed with anything
+    If you call VirtualAlloc(...,16384, MEM_RESERVE, ...) to reserve a 16KB range, you will get a table like:
+
+    Virtual                Physical
+    0x400000-0x400fff  --> ???
+    0x401000-0x401fff  --> ???
+    0x402000-0x402fff  --> ???
+    0x403000-0x403fff  --> ???
+
+    Why is it useful? Well, you may want to make sure that you have a contiguous (from your program's point
+    of view) range of addresses before you actually have a use for it. Or, vice versa, you had used a memory
+    but you decided to remove the backing of it ("decommit" it) while keeping the address space reserved, to
+    make sure that any lingering pointers will cause a segmentation fault if accessed.
+
+ 2. "committing" a page (or pages) of an already reserved range
+    Let's say you called VirtualAlloc(0x401000, 4096, MEM_COMMIT,...) to commit a page from the above range -
+    the result of this will look like:
+
+    Virtual               Physical
+    0x400000-0x400fff --> ???
+    0x401000-0x401fff --> 0x8800000-0x8800fff
+    0x402000-0x402fff --> ???
+    0x403000-0x403fff --> ???
+
+    Now you can access the memory at the addresses 0x401000-0x401fff (but not 0x402000 or 0x400fff).
+
+    Actually, the above table is a bit of a lie - we cannot know whether the virtual address will be backed
+    by the physical RAM after VirtualAlloc() returns and what the physical address would be. The page
+    committed may - and likely will - be made "resident" (that is, have the actual physical RAM allocated for
+    it) on demand when we first read from or write to it. The key moment is that we will no longer have a
+    segmentation fault on access.
+
+After those two steps, Windows gives you the memory you can freely use. In fact, you can combine those steps
+into one and ask MEM_COMMIT in the first call and a lot of software will do just this, but keep in mind that
+Windows allows you to stop half-way.
+
+The minimal size of each mapping is of course a single page (4KB), since the hardware works that way.
+However, Windows can only set up a mapping that starts from an address divisible by 64KB (theoretically, this
+number is not fixed and there is a system call you can use to obtain that granularity, but in practice, it
+will never change because it would break too much software). Yes, that means that if you call VirtualAlloc()
+to allocate 4KB and then call it again to allocate the next 4KB, the returned addresses will differ by at
+least 64 KB from each other. This will results in a very "holey" virtual address space like:
+
+0x400000-0x400fff  --> ???
+0x410000-0x410fff  --> ???
+
+To "decommit" the mapping or remove it altogether, you call VirtualFree() with the same pointer you got from
+VirtualAlloc(). Windows stores its own bookkeeping information under the hood that allows the function to
+look up the details about the size of the mapping.
+
+Because the reservations are stored more efficiently than the actually "committed" ranges, the limit on the
+virtual address space that you can reserve is huge - currently, it is 128TB. The limit on the "committed"
+memory depends on the amount of actual physical RAM and configured swap space and is thus much lower.
+
+To sum up, these are the key aspects of the Windows API:
+  * There are three page states and two separate steps in establishing the mapping - reserving just the
+    address range and actually backing it with either RAM or swap.
+  * Each mapping is a separate "allocation" whose size is tracked internally, and the number of VirtualFree()
+    calls must match the number of VirtualAlloc() calls. Just like with malloc()/free(), you must pass the
+    same pointer that you got when allocating it.
+  * Asking for less than 64KB of the virtual adress space on Windows is suboptimal. Possibly due to
+    historical reasons or because the bookkeeping data introduces an overhead, Windows parcels out the
+    virtual address space in 64KB increments (or decrements, which is governed by a flag to VirtualAlloc()).
+  * Windows tolerates "holey" address space (the performance of VirtualAlloc() will degrade though with the
+    number of allocations). The limit on address space reservations is enormous (128TB).
+
+Remember these conclusions for later, since all of them will be invalid - and in fact, exactly the opposite -
+on Linux.
+
+Linux
+Linux uses a mmap()/munmap() API from the classical BSD Unix that had been codified in POSIX (and also
+present on Mac, *BSD and some other platforms). This is a powerful API that allows - on the surface - pretty
+arbitrary mapping manipulations. However, Linux adds its own twist to it that makes the API less useful than
+it could be.
+
+When you call mmap() to request the same 16KB of the virtual address space, you'll get a mapping that will be
+already usable (again, randomness of the physical addresses is for illustration only).
+
+Virtual                    Physical
+0x7ff01000-0x7ff01fff  --> 0x090000-0x090fff
+0x7ff02000-0x7ff02fff  --> 0x078000-0x078fff
+0x7ff03000-0x7ff03fff  --> 0x091000-0x091fff
+0x7ff04000-0x7ff04fff  --> 0x056000-0x056fff
+
+Under Linux, you do not have the separate step of "committing" the memory, the returned 16KB are already
+committed and are legal to read from or write to (barring protection flags) - just as if you passed
+MEM_COMMIT flag to VirtualAlloc(). Like on Windows, the above table is a bit of a lie - you do not control
+the residency, so we cannot know whether a page is actually present in the physical RAM or just marked to be
+brought back from the paging file or initialized (with zeroes) on its first use - you can however hint the
+kernel with madvise(MADV_WILLNEED) about this.
+
+Another surprise is how munmap() works. Just like on Windows, you could munmap() all 16 KB at once, but you
+don't have to. Notice that munmap takes the len parameter and in fact can be passed an arbitrary range, not
+just the one you established with mmap(). You can free the memory by munmap()ing it page by page, or you can
+make a hole inside it, like, e.g., by removing the middle 8KB with munmap(0x7ff02000, 8192), resulting in a
+mapping like:
+
+0x7ff01000-0x7ff01fff  --> 0x090000-0x090fff
+0x7ff04000-0x7ff04fff  --> 0x056000-0x056fff
+
+Now the addresses 0x7ff01000 - 0x7ff02fff are no longer legal to be touched and an attempt to read from that
+range or write to it will cause SIGSEGV.
+
+Also, notice that the address returned by mmap() is not 64KB aligned - it can be arbitrary (but of course
+will always be page-, that is, 4KB-, aligned). In fact, due to the "twist" added by Linux, it is likely that
+the address returned by mmap() will be directly adjacent to some existing virtual address (e.g., in our
+example, next time you call mmap(), you're likely to get 0x7ff05000).
+
+All of this is explained by how Linux represents the mappings. The kernel calls them VMAs, which stand for a
+"virtual memory area". Each VMA/mapping maps a continuous range of pages that share the same attributes and
+usually begins as a result of a single mmap() invocation. Unlike Windows allocations, VMAs can be split by
+the kernel whenever a page in the range gets unmapped or its attributes change as a result of a mprotect()
+call (among other reasons).
+
+All VMAs taken together describe how your program's address space looks like and can be thought of as a
+"shadow" and hardware-independent page table. In theory, since kernel already maintains the page table for
+the hardware, it does not need another one. They were however introduced to Linux to solve two main problems:
+accommodate an ever-growing set of page attributes (some of which make sense only for the kernel itself and
+not MMU) and support architectures that map virtual to real addresses without a page table at all. As Linus
+described in an e-mail from 17 years ago:
+
+We used to have these "this is a COW page" and "this is shared writable"
+bits in the page table etc - there are two sw bits on x86, and I think we
+used them both.
+
+These days, the vma's just have too much information, and the page tables
+can't be counted on to have enough bits.
+
+[...]
+
+This is most clearly seen on CPU's that don't have traditional page table
+trees, but use software fill TLB's, hashes, or other things in hardware.
+
+You can look up VMAs of the process in /proc/$PID/maps (and you can look up more details about each mapping
+in /proc/$PID/smaps).
+
+So, each time you do a mmap(), you're either creating a VMA or enlarging an existing one, because the kernel
+is smart enough to place the new mapping adjacent to some other one with the same attributes, thus merging
+them. However, since VMA only represents a contiguous virtual memory region, it means that not only mmap()
+can create them, but munmap() as well. In the above example (where we unmapped the middle of our 16KB
+allocation), we actually created two new VMAs of 4KB each, because they are no longer adjacent to each other
+(one starts at 0x7ff01000 and ends at 0x7ff01fff, another at 0x7ff04000 and 0x7ff04fff respectively).
+
+So far so good. However, remember that a VMA structure holds "too much information", and it is larger than
+the page entry in the hardware page table. A programmer's intuition immediately suggests that the very
+existence of VMAs puts another limit on how fine-grained the mappings can be - and indeed it does. A
+degenerate case - putting each virtual page in its own separate VMA - would take too many resources, so Linux
+limits the number of mappings. The limit is vm.max_map_count and it is fairly low by default - just 65530
+mappings are allowed.
+
+This also introduces another limit on the maximum amount of virtual memory you could allocate (which
+normally, similarly to the commit limit on Windows, depends on the physical RAM and swap space, governed by
+the vm.overcommit_memory setting). If you, for some reason, indeed ended up having one page per each VMA, you
+will get a ENOMEM error after allocating 65530 * 4096 = ~255 MB, no matter how large your physical RAM and
+swap are.
+
+This "edge case" scenario of one page per VMA is not that rare in practice due to Electric Fence-like memory
+debugging techniques that can interleave "read/write" pages with "read/only" ones, forcing the kernel to
+split the mappings.
+
+The vm.max_map_count limit is also the reason why you can get ENOMEM when freeing the memory (if you attempt
+to free a "hole" in the existing mapping, and the kernel cannot split it in two), which is not very
+intuitive.
+
+Why is there a limit on the number of VMAs at all? If you have root, you can jack up vm.max_map_count by sudo
+sysctl -w vm.max_map_count=1000000, what's the big deal?
+
+However, the number of VMAs is limited not just because of their size, but also because they need to be
+traversed during each page fault, which is, well, very often. And most importantly, even if you can increase
+the limit, you absolutely cannot rely on your users being able or willing to increase the system-wide limit
+just to run your program.
+
+This means that in practice, you need to keep your mappings down to a reasonable number by avoiding unmapping
+memory with munmap(), changing page protection with mprotect() or changing page properties with madvise() for
+parts of a mapping (which can split it in two or even in three VMAs).
+
+It is rather unfortunate that none of the traditional Linux monitoring tools pay attention to the number of
+mappings that a process has, which changes unpredictably as your address space fragments itself due to the
+above calls. The number is not even provided to you by the kernel, you need to calculate it yourself by
+tallying /proc/$PID/maps. I recommend using watch -n1 "wc -l /proc/\`pidof ProgName\`/maps" in order to
+monitor it continuously as your program is running.
+
+Conclusions
+It's time to make a side by side comparison of the most important traits:
+
+-------------------------------------------------------------------------------------------------------------
+Windows                                             Linux
+-------------------------------------------------------------------------------------------------------------
+Virtual memory range can be just reserved or        Creating a mapping both reserves the address space and
+actually mapped ("committed", i.e., backed by       allows access to its contents, i.e., a mapping is always
+either RAM or swap). Mapping can be "decommitted",  "committed".
+converting it back to just a reservation.
+-------------------------------------------------------------------------------------------------------------
+Each mapping is a separate allocation that is       Mappings can be merged and split as needed by mmap() and
+book-kept by the OS. Number of calls to VirtualFree munmap(). Number of calls to munmap() can be larger or
+() must match the number of calls to VirtualAlloc() smaller than the number of calls to mmap() as long as all
+and the same pointer must be passed - no "partial"  mappings are removed. It is up to the program to book
+frees.                                              keep the sizes of mappings.
+-------------------------------------------------------------------------------------------------------------
+Mappings always start at a 64KB-aligned boundary.   Mappings can start at an arbitrary page-aligned address.
+Asking for less than 64KB of the virtual adress     You can map single pages one by one with no ill effects
+space on Windows is suboptimal and results in waste on the address space (the kernel will try to "attach" new
+(fragmentation) of the address space.               mappings to existing ones).
+-------------------------------------------------------------------------------------------------------------
+                                                    There is a limit on the number of mappings (pretty low,
+No limit on the number of mappings (the performance 65530). You cannot easily know the number of mappings, as
+of VirtualAlloc() will degrade, but it will not     they can be created whenever you partially unmap existing
+refuse to allocate).                                mappings or change properties with mprotect() or madvise
+                                                    ().
+-------------------------------------------------------------------------------------------------------------
+                                                    Since all mappings are always committed, the limit on the
+                                                    virtual address space is much lower and depends on the
+You can reserve up to 128TB of virtual address      RAM and swap size (by default).
+space, however the commit limit depends on your
+physical RAM and swap size.                         However, limit on mappings also limits the address space
+                                                    to possibly much smaller size - the worst case scenario
+                                                    (each mapping only containing one page) allows allocation
+                                                    of 255MB (65530 * 4k).
+-------------------------------------------------------------------------------------------------------------
+
+Of this, the most important differences are perhaps the two last ones. The low limit on the number of
+mappings and unpredictable effect of them on the address space are definitely crippling the otherwise
+powerful mmap() API. To make things worse, this factor seems to be unique to the Linux kernel (FreeBSD has a
+larger limit on mappings by default and Mac doesn't seem to expose that), and it is not common for developers
+with the background on other platforms to think of virtual address space fragmentation on a 64 bit OS, so
+workarounds for running out of VMAs can be hard to retrofit to the existing software.
+
+Other dissimilarities, like the lack of separate "commit" step on Linux can be in practice approximated by
+the (Linux-specific, so going beyond POSIX) flags to madvise() call and mprotect() permissions. However,
+inability to allocate very large (e.g. 1TB) mapping cannot be overcome with the default settings and this
+prevents Linux application from applying certain debugging and optimization techniques.
+
+Going from Linux to Windows, the flexibility of mmap()/munmap() is challenging to replicate (but is also
+rarely needed). It is however worth noting that this limitation might not exist on the level lower than Win32
+API and the Windows kernel itself might be capable of mmap()/munmap() functionality (it was certified for
+POSIX at an early stage of its life after all). I have not had a need to dig deeper into that, but native
+APIs like NtMapViewOfSection seem to be pretty powerful.
+
+
+---
+

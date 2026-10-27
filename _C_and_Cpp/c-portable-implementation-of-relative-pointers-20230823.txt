@@ -1,0 +1,599 @@
+filename: c_portable-implementation-of-relative-pointers_20230823.txt
+https://stackoverflow.com/questions/69573681/portable-c-implementation-of-relative-pointers
+
+Portable C Implementation of Relative Pointers
+
+   I define relative pointer to mean what Ginger Bill describes as Self-Relative Pointers:
+
+     ... define the base [to which an offset will be applied] to be the memory address of the offset
+     itself
+
+   For example, consider this struct:
+
+struct house {
+	int32_t weight;
+}
+
+struct person {
+	int32_t age;
+	struct house *residence;
+}
+
+int32_t getPersonsHousesWeight(struct person *p) {
+	return p->residence->weight;
+}
+
+   The relative-pointer implementation of the same thing in C that I think might work is:
+
+struct house { ... } // same as before
+struct person {
+	int32_t age;
+	int64_t residence; // an offset from the person's address in memory
+}
+
+int32_t getPersonsHousesWeight(struct person *p) {
+	return ((struct residence *)((char *)p + (p->residence)))->weight;
+}
+
+   Assuming that alignment of everything is good (all 8 bytes), is this free of undefined behavior?
+
+***
+   @tstanisl has provided an excellent answer (which I've accepted) that thoroughly explains UB in the
+   context of stack allocations. I am curious how allocation into a large slab of contiguous heap would
+   impact this analysis. For example:
+
+int foo(void) {
+	char *base = mmap(NULL,4096,PROT_WRITE | PROT_READ,-1,MAP_PRIVATE | MAP_ANONYMOUS);
+
+	// Omitting mmap error checking
+	struct person *myPerson = (struct person *)(base + 128);
+	struct house *myHouse = (struct house *)(base + 256);
+	int32_t delta = (char *)myHouse - (char *)myPerson;
+
+	// Does the computation of delta invoke UB?
+}
+
+***
+     * For me, it depends on how you define the offset, if you set it at runtime like:
+       p->residence = (intptr_t)p - (intptr_t)h (assuming person *p, house *h) then it would work well.
+***
+     * it depends if the p and struct house object belong the same large object like struct
+       person_in_da_house { struct person p; struct house h; }. Moreover, there are some technical
+       condition on how the pointer p is constructed.
+***
+   Usually it is going to be UB. The first case is when person and house belong to separate object. In
+   such a case it will be UB because the pointer arithmetics is performed outside of the object.
+
+int foo(void) {
+	struct person p;
+	struct house h;
+	p.residence = (char *)&h - (char *)&p; // already UB
+	getPersonsHousesWeight(&p); // UB again
+}
+
+   In practice it means that the compiler is not obligated to notice that objects accessed from a
+   pointers constructed from &p can alias with object h because p and h are separete memory regions (aka
+   objects).
+
+   When both objects are placed inside a larger object then the situation is a bit better. Though it
+   still would be technical UB.
+
+int foo(void) {
+	struct ph {
+		struct person p;
+		struct house h;
+	} ph;
+	ph.p.residence = (char *)&ph.h - (char *)&ph.p; // still UB
+	getPersonsHousesWeight(&ph.p); // UB again
+}
+
+   It UB because pointer arithmetic is done outside the member object. (char *)&ph.h - 1 is a pointer
+   outside of ph.h.
+
+   Note, that this code will likely work pretty much everywhere. Otherwise, heavily used
+   container_of-like macros would not work breaking a lot of existing code including the Linux kernel.
+
+   To avoid UB the pointer must be constructed in a special way to avoid moving outside of the
+   originating object. Rather using &ph.h one should use (char *)&ph + offsetof(struct ph, h). Similarly
+   &ph.p should be replaced with (char *)&ph + offsetof(struct ph, p).
+
+   Now this code should be portable:
+
+int foo(void) {
+	struct ph {
+		struct person p;
+		struct house h;
+	} ph;
+	struct person *p_ptr = (struct person *)((char *)&ph + offsetof(struct ph, p));
+	struct house  *h_ptr = (struct house *) ((char *)&ph + offsetof(struct ph, h));
+	ph.p.residence = (char *)h_ptr - (char *)p_ptr;
+	getPersonsHousesWeight(p_ptr);
+}
+
+Though it is very obscure. The interesting discussion on this topic can be found at
+[**1][https://stackoverflow.com/questions/25296019/can-a-container-of-macro-ever-be-strictly-conforming]link
+
+***
+     * Thanks! This is very thorough. I've added an edit at the end of the original question to ask more
+       specifically about the case of heap allocation. In the context of heap allocation, it is less
+       clear to me what an "originating object" is. Is it the entire block of memory that the OS hands
+       the user? Or does slicing into a block somehow change the originating pointer?
+
+***
+       @AndrewThaddeusMartin the C standard is agnostic about OS, heaps and stack. To be fully portable
+       you should treat each pointer returned from malloc as being placed in a unique address space
+       fully separated from everything else. I guess the relative pointers can only be used for object
+       created within a region returned from the same call to malloc().
+
+
+---
+[**1]
+https://stackoverflow.com/questions/25296019/can-a-container-of-macro-ever-be-strictly-conforming
+
+Can a "container_of" macro ever be strictly-conforming?
+
+   A commonly-used macro in the linux kernel (and other places) is container_of, which is (basically)
+   defined as follows:
+
+#define container_of(ptr, type, member) (((type) *)((char *)(ptr) - offsetof((type), (member))))
+
+   Which basically allows recovery of a "parent" structure given a pointer to one of its members:
+
+struct foo {
+	char ch;
+	int bar;
+};
+...
+struct foo f = ...
+int *ptr = &f.bar; // 'ptr' points to the 'bar' member of 'struct foo' inside 'f'
+struct foo *g = container_of(ptr, struct foo, bar);
+// now, 'g' should point to 'f', i.e. 'g == &f'
+
+   However, it's not entirely clear whether the subtraction contained within container_of is considered
+   undefined behavior.
+
+   On one hand, because bar inside struct foo is only a single integer, then only *ptr should be valid
+   (as well as ptr + 1). Thus, the container_of effectively produces an expression like ptr -
+   sizeof(int), which is undefined behavior (even without dereferencing).
+
+   On the other hand, §6.3.2.3 p.7 of the C standard states that converting a pointer to a different
+   type and back again shall produce the same pointer. Therefore, "moving" a pointer to the middle of a
+   struct foo object, then back to the beginning should produce the original pointer.
+
+   The main concern is the fact that implementations are allowed to check for out-of-bounds indexing at
+   runtime. My interpretation of this and the aforementioned pointer equivalence requirement is that the
+   bounds must be preserved across pointer casts (this includes pointer decay - otherwise, how could you
+   use a pointer to iterate across an array?). Ergo, while ptr may only be an int pointer, and neither
+   ptr - 1 nor *(ptr + 1) are valid, ptr should still have some notion of being in the middle of a
+   structure, so that (char *)ptr - offsetof(struct foo, bar) is valid (even if the pointer is equal to
+   ptr - 1 in practice).
+
+   Finally, I came across the fact that if you have something like:
+int arr[5][5] = ...
+int *p = &arr[0][0] + 5;
+int *q = &arr[1][0];
+
+   while it's undefined behavior to dereference p, the pointer by itself is valid, and required to
+   compare equal to q (see this question). This means that p and q compare the same, but can be
+   different in some implementation-defined manner (such that only q can be dereferenced). This could
+   mean that given the following:
+
+// assume same 'struct foo' and 'f' declarations
+char *p = (char *)&f.bar;
+char *q = (char *)&f + offsetof(struct foo, bar);
+
+   p and q compare the same, but could have different boundaries associated with them, as the casts to
+   (char *) come from pointers to incompatible types.
+
+   To sum it all up, the C standard isn't entirely clear about this type of behavior, and attempting to
+   apply other parts of the standard (or, at least my interpretations of them) leads to conflicts. So,
+   is it possible to define container_of in a strictly-conforming manner? If so, is the above definition
+   correct?
+
+***
+     * 3
+       It seems like it should be OK: Since the original pointer points into the middle of a large
+       object, it's OK to convert it to a char pointer and treat it as pointing to an element of the
+       object representation of the large object and perform arithmetic on it.
+     * 1
+       The C spec is completely ambiguous as to the meaning of the term 'the array object' when you have
+       arrays of arrays (or structs containing arrays, since the struct objects are implicitly arrays of
+       size 1) -- it could mean either the inner array or the containing array. Combine this with the
+       fact that the spec requires an implementation to allow treating any object as a sequence of bytes
+       (chars) that can be copied around, and you have a situation where it seems like all this sort of
+       pointer manipulation has to be allowed, but the spec does not clearly say it.
+     * "[...] converting a pointer to a different type and back again shall produce the same pointer"-to
+       be precise, a pointer which "shall compare equal to the original pointer". As I read it, this
+       does not necessarily imply the "same" regarding bounds information.
+     * 1
+       The standard also isn't clear about accessing an object through a converted pointer - it only
+       mentions the alignment requirement.
+
+***
+TLDR
+
+   It is a matter of debate among language lawyers as to whether programs using container_of are
+   strictly conforming, but pragmatists using the container_of idiom are in good company and are
+   unlikely to run into issues running programs compiled with mainstream tool chains on mainstream
+   hardware. In other words:
+     * strictly conforming: debated
+     * conforming: yes, for all practical purposes, in most situations
+
+What can be said today
+
+    1. There is no language in the standard C17 standard that unambiguously requires support for the
+       container_of idiom.
+    2. There are defect reports that suggest the standard intends to allow implementations room to
+       forbid the container_of idiom by tracking "provenance" (i.e. the valid bounds) of objects along
+       with pointers. However, these alone are not normative.
+    3. There is recent activity in the C memory object model study group that aims to provide more
+       rigor to this and similar questions. See Clarifying the C memory object model - N2012 from
+       2016, Pointers are more abstract than you might expect from 2018, and A Provenance-aware
+       Memory Object Model for C - N2676 from 2021.
+
+   Depending on when you read this, there may be newer documents available at the WG14 document log.
+   Additionally, Peter Sewell collects related reference material here:
+   https://www.cl.cam.ac.uk/~pes20/cerberus/. These documents do not change what a strictly
+   conforming program is today (in 2021, for versions C17 and older), but they suggest that the answer
+   may change in newer versions of the standard.
+
+Background
+
+What is the container_of idiom?
+   This code demonstrates the idiom by expanding the contents of the macro usually seen implementing the
+   idiom:
+#include <stddef.h>
+
+struct foo {
+	long first;
+	short second;
+};
+
+void container_of_idiom(void) {
+	struct foo f;
+
+	char *b = (char *)&f.second;        /* Line A */
+	b -= offsetof(struct foo, second);  /* Line B */
+	struct foo *c = (struct foo *)b;    /* Line C */
+}
+
+   In the above case, a container_of macro would typically take a short * argument intended to point to
+   the second field of a struct foo. It would also take arguments for struct foo and second, and would
+   expand to an expression returning struct foo *. It would employ the logic seen in lines A-C above.
+
+   The question is: is this code strictly conforming?
+
+   First, let's define "strictly conforming"
+
+     C17 4 (5-7) Conformance
+    5. A strictly conforming program shall use only those features of the language and library specified
+       in this International Standard. It shall not produce output dependent on any unspecified,
+       undefined, or implementation-defined behavior, and shall not exceed any minimum implementation
+       limit.
+    6. [...] A conforming hosted implementation shall accept any strictly conforming program. [...] A
+       conforming implementation may have extensions (including additional library functions), provided
+       they do not alter the behavior of any strictly conforming program.
+    7. A conforming program is one that is acceptable to a conforming implementation.
+
+   (For brevity I omitted the definition of "freestanding" implementations, as it concerns limitations
+   on the standard library not relevant here.)
+
+   From this we see that strict conformance is quite strict, but a conforming implementation is allowed
+   to define additional behavior as long as it does not alter the behavior of a strictly conforming
+   program. In practice, almost all implementations do this; this is the "practical" definition that
+   most C programs are written against.
+
+   For the purposes of this answer I'll contain my answer to strictly conforming programs, and talk
+   about merely conforming programs at the end.
+
+Defect reports
+   The language standard itself is somewhat unclear on the question, but several defect reports shed
+   more light on the issue.
+
+***
+#include <stdlib.h>
+
+struct A {
+	char x[1];
+};
+
+int main() {
+	struct A *p = (struct A *)malloc(sizeof(struct A) + 100);
+	p->x[5] = '?'; /* This is the key line */
+	return p->x[5];
+}
+
+   The response to the DR includes (emphasis mine):
+     Subclause 6.3.2.1 describes limitations on pointer arithmetic, in connection with array
+     subscripting. (See also subclause 6.3.6.) Basically, it permits an implementation to tailor how it
+     represents pointers to the size of the objects they point at. Thus, the expression p->x[5] may
+     fail to designate the expected byte, even though the malloc call ensures that the byte is present.
+     The idiom, while common, is not strictly conforming.
+
+   Here we have the first indication that the standard allows implementations to "tailor" pointer
+   representations based on the objects pointed at, and that pointer arithmetic that "leaves" the valid
+   range of the original object pointed to is not strictly conforming.
+
+#include <stddef.h>
+#include <stdlib.h>
+
+typedef double T;
+struct hacked {
+	int size;
+	T data[1];
+};
+
+struct hacked *f(void) {
+	T *pt;
+	struct hacked *a;
+	char *pc;
+
+	a = malloc(sizeof(struct hacked) + 20 * sizeof(T));
+	if (a == NULL) return NULL;
+	a->size = 20;
+
+	/* Method 1 */
+	a->data[8] = 42; /* Line A */
+
+	/* Method 2 */
+	pt = a->data;
+	pt += 8; /* Line B */
+	*pt = 42;
+
+	/* Method 3 */
+	pc = (char *)a;
+	pc += offsetof(struct hacked, data);
+	pt = (T *)pc; /* Line C */
+	pt += 8;      /* Line D */
+	*pt = 6 * 9;
+	return a;
+}
+
+   Astute readers will notice that /* Method 3 */ above is much like the container_of idiom. I.e. it
+   takes a pointer to a struct type, converts it to char *, does some pointer arithmetic that takes the
+   char * outside the range of the original struct, and uses the pointer.
+
+   The committee responded by saying /* Line C */ was strictly conforming but /* Line D */ was not
+   strictly conforming by the same argument given for DR 51 above. Further, the committee said that the
+   answers "are not affected if T has char type."
+
+Verdict: container_of is not strictly conforming (probably)
+   The container_of idiom takes a pointer to a struct's subobject, converts the pointer to char *, and
+   performs pointer arithmetic that moves the pointer outside the subobject. This is the same set of
+   operations discussed in DR 51 and 72 apply. There is clear intent on the part of the committee. They
+   hold that the standard "permits an implementation to tailor how it represents pointers to the size of
+   the objects they point at" and thus "the idiom, while common, is not strictly conforming."
+
+   One might argue that container_of side steps the issue by doing the pointer arithmetic in the domain
+   of char * pointers, but the committee says the answer is "not affected if T has char type."
+
+May the container_of idiom be used in practice?
+   No, if you want to be strict and use only code that is not clearly strictly conforming according to
+   current language standards.
+
+   Yes, if you are a pragmatist and believe that an idiom widely used in Linux, FreeBSD, Microsoft
+   Windows C code is enough to label the idiom conforming in practice.
+
+   As noted above, implementations are allowed to guarantee behavior in ways not required by the
+   standard. On a practical note, the container_of idiom is used in the Linux kernel and many other
+   projects. It is easy for implementations to support on modern hardware. Various "sanitizer" systems
+   such as Address Sanitizer, Undefined Behavior Sanitizer, Purify, Valgrind, etc., all allow this
+   behavior. On systems with flat address spaces, and even segmented ones, various "pointer games" are
+   common (e.g. converting to integral values and masking off low order bits to find page boundaries,
+   etc). These techniques are so common in C code today that it is very unlikely that such idioms will
+   cease to function on any commonly supported system now or in the future.
+
+   In fact, I found one implementation of a bounds checker that gives a different interpretation of C
+   semantics in its paper. The quotes are from the following paper: Richard W. M. Jones and Paul H. J.
+   Kelly. Backwards-compatible bounds checking for arrays and pointers in C programs. In Third
+   International Workshop on Automated Debugging (editors M. Kamkarand D. Byers), volume 2 (1997), No.
+   009 of Linköping Electronic Articles in Computer and Information Science. Linköping University
+   Electronic Press, Linköping, Sweden. ISSN 1401-9841, May 1997 pp. 13-26. URL
+   http://www.ep.liu.se/ea/cis/1997/009/02/
+
+     ANSI C conveniently allows us to define an object as the fundamental unit of memory allocation.
+     [...] Operations are permitted which manipulate pointers within objects, but pointer operations
+     are not permitted to cross between two objects. There is no ordering defined between objects, and
+     the programmer should never be allowed to make assumptions about how objects are arranged in
+     memory.
+
+     Bounds checking is not blocked or weakened by the use of a cast (i.e. type coercion). Cast can
+     properly be used to change the type of the object to which a pointer refers, but cannot be used to
+     turn a pointer to one object into a pointer to another. A corollary is that bounds checking is not
+     type checking: it does not prevent storage from being declared with one data structure and used
+     with another. More subtly, note that for this reason, bounds checking in C cannot easily validate
+     use of arrays of structs which contain arrays in turn.
+
+     Every valid pointer-valued expression in C derives its result from exactly one original storage
+     object. If the result of the pointer calculation refers to a different object, it is invalid. This
+     language is quite definitive but take note the paper was published in 1997, before the DR reports
+     above were written and responded to. The best way to interpret the bounds checking system
+     described in the paper is as a conforming implementation of C, but not one that detects all
+     non-strictly conforming programs. I do see similarities between this paper and A
+     Provenance-aware Memory Object Model for C - N2676 from 2021, however, so in the future the ideas
+     similar to the ones quoted above might be codified in the language standard.
+
+   The C memory object model study group is a treasure trove of discussions related to container_of
+   and many other closely related problems. From their mailing list archive we have these mentions of
+   the container_of idiom:
+
+   2.5.4 Q34 Can one move among the members of a struct using representation-pointer arithmetic and
+   casts?
+
+     The standard is ambiguous on the interaction between the allowable pointer arithmetic (on unsigned
+     char * representation pointers) and subobjects. For example, consider:
+
+     Example cast_struct_inter_member_1.c
+
+#include <stdio.h>
+#include <stddef.h>
+
+typedef struct { float f; int i; } st;
+
+int main() {
+	st s = {.f=1.0, .i=1};
+	int *pi = &(s.i);
+	unsigned char *pci = ((unsigned char *)pi);
+	unsigned char *pcf = (pci - offsetof(st,i)) + offsetof(st,f);
+	float *pf = (float *)pcf;
+	*pf = 2.0;  // is this free of undefined behaviour?
+	printf("s.f=%f *pf=%f  s.i=%i\n",s.f,*pf,s.i);
+}
+
+     This forms an unsigned char * pointer to the second member (i) of a struct, does arithmetic on that
+     using offsetof to form an unsigned char * pointer to the first member, casts that into a pointer to
+     the type of the first member (f), and uses that to write.
+
+     In practice we believe that this is all supported by most compilers and it is used in practice,
+     e.g. as in the Container idiom of Chisnall et al. [ASPLOS 2015], where they discuss container
+     macros that take a pointer to a structure member and compute a pointer to the structure as a
+     whole. They see it heavily used by one of the example programs they studied. We are told that
+     Intel's MPX compiler does not support the container macro idiom, while Linux, FreeBSD, and Windows
+     all rely on it.
+
+     The standard says (6.3.2.3p7): "...When a pointer to an object is converted to a pointer to a
+     character type, the result points to the lowest addressed byte of the object. Successive
+     increments of the result, up to the size of the object, yield pointers to the remaining bytes of
+     the object.". This licenses the construction of the unsigned char * pointer pci to the start of the
+     representation of s.i (presuming that a structure member is itself an "object", which itself is
+     ambiguous in the standard), but allows it to be used only to access the representation of s.i.
+
+     The offsetof definition in stddef.h, 7.19p3, " offsetof(type,member-designator) which expands to
+     an integer constant expression that has type size_t, the value of which is the offset in bytes, to
+     the structure member (designated by member-designator, from the beginning of its structure
+     (designated by type", implies that the calculation of pcf gets the correct numerical address, but
+     does not say that it can be used, e.g. to access the representation of s.f. As we saw in the
+     discussion of provenance, in a post-DR260 world, the mere fact that a pointer has the correct
+     address does not necessarily mean that it can be used to access that memory without giving rise to
+     undefined behaviour.
+
+     Finally, if one deems pcf to be a legitimate char * pointer to the representation of s.f, then the
+     standard says that it can be converted to a pointer to any object type if sufficiently aligned,
+     which for float * it will be. 6.3.2.3p7: "A pointer to an object type may be converted to a pointer
+     to a different object type. If the resulting pointer is not correctly aligned (68) for the
+     referenced type, the behavior is undefined. Otherwise, when converted back again, the result shall
+     compare equal to the original pointer....". But whether that pointer has the right value and is
+     usable to access memory is left unclear.
+
+     This example should be allowed in our de facto semantics but is not clearly allowed in the ISO
+     text.
+
+     What needs to be changed in the ISO text to clarify this?
+
+     More generally, the ISO text's use of "object" is unclear: does it refer to an allocation, or are
+     struct members, union members, and array elements also "objects"?
+
+   Key phrase being "This example should be allowed in our de facto semantics but is not clearly allowed
+   in the ISO text." i.e. I take this to mean the the group documenets like N2676 wish to see
+   container_of supported.
+
+   However, in a later message:
+     2.2 Provenance and subobjects: container-of casts
+
+     A key question is whether one can cast from a pointer to the first member of a struct to the
+     struct as a whole, and then use that to access other members. We discussed it previously in N2222
+     Q34 Can one move among the members of a struct using representation-pointer arithmetic and casts?,
+     N2222 Q37 Are usable pointers to a struct and to its first member interconvertable?, N2013, and
+     N2012. Some of us had thought that that was uncontroversially allowed in ISO C, by 6.7.2.1p15 ...A
+     pointer to a structure object, suitably converted, points to its initial member..., and vice
+     versa..., but others disagree. In practice, this seems to be common in real code, in the
+     "container-of" idiom.
+
+     Though someone suggested that the IBM XL C/C++ compiler does not support it. Clarification from
+     WG14 and compiler teams would be very helpful on this point.
+
+   With this, the group sums it up nicely: the idiom is widely used, but there is disagreement about
+   what the standard says about it.
+
+***
+     * A great post. It provides so much useful material about abstraction that pointer really are. As I
+       understand the ambiguity comes from insufficient definition of "object". I think that the
+       strict-conformance of container_of-like macros may depend on how the pointer are formed.Do you
+       think that in example 2.5.4 if int *pi = &(s.i); was replaced with int *pi = (int *)((char *)&s +
+       offsetof(st, i)); then the behavior would be defined?
+     * Yes I think the distinction you draw holds. The standard says that if you take (char *)&x then you
+       can increment/decrement that char * across the bytes of the x object at will. The n2676 paper I
+       linked, I think, gives both cases valid semantics. It says that both would point into the same
+       "storage instance" and says pointer arithmetic within any one "storage instance" is valid. The
+       paper says storage instances can't overlap, which implies that containing objects and sub-objects
+       are in the same storage instance. I think this attempts to codify what most would expect
+       intuitively.
+     * 1
+       @nmr, yes I misspelled "provenance" there, thanks.
+
+***
+   I think its strictly conforming or there's a big defect in the standard. Referring to your last
+   example, the section on pointer arithmetic doesn't give the compiler any leeway to treat p and q
+   differently. It isn't conditional on how the pointer value was obtained, only what object it points
+   to.
+
+   Any interpretation that p and q could be treated differently in pointer arithmetic would require an
+   interpretation that p and q do not point to the same object. Since since there's no implementation
+   dependent behaviour in how you obtained p and q then that would mean they don't point to the same
+   object on any implementation. That would in turn require that p == q be false on all implementations,
+   and so would make all actual implementations non-conforming.
+
+***
+   1
+     * Yes, what object it points to is key. The debate seems to center around that question. The
+       standard merely says "the object" but in the case of char *p = (char *)&f.bar; the object could
+       be f or its subobject f.bar. Some argue that the standard allows, but does not require,
+       implementations to restrict the providence of the p pointer to the range of bytes in f.bar. If p
+       is decremented past the first byte of f.bar, some argue p has undefined value, so equality
+       comparison is undefined, and if so your proof by contradiction would not hold.
+
+***
+   I just want to answer this bit.
+int arr[5][5] = ...
+int *p = &arr[0][0] + 5;
+int *q = &arr[1][0];
+
+   This is not UB. It is certain that p is a pointer to an element of the array, provided only that it
+   is within bounds. In each case it points to the 6th element of a 25 element array, and can safely be
+   dereferenced. It can also be incremented or decremented to access other elements of the array.
+
+   See n3797 S8.3.4 for C++. The wording is different for C, but the meaning is the same. In effect
+   arrays have a standard layout and are well-behaved with respect to pointers.
+
+   Let us suppose for a moment that this is not so. What are the implications? We know that the layout
+   of an array int[5][5] is identical to int[25], there can be no padding, alignment or other extraneous
+   information. We also know that once p and q have been formed and given a value, they must be
+   identical in every respect.
+
+   The only possibility is that, if the standard says it is UB and the compiler writer implements the
+   standard, then a sufficiently vigilant compiler might either (a) issue a diagnostic based on
+   analysing the data values or (b) apply an optimisation which was dependent on not straying outside
+   the bounds of sub-arrays.
+
+   Somewhat reluctantly I have to admit that (b) is at least a possibility. I am led to the rather
+   strange observation that if you can conceal from the compiler your true intentions this code is
+   guaranteed to produce defined behaviour, but if you do it out in the open it may not.
+
+***
+     * Did you read the question linked in this question? The memory layout and bounds checking are
+       two things, the former being guaranteed and the latter being the question here.
+     * Yes, I read it and yes they are. That answer was old, the issue was not properly resolved in
+       comments and I don't feel like adding to them. But your comment leads me to a different train of
+       thought...see edit.
+     * Your (b) is another good point, while the main concern was reliable run-time bounds checking (not
+       compile-time checking as you suggest in (a)). Reading the standard quote given in the linked post
+       (especially the emphasized part and the footnote) makes me believe the standard's intent is to
+       not allow such out-of-bounds access. And yes, this necessarily implies, that pointers comparing
+       equal may differ in their associated bounds information and thus arithmetic/dereferencing may
+       throw an exception for one of them and succeed for the other. Two examples:
+     * 2
+       int p[1]; int q; if(p+1 == &q) /* look if they happen to be contiguous in stack */ { p[1] = 1; /*
+       Does this initialize q? */ } assuming the if branch is entered. I think it's desirably to allow a
+       bounds-checking implementation to catch this nonsense-construct. A less contrived example: struct
+       { char str1[16], str2[16]; } foo; fgets(str1, 32, stdin); (Assume no padding, we could have
+       statically asserted sizeof foo == 32.) Should this be allowed to throw an exception? We can
+       discuss further on this in chat, if you like, I'm really interested in this topic.
+     * 1
+       @david.pfx there's nothing in the standard that says a pointer to an element of an array can't
+       carry information on the originating array. Otherwise, with something like int x[5], p = &x[2], q
+       = p[3];, there'd be no way of knowing that p[3] refers to x[5], which is out of bounds.
+
+
+
+---
+

@@ -1,0 +1,278 @@
+filename: go-building-imdb-web-scraper-20251110.txt
+https://tanmaysarkar.hashnode.dev/building-a-imdb-web-scraper-using-go
+
+Building a IMDB Web Scraper using Go
+Oct 21, 2022
+
+Hi fellows, I have been learning about web scrapers these days and saw there is no many articles on Go
+itself on Hashnode and building a scraper with it is far away. So I thought about let's build a simple cli
+tool which will take birthday as input and crawl a tiny part of the website IMDB to look for celebrities
+who born on that date and stores various data into a file outputs/mm-dd.json inside output directory.
+
+If you do not know about IMDB, it is a website which contains information about movies, TV shows, and
+celebrities. It is a very popular website and has a huge database of information. So, it is a good place
+to start learning about web scraping.
+
+As you might not know, building a web scraper consists of four main steps:
+    Crawling: Crawling is the process of finding all the links on a website and adding them to a queue.
+    Scraping: Scraping is the process of extracting data from a website.
+    Parsing: Parsing is the process of converting the raw data into a structured format.
+    Storing: Storing is the process of saving the data into a file or database.
+
+And we will look deep into all of them step by step, so sit tight and let's get started.
+
+Let us begin then
+
+1. Project Setup
+At first, Create a directory and make a main.go file inside and open terminal in that directory to command:
+$> go mod init github.com/sarkartanmay/IMBD-Scraper-Golang
+
+I am using my GitHub repo link in my module name as a convention, so you should change that to your
+desired module name. E.g. github.com/username/project-name and you can learn more about Modules in Go here.
+
+Then, install colly by commanding in terminal:
+$> go get github.com/gocolly/colly
+
+And this is how our project setup is done, let us now go straight into coding our web scraper.
+
+2. Coding the Scraper
+I hope as you write the code, your code editor will import the packages that are necessary. And with that,
+let us start coding our scraper.
+
+First, we will make customized structs that will hold our scraped data in program memory. We will make
+a struct for each type of data we want to scrape. For example, we will make a struct for each celebrity
+and a struct for each movie.
+
+// Star holds a celebrety's name and other imdb information.
+type Star struct {
+	Name      string  `json:"name"`
+	Photo     string  `json:"photo"`
+	JobTitle  string  `json:"job_title"`
+	Birthdate string  `json:"birthdate"`
+	Bio       string  `json:"bio"`
+	TopMovies []Movie `json:"top_movies"`
+}
+
+// Movie holds basic information about a movie.
+type Movie struct {
+	Title   string `json:"title"`
+	Release string `json:"release"`
+}
+
+This is our two structures that will hold our scraped data. We will use the json package to convert
+our data into JSON format. We will use the json tag to specify the name of the key in the JSON object,
+and to tell Go that when we convert our struct into a JSON object, it must name them as we specified in
+the json tag.
+
+    For example, the Name field in the Star struct will be converted to the name key and TopMovies to
+    top_movies in the JSON object.
+
+Now, we will create function that will take two parameters (day, month) to crawl into IMDB with specified
+date and return scraped data in a slice of stars []stars.
+
+// Crawl crawls the imdb website for a given page and returns a list of stars.
+func Crawl(month int, day int) []Star {
+
+	// stars will hold all the scraped data.
+	var stars []Star
+
+	// Collectors are used to scrape data from a website.
+	// Main collector instance is initialized here.
+	// Our main collector c will only look for profile links of celebreties
+	// and go on next pages if there is next button on current page.
+	c:= colly.NewCollector(
+		// Colly collector will only visit the given domains.
+		colly.AllowedDomains("www.imdb.com", "imdb.com"),
+
+		// Colly collector stores cache and uses from here.
+		colly.CacheDir("./.imdb_cache"),
+
+		// Cache is disabled by default, so we need to enable it.
+	)
+
+	// ic stands for Info Collector, is just cloned from main collector.
+	// This collector will be used to scrape data from the info page.
+	// It will go inside a profile link and look for data in that only.
+	// This collector will be on work everytime main collector find a new profile link.
+	ic:= c.Clone()
+
+	// Where crawler sees 'mode-detail' class attribute, it will call back the function.
+	c.OnHTML(".mode-detail", func(e *colly.HTMLElement) {
+		// Getting the profile url from the href attribute, it is goquery selector string.
+		// 'div.lister-item-image > a' is path of profile url in HTML.
+		// At fist there is a Div tag with class 'lister-item-image' and
+		// inside that there is a tag 'a' where href attribute is profile url.
+		profileUrl:= e.ChildAttr("div.lister-item-image > a", "href")
+
+		// But the profile url is relative, so we need to add the base url.
+		// profileUrl is "/name/nm0000123/" corrently.
+		profileUrl = e.Request.AbsoluteURL(profileUrl)
+
+		// Now profileUrl is "https://www.imdb.com/name/nm0000123/".
+
+		// Asking info collector to visit the profile url.
+		ic.Visit(profileUrl)
+	})
+
+	// This crawler function gets into next page, if there is one.
+	// On IMDB, there is a button with text 'Next' on each page with
+	// class 'lister-page-next next-page' and we are looking only for that.
+	c.OnHTML("a.lister-page-next", func(e *colly.HTMLElement) {
+		// Getting the next page url from the href attribute.
+		nextPageUrl:= e.Attr("href")
+		nextPageUrl = e.Request.AbsoluteURL(nextPageUrl)
+		
+		// Asking main collector to visit the next page url.
+		c.Visit(nextPageUrl)
+	})
+
+	// This info collector crawler function gets the information of the celebrety inside the 'profileURL' page.
+	ic.OnHTML("#content-2-wide", func(e *colly.HTMLElement) {
+		// Getting all details using info collector and storing them in a Star struct.
+		temporaryStar:= Star{
+			Name:      e.ChildText("h1.header > span.itemprop"),
+			Photo:     e.ChildAttr("#name-poster", "src"),
+			JobTitle:  e.ChildText("#name-job-categories > a > span.itemprop"),
+			Birthdate: e.ChildAttr("#name-born-info > time", "datetime"),
+			Bio:       strings.TrimSpace(e.ChildText("#name-bio-text > div.name-trivia-bio-text > div.inline")),
+			TopMovies: []Movie{},
+		}
+
+		// Now iterating over all the top movies of the profile url page.
+		e.ForEach("div.knownfor-title", func(_ int, el *colly.HTMLElement) {
+			temporaryStar.TopMovies = append(temporaryStar.TopMovies, Movie{
+				Title:   el.ChildText("div.knownfor-title-role > a.knownfor-ellipsis"),
+				Release: el.ChildText("div.knownfor-title > div.knownfor-year > span.knownfor-ellipsis"),
+			})
+		})
+
+		// Now appending the temporaryStar to the stars slice.
+		stars = append(stars, temporaryStar)
+	})
+
+	// Printing text of every request made on info collector.
+	ic.OnRequest(func(r *colly.Request) {
+		fmt.Println("Visiting:    ", r.URL.String())
+	})
+
+	// Our link to crawl with user specified date and month.
+	startUrl:= fmt.Sprintf("https://www.imdb.com/search/name/?birth_monthday=%d-%d", month, day)
+	fmt.Println("Starting crawling into    ", startUrl)
+
+	// Starting the main collector.
+	c.Visit(startUrl)
+
+	// Returning all the scraped data in a slice of stars.
+	return stars
+}
+
+If you are overwhelmed by the code, don't worry. As I always write lots of comments in code, if you read
+them, you will understand what is going on.
+
+Let's break down one important part of scraping.
+
+Q. How we can recognize the HTML structure of a website ?
+A. There are two ways to do that. One is to use the browser's developer tools manually and the other is
+to use the colly package's InspectElement function.
+
+I like the first one, manually going through web pages and finding the HTML elements. Searching in HTML
+is kind of a skill itself, you need to know how to find the right element in HTML.
+
+Let us see how we do that ?
+    Here is video [https://youtu.be/rL07q10eo0Q]that I made for you to understand how to find right HTML
+    component of a website using query strings -- [video not available ...].
+
+Now, we can go further into the code. Let us now deal with the []Star slice that we are returning from
+the Crawl function.
+
+// main takes two arguments, month and day.
+// Parse them into integers and call Crawl function.
+// Crawl function returns a slice of stars.
+// That slice is converted into JSON object.
+// And then writes the object into a file.
+func main() {
+
+	// Printing prompt for user to input values.
+	var input string
+
+	// User should type just like this. e.g.. 12-23
+	fmt.Println("Type a date and month in (MM-DD) format:    ")
+	_, err:= fmt.Scanf("%s", &input)
+	if err != nil { // Error handling
+		            // Fatalln will print the error and exit the program.
+		log.Fatalln("Unable to read input because    ", err)
+	}
+
+	// Splitting the input into month and day.
+	sliceOfInput:= strings.Split(input, "-")
+
+	// Converting the month into integer.
+	month, err:= strconv.Atoi(sliceOfInput[0])
+	if err != nil {
+		log.Fatalln("Unable to convert month into int because    ", err)
+	}
+
+	// Converting the month into integer.
+	day, err:= strconv.Atoi(sliceOfInput[1])
+	if err != nil {
+		log.Fatalln("Unable to convert date into int because    ", err)
+	}
+
+	// Crawling the website with the given month and day and stores the data into a slice of Star.
+	// Calling Crawl func with month and day.
+	// Storing the returned slice of Star into stars variable.
+	stars:= Crawl(month, day)
+
+	// To print all the scraped data in terminal.
+	// This code part is commented out, because it is not necessary.
+	// You can play with it to show the scraped data on terminal.
+	// encoder:= json.NewEncoder(os.Stderr)
+	// encoder.SetIndent("", "   ")
+	// err:= encoder.Encode(stars)
+
+	// Converting Star struct into JSON.
+	data, err:= json.MarshalIndent(stars, "", "    ")
+	if err != nil {
+		log.Println("Error while marshalling JSON: ", err)
+	}
+
+	// Writing JSON into a file called 'mm-dd.json'.
+	// file name will vary according to the month and day.
+	// We are using os pkg to write the file.
+	fileName:= fmt.Sprintf("%s.json", input)
+		err = os.WriteFile(fmt.Sprintf("./outputs/%s", fileName), data, 0644)
+		if err != nil {
+			if err.Error() == "open ./outputs/12-23.json: no such file or directory" {
+				log.Println("Making directory named outputs.")
+				os.Mkdir("./outputs", 0755) // making a directory.
+				err:= os.WriteFile(fmt.Sprintf("./outputs/%s", fileName), data, 0644)
+				if err == nil {
+					log.Fatalln("Web is scraped and JSON file is created.")
+				}
+			}
+			log.Fatalln("Error while writing JSON: ", err)
+		}
+	log.Println("Web is scraped and JSON file is created.")
+}
+
+// This is where our code ends.
+
+    For the whole code, you can check out the IMDB-Scraper-Golang repository.
+
+3. Testing our Scraper
+Now, we run our program to test it. We will run it with the date and month of my birthday. So, I will
+run the main.go then type 12-23 and hit enter.
+
+asciicast
+Conclusion:
+
+This was a simple yet interesting scraper project. We scraped the IMDB website and got the data of all
+the celebrities who were born on the same day as me. We used colly package to scrape the website. We
+also used the os package to write the scraped data into a file.
+
+I hope you liked this blog and learned something new. If you have any inquiry or suggestions, feel free
+to tell me in the comments section or on Twitter. I will be very happy to get connected with you.
+
+
+---
+

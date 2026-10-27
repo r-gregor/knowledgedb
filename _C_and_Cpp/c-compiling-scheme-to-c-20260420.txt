@@ -1,0 +1,198 @@
+filename: c-compiling-scheme-to-c-20260420.txt
+https://matt.might.net/articles/compiling-scheme-to-c/
+
+Compiling Scheme to C with closure conversion
+
+   When compiling from a language which supports lexically-scoped closures (like Scheme) to one without
+   (like C), closure conversion turns an anonymous function expression into a pair containing function
+   pointer and a struct.
+
+   Read on to see how to compile Scheme as directly as possible into C.
+   At the bottom, you´ll find a reference compiler that´s about 1000 lines of highly-commented Scheme.
+
+   Recommended reading:
+     * [http://www.amazon.com/gp/product/0521545668?ie=UTF8&tag=mmamzn06-20&linkCode=as2&camp=1789&creative=390957&creativeASIN=0521545668]Lisp
+       in Small Pieces by Christian Queinnec. An indispensible resource on compiling Scheme/Lisp into
+       efficient C code.
+     * [http://www.amazon.com/gp/product/0131103709?ie=UTF8&tag=mmamzn06-20&linkCode=as2&camp=1789&creative=390957&creativeASIN=0131103709]The
+       C Programming Language by C´s creators, Brian Kernighan and Dennis Ritchie. An invaluable resource for
+       making sure generated code is portable.
+     * [http://gcc.gnu.org/onlinedocs/gcc-3.0.2/gcc_5.html]GCC extensions to C. If you´re willing to
+       compromise portability, GCC offers many extensions (like first-class labels) to take the performance of
+       generated code to within a hair´s width of writing raw assembly.
+
+Closure conversion
+   In C, the closest construct to lexically-scoped anonymous functions are function pointers. But,
+   anonymous functions cannot be compiled directly to function pointers, because functions must be
+   declared at the top-level, and this means that they cannot capture local environments. To turn
+   anoymous functions into function pointers, the compiler must remove all of their free variables.
+
+   Closure conversion eliminates free variables by making an explicit environment structure, and forcing
+   free variables to be accessed through that structure. Then, every procedure expects to receive that
+   environment structure as a parameter.
+
+   Given a lambda term:
+ (lambda (v1 ... vN) ... x ...)
+
+   where x is a free variable, a closure conversion algorithm might turn this into something like:
+ (closure (lambda ($env v1 ... vN) ... (env-get k x $env) ...)
+          (make-env-struct k (x1 x1) ... (xN xN)))
+
+   During efficient closure conversion, each closure expression gets an id k that is also tied to its
+   lambda term and its environment structure. In C, this closure expression might then become:
+ MakeClosure(lambda_k,alloc_env_k(x1,...xN))
+
+   and:
+struct env_k {
+	// All free variables:
+	Value x;
+	...
+};
+
+struct env_k *alloc_env_k(Value x, ...) {
+	struct env_k *t = malloc(sizeof(struct env_k));
+	t->x = x;
+	...
+	return t;
+}
+
+Value lambda_k(struct env_k *$env, Value v1, ... Value vN) {
+	...
+	$env->x
+	...
+}
+
+   Then, wherever a closure is invoked:
+ (f arg1 ... argN)
+
+   it compiles into:
+ (tmp = [compile f],
+	tmp.clo.lam(tmp.clo.env,[compile arg1],...,[compile argN]))
+
+   There are many variations on closure representation, but the one above is among the simplest
+   efficient representations. The compiler below differs only slightly, by making environments into
+   first-class values.
+
+Representing values
+   The compiler below opts for a (space-inefficient) encoding of values as tagged unions instead of a
+   representation that confiscates a few bits of every word for tag bits:
+
+enum Tag { VOID, INT, BOOLEAN, CLOSURE, CELL, ENV };
+
+typedef union Value (*Lambda)();
+
+struct Int {
+	enum Tag t;
+	int value;
+};
+
+struct Boolean {
+	enum Tag t;
+	unsigned int value;
+};
+
+struct Closure {
+	enum Tag t;
+	Lambda lam;
+	void *env;
+};
+
+struct Env {
+	enum Tag t;
+	void *env;
+};
+
+struct Cell {
+	enum Tag t;
+	union Value *addr;
+};
+
+union Value {
+	enum Tag t;
+	struct Int z;
+	struct Boolean b;
+	struct Closure clo;
+	struct Env env;
+	struct Cell cell;
+};
+
+typedef union Value Value;
+
+   Note how the first word of every struct in the union Value is a tag, and that the union itself
+   includes the tag field t. This means that, given access to a Value v, it is the reference v.t is
+   always the tag field.
+
+Creating values
+   In C, a Value cannot be declared as an expression without a name, and yet, to map Scheme code
+   directly into C, we will have create many Value-returning expressions. For instance, the Scheme value
+   3 will have become a C-level expression equivalent to the value of n after executing:
+union Value n;
+n.t = INT;
+n.z.value = 3;
+
+   A straightforward solution is to create static functions that build the structs and return them.
+   Because these functions are marked static, any reasonable compiler (like GCC) will inline them:
+
+static Value MakeClosure(Lambda lam, Value env) {
+	Value v;
+	v.clo.t = CLOSURE;
+	v.clo.lam = lam;
+	v.clo.env = env.env.env;
+	return v;
+}
+
+static Value MakeInt(int n) {
+	Value v;
+	v.z.t = INT;
+	v.z.value = n;
+	return v;
+}
+
+static Value MakeBoolean(unsigned int b) {
+	Value v;
+	v.b.t = BOOLEAN;
+	v.b.value = b;
+	return v;
+}
+
+static Value MakePrimitive(Lambda prim) {
+	Value v;
+	v.clo.t = CLOSURE;
+	v.clo.lam = prim;
+	v.clo.env = NULL;
+	return v;
+}
+
+static Value MakeEnv(void *env) {
+	Value v;
+	v.env.t = ENV;
+	v.env.env = env;
+	return v;
+}
+
+static Value NewCell(Value initialValue) {
+	Value v;
+	v.cell.t = CELL;
+	v.cell.addr = malloc(sizeof(Value));
+	*v.cell.addr = initialValue;
+	return v;
+}
+
+Code
+
+Resources
+     * [http://dynamo.iro.umontreal.ca/~gambit/wiki/index.php/Main_Page]Gambit, a full-featured Scheme-to-C
+       compiler.
+     * Christian Queinnec´s Lisp in Small Pieces:
+       [http://www.amazon.com/gp/product/0521545668/ref=as_li_ss_il?ie=UTF8&camp=1789&creative=390957&creativeASIN=0521545668&linkCode=as2&tag=mmamzn06-20][q?_encoding=UTF8&ASIN=0521545668&Format=_SL160_&ID=AsinImage&MarketPlace=US&ServiceVersion=2
+       0070822&WS=1&tag=mmamzn06-20] is the Scheme-to-C bible.
+     * The K&R language standard is particulary helpful when it comes to portably abusing unions, structs and
+       function pointers:
+       [http://www.amazon.com/gp/product/0131103709?ie=UTF8&tag=mmamzn06-20&linkCode=as2&camp=1789&creative=390957&creativeASIN=0131103709][41WV4RS0TNL._SL160_.jpg]
+     * [http://gcc.gnu.org/onlinedocs/gcc-3.0.2/gcc_5.html]GCC extensions to C. If you´re willing to
+       compromise portability, GCC offers many extensions (like first-class labels) to take the performance of
+       generated code to within a hair´s width of writing raw assembly.
+
+
+---
+

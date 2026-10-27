@@ -1,0 +1,540 @@
+filename: c-getopt-but-friendlier-20260803.txt
+https://www.unix.dog/~yosh/blog/getopt-but-friendlier.html
+
+getopt() but friendlier
+2026-07-31
+
+   I´ve been thinking a lot about "making C generally nicer to use" recently. The language has been
+   stuck in The Dark Ages in terms of both standard behavior and programmer practice for a while, and I
+   feel like only recently-with the works of people like ThePhD on the C standard or Wellons
+   blogging about his C practices-has some amount of momentum and public discussion been put on
+   improving the ergonomics of C internally and externally.(1)
+
+   I feel like there´s a happy middle ground to be found between the average 90s C codebase and the
+   Greenspun´s lament of projects like metalang99.(2) Of course, this middle ground is
+   already found in languages like Zig or Hare, but those benefit from being new and
+   unencumbered by backwards compatibility right now.(3) I want to know what can be done to make
+   ragtag old C nicer to use.
+
+   I came across [**1]fanf´s article on option parsing recently, and a bored enough me paid enough
+   attention to think about the problem space myself during the night. I´m not sure how much use this
+   might have for me, as most of the time I interact with C is contributing to other projects, but this
+   exists now, and I don´t really want to make it un-exist, so it´s here now. Gives me an excuse to
+   ramble.
+
+what makes nice CLI argument handling?
+   For me, compared to getopt(), not much, really. The biggest divergence that my opinion has from POSIX
+   is that I´d like to not have to specify flags before positional arguments, i.e. ./prog -a file should
+   be the same as ./prog file -a. Arguments would of course be treated as positional after a --, and a
+   lone - should be treated as positional since it´s a common idiom for stdin/stdout. This seems to be
+   the common consensus among Modern Terminal Programs™, so it´s nice to get up to speed.
+
+   It´s also nice when short and long option arguments have a single consistent separator. This is
+   mainly something I noticed with GNU tools, as they accept either = or the next *argv as the long
+   option argument. Not like, the end of the world, but it just feels like unnecessary leniency. It also
+   means I don´t have to use a form of string slices to separate an option from its argument, which
+   keeps things slightly simpler.(4) There´s also a common practice for short options to allow no
+   separator, i.e. -Wall -Wextra -Wpedantic. I´m not personally a fan of this, since with sufficiently
+   many options it might conflate flag chaining with an argument, but others seem to like it, and it
+   made the API for what I wrote a bit more consistent, so I decided to keep it.
+
+what makes a nice argument parser?
+   If the language is ripe for it, I find a mostly-declarative argument parser to be quite nice.
+   They can coalesce long opts, short opts, help text, whatever in one neat bundle. I was actually
+   initially wanting to make one of these for C a few months ago. Alas, C is not a language ripe for
+   declarative-style compositions, and any time I worked my brain on the macro hell that´d emerge from
+   such a library, I´d shunt the project idea to the archives for a few more weeks.
+
+   fanf´s article (and the rust crate it derives from) opted for an iterator-esque immediate
+   parser. Duh! It´s the pretty obvious approach for an imperative language. Not sure why I didn´t view
+   it from that angle before. If you ask me, the Rust crate is close to the ideal form of this style of
+   argument parsing, with a loop that iterates over argv and matches against argument types, leaving the
+   rest of the logic to the programmer. Without pattern matching, it means using some ugly if blocks,
+   but that´s the cost of C.
+
+implementation
+   I´m personally a fan of modeling iterators in C after C#/Rust iterators as opposed to C++
+   iterators. Mainly since the latter´s use in a for loop doesn´t translate to C too nicely, requiring
+   bundling the value in the iterator state. In any case, iterators require keeping some kind of state
+   somewhere for knowing where you are. fanf uses global variables for this at the cost of not being
+   re-entrant, but in line with the "object-y" nature of iterators in general, I find it more idiomatic
+   to shunt state to a struct that gets passed to the next() function:
+
+typedef struct {
+	bool posonly;
+	int short_idx;
+	char **vec;
+} ArgCtx;
+
+static ArgCtx
+
+arg_init(char **argv) {
+	return (ArgCtx) {
+		.posonly = false,
+		.short_idx = 0,
+		.vec = argv[0] == NULL ? argv : argv + 1,
+	};
+}
+
+static Arg
+
+arg_next(ArgCtx *ctx) {
+	// ...
+}
+
+   The iterator keeps extra state for whether the end of options mark was found (posonly) and the
+   current index in a chain of short options (short_idx). The implementation of arg_next() is roughly
+   similar to that of fnaf´s, just that I use a tagged union for arguments:
+
+typedef struct {
+	ArgType type;
+	union {
+		char chr;
+		char *str;
+	};
+} Arg;
+
+   If the argument is short, look at .chr. Otherwise, look at .str. There´s some macros for helping
+   achieve the desired loop feel, and there´s an arg_err() function that works just like fanf´s:
+
+#include "arg.h"
+
+static char *USAGE_STR ="./a.out [-a] [-s/--string STR] [-t/--test] ARG...;
+
+int main(int argc, char **argv) {
+	if (argc <= 1) {
+		printf(stdout, "usage: %s\n", USAGE_STR);
+		return 0;
+	}
+
+	ArgCtx argctx = arg_init(argv);
+	Arg arg;
+
+	while (!ARG_DONE(arg = arg_next(&argctx))) {
+		if (ARG_SHORT(arg, 'a')) {
+			printf("Option -a passed\n");
+		} else if (ARG_SHORT(arg, 's') || ARG_LONG(arg, "string")) {
+			char *s = arg_valnext(&argctx);
+			if (s == NULL) {
+				arg_err(arg, "requires argument.", USAGE_STR);
+			}
+			printf("Option -s/--string is: %s\n", s);
+		} else if (ARG_LONG(arg, "test") || ARG_SHORT(arg, 't')) {
+			printf("Option --test or -t passed!\n");
+		} else if (ARG_POS(arg)) {
+			printf("Positional argument: %s\n", arg.str);
+		} else {
+			arg_err(arg, "unknown option.", USAGE_STR);
+		}
+	}
+}
+
+conclusion
+   There´s a lot of things you tend to learn about once, use as-is, then get comfortable enough to not
+   think about it at a deeper level. getopt() was one of those for me, since for the longest time when I
+   was writing C, I wanted to "stick to established conventions and standards". It´s neat to look at
+   wheels again every once in a while, as I´ve recently been doing with this half a century old
+   language.
+
+   I don´t really write C much nowadays, though I find it tends to be a comfort language for me, almost?
+   Even though I am aware of its unergonomic design, find other languages nicer to write, and don´t have
+   much use for it in day-to-day programming, I still just find myself coming back to it from time to
+   time. I´m not sure why. I talked with some friends about it, and they concurred a similar "comfort
+   language" feeling with JavaScript-a language also known to be unergonomic and footgun-y. Curious!
+
+   Anyway, that´s really all. Not sure how much use I´ll get out of this, but for any others who happen
+   to stop by, you can find the full code as a single-header file in this [**2]fancy new repo I made for
+   snippets. It´s C23 since it uses bool as a keyword, but it can easily be made C99 by adding an
+   #include <stdbool.h> before it. Your call.
+   _____________________________________________________________________________________________________
+
+    1. I´ve been realizing from using many other languages that most of the "footguns" C has can just be
+       attributed to its very poor ergonomics or legacy standard practice. It´s an uphill battle to use
+       an allocator interface that helps organize lifetimes as opposed to just malloc()ing and free()ing
+       everything. It´s an uphill battle to use data + len strings instead of NUL-terminated ones.
+       Most of the uphill battles are due to interacting with old libraries. There´s more reasons, of
+       course, but expanding upon them is certainly out of the scope of this post.
+
+    2. Not to say that ML99 is a bad project-far from it! I used datatype99 and interface99 for
+       prototyping a little ffmpeg tool that couldn´t be done with the command line. It was quite fun!
+       And I can see its use! But without pre-compiled headers and other chicanery, compile times were a
+       little meh, I found I wasn´t using most of its true power, and clangd didn´t like some of it.
+
+    3. I hesitate to include Rust in this list, since it´s a more ML-influenced language with
+       fundamentally different semantics compared to zig or hare. I do greatly enjoy using it, though.
+
+    4. Yes, I am a fan of using data+len strings/slices just about everywhere in C, but introducing them
+       when handling argc/argv just felt a bit over-the-top. Keeping the design simple by just managing
+       the strings as-is seemed more preferable, especially since you only really have one minor
+       concession without slices. 
+
+
+---
+[**1]
+https://dotat.at/@/2024-11-06-getopt.html
+
+getopt() but smaller
+2024-11-06
+
+   The other day I learned about the Rust crate lexopt which describes itself as,
+     A pathologically simple command line argument parser.
+
+     Most argument parsers are declarative: you tell them what to parse, and they do it. This one
+     provides you with a stream of options and values and lets you figure out the rest.
+
+   For "pathologically simple" I still rather like getopt(3) despite its lack of support for long
+   options. Aaron S Cohen wrote getopt in around 1979, and it was released into the public
+   domain by AT&T in 1985. A very useful 50-ish lines of code! It still has almost everything required
+   by POSIX nearly four decades later.
+
+   But the description of lexopt made me think getopt() could be simpler. The insight is that the string
+   of options that you have to pass to getopt() is redundant with respect to the code that deals with
+   the return values from getopt(). What if you just get rid of the options string?
+
+   I thought I would try it. Turns out, not much is lost in getting rid of the options string, and a few
+   things are gained.
+
+   My new code is half the size of getopt(), and has more functionality. I´m going to show how how this
+   was done, because it´s short (ish), not because it is interesting. Then I´ll try to tease out a
+   lesson or two.
+
+Examples
+   A typical getopt() man page example starts,
+
+while ((ch = getopt(argc, argv, "bf:")) != -1) {
+	switch (ch) {
+
+   It´s one of the more ugly loop conditions that commonly occurs in C. There´s a minor footgun if you
+   declare char ch on systems where char is unsigned, but that´s rare. There´s also an issue that
+   getopt() has generally been vague about how to restart the loop - it doesn´t expose all the necessary
+   internal state.
+
+   My alternative function for getting an option from argv is called argv_opt(). Its loop header looks
+   like,
+
+for (char opt = argv_opt(argv); opt; opt = argv_opt(NULL)) {
+	switch (opt) {
+
+   A slightly longer but more basic idiom. A straightforward way to restart the loop. A more sensible
+   return value when the loop is finished: '\0' cannot be a valid option whereas -1 could (in the 1990s)
+   have been 'ÿ'.
+
+   When an option needs a value, getopt() sets optarg for you:
+
+case 'f':
+	file = optarg;
+	break;
+
+   However argv_opt() doesn´t know if an option needs a value. You have to tell it by calling argv_val()
+   to consume the value - and you might find out it is missing:
+
+case('f'):
+	file = argv_val();
+	if(file == NULL)
+		argv_err(usage, opt, "requires an argument");
+	break;
+
+   By default, getopt() prints error messages for you, but you still have to handle the error. The usual
+   way is to write a usage() function, or write it inline like,
+
+case '?':
+	fprintf(stderr,
+			"usage: example [-b] [-f file] args...");
+	exit(1);
+
+   My functions include a small helper that prints the message and exits.
+
+static const char *usage =
+	"example [-b] [-f file] args...";
+
+// ... for ... switch ...
+
+	case('h'):
+		argv_err(usage, opt, NULL);
+	default:
+		argv_err(usage, opt, "is not recognized");
+
+   If options can conflict or if they are required, then argv_err() helps to keep error messages
+   consistent.
+
+if(aflag && bflag)
+	argv_err(usage, 'a', "conflicts with '-b'");
+if(inplace && !file)
+	argv_err(usage, 'i', "requires '-f'");
+
+Implementation
+   The code is slightly more than half the length of trad getopt(). I decided it´s simpler not to try to
+   be re-entrant.
+
+static char **vec;
+static int arg, pos;
+
+char argv_opt(char *argv[]) {
+
+   When (re-)starting the loop we normally want to skip the program name, but not if that would make us
+   overrun the end of argv.
+
+if(argv != NULL) {
+	vec = argv;
+	arg = vec[0] ? 1 : 0;
+	pos = 0;
+}
+
+   The pos variable keeps track of where we were inside a cluster of options like -ab. Move to the next
+   argument when we reach the end of the cluster.
+
+if(pos > 0 && vec[arg][pos + 1] == '\0') {
+	arg++;
+	pos = 0;
+}
+
+   When we reach the end of the options, pos is set to -1. An argument that doesn´t start with - ends
+   the options. An argument that is just "-" often indicates stdin, and needs to be returned as a
+   non-option argument.
+
+if(pos < 0 || vec[arg] == NULL || vec[arg][0] != '-' || vec[arg][1] == '\0') {
+	pos = -1;
+	return('\0');
+}
+
+   An argument "--" indicates the end of the options and is skipped.
+
+if(vec[arg][1] == '-' && vec[arg][2] == '\0') {
+	arg++;
+	pos = -1;
+	return('\0');
+}
+
+   The previous two clauses are basically the same as the first half-dozen lines of original getopt().
+   Most of the rest of the code in getopt() is scanning the options string. But we don´t have that so we
+   can just bump to the next option.
+
+   This is where most of the code size reduction happens.
+
+	return(vec[arg][++pos]);
+}
+
+   Option values are a little more flavoursome than I showed in the examples: there´s also a function
+   for getting an optional value, for things like sed -i inplace editing. Optional values require a GNU
+   extension for getopt().
+
+char *argv_optval(void) {
+	char *val = &vec[arg][pos + 1];
+	arg++;
+	pos = 0;
+	return(val);
+}
+
+   To get a mandatory option value, look for an optional value, or if it isn´t present, use the next
+   argument (taking care not to overrun).
+
+char *argv_val(void) {
+	char *val = (pos > 0) ? argv_optval() : "";
+	return(val[0] ? val : vec[arg] ? vec[arg++] : NULL);
+}
+
+   There´s not much to the error handler:
+
+noreturn void
+
+argv_err(const char *usage, char opt, const char *err) {
+	if(err) fprintf(stderr, "option '-%c' %s\n", opt, err);
+	fprintf(err ? stderr : stdout, "usage: %s\n", usage);
+	exit(err ? 1 : 0);
+}
+
+   That´s all!
+
+   When I understood the idea of lexopt, I thought that getting rid of getopt()s semi-declarative option
+   string might simplify things, but I was surprised by how much code could be deleted. There wasn´t
+   much code to start with!
+
+   This experience reminds me of the end-to-end argument, which says,
+
+     functions placed at low levels of a system may be redundant or of little value when compared with
+     the cost of providing them at that low level.
+
+   That is straightforwardly the thing that motivated this hack. And when I was refining argv_val() and
+   argv_err() I repeatedly found that there was already logic in the caller that made features in the
+   lower-level code redundant. Making the API less redundant meant there was less need for communication
+   across the API boundary, so removing the redundant features caused cascading simplifications.
+
+   It´s interesting that most successors to getopt() have aimed to be more declarative, but what
+   argv_opt() does is remove its most declarative feature. The name lexopt refers to parsing technology,
+   treating the job of reading the command line as lexical analysis. The declarative approach adds a
+   metalanguage that describes the command line language, and a metalanguage interpreter that runs the
+   declarative description in order to interpret the command line. Two layers of little languages!
+   That´s a lot of machinery for such a small task. No wonder removing the metalayer is simpler, because
+   the lower layer isn´t (usually) complicated enough to justify so much machinery.
+
+   I didn´t look at the lexopt implementation until after I wrote argv_opt(). It´s a lot bigger than
+   I expected, but as well as long options, I´m pretty sure it handles things I haven´t even thought of
+   yet. (Good Rust code is like that.) But I suppose lexopt is comparing itself to clap, which is
+   notorious for turning simple command line utilities into monsters
+
+   Anyway, you can use the code in this article under 0BSD or MIT-0 licences, but I recommend
+   you use something better instead - not C, or if you must C, standard getopt().
+
+
+---
+[**2]
+https://git.unix.dog/yosh/snippets/src/branch/main/c/arg_get
+
+
+[arg_get.h]
+// 0BSD / MIT-0 / Public Domain - choose one
+
+#include <string.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef enum {
+	ArgType_Short,
+	ArgType_Long,
+	ArgType_Positional,
+	ArgType_Done,
+} ArgType;
+
+typedef struct {
+	ArgType type;
+	union {
+		char chr;
+		char *str;
+	};
+} Arg;
+
+#define ARG_SHORT(arg, c) ((arg).type == ArgType_Short && (arg).chr == c)
+#define ARG_LONG(arg, s) ((arg).type == ArgType_Long && !strcmp((arg).str, s))
+#define ARG_POS(arg) ((arg).type == ArgType_Positional)
+#define ARG_DONE(arg) ((arg).type == ArgType_Done)
+
+typedef struct {
+	bool posonly;
+	int short_idx;
+	char **vec;
+} ArgCtx;
+
+static void
+arg_err(Arg arg, const char *err, const char *usage) {
+	if (err != NULL) {
+		switch (arg.type) {
+		case ArgType_Short: fprintf(stderr, "option '-%c': %s\n", arg.chr, err); break;
+		case ArgType_Long: fprintf(stderr, "option '--%s': %s\n", arg.str, err); break;
+		case ArgType_Positional: fprintf(stderr, "argument '%s': %s\n", arg.str, err); break;
+		case ArgType_Done: fprintf(stderr, "unexpected end of arguments\n"); break;
+		}
+	}
+	fprintf(err != NULL ? stderr : stdout, "usage: %s\n", usage);
+	exit(err != NULL ? 1 : 0);
+}
+
+static ArgCtx
+arg_init(char **argv) {
+	return (ArgCtx) {
+		.posonly = false,
+		.short_idx = 0,
+		.vec = argv[0] == NULL ? argv : argv + 1,
+	};
+}
+
+// get the next argument as a char*. if in a short flag chain, the rest of the
+// chain is the value. this is used for "arguments" of a flag.
+// returns NULL for end of arguments
+static char *
+arg_valnext(ArgCtx *ctx) {
+	if (ctx->short_idx > 0) {
+		int a = ctx->short_idx;
+		ctx->short_idx = 0;
+		return *ctx->vec++ + a;
+	}
+	if (*ctx->vec == NULL) {
+		return NULL;
+	}
+	return *ctx->vec++;
+}
+
+// get the next "proper argument", i.e. flag/positional
+static Arg
+arg_next(ArgCtx *ctx) {
+	start:
+	if (*ctx->vec == NULL) {
+		return (Arg){ .type = ArgType_Done };
+	}
+
+	if (ctx->posonly) {
+		return (Arg){ .type = ArgType_Positional, .str = *ctx->vec++ };
+	}
+
+	// short option init / chain
+	if (ctx->short_idx > 0) {
+		Arg ret = (Arg){ .type = ArgType_Short, .chr = (*ctx->vec)[ctx->short_idx++] };
+		if ((*ctx->vec)[ctx->short_idx] == '\0') {
+			ctx->vec += 1;
+			ctx->short_idx = 0;
+		}
+		return ret;
+	}
+
+	if (**ctx->vec == '-') {
+		if ((*ctx->vec)[1] == '\0') {
+			// "-" alone (common alias for stdin)
+			return (Arg){ .type = ArgType_Positional, .str = *ctx->vec++ };
+		}
+		if ((*ctx->vec)[1] == '-') {
+			if ((*ctx->vec)[2] == '\0') {
+				// -- (end of options), parse the next thing
+				ctx->posonly = true;
+				ctx->vec += 1;
+				goto start;
+			}
+			// treat anything else starting with -- as long option
+			char *a = *ctx->vec + 2;
+			ctx->vec += 1;
+			return (Arg){ .type = ArgType_Long, .str = a };
+		}
+		// misc. short option
+		ctx->short_idx = 1;
+		goto start;
+	}
+
+	return (Arg){ .type = ArgType_Positional, .str = *ctx->vec++ };
+}
+
+[main.c]
+#include <stdio.h>
+#include "arg_get.h"
+
+static char *USAGE_STR =
+	"./a.out [-a] [-s/--string STR] [-t/--test] ARG..."
+	;
+
+int main(int argc, char **argv) {
+	if (argc <= 1) {
+		printf("usage: %s\n", USAGE_STR);
+		return 1;
+	}
+	ArgCtx argctx = arg_init(argv);
+	Arg arg;
+	while (!ARG_DONE(arg = arg_next(&argctx))) {
+		if (ARG_SHORT(arg, 'a')) {
+			printf("Option -a passed\n");
+		} else if (ARG_SHORT(arg, 's') || ARG_LONG(arg, "string")) {
+			char *s = arg_valnext(&argctx);
+			if (s == NULL) {
+				arg_err(arg, "requires argument.", USAGE_STR);
+			}
+			printf("Option -s/--string is: %s\n", s);
+		} else if (ARG_LONG(arg, "test") || ARG_SHORT(arg, 't')) {
+			printf("Option --test or -t passed!\n");
+		} else if (ARG_POS(arg)) {
+			printf("Positional argument: %s\n", arg.str);
+		} else {
+			arg_err(arg, "unknown option.", USAGE_STR);
+		}
+	}
+}
+
+
+---
+

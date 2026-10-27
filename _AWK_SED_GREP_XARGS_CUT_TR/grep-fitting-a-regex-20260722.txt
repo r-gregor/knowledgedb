@@ -1,0 +1,173 @@
+filename: grep-fitting-a-regex-20260722.txt
+https://www.johndcook.com/blog/2026/07/19/fitting-a-regex/
+
+Fitting a regular expression to a list of words
+19 July 2026
+
+   Suppose you want to search for a list of words. If you´re using grep, you can add the -f flag provide
+   a file of regular expressions, and you can add the -F to tell it that the regular expressions are in
+   fact just words. I did something like this
+   [**1][https://www.johndcook.com/blog/2026/07/17/regex-speed-error/]a couple days ago when searching for
+   diagnosis codes.
+$> grep -w -F -o -f icd10codes.txt notes.txt
+
+   Now you might want to combine your list of words into a singular regular expression, for efficiency
+   or possibly for some other reason. Apparently ripgrep does this because when I tried replacing grep
+   with ripgrep in the command above I got an error saying "Compiled regex exceeds size limit of
+   104857600 bytes."
+
+Beating brute force
+   Say you wanted to search for the strings "bluecross", "blueshield", and "bluey". You could simply
+   form the brute force regular expression
+bluecross|blueshied|bluey
+
+   but that doesn´t take advantage of the fact that all three strings begin with "blue." A smaller
+   regular expression would be
+blue(shield|cross|y)
+
+   Finding the shortest regular expression that matches a list of words is a hard problem, but finding a
+   regular expression that´s shorter than brute force is not. The Python package
+   [https://github.com/ermanh/trieregex]trieregex will do this. According to the documentation, trieregex
+   creates efficient regular expressions (regexes) by storing a list of words in a trie structure, and
+   translating the trie into a more compact pattern.
+
+   Let´s try our blue example with trieregex.
+import re
+from trieregex import TrieRegEx as TRE
+
+words = ['bluecross', 'blueshield', 'bluey']
+tre = TRE(*words)
+print(tre.regex())
+
+   This produces the same regular expression as above, except it adds ?: to make the parentheses
+   non-capturing.
+blue(?:shield|cross|y)
+
+Prefixes versus suffixes
+   The library builds a trie data structure using common prefixes. That works well in the example above,
+   but the result is disappointing when we have common suffixes rather than common prefixes. The
+   following code
+words = ['javascript', 'typescript']
+tre = TRE(*words)
+print(tre.regex())
+
+   produces the regular expression
+(?:javascript|typescript)
+
+   which is no better than brute force, whereas we might have hoped for
+(?:java|type)script
+
+HCPCS examples
+   As mentioned at the top of the post, ripgrep failed to search on a list of ICD-10 codes. The list of
+   HCPCS codes is about 10x smaller, and more compressible. Ripgrep was able to fit all HCPCS codes into
+   a single regex and was able to search the test file much faster than grep. The command
+$> grep -w -F -o -f hcpcs.txt notes.txt
+
+   took 73.426 seconds to execute, while the command
+
+$> rg -w -F -o -f hcpsc.txt notes.txt
+
+   took 0.078 seconds, three orders of magnitude faster.
+
+   The following code will read a list of HCPCS codes from a file and create a regular expression.
+tre = TRE()
+with open('hcpcs.txt', 'r') as file:
+	for line in file:
+		tre.add(line.strip())
+print(len(tre.regex()))
+
+   This shows that the resulting regular expression has 17,198 characters. The file of codes has 8725
+   five-character codes, so the regex compresses the code characters by roughly a ratio of 5 to 2.
+
+
+---
+[**1]
+https://www.johndcook.com/blog/2026/07/17/regex-speed-error/
+
+Regular expression speed and error rates
+17 July 2026
+
+Seven years ago I wrote a post about regular expressions to match diagnosis codes. I wanted to revisit
+that post looking at speed and error rates.
+
+Regular expressions usually do not exactly match what you´re looking for and nothing else. They have
+error false positives and false negatives. But they also have advantages, and context determines whether
+the advantages make the error rates tolerable.
+
+The post mentioned above gave the following regular expression for ICD-10 diagnosis codes.
+
+    [A-TV-Z][0-9][0-9AB]\.?[0-9A-TV-Z]{0,4}
+
+As cryptic as this may look at first glance, it´s straight-forward to interpret. It says that an
+ICD-10 code
+ - Begins with a capital letter, excluding U
+ - Followed by a digit
+ - Followed by a digit or A or B
+ - Optionally followed by a period
+ - Followed by up to 4 digits or capital letters, excluding U.
+
+Speed
+Now suppose you want to scan a text document for ICD-10 codes. One approach would be to use the
+regex above. Another would be to compare every alphanumeric sequence in the document to a list of
+ICD-10. Currently this list has 74,719 codes.
+
+I tested both approaches on a 800kb text file. The regex search
+
+$> egrep -o '[A-TV-Z][0-9][0-9AB]\.?[0-9A-TV-Z]{0,4}' notes.txt
+
+took 18 milliseconds. Searching against the list of codes
+
+$> grep -w -F -o -f icd10codes.txt notes.txt
+
+took 386 seconds, about six and a half minutes or five orders of magnitude longer.
+
+Error rates
+
+The regex
+    [A-TV-Z][0-9][0-9AB]\.?[0-9A-TV-Z]{0,4}
+
+had a false negative rate of zero at the time it was written. I tested the regex against the current
+list of codes with the following command.
+
+$> egrep -v '[A-TV-Z][0-9][0-9AB]\.?[0-9A-TV-Z]{0,4}' icd10codes.txt
+
+The -v flag reverses the sense of the search, reporting lines that do not match the regular expression. This
+returned three matches: U070, U071, and U099. So 3 out of 74,719 valid ICD-10 codes were reported as invalid.
+
+Codes beginning with U are designated for provisional/emergency/special purposes, but these three have
+become essentially permanent. A change in the application of the ICD-10 standard caused an error in the
+regular expression.
+
+But the change would also have caused an error in code that did an exhaustive search against the list of
+ICD-10 codes at the time. In fact, every new code not starting with U would also be reported in error. So
+the regex is actually more future-proof than an exhaustive search. Presumably the simplified regex
+
+    [A-Z][0-9][0-9AB]\.?[0-9A-Z]{0,4}
+
+will remain valid for the foreseeable future.
+
+We´ve looked at false negatives. What about false positives? That depends on context. The false positive
+rate when searching medical notes is low: a word matching the regex above in a medical record is most
+likely an ICD-10 code. But the number of conceivable false positives is enormous. If you were searching a
+file of randomly generated alphanumeric text, the regex matches would overwhelmingly be false positives [1].
+
+The number of strings matching
+    [A-Z][0-9][0-9AB]\.?[0-9A-Z]{0,4}
+
+would be
+
+26 × 10 × 12 × (1 + 36 + 36^2 + 36^3 + 36^4) = 5,390,127,600.
+
+Out of over five billion strings matching the regular expression, only around 75,000 are valid ICD-10
+codes. So a naive theoretical calculation would say the false positive rate is 99.9986%, whereas in
+practice the false positive rate is very low, though there´s no way to say a priori exactly how low.
+
+[1] You could argue that all positives would be false positives in this context because you´re looking
+at noise. You couldn´t find an ICD code, though you could find a string of characters that coincides
+with an ICD code. That may sound like a pedantic distinction, but it matters in the context of evaluating
+deidentification quality: you want to find instances of PHI, not instances of strings that match the
+character pattern of PHI.
+
+
+---
+

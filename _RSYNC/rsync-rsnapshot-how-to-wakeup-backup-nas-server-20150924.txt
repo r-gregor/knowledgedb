@@ -1,0 +1,359 @@
+filename: rsync-rsnapshot_how-to-wakeup-backup-nas-server_20150924.txt
+http://www.cyberciti.biz/faq/how-to-wakeup-backup-nas-server-and-mirror-files-using-rsync-in-linux/
+
+How To Wakeup Backup Nas Server and Mirror Files Using Rsync in Linux
+
+I've a critical data stored on my small home server. I backup my Desktop, Laptop and a remote VPS server
+to my home nas server powered by Debian Linux using rsnapshot backup utility. In the event that my main
+nas server has a hardware (hard disk failure) problem, having mirrored files provides some sort of peace
+of mind. How do I mirror /backups/personal (total 100GB and growing everyday) to a secondary nas Linux
+server located in my network?
+
+You can easily sync your files from main nas server to secondary nas server using the following techniques:
+Sends 'magic packets' to wake-on-lan (WOL) enabled ethernet adapters and secondary nas server to wake up
+(switch on server). You need to enable the WOL function in the BIOS and need to run 'ethtool -s eth0
+wol g' command on nas02 (see below).
+Start mirroring using rsync command.
+When job done shutdown the secondary backup nas server (nas02) using shutdown command
+In this quick tutorial you will learn how to setup file mirroring using rsync in Debian or Ubuntu Linux.
+
+Our sample setup
+
+------------+		+------------
+nas01	    |		|nas02
+main	    | <----->	|backup
+server	    |		|server
+192.168.1.10|		|192.168.1.11
+------------+		+-------------
+In this setup,
+
+nas01 : This box is powered by Debian Linux. This server is always powered on and it makes hourly,
+daily, weekly, and monthly backups using rsnapshot command line utility. You must setup rsnapshot on
+the nas01 server.
+nas02 : Our secondary backup server. You can run Linux+BTRFS or FreeBSD+ZFS or any other Unix of your
+choice. I'm simply going to use Debian Linux for demo purpose.
+Prerequisites
+Setup the rsnapshot backup server on nas01 server.
+Update /etc/hosts file as follows on both nas01 and nas02 servers:
+192.168.1.10	nas01
+192.168.1.11	nas02
+Setup the ssh public key based and password less authentication between nas01 and nas02 servers.
+Turn on nas02 server. Go to BIOS. Find power management option. You will have a clear, intuitive option
+labelled "Wake On LAN". Turn it on. Next, boot the nas02 server and edit the /etc/network/interfaces
+file. Update it as follows:
+## eth0 config with wol setting
+auto eth0
+allow-hotplug eth0
+iface eth0 inet static
+    address 192.168.1.11
+    netmask 255.255.255.0
+    network 192.168.1.0
+    gateway 192.168.1.254
+    up /sbin/ethtool -s eth0 wol g
+nas01 setup (all commands must run on nas01)
+
+Okay, let us get started with our project.
+
+Step 1: /root/bin/wakeup.nas02
+Create a shell script called /root/bin/wakeup.nas02:
+
+#!/bin/bash
+# wakeup.nas02 : Wake up nas02 server
+# Author : www.cyberciti.biz under GPL v.2.x+
+# ------------------------------------------
+# Secondary Server Name/IP address
+server="nas02"
+
+# Secondary Server Mac
+servermac="00:40:63:ff:2d:e6"
+
+# See if the server is alive or sleeping, if sleeping send magic packet to wake the server XD
+ping -W 1 -c4 -q $server >&/dev/null
+[ $? -eq 0 ] || /usr/bin/wakeonlan $servermac >&/dev/null
+
+Step 2: /root/bin/mirror.nas02
+Create another shell script called /root/bin/mirror.nas02:
+
+#!/bin/bash
+# mirror.nas02 : File mirroring script. Also shutdown the nas02 server when done.
+# Author : www.cyberciti.biz under GPL v.2.x+
+# ------------------------------------------
+# Secondary server name or IP address
+t="nas02"
+
+# Backup source on nas01
+# Must be same as 'snapshot_root' set in rsnapshot.conf
+s="/backups/personal"
+
+# Secondary nas02 server backup directory
+# I am using BTRFS on nas02 but you can use FreeBSD+ZFS too
+d="root@${t}:/backups/"
+
+# Path
+_rsync="/usr/bin/rsync"
+_ssh="/usr/bin/ssh"
+
+# Rsync args
+_args='-a -H --progress --delete --numeric-ids --relative --delete-excluded --rsh=/usr/bin/ssh'
+
+# Is the nas02 server alive? If so start mirroring from nas01:$s ===> nas02:$d
+# And when done shutdown the secondary nas02 server to saver power/electricity bills.
+ping -W 1 -c4 -q $t >&/dev/null
+[ $? -eq 0 ] && { $_rsync $_args ${s} ${d} && $_ssh root@${t} "sync && sync && /sbin/shutdown -h 0"; }
+
+Step 3: Update /etc/rsnapshot.conf file
+The default rsnapshot configuration file is located at /etc/rsnapshot.conf. Edit the file and update
+the following two directives:
+
+
+# Specify the path to a script to run right before rsnapshot syncs files
+# Wake up the nas02 server from sleep i.e. power on the server
+cmd_preexec	/root/bin/wakeup.nas02
+
+# Specify the path to a script to run right after rsnapshot syncs files
+# Mirror all nas01 files using this script to nas02 and shutdown nas02 server
+# when done.
+cmd_postexec	/root/bin/mirror.nas02
+
+Save and close the file. Run syntax check the config file:
+# rsnapshot configtest
+
+Sample outputs:
+
+Syntax OK
+Step 4: Generate an SSH key on nas01 server
+Run the following command on nas01 server to generate an SSH key:
+# ssh-keygen
+
+Press enter key to accept default and skip password. Next, copy the /root/.ssh/id_rsa.pub file to nas02
+server, run:
+# ssh-copy-id root@nas02
+
+Verify that you can login without passwords:
+# ssh root@nas02
+# ssh root@nas02 date
+# ssh root@nas02 uptime
+
+Now, we have everything configured and ready to test. See "HowTo: Setup SSH Keys on a Linux / Unix System"
+for more info.
+
+Step 5: Test it
+
+Type the following command on nas01:
+# rsnapshot -vvv hourly
+
+
+Fig.01: File mirroring in progress
+Fig.01: File mirroring in progress
+
+You need to Wait until all files has been synced over by our script. Next, verify that job completed
+successfully:
+# tail -f /var/log/messages
+# tail -f /var/log/rsnapshot
+
+Sample outputs:
+Sep 16 23:07:21 nas01 rsnapshot[2531]: /usr/bin/rsnapshot -vvv hourly: completed successfully
+Sep 17 02:15:27 nas01 rsnapshot[3686]: /usr/bin/rsnapshot -vvv hourly: completed successfully
+Step 6: Setup cronjob on nas01
+
+Cron job are used to schedule commands to be executed periodically. You can setup commands or scripts,
+which will repeatedly run at a set time. I'm going to setup a cronjob to sync my files automatically to
+nas02. Here is a sample /etc/cron.d/rsnapshot file:
+
+# This is a sample cron file for rsnapshot.
+# The values used correspond to the examples in /etc/rsnapshot.conf.
+# There you can also set the backup points and many other things.
+#
+# Feel free to adapt it to your needs.
+
+0 */4	* * *		root	/usr/bin/rsnapshot hourly
+30 3	* * *		root	/usr/bin/rsnapshot daily
+0  3	* * 1		root	/usr/bin/rsnapshot weekly
+30 2	1 * *		root	/usr/bin/rsnapshot monthly
+
+
+
+---
+http://www.cyberciti.biz/faq/linux-rsnapshot-backup-howto/
+
+Debian / Ubuntu Linux Install and Configure Remote Filesystem Snapshot with rsnapshot Incremental
+Backup Utility
+by VIVEK GITE on FEBRUARY 11, 2008
+in BACKUP & RECOVERY, DEBIAN / UBUNTU, FILE SYSTEM, HARDWARE, LINUX, NETWORKING, PACKAGE MANAGEMENT,
+SOLARIS-UNIX, SUSE, UNIX
+
+I'd like to configure my Debian box to backup two remote servers using rsnapshot software. It should
+make incremental snapshots of local and remote filesystems for any number of machines on 2nd hard disk
+located at /disk1 ( /dev/sdb2).
+
+rsnapshot is perfect open source solution for making backups on local system. It supports both remote
+and local systems. From the man page:
+
+rsnapshot saves much more disk space than you might imagine. The amount of space required is roughly the
+size of one full backup, plus a copy of each additional file that is changed. rsnapshot makes extensive
+use of hard links, so if the file doesn’t change, the next snapshot is simply a hard link to the exact
+same file. The following instructions are compatible with both Debian and Ubuntu Linux.
+
+Required software / setup on local backup system
+
+rsnapshot
+rsync
+ssh client
+2nd hard disk ( RAID array is suggested) - you can also use primary hard disk
+Password less login configured using ssh keys
+/disk1/backup - Backup directory
+/disk1/backup/server1 - Backup directory for remote server called server1
+/disk1/backup/server2 - Backup directory for remote server called server2
+/disk1/backup/localhost - Backup directory for local server
+Required software on remote server
+
+OpenSSH sshd server
+Password less login configured using ssh keys
+Step #1: Install rsync and rsnapshot software
+
+Use apt-get command, enter:
+$ sudo apt-get install rsync rsnapshot
+
+Step #2: Configure passwordless login / public key based login
+
+Type the following command
+# ssh-keygen -t rsa
+# scp .ssh/id_rsa.pub root@remotebox1.server.com:.ssh/authorized_keys2
+# scp .ssh/id_rsa.pub root@remotebox2.server.com:.ssh/authorized_keys2
+
+See how to configure RSA / DSA SSH public key based authentication.
+
+Step #3: Configure rsnapshot utility
+
+The configuration file is located at /etc/rsnapshot.conf. The configuration file requires tabs between
+elements and all drectories require a trailing slash. Just open config file using a text editor such as
+vi or gedit:
+# vi /etc/rsnapshot.conf
+
+OR
+$ sudo vi /etc/rsnapshot.conf
+
+Set snapshots root directory:
+
+snapshot_root	/disk1/backup/
+Note you must separate snapshot_root and /disk1/ by a [tab] key i.e. type snapshot_root hit [tab] key
+once and type /disk1/backup/. All snapshots will be stored under this root directory (/disk1/backup/).
+
+Configure backup policy
+You can make hourly, daily, weekly or monthly snapshots of local and remote systems. To make a snapshot
+every four hours (six times a day) and keep a second set, which are taken once a day, and stored for a
+seven days, enter:
+
+interval    hourly  6
+interval    daily   7
+Feel free to adapt configuration as per your backup needs.
+
+Specify local and remote backup directories
+Find out comments that read as follows:
+
+###############################
+### BACKUP POINTS / SCRIPTS ###
+###############################
+You need to comment out / delete default backup directories. To make snapshots for /home/, /etc/,
+/webroot/ directories to /disk1/backup/localhost, enter:
+
+backup	/home/	localhost/
+backup	/etc/	localhost/
+backup	/webroot/	localhost/
+To backup remote server1 /home/, /etc/, /var/spool/mail/, /webroot/ directories to /disk1/backup/server1,
+enter:
+
+backup	root@remotebox1.server.com:/home/	server1/
+backup	root@remotebox1.server.com:/etc/	server1/
+backup	root@remotebox1.server.com:/webroot/	server1/
+backup	root@remotebox1.server.com:/var/spool/mail/	server1/
+backup	root@remotebox2.server.com:/home/	server2/
+Save and close the file.
+
+Test your config file for errors
+Type the following to test your configuration file for errors
+# rsnapshot configtest
+
+Output:
+
+Syntax OK
+You can also run rsnapshot in a test mode to display its action:
+# rsnapshot -t hourly
+
+Step #4: Run rsnapshot for first time
+
+To run first time, enter:
+# rsnapshot hourly
+
+Step #5: Configure cron job
+
+Edit /etc/cron.d/rsnapshot file to setup backup snapshot job. This is a sample cron file for rsnapshot. The
+values used correspond to the examples in /etc/rsnapshot.conf. There you can also set the backup points
+and many other things. To activate this cron file you have to uncomment the lines below.
+Feel free to adapt it to your needs.
+
+0 */4	      * * *	      root    /usr/bin/rsnapshot hourly
+30 3	      * * *	      root    /usr/bin/rsnapshot daily
+0  3	      * * 1	      root    /usr/bin/rsnapshot weekly
+30 2	      1 * *	      root    /usr/bin/rsnapshot monthly
+See crontab related faq for more information about cronjob under UNIX / Linux.
+
+How do I exclude files from backup?
+
+rsnapshot allows you to set the include and exclude parameters, if enabled, simply get passed directly
+to rsync. If you have multiple include/exclude patterns, put each one on a separate line. For example,
+exclude_file /etc/rsnapshot.server1.conf
+
+Append exclude file list to /etc/rsnapshot.server1.conf:
+# vi /etc/rsnapshot.server1.conf
+
+Exclude files matching pattern from backup:
+
+var/lib/php/session/*
+/var/spool/mail/nobody/*
+cache/wp-cache-*.????
+/var/logs/apache/access.log.*
+/var/logs/apache/error.log.*
+/linux-kernel/*
+/tmp/cache/*
+/var/lib/mysql/mysql.sock*
+/tmp/php.socket-*
+/tmp/*socket*
+
+Save and close the file.
+
+How do I backup remote MySQL database?
+
+You can backup default database directory /var/lib/mysql. However, you can backup remote or local MySQL
+database with the following script:
+
+#!/bin/sh
+NOW=$(date +"%d-%m-%Y")
+# set mysql login info
+MUSER="MySQL-UserNAME"		      # Username
+MPASS="MySQL-SERVER-PASSWORD"	# Password
+MHOST="MySQL-SERVER-IP-ADDRESS"  # Server Name
+# guess binary names
+MYSQL="$(which mysql)"
+MYSQLDUMP="$(which mysqldump)"
+GZIP="$(which gzip)"
+
+# get all db names
+DBS="$($MYSQL -u $MUSER -h $MHOST -p$MPASS -Bse 'show databases')"
+for db in $DBS
+do
+ FILE=mysql-$db.$NOW-$(date +"%T").gz
+ $MYSQLDUMP -u $MUSER -h $MHOST -p$MPASS $db | $GZIP -9 > $FILE
+done
+Now add following line to /etc/rsnapshot.conf file:
+backup_script	/root/scripts/mysql.backup.sh	server1/mysql/
+
+How do I restore backup?
+
+You can simply copy back file using regular scp / rsync command. In this example, restore all *.html
+file to remote web server called www-03.example.com:
+
+
+rsync -av *.html user@www-03.example.com:/home/httpd/example/html/
+
+**************************************************************************************************************

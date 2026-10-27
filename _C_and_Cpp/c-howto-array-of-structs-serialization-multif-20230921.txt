@@ -1,0 +1,1047 @@
+filename: c_howto_array-of-structs-serialization-multif_20230921.txt
+https://stackoverflow.com/questions/15707933/how-to-serialize-a-struct-in-c
+
+how to serialize a struct in c?
+
+   I have a struct object that comprises of several primitive data types, pointers and struct pointers.
+   I want to send it over a socket so that it can be used at the other end. As I want to pay the
+   serialization cost upfront, how do I initialize an object of that struct so that it can be sent
+   immediately without marshalling? For example
+
+struct A {
+	int i;
+	struct B *p;
+};
+
+struct B {
+	long l;
+	char *s[0];
+};
+
+struct A *obj;
+
+// can do I initialize obj?
+int len = sizeof(struct A) + sizeof(struct B) + sizeof(?);
+obj = (struct A *) malloc(len);
+...
+
+write(socket, obj, len);
+
+// on the receiver end, I want to do this
+char buf[len];
+
+read(socket, buf, len);
+struct A *obj = (struct A *)buf;
+int i = obj->i;
+char *s = obj->p->s[0];
+int i obj.i=1; obj.p.
+
+   Thank you.
+
+***
+   The simplest way to do this may be to allocate a chunk of memory to hold everything. For instance,
+   consider a struct as follows:
+
+typedef struct A {
+	int v;
+	char* str;
+} our_struct_t;
+
+   Now, the simplest way to do this is to create a defined format and pack it into an array of bytes. I
+   will try to show an example:
+
+int sLen = 0;
+int tLen = 0;
+char* serialized = 0;
+char* metadata = 0;
+char* xval = 0;
+char* xstr = 0;
+our_struct_t x;
+x.v   = 10;
+x.str = "Our String";
+sLen  = strlen(x.str);      // Assuming null-terminated (which ours is)
+tLen  = sizeof(int) + sLen; // Our struct has an int and a string - we want the whole string not a mem addr
+serialized = malloc(sizeof(char) * (tLen + sizeof(int)); // We have an additional sizeof(int) for metadata -
+                                                         // this will hold our string length
+
+metadata = serialized;
+xval = serialized + sizeof(int);
+xstr = xval + sizeof(int);
+*((int*)metadata) = sLen; // Pack our metadata
+*((int*)xval) = x.v; // Our "v" value (1 int)
+strncpy(xstr, x.str, sLen); // A full copy of our string
+
+   So this example copies the data into an array of size 2 * sizeof(int) + sLen which allows us a single
+   integer of metadata (i.e. string length) and the extracted values from the struct. To deserialize,
+   you could imagine something as follows:
+
+char* serialized = // Assume we have this
+char* metadata = serialized;
+char* yval = metadata + sizeof(int);
+char* ystr = yval + sizeof(int);
+our_struct_t y;
+int sLen = *((int*)metadata);
+y.v = *((int*)yval);
+y.str = malloc((sLen + 1) * sizeof(char)); // +1 to null-terminate
+strncpy(y.str, ystr, sLen);
+y.str[sLen] = '\0';
+
+   As you can see, our array of bytes is well-defined. Below I have detailed the structure:
+	 * Bytes 0-3 : Meta-data (string length)
+	 * Bytes 4-7 : X.v (value)
+	 * Bytes 8 - sLen : X.str (value)
+
+   This kind of well-defined structure allows you to recreate the struct on any environment if you
+   follow the defined convention. To send this structure over the socket, now, depends on how you
+   develop your protocol. You can first send an integer packet containing the total length of the packet
+   which you just constructed, or you can expect that the metadata is sent first/separately (logically
+   separately, this technically can still all be sent at the same time) and then you know how much data
+   to receive on the client-side. For instance, if I receive metadata value of 10 then I can expect
+   sizeof(int) + 10 bytes to follow to complete the struct. In general, this is probably 14 bytes.
+
+   EDIT
+   I will list some clarifications as requested in the comments.
+
+   I do a full copy of the string so it is in (logically) contiguous memory. That is, all the data in my
+   serialized packet is actually full data - there are no pointers. This way, we can send a single
+   buffer (we call is serialized) over the socket. If simply send the pointer, the user receiving the
+   pointer would expect that pointer to be a valid memory address. However, it is unlikely that your
+   memory addresses will be exactly the same. Even if they are, however, he will not have the same data
+   at that address as you do (except in very limited and specialized circumstances).
+
+   Hopefully this point is made more clear by looking at the deserialization process (this is on the
+   receiver's side). Notice how I allocate a struct to hold the information sent by the sender. If the
+   sender did not send me the full string but instead only the memory address, I could not actually
+   reconstruct the data which was sent (even on the same machine we have two distinct virtual memory
+   spaces which are not the same). So in essence, a pointer is only a good mapping for the originator.
+
+   Finally, as far as "structs within structs" go, you will need to have several functions for each
+   struct. That said, it is possible that you can reuse the functions. For instance, if I have two
+   structs A and B where A contains B, I can have two serialize methods:
+
+char* serializeB() {
+	// ... Do serialization
+}
+
+char* serializeA() {
+	char* B = serializeB();
+	// ... Either add on to serialized version of B or do some other modifications to combine the structures
+}
+
+   So you should be able to get away with a single serialization method for each struct.
+
+***
+   You should serialize the data in a platform independent way.
+
+   Here is an example using the Binn library (my creation):
+  binn *obj;
+
+// create a new object
+obj = binn_object();
+
+// add values to it
+binn_object_set_int32(obj, "id", 123);
+binn_object_set_str(obj, "name", "Samsung Galaxy Charger");
+binn_object_set_double(obj, "price", 12.50);
+binn_object_set_blob(obj, "picture", picptr, piclen);
+
+// send over the network
+send(sock, binn_ptr(obj), binn_size(obj));
+
+// release the buffer
+binn_free(obj);
+
+   If you don't want to use strings as keys you can use a binn_map which uses integers as keys. There is
+   also support for lists. And you can insert a structure inside another (nested structures). eg:
+  binn *list;
+
+// create a new list
+list = binn_list();
+
+// add values to it
+binn_list_add_int32(list, 123);
+binn_list_add_double(list, 2.50);
+
+// add the list to the object
+binn_object_set_list(obj, "items", list);
+
+// or add the object to the list
+binn_list_add_object(list, obj);
+
+*** [**1]
+   I tried the method provided by @RageD but it didn't work.
+
+   The int value I got from deserialization was not the original one.
+
+   For me, memcpy() works for non-string variables. (You can still use strcpy() for char *)
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct A {
+	int a;
+	char *str;
+} test_struct_t;
+
+char *serialize(test_struct_t t) {
+	int str_len = strlen(t.str);
+
+	int size = 2 * sizeof(int) + str_len;
+	char *buf = malloc(sizeof(char) * (size+1));
+
+	memcpy(buf, &t.a, sizeof(int));
+	memcpy(buf + sizeof(int), &str_len, sizeof(int));
+	memcpy(buf + sizeof(int) * 2, t.str, str_len);
+	buf[size] = '\0';
+
+	return buf;
+}
+
+test_struct_t deserialize(char *buf) {
+	test_struct_t t;
+
+	memcpy(&t.a, buf, sizeof(int));
+
+	int str_len;
+	memcpy(&str_len, buf+sizeof(int), sizeof(int));
+
+	t.str = malloc(sizeof(char) * (str_len+1));
+	memcpy(t.str, buf+2*sizeof(int), str_len);
+	t.str[str_len] = '\0';
+
+	return t;
+}
+
+int main() {
+	char str[15] = "Hello, world!";
+
+	test_struct_t t;
+	t.a = 123;
+	t.str = malloc(strlen(str) + 1);
+	strcpy(t.str, str);
+	printf("original values: %d %s\n", t.a, t.str);
+
+	char *buf = serialize(t);
+	test_struct_t new_t = deserialize(buf);
+	printf("new values: %d %s\n", new_t.a, new_t.str);
+
+	return 0;
+}
+
+   And the output of the code above is:
+original values: 123 Hello, world!
+new values: 123 Hello, world!
+
+***
+   @Shahbaz is right I would think you actually want this
+int len = sizeof(struct A);
+obj = (struct A *) malloc(len);
+
+   But also you will run into problems when sending a pointer to another machine as the address the
+   pointer points to means nothing on the other machine.
+
+
+---
+https://bytes.com/topic/c/answers/215566-serializing-structs-c
+
+"serializing" structs in C
+
+   I want to save a struct to disk.... as plain text.
+   At the moment I do it with a function that just
+   writes the data using fprintf. I mean like this:
+   fprintf(fp, "%d %d", my_struct.a, my_struct.b)
+   This way I have to write another "serializing"
+   function for every new kind of struct I want
+   to write, though. Is there a way to write
+   functions that can write/read any struct
+   to/from plain text format in a portable way?
+
+***
+   Hello,
+   Since you don't want to write a serialization function, I would suggest
+   encoding (say base64) the struct into a string then writing that string into
+   the file.
+
+   For reading you would read the string, decode it to get the struct back
+   again.
+
+   If you add members however, you have to rewrite old files....unless you can
+   control it via 'version' field in your struct...
+
+***
+   Such a serializing function would need to know the type and location
+   of each structure member. If you store this information once for every
+   structure, you can pass it as an additional argument to a structure
+   serializing function. The program below should give you some ideas.
+   Martin
+
+#include <stddef.h>
+#include <stdio.h>
+
+/* Structure that will be serialized. */
+struct foo {
+	int a;
+	unsigned long b;
+	double c;
+};
+
+/* Information about a structure member. */
+struct member_info {
+	enum {NIL, TYPE_INT, TYPE_UINT, TYPE_LONG, TYPE_ULONG, TYPE_DOUBLE} type;
+	size_t offset;
+};
+
+/* Information about the members of struct foo. */
+const struct member_info foo_info [] = {
+	{TYPE_INT, offsetof (struct foo, a)},
+	{TYPE_ULONG, offsetof (struct foo, b)},
+	{TYPE_DOUBLE, offsetof (struct foo, c)},
+	{NIL, 0}
+};
+
+void serialize (const void *const data, const struct member_info *info) {
+	while (1) {
+		switch (info->type) {
+			case TYPE_INT:
+				printf ("%d", *(int *)((char *)data + info->offset));
+				break;
+			case TYPE_UINT:
+				printf ("%u", *(unsigned int *)((char *)data + info->offset));
+				break;
+			case TYPE_LONG:
+				printf ("%ld", *(long *)((char *)data + info->offset));
+				break;
+			case TYPE_ULONG:
+				printf ("%lu", *(unsigned long *)((char *)data + info->offset));
+				break;
+			case TYPE_DOUBLE:
+				printf ("%f", *(double *)((char *)data + info->offset));
+				break;
+		}
+
+		if ((++info)->type == NIL) {
+			putchar ('\n');
+			break;
+		} else {
+			putchar (' ');
+		}
+	}
+}
+
+int main (void) {
+	struct foo myfoo = {42, 2004, 3.1415926536};
+	serialize (&myfoo, foo_info);
+	return 0;
+}
+
+***
+   No, but you can write code to serialize some classes of
+   structures. For example:
+
+typedef struct para {
+	size_t linecount;
+	char **lines;
+} para, paraptr;
+
+   (you can use some tricks to make the lines field a variable length
+   array in C90, but making it a pointer to an array of char *
+   pointers, which need to be allocated, and in turn need to be
+   allocated space to hold the individual strings, is cleaner)
+   Now the serializing routine might be:
+
+void writepara(paraptr pp){
+	size_t count;
+	count = pp->linecount;
+	printf("%ud\n", (unsigned int)count);
+	while (count--) puts((pp->lines)[count], stdout);
+}
+
+   If I have not goofed excessively, the resultant text file will
+   consist of an integer specifying the number of following lines,
+   followed by the lines in reversed order. This pattern will be
+   repeated as needed, and can be read back into entirely different
+   structures if desired. The lines proper cannot contain embedded
+   '\n's nor '\0's without confusion.
+
+
+---
+https://www.reddit.com/r/C_Programming/comments/4rwg5y/generic_way_to_serialize_structs_without_dynamic/?rdt=39100
+
+Generic way to serialize structs without dynamic memory allocation?
+
+   I'm working in an embedded domain and have no dynamic memory allocation at all, no heap. I am looking
+   for a generic way to serialize/deserialize any struct for saving/loading to/from a byte-addressable
+   flash memory chip.
+
+   If it's not possible to do this generically I could deal with writing simple functions for each
+   struct as long as they just call generic functions to serialize each primitive data type, but that
+   would be messy since I have multiple levels of nested structs...
+
+   I have a VERY large global array that I can use for general purpose uses (it's a backsurface buffer
+   for the display for double-buffering) that is word-addressable (16bit) for buffering the data. I was
+   thinking I could just pass a pointer to the current position in this buffer along through function
+   calls to serialize each primitive type, but that would require knowledge of the data types within the
+   structs and thus a specific function to handle each struct... and I have >100 different types of
+   structs with deep nesting... is there a better way?
+   (BUTTON) Read more
+
+***
+Are you pointer-chasing when you serialize the structs? Otherwise, why not just memcpy the size of the struct?
+You could just use a generic function and a macro that calls it, something like
+
+#define serialize(struct) do { bufferedWrite(struct, sizeof(struct)); } while (0);
+
+and then have bufferedWrite memcpy to your buffer, and keep track of the position in the buffer with a
+static variable. Then, you can write to flash a page at a time, if you have access to doing that.
+
+
+***
+Have you considered macros?
+
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+#define SAMPLE_STRUCT(ENTRY) \
+	ENTRY(a, uint8_t) \
+ENTRY(b, int16_t)
+
+struct sample {
+#define MEMBER(name, type) type name;
+	SAMPLE_STRUCT(MEMBER)
+};
+
+int main(void) {
+	uint8_t buf[256];
+	unsigned i;
+
+	struct sample x0 = { .a = 230, .b = -4096 };
+	i = 0;
+#define ENCODE(name, type) \
+	for (unsigned name##_i = 0; name##_i < sizeof(type); ++name##_i) \
+
+	buf[i++] = (x0.name >> (sizeof(type) - name##_i - 1) * 8) & 0xFF;
+	SAMPLE_STRUCT(ENCODE)
+
+	for (unsigned k = 0; k < 4; ++k) {
+		printf("%02x ", buf[k]);
+	}
+	printf("\n");
+
+	struct sample x1;
+	i = 0;
+#define DECODE(name, type) \
+	for (unsigned name##_i = 0; name##_i < sizeof(type); ++name##_i) \
+	x1.name = (x1.name << 8) | buf[i++];
+	SAMPLE_STRUCT(DECODE)
+
+		printf(".a = %" PRIu8 ", .b = %" PRId16 "\n", x1.a, x1.b);
+
+	return EXIT_SUCCESS;
+}
+
+ It should be easy to extend this to more complicated structs.
+
+***
+you could either include some meta data inside of each struct that would describe the layout of the struct
+or you could write a program that would generate the required serialization functions from the struct
+definitions.
+
+***
+define a struct with type id and a void pointer. i'm assuming you have all the possible structs defined
+somewhere. make sure they are defined as packed. then as you read the stuff from flash into your array, set
+the type and set the pointer to point to the address where it is. later when you want to use it you just
+recast it based on the id.
+
+
+---
+https://www.javatpoint.com/serialize-and-deserialize-a-binary-tree
+
+Serialize and Deserialize a Binary Tree
+
+   Data structures must also be able to be transformed into a format that can be stored and later
+   reconstructed. A data structure is transformed into a series of bits through the process of
+   serialization. The process of recreating the data structure from the serialized sequence is known as
+   deserialization.
+
+   In order to create effective software, data structures are essential, and we frequently need to
+   exchange them. Consider sharing a binary tree; if it's an inter - process interaction, the tree's
+   root node can be exchanged directly. But if we need to share it over a network, this won't work. We
+   can transform a data structure into a sequence using serialisation so that it can be transferred over
+   a network or kept in a memory buffer. Deserialization is then performed to reconstruct the data
+   structure at a later time.
+
+   Let's look at a binary tree serialization and deserialization example.
+   Serialize and Deserialize a Binary Tree
+
+   One simplistic method for doing this is to keep track of any two tree traversals and recreate the
+   tree from scratch using both traversal sequences. Additionally, the nulls must be saved here in order
+   to serialise the tree and restore it using a single tree traversal, either preorder or postorder.
+
+   Let's first examine how to serialize a tree and the process of deserialize a tree separately before
+   getting into the theory and implementation of serialising and deserializing a binary tree.
+
+Binary Tree Serialization
+   A binary tree can be serialised by traversing it in a specific order and saving the relevant
+   sequence. The objective is to have the ability to reconstruct the tree from the sequence as well as
+   archive the tree nodes in a sequence (to be able to serialise and deserialize a binary tree). Now,
+   this can be accomplished by traversing the tree in a particular way so that the same approach may be
+   taken while deserializing.
+
+   Pre-order, in-order, post-order, and other types of traversals are a few examples.
+
+First Technique: Pre-Order Traversal
+   In order to identify a null when reconstructing the tree, the concept is to do a preorder traversal
+   of the tree and save the null values with integer minimum.
+
+   The pre-order traversal algorithm is as follows:
+	 * Create an empty ArrayList and fill it with the sequence.
+	 * Pre-order, recursive traversal of the tree (current, left, right).
+	 * If the current node is not null, add a minimum integer value; otherwise, add the value of the
+	   current node.
+
+   Implementation
+
+   The pre-order traversal implementation for serializing a binary tree in C++ is as follows:
+
+   C++Code:
+
+#include <iostream>
+#include <climits>
+#include <vector>
+   using namespace std;
+
+struct Tree {
+	int val;
+	Tree* left;
+	Tree* right;
+};
+
+Tree* newNode(int val) {
+
+	Tree* node = new Tree;
+	node -> val = val;
+	node -> left = NULL;
+	node -> right = NULL;
+
+	return node;
+}
+
+vector<int> PreorderSerialize(Tree* root, vector<int> series {
+
+	if(root == NULL) { 
+		series.push_back(INT_MIN);
+		return series;
+	}
+	series.push_back(root -> val);
+	series = PreorderSerialize(root -> left, series);
+	series = PreorderSerialize(root -> right, series);
+	return series;
+}
+int main() {
+	Tree* root = newNode(1);
+	root -> left = newNode(2);
+	root -> right = newNode(3);
+	root -> left -> left = newNode(4);
+	root -> right -> left = newNode(5);
+
+	vector<int> PreorderSeries;
+	PreorderSeries = PreorderSerialize(root, PreorderSeries);
+
+	cout << "Preorderseries follows as \n";
+	for(int i=0;i<PreorderSeries.size();i++) {
+		cout<<PreorderSeries.at(i)<<" ";
+	}
+
+}
+
+   Output
+Preorderseries follows as
+1 2 4 -2147483648 -2147483648 -2147483648 3 5 -2147483648 -2147483648 -2147483648
+
+   Time Complexity
+   This method traverses the tree, appending each node to the array. Time complexity is going to be
+   O(N).
+
+   Space Complexity
+   This method maintains an internal recursion stack of size H and needs an array to store the
+   serialized sequence (height of binary tree). As a result, the complexity of space will be O(H+N),
+   where
+
+   Number of nodes + number of null nodes.
+
+Technique 2: Post-Order Traversal
+   In order to identify a null when reconstructing the tree, the concept is to do post-order traversal
+   of the tree and save the null values with integer minimum.
+
+   The post-order traversal algorithm is as follows:
+	 * Create an empty ArrayList and fill it with the sequence.
+	 * Recursively and post-orderly traverse the tree (left, right, current).
+	 * If the current node is not null, add a minimum integer value; otherwise, add the value of the
+	   current node.
+
+   Implementation
+   The post-order traversal implementation for serializing a binary tree in C++ is as follows:
+
+   C++ Program:
+
+#include <iostream>
+#include <climits>
+#include <vector>
+using namespace std;
+
+struct Tree {
+	int val;
+	Tree* left;
+	Tree* right;
+	
+};
+
+Tree* newNode(int val) {
+	Tree* node = new Tree;
+	node -> val = val;
+	node -> left = NULL;
+	node -> right = NULL;
+	
+	return node;
+}
+
+vector<int> PostorderSerialize(Tree* root, vector<int> serie { 
+	
+	if(root == NULL) { 
+		series.push_back(INT_MIN);
+		return series;
+	}
+
+	series = PostorderSerialize(root -> left, series);
+	series = PostorderSerialize(root -> right, series);
+	series.push_back(root -> val);
+	return series;
+}
+
+int main() {
+	Tree* root = newNode(1);
+	root -> left = newNode(2);
+	root -> right = newNode(3);
+	root -> left -> left = newNode(4);
+	root -> right -> left = newNode(5);
+	
+	vector<int> PostorderSeries;
+	PostorderSeries = PostorderSerialize(root, PostorderSeries)
+	
+	cout << "Postorderseries follows as \n";
+
+	for(int i=0;i<PostorderSeries.size();i++) {
+		cout << PostorderSeries.at(i) << " ";
+	}
+}
+
+   Output
+Postorderseries follows as
+-2147483648 -2147483648 4 -2147483648 2 -2147483648 -2147483648 5 -2147483648 3 1
+
+   Time Complexity
+   This method traverses the tree, appending each node to the array. Time complexity is going to be
+   O(N).
+
+   Space Complexity
+   This method maintains an internal recursion stack of size H and needs an array to store the
+   serialized sequence (height of binary tree). As a result, the complexity of space will be O(H+N),
+   where
+
+   Number of nodes + number of null nodes.
+
+Binary Tree Deserialization
+   Once serialisation is complete, we will have a serialised sequence from which the original tree must
+   be recreated. As was previously discussed, we ought to use the same traversal strategy as when the
+   tree was serialized (to be able to serialize and deserialize a binary tree). By doing this, the
+   deserialization method is able to maintain the original tree's state.
+
+Technique 1: Pre-Order Traversal
+   The goal is to continue adding nodes to a tree in the appropriate pre-order as we go through the
+   specified sequence. Keep in mind that the specified sequence must equal the original tree's pre-order
+   traversal. Otherwise, the original tree will not be recreated by the pre-order deserialization.
+
+   The following is the deserialization procedure for a pre-order traversal sequence.
+	 * Start at the beginning of the sequence.
+	 * Make a node that contains the sequence's current value.
+	 * Move the remaining sequence to the current's left child recursively.
+	 * Then recursively move the remaining sequence to the right child of the current sequence.
+	 * In the event that the sequence has an integer minimum, add a null at the current node in the
+	   tree.
+
+   The pre-order traversal sequence used by the C++ implementation to deserialize a binary tree follows
+   as:
+
+   C++ Program:
+
+#include <iostream>
+#include <climits>
+#include <vector>
+using namespace std;
+
+struct Tree {
+	int val;
+	Tree* left;
+	Tree* right;
+};
+
+Tree* newNode(int val) {
+	
+	Tree* node = new Tree;
+	node -> val = val;
+	node -> left = NULL;
+	node -> right = NULL;
+	
+	return node;
+}
+
+int index=0;
+Tree* PreorderDeserialize(vector<int> series) {
+	if(series.size() == index) {
+		return NULL;
+	}
+	
+	if(series.at(index) == INT_MIN) {
+		index++;
+		return NULL;
+	}
+
+	Tree* root = newNode(series.at(index));
+	index++;
+	root -> left = PreorderDeserialize(series);
+	root -> right = PreorderDeserialize(series);
+		
+	return root;
+}
+
+void inOrder(Tree* root) {
+	if(root == NULL)
+		return;
+		
+	inOrder(root -> left);
+	cout << root -> val << " ";
+	inOrder(root -> right);
+}
+	
+int main() { 
+	int arr[] = {1, 2, 4, -2147483648, -2147483648, -2147483648, 3, 5, -2147483648, -2147483648, -2147483648};
+	vector<int> PreorderSeries;
+	for(int i:arr)
+		PreorderSeries.push_back(i);
+	index=0;
+	Tree* root = PreorderDeserialize(PreorderSeries);
+	cout << "inorder traversal of deserialized tree follows as\
+	inOrder(root);
+}
+
+   Output
+inorder traversal of deserialized tree follows as
+4 2 1 5 3
+
+   Time Complexity
+   This method goes over the entire sequence and generates a fresh node for each value. Because N is the
+   length of the sequence, the time complexity will be O(N).
+
+   Space Complexity
+   However, this method effectively keeps a recursion stack of size O(H), in which H is the height of a
+   binary tree, without the need for any additional space.
+
+Technique 2: Post-order Traversal
+   The expected procedure for deserializing a post-order traversal sequence is to first construct the
+   left child, then construct the right child, and then construct the current node. However, without
+   first building the current node, we are unable to access child nodes. As a result, we move through
+   the sequence backwards while adhering to the current, right, and left directions.
+
+   Keep in mind that the specified sequence must equal the original tree's pre-order traversal.
+   Otherwise, the original tree will not be recreated by the pre-order deserialization.
+
+   The following is the deserialization procedure for a post-order traversal sequence.
+	 * Starting at the end, traverse the sequence.
+	 * Make a node that contains the sequence's current value.
+	 * Recursively send the subsequent sequence to the right child of the current.
+	 * and then transmit the leftover sequence to the left child of the current.
+	 * In the event that the sequence has an integer minimum, add a null at the current node in the
+	   tree.
+
+   Implementation
+
+   The post-order traversal sequence's binary tree deserialization in C++ is implemented as
+
+   C++ Program:
+
+#include <iostream>
+#include <climits>
+#include <vector>
+using namespace std;
+
+struct Tree {
+	int val;
+	Tree* left;
+	Tree* right;
+};
+
+Tree* newNode(int val) {
+	Tree* node = new Tree;
+	node -> val = val;
+	node -> left = NULL;
+	node -> right = NULL;
+	
+	return node;
+}
+
+int index=0;
+
+Tree* PostorderDeserialize(vector<int> series) {
+	if(index == -1) { 
+		return NULL;
+	}
+
+	if(series.at(index) == INT_MIN) {
+		index--;
+		return NULL;
+	}
+
+	Tree* root = newNode(series.at(index));
+	index--;
+	root -> right = PostorderDeserialize(series);
+	root -> left = PostorderDeserialize(series);
+		
+	return root;
+}
+
+void inOrder(Tree* root) {
+	if(root == NULL)
+		return;
+		
+	inOrder(root -> left);
+	cout << root -> val << " ";
+	inOrder(root -> right);
+}
+	
+int main() {
+
+	int arr[] = {-2147483648, -2147483648, 4, -2147483648, 2, -2147483648, -2147483648, 5, -2147483648, 3, 1};
+	
+	vector<int> PostorderSeries;
+	for(int i:arr)
+		PostorderSeries.push_back(i);
+	index = PostorderSeries.size()-1;
+	Tree* root = PostorderDeserialize(PostorderSeries);
+	cout << "inorder traversal of deserialized tree follows as\
+	inOrder(root);
+}
+
+   Output
+inorder traversal of deserialized tree follows as
+4 2 1 5 3
+
+   Time Complexity
+   This method goes over the entire sequence and generates a new node for each value. Because N is the
+   length of the sequence, the time complexity will be O(N).
+
+   Space Complexity
+   However, this method effectively keeps a recursion stack of size O(H), in which H is the height of a
+   binary tree, without the need for any additional space.
+
+Serialization and Deserialization Benefits
+	 * Data structures can be easily transferred over the network or stored in a memory buffer thanks to
+	   serialization.
+	 * Serialization is utilized for objects as well as data structures, and many ORM frameworks, such
+	   as hibernate, employ this technique.
+	 * Average access time can be decreased because serialization enables the storage of a data
+	   structure into a memory buffer.
+	 * Deserialization makes it possible to determine the data structure's original state.
+	 * Deserializing an item is substantially quicker in this scenario than generating an entirely new
+	   object.
+	 * This cycle of serialization and deserialization is frequently used in distributed systems to
+	   distribute data among nodes.
+
+Conclusion
+   Let's review the steps for serializing and deserializing a binary tree.
+	 * A data structure is transformed into a series of bits through the process of serialization.
+	 * Reconstructing the data structure from the serialized sequence is known as deserialization.
+	 * A binary tree can be serialized by keeping a marker to null nodes and saving the preorder or
+	   postorder traversal sequence of the tree.
+	 * When deserializing a binary tree from a given sequence, the tree is recreated using the
+	   appropriate traversal strategy.
+	 * There are applications for serialization and deserialization in file storage, ORM frameworks, and
+	   distributed systems.
+
+
+---
+https://newbedev.com/how-to-serialize-a-struct-in-c
+
+how to serialize a struct in c?
+
+   The simplest way to do this may be to allocate a chunk of memory to hold everything. For instance,
+   consider a struct as follows:
+
+typedef struct A {
+	int v;
+	char* str;
+} our_struct_t;
+
+   Now, the simplest way to do this is to create a defined format and pack it into an array of bytes. I
+   will try to show an example:
+
+int sLen = 0;
+int tLen = 0;
+char* serialized = 0;
+char* metadata = 0;
+char* xval = 0;
+char* xstr = 0;
+our_struct_t x;
+x.v   = 10;
+x.str = "Our String";
+sLen  = strlen(x.str);      // Assuming null-terminated (which ours is)
+tLen  = sizeof(int) + sLen; // Our struct has an int and a string - we want the whole string not a mem addr
+serialized = malloc(sizeof(char) * (tLen + sizeof(int)); // We have an additional sizeof(int) for metadata -
+                                                         // this will hold our string length
+metadata = serialized;
+xval = serialized + sizeof(int);
+xstr = xval + sizeof(int);
+*((int*)metadata) = sLen; // Pack our metadata
+*((int*)xval) = x.v; // Our "v" value (1 int)
+strncpy(xstr, x.str, sLen); // A full copy of our string
+
+   So this example copies the data into an array of size 2 * sizeof(int) + sLen which allows us a single
+   integer of metadata (i.e. string length) and the extracted values from the struct. To deserialize,
+   you could imagine something as follows:
+char* serialized = // Assume we have this
+char* metadata = serialized;
+char* yval = metadata + sizeof(int);
+char* ystr = yval + sizeof(int);
+our_struct_t y;
+int sLen = *((int*)metadata);
+y.v = *((int*)yval);
+y.str = malloc((sLen + 1) * sizeof(char)); // +1 to null-terminate
+strncpy(y.str, ystr, sLen);
+y.str[sLen] = '\0';
+
+   As you can see, our array of bytes is well-defined. Below I have detailed the structure:
+	 * Bytes 0-3 : Meta-data (string length)
+	 * Bytes 4-7 : X.v (value)
+	 * Bytes 8 - sLen : X.str (value)
+
+   This kind of well-defined structure allows you to recreate the struct on any environment if you
+   follow the defined convention. To send this structure over the socket, now, depends on how you
+   develop your protocol. You can first send an integer packet containing the total length of the packet
+   which you just constructed, or you can expect that the metadata is sent first/separately (logically
+   separately, this technically can still all be sent at the same time) and then you know how much data
+   to receive on the client-side. For instance, if I receive metadata value of 10 then I can expect
+   sizeof(int) + 10 bytes to follow to complete the struct. In general, this is probably 14 bytes.
+
+   EDIT
+   I will list some clarifications as requested in the comments.
+
+   I do a full copy of the string so it is in (logically) contiguous memory. That is, all the data in my
+   serialized packet is actually full data - there are no pointers. This way, we can send a single
+   buffer (we call is serialized) over the socket. If simply send the pointer, the user receiving the
+   pointer would expect that pointer to be a valid memory address. However, it is unlikely that your
+   memory addresses will be exactly the same. Even if they are, however, he will not have the same data
+   at that address as you do (except in very limited and specialized circumstances).
+
+   Hopefully this point is made more clear by looking at the deserialization process (this is on the
+   receiver's side). Notice how I allocate a struct to hold the information sent by the sender. If the
+   sender did not send me the full string but instead only the memory address, I could not actually
+   reconstruct the data which was sent (even on the same machine we have two distinct virtual memory
+   spaces which are not the same). So in essence, a pointer is only a good mapping for the originator.
+
+   Finally, as far as "structs within structs" go, you will need to have several functions for each
+   struct. That said, it is possible that you can reuse the functions. For instance, if I have two
+   structs A and B where A contains B, I can have two serialize methods:
+
+char* serializeB() {
+	// ... Do serialization
+}
+
+char* serializeA() {
+	char* B = serializeB();
+	// ... Either add on to serialized version of B or do some other modifications to combine the structures
+}
+
+   So you should be able to get away with a single serialization method for each struct.
+
+   This answer is besides the problems with your malloc.
+
+   Unfortunately, you cannot find a nice trick that would still be compatible with the standard. The
+   only way of properly serializing a structure is to separately dissect each element into bytes, write
+   them to an unsigned char array, send them over the network and put the pieces back together on the
+   other end. In short, you would need a lot of shifting and bitwise operations.
+
+   In certain cases you would need to define a kind of protocol. In your case for example, you need to
+   be sure you always put the object p is pointing to right after struct A, so once recovered, you can
+   set the pointer properly. Did everyone say enough already that you can't send pointers through
+   network?
+
+   Another protocolish thing you may want to do is to write the size allocated for the flexible array
+   member s in struct B. Whatever layout for your serialized data you choose, obviously both sides
+   should respect.
+
+   It is important to note that you cannot rely on anything machine specific such as order of bytes,
+   structure paddings or size of basic types. This means that you should serialize each field of the
+   element separately and assign them fixed number of bytes.
+
+
+---
+https://forum.dlang.org/thread/eiquqszzycomrcazcfsb@forum.dlang.org
+
+How can I serialize a struct into a file in the style of C?
+July 22, 2017
+
+Due to it's convenience, I was thinking on reading and writing file headers by creating structs mirroring the
+layouts of actual headers I would need. I've seen many examples of this in C, however I' struggling using the
+same methods through the use of code.stdc.stdio, especially as I can't really trace bugs from fread.
+
+***
+struct Data {
+	int x;
+	float y;
+	ubyte z;
+}
+
+void main() {
+	import core.stdc.stdio;
+
+	Data od = Data(10, 3.0f, 5);
+
+	FILE* fp = fopen("data.dat", "wb");
+	size_t ret = fwrite(&od, od.sizeof, 1, fp);
+	fclose(fp);
+
+	assert(ret == 1);
+
+	Data id;
+	fp = fopen("data.dat", "rb");
+	ret = fread(&id, id.sizeof, 1, fp);
+	fclose(fp);
+
+	assert(ret == 1);
+
+	assert(id.x == 10);
+	assert(id.y == 3.0f);
+	assert(id.z == 5);
+}
+
+***
+I should add, though, that you're better off using either std.stdio.File or std.file. Use the former if you ne
+ed to make multiple reads/writes to a file, the latter if you can pull it in or push it out all in one go. The
+y take arrays as arguments, so if you have something like Data[], you can pass it directly to the appropriate
+functions. To write a single instance, you'll have to take the pointer and slice it. Either way, it's less cod
+e, less error prone, and more idiomatic than using the C API.
+
+***
+Well, it seems the toStringz() function adds a few garbage characters to the end of the filename, I might look
+ into a way to read the data with Phobos instead of the C API.
+
+***
+How are you using it? The only character it should be adding is the zero terminator.
+
+I suspect you might be using it on a static array without slicing it down to size first...
+
+
+---
+

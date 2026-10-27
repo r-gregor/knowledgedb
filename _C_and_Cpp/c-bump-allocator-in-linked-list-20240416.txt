@@ -1,0 +1,569 @@
+filename: c_bump-allocator-in-linked-list_20240416.txt
+https://codereview.stackexchange.com/questions/253412/bump-allocator-in-linked-list
+
+Bump Allocator in Linked List
+
+   Here is my code for implementing a linked list with custom allocators (the standard malloc/free and a
+   simple bump allocator). I appreciate any comments or critiques about architecture, formatting, and
+   anything in between. There are a number of files so I am very appreciative of comments even
+   concerning singular functions. I am especially interested in opinions on my bump allocator
+   implementation and on my "polymorphism" hack with the MemAlloc struct. The code has been run with gcc
+   and valgrind.
+
+   The code is organized into three header files and three source files, placed in the inc and src
+   folders, respectively. Here is the Makefile I use for building which is located in the root
+   directory. It creates a bin folder which contains the main executable.
+
+   Makefile
+CC      := gcc
+CCFLAGS := -g3 -g \
+    -Wall -Warray-bounds -Wconversion -Wdouble-promotion \
+    -Werror -Wextra -Wno-parentheses -Wpedantic -Wshadow \
+    -Wstrict-prototypes -Wwrite-strings -Wundef \
+    -fno-common -fPIC
+CLIB    := -lm
+
+TARGET  := main
+BIN_DIR := bin
+OBJ_DIR := build
+INC_DIR := inc
+SRC_DIR := src
+
+SRC     := $(wildcard $(SRC_DIR)/*.c)
+OBJ     := $(patsubst $(SRC_DIR)/*.c, $(OBJ_DIR)/%.o, $(SRC))
+
+$(BIN_DIR)/$(TARGET):    $(OBJ) | bin
+	$(CC) $(CCFLAGS) -o $@ $^ -I$(INC_DIR) $(CLIB)
+
+$(OBJ_DIR)/%.o:        $(SRC_DIR)/%.c | build
+	$(CC) $(CCFLAGS) -o $@ -c $^ -I$(INC_DIR) $(CLIB)
+
+bin:
+	mkdir $(BIN_DIR)
+
+build:
+	mkdir $(OBJ_DIR)
+
+clean:
+	rm -fr $(OBJ_DIR)
+	rm -fr $(BIN_DIR)
+	rm -fr perf.data perf.data.old
+	rm -fr gmon.out gprof.txt
+	rm -fr vg_logfile.out
+
+
+   memory.h
+#ifndef MEMORY_H
+#define MEMORY_H
+
+#include <stddef.h>
+
+typedef struct MemAlloc MemAlloc;
+typedef struct MemBump MemBump;
+typedef struct MemMalloc MemMalloc;
+
+typedef enum { BUMP, MALLOC, } MemAllocType;
+
+/**
+A memory allocator that is able to allocate and free.
+ */
+struct MemAlloc {
+	void* (*alloc)(MemAlloc*, size_t);
+	void (*free)(MemAlloc*, void*);
+	MemAllocType type;
+};
+
+/**
+  Construct a memory allocator.
+
+type: the type of allocator
+size: the size in bytes to allocate
+
+Note: MALLOC allocator does not use the size parameter.
+ */
+MemAlloc*
+mem_alloc_create(MemAllocType type, size_t size);
+
+/**
+  Destroy a memory allocator.
+
+allocator: the allocator to destroy
+ */
+void mem_alloc_destroy(MemAlloc* allocator);
+
+#endif
+
+   memory.c
+#include "memory.h"
+
+#include <inttypes.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+// -----
+// BUMP
+// -----
+
+/**
+A bump allocator that divides its memory into used and unused segments.
+
+NOTE: freeing memory in a bump allocator does nothing
+
+   [  unused   |   used   ]
+   ^           ^          ^
+   head        ptr        tail
+
+   (ptr moves in <-- direction)
+*/
+struct MemBump {
+	void* (*alloc)(MemBump*, size_t);
+	void (*free)(MemBump*, void*);
+	MemAllocType type;
+
+	size_t num_allocs;
+	size_t capacity;
+	void* head;
+	void* tail;
+	void* ptr;
+};
+
+void* mem_bump_alloc(MemBump* allocator, size_t size) {
+	if (size > allocator->capacity) return NULL;
+	void* ptr = (char*) allocator->ptr - size;
+	size_t word_size = (size_t) sizeof(long) * CHAR_BIT;
+	if (size >= word_size) {
+		// NOTE(matt): this bit twiddling assumes align is a power of 2
+		// https://fitzgeraldnick.com/2019/11/01/always-allocator-downwards.html
+		ptr = (void*) ((uintptr_t) ptr & ~(word_size - 1));
+	}
+	if (ptr < allocator->head) return NULL;
+	allocator->capacity -= (size_t) ((uintptr_t) allocator->ptr - (uintptr_t) ptr);
+	allocator->num_allocs++;
+	allocator->ptr = ptr;
+	return ptr;
+}
+
+void mem_bump_free(MemBump* allocator, void* ptr) {
+	(void) allocator;
+	(void) ptr;
+}
+
+MemBump* mem_bump_create(size_t capacity) {
+	// NOTE(matt): this capacity should be at least the size of a CPU word
+	MemBump* allocator = malloc(sizeof(*allocator));
+	if (!allocator) return NULL;
+	allocator->capacity = capacity;
+	allocator->num_allocs = 0;
+	allocator->head = malloc(capacity);
+	if (!allocator->head) { free(allocator); return NULL; }
+	allocator->tail = (char*) allocator->head + capacity;
+	allocator->ptr = allocator->tail;
+
+	allocator->alloc = mem_bump_alloc;
+	allocator->free = mem_bump_free;
+	allocator->type = BUMP;
+	return allocator;
+}
+
+void mem_bump_destroy(MemBump* allocator) {
+	free(allocator->head);
+	free(allocator);
+}
+
+// -----
+// MALLOC
+// -----
+
+/**
+An allocator that uses the standard malloc and free.
+*/
+struct MemMalloc {
+	void* (*alloc)(MemMalloc*, size_t);
+	void (*free)(MemMalloc*, void*);
+	MemAllocType type;
+
+	size_t num_allocs;
+};
+
+void* mem_malloc_alloc(MemMalloc* allocator, size_t size) {
+	void* ptr = malloc(size);
+	if (!ptr) return NULL;
+	allocator->num_allocs++;
+	return ptr;
+}
+
+void mem_malloc_free(MemMalloc* allocator, void* ptr) {
+	allocator->num_allocs--;
+	free(ptr);
+}
+
+MemMalloc* mem_malloc_create(void) {
+	MemMalloc* allocator = malloc(sizeof(*allocator));
+	if (!allocator) return NULL;
+	allocator->num_allocs = 0;
+
+	allocator->alloc = mem_malloc_alloc;
+	allocator->free = mem_malloc_free;
+	allocator->type = MALLOC;
+	return allocator;
+}
+
+void mem_malloc_destroy(MemMalloc* allocator) {
+	free(allocator);
+}
+
+// -----
+// INTERFACE
+// -----
+
+MemAlloc* mem_alloc_create(MemAllocType type, size_t size) {
+	switch(type) {
+		case BUMP:
+			return (MemAlloc*) mem_bump_create(size);
+		case MALLOC:
+			return (MemAlloc*) mem_malloc_create();
+		default:
+			fprintf(stderr, "Failed to create memory allocator.\n");
+			return NULL;
+	}
+}
+
+void mem_alloc_destroy(MemAlloc* allocator) {
+	switch(allocator->type) {
+		case BUMP:
+			mem_bump_destroy((MemBump*) allocator);
+			break;
+		case MALLOC:
+			mem_malloc_destroy((MemMalloc*) allocator);
+			break;
+		default:
+			fprintf(stderr, "Failed to destroy memory allocator.\n");
+			break;
+	}
+}
+
+
+   linkedlist.h
+#ifndef LINKEDLIST_H
+#define LINKEDLIST_H
+
+#include "linkedlist.h"
+#include "memory.h"
+#include <stddef.h>
+
+typedef struct LinkedList LinkedList;
+typedef struct LinkedListNode LinkedListNode;
+
+struct LinkedList {
+	LinkedListNode* first;
+	LinkedListNode* last;
+	size_t length;
+
+	MemAlloc* allocator;
+};
+
+struct LinkedListNode {
+	void* data;
+	LinkedListNode* next;
+};
+
+/**
+Append (to the end) of the linked list.
+*/
+void* linkedlist_append(LinkedList* ll, void* data);
+
+/**
+Index the linked list and return the data.
+*/
+void* linkedlist_at(const LinkedList* ll, size_t i);
+
+/**
+Create a linked list.
+*/
+LinkedList* linkedlist_create(MemAlloc* allocator);
+
+/**
+Destroy a linked list.
+*/
+void linkedlist_destroy(LinkedList* ll);
+
+/**
+Return the length of a linked list.
+*/
+size_t linkedlist_length(const LinkedList* ll);
+
+/**
+Prepend (to the beginning) of the linked list.
+*/
+void* linkedlist_prepend(LinkedList* ll, void* data);
+
+/**
+Print the contents of the linked list.
+*/
+void linkedlist_print(const LinkedList* ll, void (*print)(void*));
+
+#endif
+
+
+   linkedlist.c
+#include "linkedlist.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+
+void* linkedlist_append(LinkedList* ll, void* data) {
+	LinkedListNode* node = ll->allocator->alloc(ll->allocator, sizeof(*node));
+	if (!node) return NULL;
+
+	node->data = data;
+	node->next = NULL;
+
+	if (ll->first == NULL) {
+		ll->first = node;
+		ll->last = node;
+	} else {
+		ll->last->next = node;
+		ll->last = node;
+	}
+	ll->length++;
+	return data;
+}
+
+void* linkedlist_at(const LinkedList* ll, size_t i) {
+	if (ll->length <= i) return NULL;
+
+	LinkedListNode* node = ll->first;
+	if (!node) return NULL;
+
+	while (i > 0) {
+		node = node->next;
+		i--;
+	}
+	return node->data;
+}
+
+LinkedList* linkedlist_create(MemAlloc* allocator) {
+	LinkedList* ll = allocator->alloc(allocator, sizeof(*ll));
+	if (!ll) return NULL;
+	ll->first = NULL;
+	ll->last = NULL;
+	ll->length = 0;
+	ll->allocator = allocator;
+	return ll;
+}
+
+void linkedlist_destroy(LinkedList* ll) {
+	LinkedListNode* node = ll->first;
+	while (node != NULL) {
+		LinkedListNode* tmp = node->next;
+		ll->allocator->free(ll->allocator, node);
+		node = tmp;
+	}
+	ll->allocator->free(ll->allocator, ll);
+}
+
+size_t linkedlist_length(const LinkedList* ll) {
+	return ll->length;
+}
+
+void* linkedlist_prepend(LinkedList* ll, void* data) {
+	LinkedListNode* node = ll->allocator->alloc(ll->allocator, sizeof(*node));
+	if (!node) return NULL;
+
+	node->data = data;
+	node->next = NULL;
+
+	if (ll->first == NULL) {
+		ll->first = node;
+		ll->last = node;
+	} else {
+		node->next = ll->first;
+		ll->first = node;
+	}
+	ll->length++;
+	return data;
+}
+
+void linkedlist_print(const LinkedList* ll, void (*print)(void*)) {
+	LinkedListNode* node = ll->first;
+	if (node == NULL) { return; }
+	print(node->data);
+	while (node->next != NULL) {
+		print(node->next->data);
+		node = node->next;
+	}
+}
+
+
+   print.h
+#ifndef PRINT_H
+#define PRINT_H
+
+#include <stdio.h>
+
+void print_float(void* data) { printf("%g\n", *((double*) data)); }
+void print_int(void* data) { printf("%d\n", *((int*) data)); }
+
+#endif
+
+
+   main.c
+#include "linkedlist.h"
+#include "memory.h"
+#include "print.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <time.h>
+
+double time_bump(size_t num_nodes) {
+	clock_t begin = clock();
+
+	size_t memory_size = sizeof(LinkedList) + num_nodes * sizeof(LinkedListNode);
+
+	MemAlloc* allocator = mem_alloc_create(BUMP, memory_size);
+
+	if (!allocator) {
+		fprintf(stderr, "Failed to create bump allocator.\n");
+		return 1;
+	}
+
+	int a = 4;
+	LinkedList* ll = linkedlist_create((MemAlloc*) allocator);
+	if (!ll) {
+		fprintf(stderr, "Failed to create linked list.\n");
+		return 1;
+	}
+
+	for (size_t i = 0; i < num_nodes; i++) {
+		if (!linkedlist_append(ll, &a)) {
+			fprintf(stderr, "Failed to append node.\n");
+			return 1;
+		}
+	}
+	linkedlist_destroy(ll);
+	mem_alloc_destroy(allocator);
+
+	clock_t end = clock();
+	double time_spent = (double) (end - begin) / CLOCKS_PER_SEC;
+	return time_spent;
+}
+
+double time_malloc(size_t num_nodes) {
+	clock_t begin = clock();
+
+	MemAlloc* allocator = mem_alloc_create(MALLOC, 0);
+
+	if (!allocator) {
+		fprintf(stderr, "Failed to create malloc allocator.\n");
+		return 1;
+	}
+
+	int a = 4;
+	LinkedList* ll = linkedlist_create((MemAlloc*) allocator);
+	if (!ll) {
+		fprintf(stderr, "Failed to create linked list.\n");
+		return 1;
+	}
+
+	for (size_t i = 0; i < num_nodes; i++) {
+		if (!linkedlist_append(ll, &a)) {
+			fprintf(stderr, "Failed to append node.\n");
+			return 1;
+		}
+	}
+	linkedlist_destroy(ll);
+	mem_alloc_destroy(allocator);
+
+	clock_t end = clock();
+	double time_spent = (double) (end - begin) / CLOCKS_PER_SEC;
+	return time_spent;
+}
+
+int main(void) {
+	// Compare the performance of the regular allocation (malloc and free) to
+	// the performance of a simple bump allocator.
+	// Both trials simply insert integer pointers into a linked list.
+
+	size_t num_nodes = 1 * pow(10, 5);
+	printf("Malloc: %.10f\n", time_malloc(num_nodes));
+	printf("Bump: %.10f\n", time_bump(num_nodes));
+	return 0;
+}
+
+***
+1 Answer:
+
+Makefile variables
+
+   You use $(BIN_DIR), $@ and $^ correctly here:
+$(BIN_DIR)/$(TARGET):	$(OBJ) | bin
+	$(CC) $(CCFLAGS) -o $@ $^ -I$(INC_DIR) $(CLIB)
+
+   but not here:
+bin:
+	mkdir $(BIN_DIR)
+
+   This should be:
+$(BIN_DIR):
+	mkdir $@
+
+Conflation of tags and definitions
+   I typically recommend against naming these the same (i.e. MemAlloc and MemAlloc). One way to
+   differentiate them is to name the tag MemAllocTag.
+
+Void casting
+
+   This:
+void mem_bump_free(MemBump* allocator, void* ptr) {
+	(void) allocator;
+	(void) ptr;
+}
+
+   is foreign syntax to me; apparently it's a hack to tell the compiler to suppress warnings. But
+   why doesn't mem_bump_free do anything?
+
+C99 struct sugar
+   For known initialization values, this:
+
+MemBump* allocator = malloc(sizeof(*allocator));
+if (!allocator) return NULL;
+allocator->capacity = capacity;
+allocator->num_allocs = 0;
+allocator->head = malloc(capacity);
+if (!allocator->head) { free(allocator); return NULL; }
+allocator->tail = (char*) allocator->head + capacity;
+allocator->ptr = allocator->tail;
+
+allocator->alloc = mem_bump_alloc;
+allocator->free = mem_bump_free;
+allocator->type = BUMP;
+
+   can be made somewhat nicer:
+MemBump *allocator = malloc(sizeof(MemBump));
+if (!allocator) return NULL;
+
+*allocator = (MemBump) {
+	.capacity = capacity,
+	.num_allocs = 0,
+	.alloc = mem_bump_alloc,
+	.free = mem_bump_free,
+	.type = BUMP,
+	.head = malloc(capacity)
+}
+
+if (!allocator->head) { free(allocator); return NULL; }
+
+allocator->tail = (char*) allocator->head + capacity;
+allocator->ptr = allocator->tail;
+
+Named signature pointer parameters
+   For better code self-documentation, consider adding parameter names to
+void* (*alloc)(MemMalloc*, size_t);
+void (*free)(MemMalloc*, void*);
+
+
+
+---
+

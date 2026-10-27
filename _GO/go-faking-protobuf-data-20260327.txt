@@ -1,0 +1,305 @@
+ilename: go-faking-protobuf-data-20260327.txt
+https://kmcd.dev/posts/faking-protobuf-data-in-go/
+
+Faking protobuf data in Go
+2026-03-26
+
+   If you build Go services that use protobuf over gRPC, you often need realistic-looking data.
+   Sometimes you need a lot of it and your creative juices and manual data entry only goes so far.
+   Tests, local demos, and stubs all benefit from messages that look plausible without carrying meaning.
+
+   FauxRPC addresses this. It´s a small Go library that fills protobuf messages with plausible data. The
+   focus is not perfect realism; it´s speed, convenience, and reducing boilerplate.
+
+   This article covers two main use cases: populating generated protobuf types and working with dynamic
+   descriptors. Along the way, you´ll see how to generate data and control its behavior for repeatable
+   results.
+
+Core entry points
+   FauxRPC provides two primary functions:
+     * fauxrpc.SetDataOnMessage: Populates a concrete Go struct generated from .proto files.
+     * fauxrpc.NewMessage: Creates a message from a protoreflect.MessageDescriptor, useful when
+       types aren´t known at compile time.
+
+   Both use the same underlying logic; the difference is whether you start with a Go struct or a
+   descriptor.
+
+Filling a generated message
+   For a simple case, consider the Eliza demo service and its SayResponse message.
+   Eliza Service SayResponse Example (click to expand)
+   [https://github.com/sudorandom/kmcd.dev/blob/main/posts/2026/faking-protobuf-data-in-go/go/example1_say_response.go]View
+   on GitHub
+
+package main
+
+import (
+	"fmt"
+	"log"
+
+	elizav1 "buf.build/gen/go/connectrpc/eliza/protocolbuffers/go/connectrpc/eliza/v1"
+	"github.com/sudorandom/fauxrpc"
+	"google.golang.org/protobuf/encoding/protojson"
+)
+
+func main() {
+	msg := &elizav1.SayResponse{}
+	if err := fauxrpc.SetDataOnMessage(msg, fauxrpc.GenOptions{}); err != nil {
+		log.Fatalf("err: %s", err)
+	}
+	b, err := protojson.MarshalOptions{Indent: "  "}.Marshal(msg)
+	if err != nil {
+		log.Fatalf("err: %s", err)
+	}
+	fmt.Println(string(b))
+}
+
+   SetDataOnMessage mutates the message in place. Every field receives a value compatible with its type.
+
+   Marshaling to JSON produces something like:
+{
+	"sentence": "Jean shorts."
+}
+
+   Values change each run. That randomness exposes assumptions in tests and ensures your code doesn´t
+   rely on fixed values.
+
+Populating a nested message
+   Most protobufs are more complex than a single field. For example, an ownerv1.Owner message with
+   nested messages, timestamps, enums, and strings:
+   Owner Service Owner Example (click to expand)
+   [https://github.com/sudorandom/kmcd.dev/blob/main/posts/2026/faking-protobuf-data-in-go/go/example2_owner.go]View
+   on GitHub
+
+package main
+
+import (
+	"fmt"
+	"log"
+
+	ownerv1 "buf.build/gen/go/bufbuild/registry/protocolbuffers/go/buf/registry/owner/v1"
+	"github.com/sudorandom/fauxrpc"
+	"google.golang.org/protobuf/encoding/protojson"
+)
+
+func main() {
+	msg := &ownerv1.Owner{}
+	if err := fauxrpc.SetDataOnMessage(msg, fauxrpc.GenOptions{}); err != nil {
+		log.Fatalf("err: %s", err)
+	}
+	b, err := protojson.MarshalOptions{Indent: "  "}.Marshal(msg)
+	if err != nil {
+		log.Fatalf("err: %s", err)
+	}
+	fmt.Println(string(b))
+}
+
+   SetDataOnMessage recursively populates nested messages, assigns valid enum values, and generates RFC
+   3339 timestamps. Marshaled with protojson:
+
+{
+	"organization": {
+		"id": "a4cf6166453b49d9811cfdc169c36354",
+		"createTime": "1912-06-01T16:45:13.510830647Z",
+		"updateTime": "2009-04-03T13:11:31.216229245Z",
+		"name": "xm0r3",
+		"description": "Godard selvage.",
+		"url": "https://www.dynamicreintermediate.name/robust/seize/metrics/b2c",
+		"verificationStatus": "ORGANIZATION_VERIFICATION_STATUS_OFFICIAL"
+	}
+}
+
+   This works well for local servers, demos, and tests that focus on shape rather than meaning.
+
+Using dynamic messages
+   For proxies, gateways, or tools without generated Go types, dynamicpb allows message creation from
+   descriptors. FauxRPC supports this:
+   Dynamic Protobuf Example (click to expand)
+   [https://github.com/sudorandom/kmcd.dev/blob/main/posts/2026/faking-protobuf-data-in-go/go/example3_dynamic.go]View
+   on GitHub
+
+package main
+
+import (
+	"fmt"
+	"log"
+
+	elizav1 "buf.build/gen/go/connectrpc/eliza/protocolbuffers/go/connectrpc/eliza/v1"
+	"github.com/sudorandom/fauxrpc"
+	"google.golang.org/protobuf/encoding/protojson"
+)
+
+func main() {
+	msg, err := fauxrpc.NewMessage(
+	elizav1.File_connectrpc_eliza_v1_eliza_proto.Messages().ByName("SayResponse"),
+	fauxrpc.GenOptions{},
+	)
+	if err != nil {
+		log.Fatalf("err: %s", err)
+	}
+	b, err := protojson.MarshalOptions{Indent: "  "}.Marshal(msg)
+	if err != nil {
+		log.Fatalf("err: %s", err)
+	}
+	fmt.Println(string(b))
+}
+
+   FauxRPC fills dynamic messages with the same rules as concrete types, making them usable like any
+   other protobuf message.
+
+Respecting protovalidate constraints
+   FauxRPC reads protovalidate annotations to generate data that respects field constraints. Length
+   limits, numeric ranges, regex patterns, and formats are applied when generating values.
+
+   For example, a User message with a username, email, and age:
+   Protovalidate-aware Data Generation (click to expand)
+   [https://github.com/sudorandom/kmcd.dev/blob/main/posts/2026/faking-protobuf-data-in-go/go/example5_protovalidate.go]View
+   on GitHub
+
+package main
+
+import (
+	"fmt"
+
+	"github.com/sudorandom/fauxrpc"
+	gen "github.com/sudorandom/kmcd.dev/faking-protobuf-data-in-go/gen"
+	"google.golang.org/protobuf/encoding/protojson"
+)
+
+func main() {
+	user := &gen.User{}
+
+	err := fauxrpc.SetDataOnMessage(user, fauxrpc.GenOptions{})
+	if err != nil {
+		panic(err)
+	}
+
+	out, err := protojson.MarshalOptions{Indent: "  "}.Marshal(user)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(string(out))
+}
+
+   Sample output:
+{
+	"username": "Ezequiel",
+	"email": "kiarasantos@grant.ne",
+	"age": 46
+}
+
+   FauxRPC ensures string lengths, numeric ranges, and formats match the annotations. The result is
+   still fake data but plausible enough to exercise validators and gateways realistically.
+
+Controlling randomness with GenOptions
+   By default, FauxRPC uses a global random generator. GenOptions allows supplying a seeded
+   gofakeit.Faker for repeatable output:
+   Customizing Data Generation with GenOptions (click to expand)
+   [https://github.com/sudorandom/kmcd.dev/blob/main/posts/2026/faking-protobuf-data-in-go/go/example4_genoptions.go]View
+   on GitHub
+
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/brianvoe/gofakeit/v7"
+	elizav1 "buf.build/gen/go/connectrpc/eliza/protocolbuffers/go/connectrpc/eliza/v1"
+	"github.com/sudorandom/fauxrpc"
+	"google.golang.org/protobuf/encoding/protojson"
+)
+
+func main() {
+	faker := gofakeit.New(123) // Seed the faker for deterministic output
+	msg := &elizav1.SayResponse{}
+	if err := fauxrpc.SetDataOnMessage(msg, fauxrpc.GenOptions{Faker: faker}); err != nil {
+		log.Fatalf("err: %s", err)
+	}
+	b, err := protojson.MarshalOptions{Indent: "  "}.Marshal(msg)
+	if err != nil {
+		log.Fatalf("err: %s", err)
+	}
+	fmt.Println(string(b))
+}
+
+   Repeatable generation helps make tests predictable without hard-coded fixtures.
+
+FauxRPC in handlers
+   At the edge of a service, handlers can generate fake responses quickly.
+
+   ConnectRPC example:
+   ConnectRPC Handler (click to expand)
+   [https://github.com/sudorandom/kmcd.dev/blob/main/posts/2026/faking-protobuf-data-in-go/go/snippet1_connect_handler.go]View
+   on GitHub
+
+package main
+
+import (
+	"context"
+	"github.com/sudorandom/fauxrpc"
+	"github.com/bufbuild/connect-go"
+	elizav1 "buf.build/gen/go/connectrpc/eliza/protocolbuffers/go/connectrpc/eliza/v1"
+)
+
+func Say(ctx context.Context, req *connect.Request[elizav1.SayRequest]) (*connect.Response[elizav1.SayResponse], error) {
+	msg := &elizav1.SayResponse{}
+	if err := fauxrpc.SetDataOnMessage(msg, fauxrpc.GenOptions{}); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(msg), nil
+}
+
+   Request example:
+$> buf curl --schema=buf.build/connectrpc/eliza \
+	 -d '{"sentence": "Hello world!"}' \
+	 http://127.0.0.1:6660/connectrpc.eliza.v1.ElizaService/Say
+{
+	"sentence": "Microdosing."
+}
+
+   gRPC-go example:
+   gRPC-go Handler (click to expand)
+   [https://github.com/sudorandom/kmcd.dev/blob/main/posts/2026/faking-protobuf-data-in-go/go/snippet2_grpc_handler.go]View
+   on GitHub
+
+package main
+
+import (
+	"context"
+	"github.com/sudorandom/fauxrpc"
+	elizav1 "buf.build/gen/go/connectrpc/eliza/protocolbuffers/go/connectrpc/eliza/v1"
+)
+
+func Say(ctx context.Context, req *elizav1.SayRequest) (*elizav1.SayResponse, error) {
+	msg := &elizav1.SayResponse{}
+	if err := fauxrpc.SetDataOnMessage(msg, fauxrpc.GenOptions{}); err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+   The behavior is identical and works out-of-the-box.
+
+FauxRPC CLI
+   The CLI can generate data without compiling Go code:
+
+$> fauxrpc generate --schema=. --target=example.v1.User
+{"username":"Birdie", "email":"pariskozey@hamill.in", "age":54}
+
+   The CLI is incredibly flexible with the -schema flag. You can point it at:
+     * A local .proto file or a directory of them.
+     * A compiled protobuf descriptor set (binpb).
+     * A remote Buf Schema Registry repository (e.g., buf.build/acme/auth).
+
+Closing thoughts
+   FauxRPC is not a data modeling tool; it generates values consistent with protobuf types and
+   constraints. This makes it useful for quickly standing up services, testing clients, and exploring
+   API shapes.
+
+   It works with both ConnectRPC and grpc-go, and provides hooks for custom data generation. For full
+   details, see the [https://pkg.go.dev/github.com/sudorandom/fauxrpc]pkg.go.dev reference.
+
+
+---
+

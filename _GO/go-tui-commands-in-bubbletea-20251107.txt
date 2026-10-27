@@ -1,0 +1,279 @@
+filename: go-tui-commands-in-bubbletea-20251107.txt
+https://charm.land/blog/commands-in-bubbletea/
+
+
+Commands in Bubble Tea
+21 March 2023
+
+   Because of its [https://elm-lang.org/]Elm-inspired roots, Bubble Tea has a special approach to
+   asynchronous
+   operations: commands.
+
+   Commands are a fundamental part of Bubble Tea and are present whenever I/O needs to happen. There may
+   built-in commands you're familiar with already such as the tea.Quit, tea.Tick, and so on.
+
+   Also, if you're just getting started with Bubble Tea we recommend checking out the Bubble Tea
+   Commands tutorial. It is worth the read.
+
+Rules of thumb
+   There three things to keep in mind with regard to asynchronous stuff in Bubble Tea:
+     * Use commands for all I/O. By doing so your program will stay responsive, snappy, and
+       maintainable. Even something as simple as reading a file from disk could cause a small lock up in
+       your program, and commands are build to handle such cases beautifully.
+     * Only use commands for I/O. Sometimes it's tempting to use a command simply to send a message to
+       another part of the program, however due to the nature of the way data flows in Bubble Tea this
+       is never actually necessary.
+     * Never use goroutines within a Bubble Tea program. Bubble Tea works best when you use commands and
+       messages for communication.
+
+The basics
+   Okay, so how would we write our own commands?
+
+   A Cmd is simply an alias for func() tea.Msg, so it's just a function that returns a message. A
+   command could be something as simple as:
+
+type helloMsg string
+
+func waitASec() tea.Msg {
+	time.Sleep(time.Second)
+		return helloMsg("Hi, there!")
+}
+
+   But how would you respond to such a command? You'd match on it in your update method.
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case helloMsg:
+		// We caught our message like a Pokémon!
+		// From here you could save the output to the model
+		// to display it later in your view.
+		m.greeting = msg;
+	default:
+		return m, nil
+	}
+}
+
+Multiple commands
+   Sometimes you want to fire off more than one command at once. For that, use tea.Batch.
+
+func choresCmd() tea.Msg {
+	return tea.Batch(getTheLaundry, eatDinner, petTheCats)
+}
+
+Commands with arguments
+   Okay, so what if you want to make a command that takes an argument? Since Cmd is a func() tea.Msg, it
+   can't take an argument. So what do you do in that case? Well, you make a function that returns a
+   command.
+
+func getUser(id) tea.Cmd {
+	return func() tea.Msg {
+		user, _ := api.GetUserByID(id)
+		return gotUser{user}
+	}
+}
+
+   In your Update function it would look something like this:
+
+return m, getUser(88)
+
+Initial commands
+   Sometimes you'll want to fire off a command right as your Bubble Tea program starts without waiting
+   for user input. For that, use Model.Init:
+
+func (m Model) Init() tea.Msg {
+	return fetchUsers
+}
+
+   Or, for multiple commands:
+
+func (m Model) Init() tea.Msg {
+	return tea.Batch(
+		fetchUsers,
+		spinner.Tick,
+	)
+}
+
+APIs calls from Bubble Tea
+   A lot of the time you'll want to make API calls from Bubble Tea. Commands are great for this.
+
+func getUser(id int) tea.Cmd {
+	return func() tea.Msg {
+		res, err := http.Get(fmt.Sprintf("http://api.example.com/users?id=%d", id))
+		if err != nil {
+			return apiErrMsg{err}
+		}
+		// ...do unmarshaling and stuff...
+		return fetchedUserMsg(u)
+	}
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+				case "enter":
+					// Make our API request
+					return m, getUser(m.userID)
+			}
+		case fetchedUserMsg:
+			// Here's our API response
+		case apiErrMsg:
+			// Oh no, an API error!
+		default:
+			return m, nil
+	}
+}
+
+Injecting messages from outside the program
+   Commands work great from within a Bubble Tea program, but what if you want to send messages to Update
+   from outside the program? Enter Program.Send(). It's as simple as p.Send(someMsg{}):
+
+p := tea.NewProgram(model)
+
+// Later...
+p.Send(someMsg{})
+
+   For details check out the
+   [**1][https://github.com/charmbracelet/bubbletea/blob/6b77c8fc10d43195ab29e6e09f93272623ce4e9c/examples/\
+   send-msg/main.go#L116]full
+   example and [https://pkg.go.dev/github.com/charmbracelet/bubbletea#Program.Send]Program.Send in the docs.
+
+
+---
+[**1]
+https://github.com/charmbracelet/bubbletea/blob/6b77c8fc10d43195ab29e6e09f93272623ce4e9c/examples/send-msg/main.go
+
+package main
+
+// A simple example that shows how to send messages to a Bubble Tea program
+// from outside the program using Program.Send(Msg).
+
+import (
+	"fmt"
+	"math/rand"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+var (
+	spinnerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
+	helpStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Margin(1, 0)
+	dotStyle      = helpStyle.Copy().UnsetMargins()
+	durationStyle = dotStyle.Copy()
+	appStyle      = lipgloss.NewStyle().Margin(1, 2, 0, 2)
+)
+
+type resultMsg struct {
+	duration time.Duration
+	food     string
+}
+
+func (r resultMsg) String() string {
+	if r.duration == 0 {
+		return dotStyle.Render(strings.Repeat(".", 30))
+	}
+	return fmt.Sprintf("🍔 Ate %s %s", r.food,
+		durationStyle.Render(r.duration.String()))
+}
+
+type model struct {
+	spinner  spinner.Model
+	results  []resultMsg
+	quitting bool
+}
+
+func newModel() model {
+	const numLastResults = 5
+	s := spinner.New()
+	s.Style = spinnerStyle
+	return model{
+		spinner: s,
+		results: make([]resultMsg, numLastResults),
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	return spinner.Tick
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+		case tea.KeyMsg:
+			m.quitting = true
+			return m, tea.Quit
+		case resultMsg:
+			m.results = append(m.results[1:], msg)
+			return m, nil
+		case spinner.TickMsg:
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		default:
+			return m, nil
+	}
+}
+
+func (m model) View() string {
+	var s string
+
+	if m.quitting {
+		s += "That’s all for today!"
+	} else {
+		s += m.spinner.View() + " Eating food..."
+	}
+
+	s += "\n\n"
+
+	for _, res := range m.results {
+		s += res.String() + "\n"
+	}
+
+	if !m.quitting {
+		s += helpStyle.Render("Press any key to exit")
+	}
+
+	if m.quitting {
+		s += "\n"
+	}
+
+	return appStyle.Render(s)
+}
+
+func main() {
+	rand.Seed(time.Now().UTC().UnixNano())
+
+	p := tea.NewProgram(newModel())
+
+	// Simulate activity
+	go func() {
+		for {
+			pause := time.Duration(rand.Int63n(899)+100) * time.Millisecond
+			time.Sleep(pause)
+
+			// Send the Bubble Tea program a message from outside the
+			// tea.Program. This will block until it is ready to receive
+			// messages.
+			p.Send(resultMsg{food: randomFood(), duration: pause})
+		}
+	}()
+
+	if _, err := p.Run(); err != nil {
+		fmt.Println("Error running program:", err)
+		os.Exit(1)
+	}
+}
+
+func randomFood() string {
+	food := []string{
+		"an apple", "a pear", "a gherkin", "a party gherkin",
+		"a kohlrabi", "some spaghetti", "tacos", "a currywurst", "some curry",
+		"a sandwich", "some peanut butter", "some cashews", "some ramen",
+	}
+	return string(food[rand.Intn(len(food))])
+}
+

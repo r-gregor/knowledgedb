@@ -1,0 +1,497 @@
+filename: c_dynamic-mem-linked-lists_20240416.txt
+https://staffwww.fullcoll.edu/aclifton/cs241/lecture-dynamic-mem-linked-lists.html
+
+Dynamic memory allocation; linked-lists
+
+Dynamic memory allocation
+   Linked lists are inherently dynamic data structures; they rely on new and delete (or malloc and free)
+   for their operation. Normally, dynamic memory management is provided by the C/C++ standard library,
+   with help from the operating system. However, nothing stops us from writing our own allocator,
+   providing the same services as malloc and free.
+
+Differences between C++ and C
+   In C++, to dynamically allocate memory, we write newtype or newtype[size] for an array, and we get
+   back a pointer, a type*. Internally, both of these boil down to a request for a contiguous chunk of
+   memory of a certain size (sizeof(type) * size). In C, this is provided directly: malloc(bytes) takes
+   a number of bytes as a parameter and returns a void* (a generic pointer) to a contiguous region of
+   memory. Similarly, when we do delete p we are passing the pointer p to the allocator to inform it
+   that the memory is not needed. In C, this is done via free(p). I'll use the C versions, as they are
+   more low level.
+
+   In C++, most standard library classes which need dynamic memory (string, vector, etc.) take a
+   compile-time allocator parameter, which allows a different allocator to be "plugged in" to the class.
+   In C, the standard allocator can only be replaced globally, by linking with a different allocator
+   library.
+
+Restrictions
+   When we're writing an allocator, we must bear in mind that we are responsible for handling dynamic
+   memory requests. This means that the allocator code should itself try to be as efficient in terms of
+   memory as possible, and of course, the allocator cannot use any dynamic memory! Thus, although they
+   would be useful, normal implementations of things like linked lists, trees, etc. are not possible in
+   an allocator. We will see that something like linked lists can be used, with some care as to where
+   the "nodes" are placed.
+
+Fragmentation
+   Fragmentation refers to the tendency of the heap to go from one large available block at the
+   beginning to many small available blocks. It may be possible that, while the total amount of memory
+   is larger than the amount requested, no single block is big enough to satisfy it. For example,
+   suppose we have a heap of size 20, and the following memory requests:
+void* a = malloc(5);
+void* b = malloc(5);
+void* c = malloc(5);
+void* d = malloc(5);
+free(b);
+free(d);
+
+   There are theoretically 10 bytes of memory available, but the largest malloc we can handle is of size
+   5! This particular example is called external fragmentation, fragmentation where the available memory
+   is broken into many small blocks rather than a few large ones.. There's relatively little an
+   allocator can do about external fragmentation, partly because we are not allowed to move existing
+   blocks (this would require finding every pointer into that block and updating it to the block's new
+   location, something that is not possible in either C or C++).
+
+   (Internal fragmentation occurs when an allocator reserves more space per-block than is actually
+   requested.)
+
+Basic allocator functionality
+   The allocator maintains some internal state to keep track of free/in-use memory and responds to two
+   kinds of requests:
+     * malloc(n) - A request for n bytes of contiguous memory. The allocator should return a pointer to
+       such a block, if it has one available, or a null pointer if it does not. The block of memory
+       should be marked as "in-use" in the allocators internal state. (Secure allocators might zero
+       memory before giving it over, to ensure that existing data is not "leaked".)
+     * free(p) - An offer to release the memory pointed to by p. The allocator should mark the memory
+       used by p as not in-use. (Error-checking allocators might fill the memory with a recognizable
+       byte pattern so that use-after-free errors are easy to detect.)
+
+   We assume that once a given region has been given to us (as a pointer returned from malloc) the
+   allocator will not later give us a pointer to the same region; that is, blocks of memory returned by
+   malloc are required to not overlap each other. Similarly, when we release a block with free, we
+   expect that only that block will be affected. The allocator has access to a large region of memory
+   (the heap section), which it may be able to expand via operating system request, but which is
+   otherwise reserved entirely for the allocator's use.
+
+No-free allocation
+
+   The simplest possible allocator is one where we simply add each allocated block of memory immediately
+   after the end of the previous allocation. That is, if we have the following three requests:
+void* p1 = malloc(12);
+void* p2 = malloc(3);
+void* p3 = malloc(7);
+
+   then we have the following memory layout:
+   +----------+-----+------+------+
+   | Block    |p1   |p2    |p3    |
+   +----------+-----+------+------+
+   |Addresses |0-11 |12-14 |15-21 |
+   +----------+-----+------+------+
+
+   When memory is free-d, we do nothing. Allocated memory is never released, until the program ends. The
+   reason why we make this choice is that keeping track of which blocks of memory are in-use and which
+   are not requires a fair bit of complexity, so we avoid it by not doing it at all.
+
+   This allocator's internal state is simply a pointer fp to the next free address (e.g., in the above,
+   this would point to address 22). The implementation of malloc is thus:
+void* fp = 0; // Starting address
+
+void* malloc(size_t n) {
+	fp += n;       // Reserve n bytes
+	return fp - n; // Start of block
+}
+
+while free is just
+void free(void* p) {
+	// Does nothing
+}
+
+   The only advantages to this allocator are that both allocation and deallocation run in \(O(1)\) time.
+   Despite its simplicity, this "never-free" allocator can be quite useful for structures which are
+   partially dynamic, but which are created once, at program startup, and then not freed until program
+   end.
+
+   Note that while we can't free individual blocks, we can free the entire heap, all at once, and revert
+   to a state where nothing has been allocated.
+
+Stack-based allocation
+   Looking at the previous allocator, we can see that there always one block of memory which we could
+   free easily: the last one. If a free is received for the most-recently allocated block, we can
+   deallocate it by simply decrementing fp by the size of the block. Note that we do not above store the
+   size of the blocks anywhere, so we will need to add some extra information. At the end of each block,
+   just after the last byte, we will write a pointer to the beginning of the block, and similarly,
+   before the beginning of the block, we will write a pointer to the end. This allows us to navigate
+   through the blocks as if they were a doubly-linked list.
+
+   Each block now looks like this:
+   +--------+-----+------+---------+
+   |Purpose |Size |Block |Start    |
+   +--------+-----+------+---------+
+   |Address |p-8  |p     |p + size |
+   +--------+-----+------+---------+
+
+   Given a pointer to a block, we can find its starting record (containing its size) by simply going
+   back 8 bytes (1 qword), and then we can find its ending record by adding the size to the pointer.
+
+   Malloc must be implemented to maintain these structures:
+void* fp = 0;
+
+void* malloc(size_t n) {
+	void* block = fp + 8; // Address of block
+	*fp = n;              // Write size record
+	*(block + n) = fp;    // Write start record
+	fp += 8 + n;
+	return block;
+}
+
+   free looks at the block being released and checks to see if it is the last block allocated; this will
+   be the case if fp points to the address immediately after the start record of the block.
+void free(void* p) {
+	size_t n = *(p - 8);
+	if(p + n == fp) {
+		// Last block
+		fp = p - 8;
+	}
+	else {
+		// Not last block
+		// Do nothing.
+	}
+}
+
+   This allocator can free all the memory allocated, provided that calls to free arrive in the opposite
+   of the order of their corresponding mallocs. If this order is not maintained, then some memory will
+   be lost.
+
+   With a simple modification, we can allow out-of-order frees to at least partially free their memory.
+   We will add a one-bit flag to the size record at the beginning of every block set to 0 if the block
+   is unused, or 1 if it is used. (Although pointers are 64-bit on x86-64, the system actually only
+   supports addresses up to 40 bits in length; thus, the high 24 bits of every pointer are available for
+   us to use for other purposes.) When we free a block, we perform the following steps:
+     * If it is not the last block then we simply mark it as unused (set its in-use flag to 0).
+     * If it is the last block, then we free it as above, and then we repeatedly check for not-in-use
+       blocks before it, and free those as well.
+
+   Thus, a chain of not-in-use blocks at the end of the heap will all be freed at once. Note that we
+   still do not reuse the memory of not-in-use blocks, unless they are "really" freed. A block's memory
+   is only really freed if every block after it has also been freed.
+
+A general-purpose allocator
+   Using the idea of blocks arranged into a linked-list-like structure, with a flag on each block for
+   "in-use" or not, we can generalize the above to a general-purpose allocator which correctly frees
+   memory on every free, not just those that are in the right order. This is called a free list.
+
+   Initially, we set things up so that the entire heap is treated as a single entry in the free-list,
+   marked as not in use. Because we're not treating the list in a stack-like manner, there's no need for
+   the "backwards" pointers, so each block has a small record before the beginning which consists of a
+   pointer to the next free block. Because the list only contains free blocks, there's no need to record
+   whether an entry is free or in-use.
+
+   To malloc a block, we search through the list for a block whose size is at least as big as requested.
+   Of all these blocks, we have a choice as to which one to use, determined by the allocation strategy:
+     * First Fit: use the first block in the list which fits
+     * Best Fit: use the block in the list whose size is closest to the requested size.
+     * Use the most/least recently free-d block (LIFO, FIFO).
+
+   If the size of the block chosen is larger than the requested size, then we split the block; part of
+   it becomes used, and the remainder is still free. If the size of the block exactly matches the
+   requested size, then the block is removed from the free list entirely.
+
+   When a block is freed, we add it to the list. This can be done in several ways:
+     * Add to the front of the list. (When used with first-fit, this results in LIFO-like behavior).
+     * Add to the back of the list. (FIFO)
+     * Insert it into the list so that the list is always ordered by address. This is most common, as
+       the structure of the list mirrors the structure of the memory layout.
+
+   Insert-in-memory order has the advantage that it makes it relatively easy to coalesce free blocks
+   which are physically adjacent to each other. E.g., if the free list contains an entry for a block
+   10-19, and an entry for a block 20-49, these should be removed and replaced with a single entry
+   10-49. This is easiest to detect if the blocks in the list are address-ordered.
+
+   Eager coalescing refers to coalescing done during free. Deferred coalescing is done later, either
+   during a malloc (if no block of sufficient size is found), or perhaps during a later free.
+
+   The main disadvantage to this allocator is speed: requests for memory must traverse the list, making
+   them run in \(O(m)\) time, where r is the number of malloc calls so far. Calls to free run in
+   \(O(1)\), as in the worst case, only three blocks will need to be examined and coalesced.
+
+Fixed-size allocator
+   If we know that every allocation request will be for a block of the same size (or we know that they
+   will all be ≤ some maximum size, and we don't mind wasting space), we can build a specialized version
+   of any of the above allocators where the block size is hard-coded. We can avoid storing the block
+   size in the records around each block, so these records become either much smaller or, in some cases,
+   non-existent. (E.g., finding the next/previous block is easy if they all have the same size.) A
+   fixed-size allocator is sometimes called an object pool (or memory pool), because a typical use of it
+   is storing objects all of the same type (and hence, having the same size).
+
+   An object pool also has the advantage that an allocation for k objects takes the same amount of time
+   as for 1 object, again, because the size of the objects is fixed.
+
+   Some allocators reserve a section of the heap for "small" object allocations, and use a fixed-size
+   allocator only in this region, while using a more general method for the rest of the heap.
+
+   It's also possible to reserve several regions, each dedicated to a particular size; if a free space
+   cannot be found in a smaller-sized region, we proceed to search the next larger region.
+
+Linked lists in assembly
+   Given that we now have structures, we can build linked lists, in assembly. We'll use the C-library so
+   we can dynamically allocate memory via malloc.
+
+   (Review linked lists.)
+
+   We'll use the following structure definition:
+struc node
+    value:  resq    1
+    next:   resq    1
+endstruc
+
+   Note that node_size will be defined as 16. Because our structure is > 8 bytes but ≤ 16 with no xmm
+   members, we can always pass/return it in GP registers, if available.
+
+Creating nodes
+   To replicate the C++ operation new node{value, next} we'll write a function which takes arguments for
+   the value, and next-pointer of the node, calls malloc to allocate memory on the heap for it, and then
+   returns the address of the newly-created node:
+
+extern malloc
+
+new_node:
+	; rdi = value
+	; rsi = next ptr
+	push rbp
+	mov rbp, rsp
+
+	push r15
+	push r14
+
+	mov r15, rdi ; value
+	mov r14, rsi ; next
+
+	mov rdi, node_size
+	call malloc
+	; rax = address of new node
+
+	; Populate node
+	mov qword [rax + value], r15
+	mov qword [rax + next],  r14
+
+	pop r14
+	pop r15
+	pop rbp
+	ret
+
+   This is equivalent to the C code
+node* new_node(long value, node* next) {
+	node* n = (node*) malloc(sizeof(node));
+	n->value = value;
+	n->next = next;
+	return n;
+}
+
+   Note that we can use the struc member labels value and next as offsets to within the structure
+   pointed to by rax.
+
+   A list will be identified by a node*. Hence, new_node above is also a kind of push_front, adding a
+   new node to the beginning of a list.
+
+Finding the length of a list
+   Finding the length is a matter of traversing the list from beginning to end, counting nodes as we go.
+   In C/C++ this would be
+unsigned long length(node* n) {
+	unsigned long c = 0;
+	while(n) {
+		++c;
+		n = n->next;
+	}
+	return c;
+}
+
+   In assembly, this becomes
+
+length:
+	; rdi = node* n
+	; We don't have to do the rbp/rsp shuffle, because this is a leaf func.
+
+	xor rax, rax                 ; rax = 0
+
+.while:
+	cmp rdi, 0                   ; while(rdi) {
+	je .return
+	inc rax                      ;    ++rax;
+	mov rdi, qword [rdi + next]  ;    rdi = rdi->next;
+	jmp .while                   ; }
+
+.return:
+	pop rbp
+	ret                          ; return rax;
+
+The loop
+.while:
+	cmp reg, 0
+	je .end_while
+
+	...
+	mov rdi, qword [rdi + next]
+	jmp .while
+
+.end_while:
+	...
+
+   will be our template for loops that need to traverse the list.
+
+   We can also implement this recursively in assembly, equivalent to the following C:
+unsigned long length(node* n) {
+	if(!n)
+		return 0;
+	else {
+		n = n->next;
+		return 1 + length(n);
+	}
+}
+
+length:
+	; rdi = node* n
+
+	cmp rdi, 0
+	jne .recurse
+	xor rax, rax    ; rax = 0
+	ret
+
+.recurse:
+	mov rdi, qword [rdi + next] ; n = n->next
+	call length
+	inc rax
+	ret
+
+Inserting a value
+   To insert a value, we pass a pointer to the node before the location to insert at, as well as the
+   value to be inserted. In C, we would do
+node* insert(node* p, long value) {
+	node* n = new_node(value, p->next);
+	p->next = n;
+	return n;
+}
+
+   In assembly, this becomes
+insert:
+	; rdi = prior node* p
+	; rsi = value
+	push rbp
+	mov rbp, rsp
+	push r15
+
+	mov r15, rdi                    ; p
+
+	mov rdi, rsi                    ; value
+	mov rsi, qword [r15 + next]     ; p->next
+	call new_node                   ; rax = new_node(...)
+
+	mov qword [r15 + next], rax     ; p->next = rax
+
+	pop r15
+	pop rbp
+	ret
+
+Removing a node
+   Similarly, to remove a node, we pass a pointer to the node before it.
+void remove(node* p) {
+	node* n = p->next;
+
+	if(p->next)
+		p->next = p->next->next;
+
+	free(n);
+}
+
+extern free
+
+remove:
+	; rdi = node* p
+	push rbp
+	mov rbp, rsp
+	push r15
+	push r14
+
+	mov r15, qword [rdi + next] ; n = p->next
+
+	cmp qword [rdi + next], 0
+	je .after_if
+	mov r14, qword [r15 + next] ; r15 = p->next->next
+	mov qword [rdi + next], r14
+.after_if:
+
+	mov rdi, r15
+	call free
+
+	pop r14
+	pop r15
+	pop rbp
+	ret
+
+Reversing a list in-place
+   Reversing a list by constructing a new one is easy: just traverse the input list, adding the values
+   one at a time to the beginning of a new list. Similarly, if the list was doubly-linked, reversing is
+   easy: we can start traversing from both ends and swap elements until we meet in the middle. Reversing
+   a singly-linked list in-place is more tricky.
+
+   In C, it would look something like this:
+
+// Returns the new head of the list.
+node* reverse(node* head) {
+	if(!head or !head->next)
+		return head; // 0 or 1 nodes
+
+	node* p = NULL;         // Previous
+	node* c = head;         // Current
+	node* n = head->next;   // Next
+
+	while(true) {
+		c->next = p;
+		p = c;
+		c = n;
+		if(c)
+			n = c->next;
+		else
+			break;
+	}
+
+	return p;
+}
+
+   This works by essentially reversing the links between the nodes, so that each node's next points to
+   the node that was before it. We have to keep track of this previous node (p), as well as the node
+   after the current node (n), because we overwrite c->next.
+
+   Translating this into assembly we have:
+
+reverse:
+	; Leaf function, no need to setup stack frame
+	; rdi = head
+
+	cmp rdi, 0
+	jne .continue
+	cmp [rdi + next], 0
+	jne .continue
+
+	mov rax, rdi            ; return head
+	ret
+
+.continue:
+	mov rax, 0              ; p
+	mov rbx, rdi            ; c
+	mov rcx, [rdi + next]   ; n
+
+.while:
+	mov [rbx + next], rax   ; c->next = p
+	mov rax, rbx            ; p = c
+	mov rbx, rcx            ; c = n
+	cmp rbx, 0              ; if(c)
+	je .return
+	mov rcx, [rbx + next]   ; n = c->next
+	jmp .while
+
+.return:
+	ret
+
+
+
+
+---
+

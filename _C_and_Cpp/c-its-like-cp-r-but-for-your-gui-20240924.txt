@@ -1,0 +1,314 @@
+filename: c_its-like-cp-r-but-for-your-gui_20240924.txt
+https://ptomato.wordpress.com/2024/09/23/its-like-cp-r-but-for-your-gui/
+
+It's like cp -R but for your GUI
+September 23, 2024
+
+   As a JavaScript engine developer at Igalia I don't find myself writing much plain C code anymore.
+   I'm either writing JS or TypeScript, or hacking on large compiler codebases in C++, or writing
+   ECMAScript specification language. Frankly, that is fine with me. C's time may not be over yet, but I
+   wouldn't be sad if I never had to write another line of it. (Hopefully this post conveys why.)
+
+   However, while working on modernizing an app written in C for the GNOME platform, that I hack on in
+   my spare time, I wanted to copy a folder recursively using the GIO async APIs. Like cp -R at the
+   shell, but without freezing up your GUI while it works.
+
+   C's callback style for async programming, combined with lack of capturing variables in closures, is
+   like going back to the dark ages if you've gotten used to languages with async/await style or even
+   C++'s lambdas. I would've avoided writing this if I could, but apparently no one else had done it
+   publicly on the internet that I could find. So here it is for your enjoyment.
+
+typedef struct {
+	GFile *dest_folder;
+	GQueue *files_to_copy;
+	GQueue *folders_to_copy;
+	GFileCopyFlags flags;
+} CopyRecursiveClosure;
+
+/* Pre-declare so we can read them in the order they are executed: */
+static void on_recursive_make_dir_finish(GFile *file, GAsyncResult *res, GTask *data);
+static void on_recursive_file_enumerate_finish(GFile* file, GAsyncResult *res, GTask *data);
+static void on_recursive_file_next_files_finish(GFileEnumerator *children, GAsyncResult *res, GTask *data);
+static void copy_file_queue_async(GTask *task);
+static void on_recursive_file_copy_finish(GFile *file, GAsyncResult *result, GTask *data);
+static void on_recursive_folder_copy_finish(GFile *file, GAsyncResult *result, GTask *data);
+static void copy_folder_queue_async(GTask *task);
+static void copy_recursive_closure_free(CopyRecursiveClosure *ptr);
+
+/**
+ * copy_recursive_async:
+ * @src: The source folder
+ * @dest: Destination folder in which to place the copy of @src
+ * @flags: #GFileCopyFlags to apply to copy operations
+ * @prio: I/O priority, e.g. #G_PRIORITY_DEFAULT
+ * @cancel: #GCancellable that will interrupt the operation when triggered
+ * @done_cb: Function to call when the operation is finished
+ * @data: Pointer to pass to @done_cb
+ *
+ * Copy the folder @src and all of the files and subfolders in it into the
+ * folder @dest, asynchronously.
+ *
+ * The only @flags supported are #G_FILE_COPY_NONE and #G_FILE_COPY_OVERWRITE.
+ */
+void copy_recursive_async(GFile *src, GFile *dest, GFileCopyFlags flags, int prio, GCancellable *cancel,
+        GAsyncReadyCallback done_cb, void *data)
+{
+	g_return_if_fail(G_IS_FILE(src));
+	g_return_if_fail(G_IS_FILE(dest));
+	g_return_if_fail(flags == G_FILE_COPY_NONE || flags == G_FILE_COPY_OVERWRITE);
+	g_return_if_fail(!cancel || G_IS_CANCELLABLE(cancel));
+
+	g_autoptr(GTask) task = g_task_new(src, cancel, done_cb, data);
+	g_task_set_priority(task, prio);
+
+	CopyRecursiveClosure *task_data = g_new0(CopyRecursiveClosure, 1);
+	g_autofree char *basename = g_file_get_basename(src);
+	task_data->dest_folder = g_file_get_child(dest, basename);
+	task_data->files_to_copy = g_queue_new();
+	task_data->folders_to_copy = g_queue_new();
+	task_data->flags = flags;
+	g_task_set_task_data(task, task_data, (GDestroyNotify)copy_recursive_closure_free);
+
+	g_file_make_directory_async(task_data->dest_folder, prio, cancel,
+			(GAsyncReadyCallback)on_recursive_make_dir_finish, g_steal_pointer(&task));
+}
+
+/**
+ * copy_recursive_finish:
+ * @src: The source folder
+ * @result: The #GAsyncResult passed to the callback
+ * @error_out: (nullable): Return location for a #GError
+ *
+ * Complete the asynchronous copy operation started by copy_recursive_async().
+ *
+ * Returns: %TRUE if the operation completed successfully, %FALSE on error.
+ */
+bool copy_recursive_finish(GFile *src, GAsyncResult *result, GError **error_out)
+{
+	g_return_val_if_fail(G_IS_FILE(src), false);
+	g_return_val_if_fail(G_IS_TASK(result), false);
+	g_return_val_if_fail(g_task_is_valid(result, src), false);
+
+	return g_task_propagate_boolean(G_TASK(result), error_out);
+}
+
+static void on_recursive_make_dir_finish(GFile *file, GAsyncResult *result, GTask *task_ptr)
+{
+	g_autoptr(GTask) task = g_steal_pointer(&task_ptr);
+	g_autoptr(GError) error = NULL;
+	GCancellable *cancel = g_task_get_cancellable(task);
+	int prio = g_task_get_priority(task);
+
+	if (!g_file_make_directory_finish(G_FILE(file), result, &error)) {
+		/* With the OVERWRITE flag, don't error out when the folder already
+		 * exists. (Hopefully plopping all the files in the existing folder is
+		 * sufficient. If not, another way to do this would be to delete the
+		 * existing folder recursively, so that extra existing files not in the
+		 * source don't remain in the destination.) */
+		CopyRecursiveClosure *data = g_task_get_task_data(task);
+		bool overwrite = !!(data->flags & G_FILE_COPY_OVERWRITE);
+		if (!overwrite || !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_EXISTS)) {
+			g_autofree char *path = g_file_get_path(file);
+			g_task_return_prefixed_error(task, g_steal_pointer(&error),
+					"Error creating destination folder %s: ", path);
+			return;
+		}
+	}
+
+	GFile *src = g_task_get_source_object(task);
+	g_file_enumerate_children_async(src, "standard::*", G_FILE_QUERY_INFO_NONE, prio, cancel,
+			(GAsyncReadyCallback)on_recursive_file_enumerate_finish, g_steal_pointer(&task));
+}
+
+static void on_recursive_file_enumerate_finish(GFile *file, GAsyncResult *result, GTask *task_ptr)
+{
+	g_autoptr(GTask) task = g_steal_pointer(&task_ptr);
+	g_autoptr(GError) error = NULL;
+	GCancellable *cancel = g_task_get_cancellable(task);
+	int prio = g_task_get_priority(task);
+
+	g_autoptr(GFileEnumerator) children = g_file_enumerate_children_finish(G_FILE(file), result, &error);
+	if (!children) {
+		g_autofree char *path = g_file_get_path(file);
+		g_task_return_prefixed_error(task, g_steal_pointer(&error),
+				"Error reading folder %s: ", path);
+		return;
+	}
+
+	g_file_enumerator_next_files_async(children, 10, prio, cancel,
+			(GAsyncReadyCallback)on_recursive_file_next_files_finish, g_steal_pointer(&task));
+}
+
+static void on_recursive_file_next_files_finish(GFileEnumerator *children, GAsyncResult *result, GTask *task_ptr)
+{
+	g_autoptr(GTask) task = g_steal_pointer(&task_ptr);
+	g_autoptr(GError) error = NULL;
+	GCancellable *cancel = g_task_get_cancellable(task);
+	int prio = g_task_get_priority(task);
+
+	g_autolist(GFileInfo) next_files = g_file_enumerator_next_files_finish(children, result, &error);
+	if (error) {
+		g_autofree char *path = g_file_get_path(g_file_enumerator_get_container(children));
+		g_task_return_prefixed_error(task, g_steal_pointer(&error),
+				"Error reading files from folder %s: ", path);
+		return;
+	}
+
+	CopyRecursiveClosure *data = g_task_get_task_data(task);
+
+	if (next_files) {
+		for (GList *iter = next_files; iter != NULL; iter = g_list_next(iter)) {
+			GFileInfo *info = G_FILE_INFO(iter->data);
+			GFileType type = g_file_info_get_file_type(info);
+			g_autoptr(GFile) file = g_file_enumerator_get_child(children, info);
+			switch (type) {
+				case G_FILE_TYPE_DIRECTORY:
+					g_queue_push_tail(data->folders_to_copy, g_steal_pointer(&file));
+					break;
+				case G_FILE_TYPE_REGULAR:
+					g_queue_push_tail(data->files_to_copy, g_steal_pointer(&file));
+					break;
+				default:
+					g_warning("Unhandled file type %d in recursive copy: %s", type, g_file
+							_info_get_name(info));
+					continue;
+			}
+		}
+
+		g_file_enumerator_next_files_async(children, 10, prio, cancel,
+				(GAsyncReadyCallback)on_recursive_file_next_files_finish, g_steal_pointer(&task));
+
+		return;
+	}
+
+	copy_file_queue_async(g_steal_pointer(&task));
+}
+
+static void copy_file_queue_async(GTask *task_ptr)
+{
+	g_autoptr(GTask) task = task_ptr;
+	CopyRecursiveClosure *data = g_task_get_task_data(task);
+
+	g_autoptr(GFile) file = g_queue_pop_head(data->files_to_copy);
+	if (file) {
+		GCancellable *cancel = g_task_get_cancellable(task);
+		int prio = g_task_get_priority(task);
+
+		g_autofree char *basename = g_file_get_basename(file);
+		g_autoptr(GFile) dest = g_file_get_child(data->dest_folder, basename);
+		g_file_copy_async(file, dest, data->flags, prio, cancel,
+				/* progress_callback = */ NULL, NULL,
+				(GAsyncReadyCallback)on_recursive_file_copy_finish, g_steal_pointer(&task));
+		return;
+	}
+
+	copy_folder_queue_async(g_steal_pointer(&task));
+}
+
+static void on_recursive_file_copy_finish(GFile *file, GAsyncResult *result, GTask *task_ptr)
+{
+	g_autoptr(GTask) task = task_ptr;
+	g_autoptr(GError) error = NULL;
+	if (!g_file_copy_finish(file, result, &error)) {
+		g_autofree char *path = g_file_get_path(file);
+		g_task_return_prefixed_error(task, g_steal_pointer(&error),
+				"Error copying file %s: ", path);
+		return;
+	}
+	copy_file_queue_async(g_steal_pointer(&task));
+}
+
+static void copy_folder_queue_async(GTask *task_ptr)
+{
+	g_autoptr(GTask) task = task_ptr;
+	CopyRecursiveClosure *data = g_task_get_task_data(task);
+
+	g_autoptr(GFile) folder = g_queue_pop_head(data->folders_to_copy);
+	if (folder) {
+		GCancellable *cancel = g_task_get_cancellable(task);
+		int prio = g_task_get_priority(task);
+
+		copy_recursive_async(folder, data->dest_folder, data->flags, prio, cancel,
+				(GAsyncReadyCallback)on_recursive_folder_copy_finish, g_steal_pointer(&task));
+		return;
+	}
+
+	g_task_return_boolean(task, true);
+}
+
+static void on_recursive_folder_copy_finish(GFile *folder, GAsyncResult *result, GTask *task_ptr)
+{
+	g_autoptr(GTask) task = task_ptr;
+	g_autoptr(GError) error = NULL;
+	if (!copy_recursive_finish(folder, result, &error)) {
+		g_autofree char *path = g_file_get_path(folder);
+		g_task_return_prefixed_error(task, g_steal_pointer(&error),
+				"Error copying folder %s: ", path);
+		return;
+	}
+	copy_folder_queue_async(g_steal_pointer(&task));
+}
+
+static void copy_recursive_closure_free(CopyRecursiveClosure *ptr) {
+	g_object_unref(ptr->dest_folder);
+	g_queue_free_full(ptr->files_to_copy, g_object_unref);
+	g_queue_free_full(ptr->folders_to_copy, g_object_unref);
+	g_free(ptr);
+}
+
+   You are welcome to take this code and customize it to your needs. I'm putting it into the public
+   domain so hopefully nobody else has to go through this.
+
+   Although if you really want to, it could be improved by implementing progress callbacks like
+   g_file_copy_async() has.
+
+   Just so you can understand what's going on at a glance, here's what it would look like in about 30
+   lines of JavaScript, with async/await style:
+
+async function copyRecursive(src, dest, flags, prio, cancel) {
+	const destFolder = dest.get_child(src.get_basename());
+	const overwrite = !!(flags & Gio.FileCopyFlags.OVERWRITE);
+
+	try {
+		await destFolder.make_directory_async(prio, cancel);
+	} catch (error) {
+		if (!overwrite || !error.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS))
+			throw error;
+	}
+
+	const children = await src.enumerate_children_async('standard::*',
+			Gio.FileQueryInfoFlags.NONE, prio, cancel);
+
+	let nextFiles;
+	const filesToCopy = [];
+	const foldersToCopy = [];
+	while ((nextFiles = await children.next_files_async(10, prio, cancel)).length) {
+		const {
+			[Gio.FileType.REGULAR]: files,
+				[Gio.FileType.DIRECTORY]: folders,
+		} = Object.groupBy(nextFiles, info => info.get_file_type());
+		foldersToCopy.push(...folders?.map(info => children.get_child(info)) ?? []);
+		filesToCopy.push(...files?.map(info => children.get_child(info)) ?? []);
+	}
+
+	for (const file of filesToCopy) {
+		const dest = destFolder.get_child(file.get_basename());
+		await file.copy_async(dest, flags, prio, cancel, null, null);
+	}
+
+	for (const folder of foldersToCopy)
+		await copyRecursive(folder, destFolder, flags, prio, cancel);
+}
+
+   (This excludes the imports and calls to Gio._promisify that you would have to do; hopefully we'll get
+   native async operations in GNOME 48!)
+
+    C++ before C++11 used to be a worse experience than C. However, I don't have to deal with that
+   because the three major JS engines use C++17. It's ... its own category of special, but better.
+
+   No, ChatGPT couldn't do it either; it made up GIO APIs that don't exist. If that programming
+   technique is on the table, then sure, it'd have been a lot easier.
+
+
+---
+

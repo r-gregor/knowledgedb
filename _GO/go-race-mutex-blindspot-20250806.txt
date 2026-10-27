@@ -1,0 +1,213 @@
+filename: go-race-mutex-blindspot-20250806.txt
+https://doublefree.dev/go-race-mutex-blindspot/
+
+Go's race detector has a mutex blind spot
+28 Jul, 2025
+
+I recently read Ralf Jung's blog post "There is no memory safety without thread safety" which mentions that
+Go is not a memory safe language in the presence of data races.
+
+"But Go comes with a built in data race detector" some might say.
+
+This reminded me of a quirk in Go's dynamic data race detection that causes it to miss data races in executed
+code that could easily be spotted by a human.
+
+Here is the code the data race detector struggles with:
+
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+var counter int
+var mutex sync.Mutex
+
+func increment(wg *sync.WaitGroup, id int) {
+	defer wg.Done()
+	mutex.Lock()
+	counter++
+	fmt.Printf("Counter: %d\n", counter)
+	mutex.Unlock()
+	if id == 1 {
+		counter++;
+	}
+}
+
+func main() {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go increment(&wg, 0)
+	go increment(&wg, 1)
+
+	wg.Wait()
+	fmt.Printf("Final: %d\n", counter)
+}
+
+Threads 0 and 1 increment a shared counter, guarded by a lock. Thread 1 then performs an additional increment
+on the counter, not guarded by the lock.
+
+If thread 1 acquires the lock first, it is possible for the unguarded write to happen at the same time as the
+guarded write on thread 0.
+
+The race detector confirms this:
+
+% go run -race race.go
+Counter: 1
+==================
+WARNING: DATA RACE
+Read at 0x000105026dd0 by goroutine 6:
+  main.increment()
+      /Users/brad/race.go:14 +0x80
+  main.main.gowrap1()
+      /Users/brad/race.go:26 +0x38
+
+Previous write at 0x000105026dd0 by goroutine 7:
+  main.increment()
+      /Users/brad/race.go:18 +0x158
+  main.main.gowrap2()
+      /Users/brad/race.go:27 +0x38
+
+Goroutine 6 (running) created at:
+  main.main()
+      /Users/brad/race.go:26 +0xac
+
+Goroutine 7 (finished) created at:
+  main.main()
+      /Users/brad/race.go:27 +0x110
+==================
+Counter: 3
+Final: 3
+Found 1 data race(s)
+
+... but only sometimes ...
+
+% go run -race race.go
+Counter: 1
+Counter: 2
+Final: 3
+
+Go's data race detector is pretty neat. It detects unsynchronized concurrent accesses to shared memory,
+regardless of the actual timing during execution. For example, even if you add a sleep to ensure the threads
+never actually run simultaneously, Go will still report a race because they access the same variable without
+synchronization.
+
+func increment(wg *sync.WaitGroup, id int) {
+	defer wg.Done()
+		if id == 1 {
+			time.Sleep(10 * time.Second)
+		}
+	counter++
+		fmt.Printf("Counter: %d\n", counter)
+}
+
+This is useful for detecting cases that rely on specific timing. For example, the tool would be much less
+useful if the race below could only be detected when bar() returns quickly.
+
+func foo(wg *sync.WaitGroup, id int) {
+	defer wg.Done()
+		if id == 1 {
+			bar() // usually slow, sometimes fast
+		}
+	counter++
+}
+
+However, in the original mutex case above, the unguarded write is always executed by thread 1, and yet Go is
+missing the race unless it actually occurs at runtime.
+
+It has been a while, so things may have changed or I may be misremembering, but I believe it is due to how
+locks are modeled in the data race detector's analysis.
+
+The data race detector creates a graph of "happens-before" relationships. Operation A "happens-before"
+operation B if we can guarantee A completes before B starts. The detector uses these relationships to
+determine if two memory accesses could occur simultaneously. For example,
+
+  * a thread spawn must happen before the thread starts executing
+  * a thread must complete before it is joined
+
+Therefore, all instructions before a thread is spawned happen before all instructions run in the thread,
+which must happen before all instructions that happen after the thread join.
+
+The data race detector checks for a happens before relationship when two threads access the same location in
+memory. If neither access is reachable from the other, a data race is reported.
+
+This is how Go is able to detect the sleep example. Sleep does not create a happens before edge between
+threads and so the race is detected regardless of how the threads are actually scheduled.
+
+However, locks don't fit cleanly into this model. Go forces locks to fit by modeling acquire/release as
+happens before relationships. If thread 0 acquires a lock first, the unlock call on thread 0 must happen
+before the lock call on thread 1.
+
+Here's a rough chart of what the graph looks like.
+
+Time↓  Thread 0          Thread 1         Main Thread
+═════ ═══════════       ═══════════       ═══════════
+  |   START <----------------------------- go increment(&wg, 0)
+  |                     START <----------- go increment(&wg, 1)
+  |                     mutex.Lock()
+  |.                    counter++
+  |                     fmt.Printf()
+  |   mutex.Lock() <--- mutex.Unlock()
+  |   counter++         counter++ (RACE)
+  |   fmt.Printf()      wg.Done()-----+
+  |   mutex.Unlock()                  |
+  |   wg.Done() ------------------------> wg.Wait()
+  |
+
+Legend:
+B<-A : A must happen before B
+C->D : C must happen before D
+
+In the racy schedule, thread 1 acquires the lock first, causing a happens before edge from the unlock on
+thread 1 to the lock thread 0. The guarded write on thread 0 cannot reach the unguarded write on thread 1,
+and vice versa, and the race is successfully detected.
+
+Now let's look at the "safe" schedule.
+
+Time↓  Thread 0          Thread 1         Main Thread
+═════ ═══════════       ═══════════       ═══════════
+  |   START <----------------------------- go increment(&wg, 0)
+  |                     START <----------- go increment(&wg, 1)
+  |   mutex.Lock()
+  |   counter++
+  |   fmt.Printf()
+  |   mutex.Unlock() -> mutex.Lock()
+  |                     counter++
+  |                     fmt.Printf()
+  |                     mutex.Unlock()
+  |                     counter++
+  |                     wg.Done()-----+
+  |    wg.Done() ------------------------> wg.Wait()
+
+Legend:
+B<-A : A must happen before B
+C->D : C must happen before D
+
+The two guarded writes are safe because the guarded write on thread 1 is reachable from the guarded write on
+thread 0 via the happens before relationship between the lock and unlock.
+
+However, this also means the unguarded write on thread 1 is reachable from the guarded write on thread 0. And
+so, Go does not report a race. While technically correct for this execution, the threads could just as easily
+have acquired the locks in a different order. The end result is a possible race was missed in executed code.
+
+Even so, Go's data race detector remains a best-in-industry tool. No other language has better tooling for
+easily getting useful reports on data races.
+
+Modeling locks as synchronization points causes blind spots, but this was likely a design decision made to
+ensure high performance and no false positives.
+
+Like any tool, Go's data race detector works best when you understand its boundaries, and I thought this was
+a neat non-obvious pattern that it can miss. Just because code is covered and go reports no races, does not
+necessarily mean the code is race free.
+
+ 1. a.k.a Thread Sanitizer
+ 2. Or an LLM
+ 3. As far as I know thread sanitizer is using some form of hyper optimized vector clocks.
+ 4. I've written a proof of concept data race detector for Rust
+ 5. Lockset analyses can be pretty cool though...
+
+
+---
+

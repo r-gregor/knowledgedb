@@ -1,0 +1,174 @@
+filename: jv_packing-application-as-one-or-fat-jar_20181009.txt
+https://www.javacodegeeks.com/2012/11/packing-your-java-application-as-one-or-fat-jar.html
+
+Packing your Java application as one (or fat) JAR
+Java November 1st, 2012
+
+   This post will target an interesting but quite powerful concept: packing your application as single,
+   runnable JAR file, also known as one or fat JAR.
+
+   We get used to large WAR archives which contain all dependencies packed together under some common
+   folder structure. With JAR-like packaging the story is a bit different: in order to make your
+   application runnable (via java -jar) all dependencies should be provided over classpath parameter or
+   environment variable. Usually it means there would be some lib folder with all dependencies and some
+   runnable script which will do the job to construct classpath and run JVM. [77]Maven Assembly plugin
+   is well know for making such kind of application distribution.
+
+   A slightly different approach would be to package all your application dependencies to the same JAR
+   file and make it runnable without any additional parameters or scripting required. Sounds great but …
+   it won’t work unless you add some magic: meet [http://one-jar.sourceforge.net/]One-JAR project.
+
+   Let’s briefly outline the problem: we are writing a stand-alone [http://spring.io/]Spring application which
+   should be runnable just by typing java -jar <our-app.jar>.
+
+   As always, let’s start with our POM file, which will be pretty simple
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" \
+xsi:schemalocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelversion>4.0.0</modelversion>
+
+    <groupid>com.example</groupid>
+    <artifactid>spring-one-jar</artifactid>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>spring-one-jar</name>
+    <url>http://maven.apache.org</url>
+
+    <properties>
+        <project.build.sourceencoding>UTF-8</project.build.sourceencoding>
+        <org.springframework.version>3.1.1.RELEASE</org.springframework.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupid>cglib</groupid>
+            <artifactid>cglib-nodep</artifactid>
+            <version>2.2</version>
+        </dependency>
+
+        <dependency>
+            <groupid>org.springframework</groupid>
+            <artifactid>spring-core</artifactid>
+            <version>${org.springframework.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupid>org.springframework</groupid>
+            <artifactid>spring-context</artifactid>
+            <version>${org.springframework.version}</version>
+        </dependency>
+    </dependencies>
+</project>
+
+   Our sample application will bootstrap Spring context, get some bean instance and call a method on
+   it. Our bean is called SimpleBean and looks like:
+package com.example;
+public class SimpleBean {
+    public void print() {
+        System.out.println( 'Called from single JAR!' );
+    }
+}
+
+   Falling in love with Spring Java configuration, let us define our context as annotated AppConfig
+   POJO:
+package com.example.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import com.example.SimpleBean;
+
+@Configuration
+public class AppConfig {
+    @Bean
+    public SimpleBean simpleBean() {
+        return new SimpleBean();
+    }
+}
+
+   And finally, our application Starter with main():
+package com.example;
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+
+import com.example.config.AppConfig;
+
+public class Starter {
+    public static void main( final String[] args ) {
+        ApplicationContext context = new AnnotationConfigApplicationContext( AppConfig.class );
+        SimpleBean bean = context.getBean( SimpleBean.class );
+        bean.print();
+    }
+}
+
+   Adding our main class to META-INF/MANIFEST.MF allows to leverage Java capabilities to run JAR file
+   without explicitly specifying class with main() method. [82]Maven JAR plugin can help us with that.
+<build>
+    <plugins>
+        <plugin>
+            <groupid>org.apache.maven.plugins</groupid>
+            <artifactid>maven-jar-plugin</artifactid>
+            <configuration>
+                <archive>
+                    <manifest>
+                        <mainclass>com.example.Starter</mainclass>
+                    </manifest>
+                </archive>
+            </configuration>
+        </plugin>
+    </plugins>
+</build>
+
+   Trying to run java -jar spring-one-jar-0.0.1-SNAPSHOT.jar will print the exception to the console:
+   java.lang.NoClassDefFoundError. The reason is pretty straightforward: even such a simple application
+   as this one already required following libraries to be in classpath.
+aopalliance-1.0.jar
+cglib-nodep-2.2.jar
+commons-logging-1.1.1.jar
+spring-aop-3.1.1.RELEASE.jar
+spring-asm-3.1.1.RELEASE.jar
+spring-beans-3.1.1.RELEASE.jar
+spring-context-3.1.1.RELEASE.jar
+spring-core-3.1.1.RELEASE.jar
+spring-expression-3.1.1.RELEASE.jar
+
+   Let’s see what One-JAR can do for us here. Thanks to availability of onejar-maven-plugin we
+   can add one to the plugins section of our POM file.
+<plugin>
+    <groupid>org.dstovall</groupid>
+    <artifactid>onejar-maven-plugin</artifactid>
+    <version>1.4.4</version>
+    <executions>
+        <execution>
+            <configuration>
+                <onejarversion>0.97</onejarversion>
+                <classifier>onejar</classifier>
+            </configuration>
+            <goals>
+                <goal>one-jar</goal>
+            </goals>
+        </execution>
+   </executions>
+</plugin>
+
+   Also, pluginRepositories section should contain this repository in order to download the plugin.
+<pluginrepositories>
+    <pluginrepository>
+        <id>onejar-maven-plugin.googlecode.com</id>
+        <url>http://onejar-maven-plugin.googlecode.com/svn/mavenrepo</url>
+    </pluginrepository>
+</pluginrepositories>
+
+   As the result, there will be another artifact available in the target folder, postfixed with one-jar:
+   spring-one-jar-0.0.1-SNAPSHOT.one-jar.jar. Running this one with java -jar
+   spring-one-jar-0.0.1-SNAPSHOT.one-jar.jar will print to the console:
+Called from single JAR!
+
+   Fully runnable Java application as single, redistributable JAR file! The last comment: though our
+   application looks pretty simple, [85]One-JAR works perfectly for complex, large applications as well
+   without any issues. Please, add it to your toolbox, it’s really useful tool to have.
+
+   Thanks to One-JAR guys!
+
+---

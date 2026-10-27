@@ -1,0 +1,198 @@
+filename: ptn_speed-up-data-processing-scripts_20180322.txt
+https://medium.com/@ageitgey/quick-tip-speed-up-your-python-data-processing-scripts-with-process-pools-cf275350163a
+
+Quick Tip: Speed up your Python data processing scripts with Process Pools
+
+Get a 4x speed-up with 3 lines of code!
+   Python is a great programming language for crunching data and automating repetitive tasks. Got a few
+   gigs of web server logs to process or a million images that need resizing? No problem! You can almost
+   always find a helpful Python library that makes the job easy.
+
+   But while Python makes coding fun, it’s not always the quickest to run. By default, Python programs
+   execute as a single process using a single CPU. If you have a computer made in the last decade,
+   there’s a good chance it has 4 (or more) CPU cores. That means that 75% or more of your computer’s
+   power is sitting there nearly idle while you are waiting for your program to finish running!
+
+   Let’s learn how to take advantage of the full processing power of your computer by running Python
+   functions in parallel. Thanks to Python’s concurrent.futures module, it only takes 3 lines of code to
+   turn a normal program into one that can process data in parallel.
+
+The Normal Approach
+   Let’s say we have a folder full of photos and we want to create thumbnails of each photo.
+
+   Here’s a short program that uses Python’s built-in [11]glob function to get a list of all the jpeg
+   files in a folder and then uses the [12]Pillow image processing library to save out 128-pixel
+   thumbnails of each photo:
+
+<code>   
+import glob
+import os
+from PIL import Image
+
+
+def make_image_thumbnail(filename):
+    # The thumbnail will be named "<original_filename>_thumbnail.jpg"
+    base_filename, file_extension = os.path.splitext(filename)
+    thumbnail_filename = f"{base_filename}_thumbnail{file_extension}"
+
+    # Create and save thumbnail image
+    image = Image.open(filename)
+    image.thumbnail(size=(128, 128))
+    image.save(thumbnail_filename, "JPEG")
+
+    return thumbnail_filename
+
+
+# Loop through all jpeg files in the folder and make a thumbnail for each
+for image_file in glob.glob("*.jpg"):
+    thumbnail_file = make_image_thumbnail(image_file)
+
+    print(f"A thumbnail for {image_file} was saved as {thumbnail_file}")
+</code>
+        
+   This program follows a simple pattern you’ll often see in data processing scripts:
+    1. You start with a list of files (or other data) that you want to process.
+    2. You write a helper function that can process one piece of that data.
+    3. You process each piece of data, one at a time, using a for loop to call the helper function.
+
+   Let’s test this program on a folder with 1000 jpeg files and see how long it takes to run:
+$ time python3 thumbnails_1.py
+A thumbnail for 1430028941_4db9dedd10.jpg was saved as 1430028941_4db9dedd10_thumbnail.jpg
+[... about 1000 more lines of output ...]
+real 0m8.956s
+user 0m7.086s
+sys 0m0.743s
+
+   The program took 8.9 seconds to run. But how hard was the computer working?
+
+   Let’s run the program again and check Activity Monitor while it’s running:
+
+   The computer is 75% idle! What’s up with that?
+
+   The problem is that my computer has 4 CPU cores, but Python is only using one of them. So while I’m
+   maxing out the capacity of one CPU, the other three CPUs aren’t doing anything. I need a way to split
+   the work load into 4 separate chunks that I can run in parallel. Luckily Python has an easy way to do
+   this!
+
+Let’s make some Process Pools
+   Here’s an approach we can use to process this data in parallel:
+    1. Split the list of jpeg files into 4 smaller chucks.
+    2. Run 4 separate instances of the Python interpreter.
+    3. Have each instance of Python process one of the 4 chunks of data.
+    4. Combine the results from the 4 processes to get the final list of results.
+
+   Four copies of Python running on four separate CPUs should be able to do roughly 4 times as much work
+   as one CPU, right?
+
+   The neat part is that Python handles all the grunt work for us. We just tell it which function we
+   want to run and how many instances of Python to use, and it does the rest. We only have to change 3
+   lines of code.
+
+   First, we need to import the concurrent.futures library. This library is built right into Python:
+import concurrent.futures
+
+   Next, we need to tell Python to boot up 4 extra Python instances. We do that by telling it to create
+   a Process Pool:
+with concurrent.futures.ProcessPoolExecutor() as executor:
+
+   By default, it will create one Python process for each CPU in your machine. So if you have 4 CPUs,
+   this will start up 4 Python processes.
+
+   The final step is to ask the Process Pool to execute our helper function on our list of data using
+   those 4 processes. We can do that by replacing the original for loop we had:
+for image_file in glob.glob("*.jpg"):
+    thumbnail_file = make_image_thumbnail(image_file)
+
+   With this new call to executor.map():
+image_files = glob.glob("*.jpg")
+for image_file, thumbnail_file in zip(image_files, executor.map(make_image_thumbnail, image_files)):
+
+   The executor.map() function takes in the helper function to call and the list of data to process with
+   it. It does all the hard work of splitting up the list, sending the sub-lists off to each child
+   process, running the child processes, and combining the results. Neat!
+
+   This also gives us back the result of each function call. The executor.map() function returns results
+   in the same order as the list of data we gave it to process. So I’ve used Python’s [14]zip() function
+   as a shortcut to grab the original filename and the matching result in one step.
+
+   Here’s how our program looks with those three changes:
+   
+<code>
+import glob
+import os
+from PIL import Image
+import concurrent.futures
+
+
+def make_image_thumbnail(filename):
+    # The thumbnail will be named "<original_filename>_thumbnail.jpg"
+    base_filename, file_extension = os.path.splitext(filename)
+    thumbnail_filename = f"{base_filename}_thumbnail{file_extension}"
+
+    # Create and save thumbnail image
+    image = Image.open(filename)
+    image.thumbnail(size=(128, 128))
+    image.save(thumbnail_filename, "JPEG")
+
+    return thumbnail_filename
+
+
+# Create a pool of processes. By default, one is created for each CPU in your machine.
+with concurrent.futures.ProcessPoolExecutor() as executor:
+    # Get a list of files to process
+    image_files = glob.glob("*.jpg")
+
+    # Process the list of files, but split the work across the process pool to use all CPUs!
+    for image_file, thumbnail_file in zip(image_files, executor.map(make_image_thumbnail, image_files)):
+        print(f"A thumbnail for {image_file} was saved as {thumbnail_file}")
+</code>
+
+   Let’s run the program and see if it finishes any faster:
+$ time python3 thumbnails_2.py
+A thumbnail for 1430028941_4db9dedd10.jpg was saved as 1430028941_4db9dedd10_thumbnail.jpg
+[... about 1000 more lines of output ...]
+real 0m2.274s
+user 0m8.959s
+sys 0m0.951s
+
+   It finished in 2.2 seconds! That’s a 4x speed-up over the original version. The elapsed time was
+   faster because we are using 4 CPUs instead of just one.
+
+   But if you look closely, you’ll see that the “user” time was almost 9 seconds. How did the program
+   finish in 2.2 seconds but still somehow run for 9 seconds? That seems… impossible?
+
+   That’s because the “user” time is a sum of CPU time across all CPUs. We completed the same 9 seconds
+   of work as last time — but we finished it with 4 CPUs in only 2.2 real-world seconds!
+
+   Note: There is some overhead in spawning more Python processes and shuffling data around between
+   them, so you won’t always get this much of a speed improvement. If you are working with huge data
+   sets, there is [16]a trick with setting the chunksize parameter that can help a lot.
+
+Will this always speed up my programs?
+   Using Process Pools is a great solution when you have a list of data to process and each piece of
+   data can be processed independently. Here are some examples of when multiprocessing is a good fit:
+     * Grabbing statistics out of a collection of separate web server log files
+     * Parsing data out of a bunch of XML, CSV or json files
+     * Pre-processing lots of images to create a machine learning data set
+
+   But Process Pools aren’t always the answer. Using a Process Pool requires passing data back and forth
+   between separate Python processes. If the data you are working with can’t be efficiently passed
+   between processes, this won’t work. The data you are processing needs to be a type that [17]Python
+   knows how to pickle.
+
+   Also, the data won’t be processed in a predictable order. If you need the result from processing the
+   previous piece of data to process the next piece of data, this won’t work.
+
+What about the GIL?
+   You might have heard that Python has a [18]Global Interpreter Lock, or GIL. That means that even if
+   your program is multi-threaded, only one instruction of Python code can be executed at once by any
+   thread. In other words, multi-threaded Python code can’t truly run in parallel.
+
+   But Process Pools work around this issue! Because we are running truly separate Python instances,
+   each instance has it’s own GIL. You get true parallel execution of Python code (at the cost of some
+   extra overhead).
+
+Don’t be afraid of Parallel Processing!
+   With the concurrent.futures library, Python gives you a simple way to tweak your scripts to use all
+   the CPU cores in your computer at once. Don’t be afraid to try it out. Once you get the hang of it,
+   it’s as simple as using a for loop, but often a whole lot faster.

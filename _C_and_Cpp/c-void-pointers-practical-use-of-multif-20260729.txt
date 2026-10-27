@@ -1,0 +1,295 @@
+filename: c-void-pointers-practical-use-of-multif-20260729.txt
+https://deardevices.com/2019/05/07/void-pointers-part1/
+
+3 Practical Uses of void Pointers in the C Language (part 1/3)
+May 7, 2019
+
+   Probably every beginner´s book on C programming has a section on pointers. Usually, there are also
+   one or two paragraphs on the topic of void pointers. Have you ever asked yourself what they can
+   actually be used for? In this article, we will explore some practical uses for pointers of type void.
+
+Introduction
+   First of all – what is a void pointer, anyway? A pointer of type void is, like every other pointer, a
+   variable that contains an address into memory (i.e. RAM). The special property of void pointers is
+   that they have no assigned type so the address is actually all they store, from a compiler´s
+   perspective.
+
+   You can take the address of a certain variable and use a void pointer to store it:
+uint16_t a = 0xabcd;
+void *p = &a;
+
+   What you cannot do is dereference the pointer afterwards:
+*p = 0xfeed; // Fails
+
+   This makes sense: The compiler cannot infer what type of value is stored at the memory location
+   referred by p. For instance, it doesn´t know how big that hunk of memory may be. You can give it a
+   hint though – by doing an explicit type conversion:
+*(uint16_t *)p = 0xfeed; // OK
+
+   Now that we have talked about the basic idea, let´s take a look at three different uses you may find
+   in software projects out there.
+
+Practical Use #1: Generic interface functions, handlers
+   Imagine a function that you write once and re-use for any type of data afterwards. This sounds pretty
+   simple at first. But how could that be done?
+
+   After all, functions have certain signatures:
+void foo(int);
+void bar(float, char);
+void baz(double *);
+
+   Obviously, when calling these functions, you´ll need to pass in arguments of the appropriate type.
+   Otherwise, your compiler will either try to implicitly convert the value or raise an error.
+
+   In order to make a certain function usable for different data types, you can use parameters of type
+   void *. Prominent Example: qsort from the C Standard Library.
+
+   The qsort function is for sorting arrays of any type. The following snippet shows its signature:
+void qsort(void *base, size_t nmemb, size_t size,
+           int (*compar)(const void *, const void *));
+
+   This actually demonstrates two different uses of void pointers. The function expects base to be the
+   start of the array to be sorted. Note that it doesn´t need to know how memory is organized at that
+   location, hence the void pointer here.
+
+   Even more exciting is the 'compar' parameter. It is a function pointer to a comparison function which
+   expects two void pointers. When providing our own comparison function we need to make sure it has
+   exactly this signature.
+
+   Inside the function body, we then define the explicit type conversion (cast) necessary to make use of
+   the two void pointers:
+#include <stdlib.h>
+
+uint8_t arr[] = { 2, 3, 1 };
+
+int my_compare(const void *a, const void *b) {
+	uint8_t aa = *(uint8_t *)a;
+	uint8_t bb = *(uint8_t *)b;
+
+	return (aa - bb);
+}
+
+qsort((void *)arr, sizeof(arr) / sizeof(uint8_t),
+		sizeof(uint8_t),
+		my_compare);
+
+// arr == { 1, 2, 3 } after qsort
+
+   This short example shows how the concept is designed: By letting the user provide appropriate type
+   conversions, the library code manages to stay type-independent.
+
+Conclusion
+   This concludes the first part already. Here´s a thought on the explicit cast needed in the example
+   above: While this is the only way, it is kind of a dangerous thing to do: We explicitly tell the
+   compiler how to interpret a certain block of memory. This assumption isn´t checked anywhere else.
+
+   Still, this is a great way to write reusable functions in C that can be used for any type of
+   arguments.
+
+   In the upcoming two parts of this series, we will cover two more practical examples of how to use
+   void pointers. Stay tuned!
+
+
+---
+https://deardevices.com/2019/06/08/void-pointers-part2/
+
+3 Practical Uses of void Pointers in the C Language (part 2/3)
+June 8, 2019
+
+   In Part 1, we talked about how to use void pointers for implementing generic interface functions.
+   Now we´re going to see how to take advantage of them to hide implementation details.
+
+Practical Use #2: Hide implementation details
+   You can use void pointers to build Abstract Data Types (ADT). Why is that something one might want
+   to have, you ask?
+
+   An ADT is a type that is defined by its data and operations on that data. They are abstract because
+   they hide internal details from the user. That´s essentially what a C++ class provides.
+
+   The following snippet shows an example of an ADT in C:
+// Counter.h
+void *Counter_init(void);
+void Counter_increment(void *handle);
+uint16_t Counter_getValue(void *handle);
+
+   What you see is the public interface of a counter that can be created, incremented and queried.
+     * Counter_init() returns a handle of type void *. By doing it that way, the user doesn´t need to
+       make any assumption about internal representation, e.g. how the counter value is stored.
+     * The void pointer handle can be passed to one of the operations, Counter_increment() or
+       Counter_getValue().
+     * You can even create multiple instances of that type (or module) by maintaining a separate handle
+       for each of them. James Grenning provides a great description of this concept in his book Test
+       Driven Development for Embedded C.
+
+   This is how you would use it:
+// main.c
+
+void *handle[2] = {};
+handle[0] = Counter_init();
+handle[1] = Counter_init();
+
+printf("%d\n", Counter_getValue(handle[0]));
+printf("%d\n", Counter_getValue(handle[1]));
+
+Counter_increment(handle[0]);
+
+printf("---\n");
+printf("%d\n", Counter_getValue(handle[0]));
+printf("%d\n", Counter_getValue(handle[1]));
+
+   Output:
+0
+0
+---
+1
+0
+
+   This demonstrates the use of two instances of Counter that don´t interfere with each other. The
+   output shows that only the first one is incremented.
+
+   Apart from its interface (the header file), what does actually happen behind the scenes of the
+   module? The corresponding source file provides some insights:
+// Counter.c
+struct InternalData {
+	uint16_t count;
+};
+
+void *Counter_init(void) {
+	void *mem = malloc(sizeof(struct InternalData));
+	((struct InternalData *)mem)->count = 0;
+	return mem;
+}
+
+void Counter_increment(void *handle) {
+	((struct InternalData *)mem)->count++;
+}
+
+uint16_t Counter_getValue(void *handle) {
+	return ((struct InternalData *)mem)->count;
+}
+
+   On initialization, memory is allocated for an internal data structure that holds the counter´s
+   current value. The pointer to that memory location is then returned, without exhibiting any detail
+   about its internal representation.
+
+   Admittedly, the internal representation is not a surprise here, of course – it´s an integer value.
+
+Type Safety
+   If you look at the code above, what else do you notice?
+
+   Well, we are completely on our own when it comes to converting our handle from void * to the actual
+   internal type. In the implementation of each operation, we assume that the incoming handle points to
+   some memory of the expected type. Because of the cast, the compiler has no way to check whether that
+   assumption holds.
+
+   There´s nothing stopping us from doing things like that, for instance:
+float a = 42;
+Counter_increment((void *)&a);
+
+   Here, the floating-point number is clearly not the same as struct InternalData.
+
+   The C language provides the concept of an incomplete type. With that in mind, we may rewrite the
+   Counter module like that:
+// Counter.h
+struct InternalData; // incomplete type
+
+struct InternalData *Counter_init(void);
+void Counter_increment(struct InternalData *handle);
+uint16_t Counter_getValue(struct InternalData *handle);
+
+   The incomplete type struct InternalData allows us to use an actual type for the handle pointer,
+   instead of void. That way the compiler will be able to do the type checking for us.
+
+   The implementation is still hidden from the user, only the incomplete declaration is visible from the
+   header file.
+
+   Sample usage (for a single instance; multiple ones would still work just as before):
+// main.c
+
+struct InternalData *handle = Counter_init();
+Counter_getValue(handle);
+Counter_increment(handle);
+
+Conclusion
+   The void pointer can be an enabler for Abstract Data Types in C. A safer alternative might be to use
+   incomplete types instead.
+
+   In the next and last part of the series, we will introduce yet another practical use of the void
+   pointer in C. Stay tuned!
+
+
+---
+https://deardevices.com/2019/06/25/void-pointers-part3/
+
+3 Practical Uses of void Pointers in the C Language (part 3/3)
+June 25, 2019
+
+   Part 2 was all about encapsulation, Abstract Data Types and how void pointers may help you
+   implement these concepts. In this third and last part, we are going to see yet another use of them.
+   After that, we will go and find out how void pointers are used in popular open source projects out
+   there.
+
+Practical Use #3: Don´t care about the actual type
+   Sometimes it is not really important what´s the type of data a pointer is referring to.
+
+   If you think about requesting heap memory using malloc() for example, that function is not concerned
+   with what you wish to store at that memory location. Its only job is to give you a contiguous block
+   of memory of a certain size (in bytes). That fact is reflected in its signature, which reads void
+   *malloc(size_t).
+
+   It returns a pointer that we may cast to the desired type:
+struct MyType *foo = (struct MyType *) malloc(sizeof(struct MyType));
+
+   Another good example is memcpy, also a standard function, we can use to copy data between two memory
+   regions. It takes two void pointers and a size as arguments. The concrete type of data is none of its
+   business.
+
+An Investigation: How others do it
+   A bit of research on github gives us a good impression on how some popular projects make use of void
+   pointers. Let´s focus on systemd, glibc and the Linux Kernel, see what they do and try to map that to
+   the three practical uses we established before.
+
+systemd
+   Systemd is a modern Linux init system. Well, actually much more than that – but that´s another
+   topic. It is based on C which makes it a good candidate for this research.
+
+   There is a mechanism in systemd for parsing configuration data. Presumably because there are so many
+   different types of configuration (more than 200) they employ a list of handlers that share the exact
+   same signature:
+int config_parse_bool(void *data);
+int config_parse_route_table(void *data);
+int config_parse_gateway_onlink(void *data);
+/* Note: only parts of signatures are shown here. */
+
+   Each handler has a void pointer parameter (among some others) that is converted to some concrete type
+   (e.g. bool) inside the function. This looks similar to what we have identified as Use #1 (Generic
+   Interfaces).
+
+GNU C library
+   The glibc provides lots of examples for using void pointers, some of which we have already looked
+   at in the course of this blog series.
+
+   A good example for Use #3 (Don´t care about data type) is fread(), which is a library function for
+   reading binary data from a file:
+size_t fread (void *data, size_t size, size_t count, FILE *stream);
+
+   To use it, we essentially provide a pointer to a memory region and how many bytes we expect to be
+   stored there. The function implementation is not concerned with the type of that data.
+
+Linux Kernel
+   One of the functions inside of some part of the PCI driver has a void * parameter called userdata:
+void pci_walk_bus(int (*cb)(struct pci_dev *, void *), void *userdata);
+/* Note: only a part of the signature is shown here. */
+
+   This clearly is an application of Use #3 (Don´t care about data type). The driver code is not
+   concerned with that data in any way.
+
+   The only purpose of that pointer is to be passed back to the user as soon as the callback (in
+   parameter cb) is called.
+
+Conclusion
+   In this blog series, we established three different uses of void pointers in the C language.
+
+
+---
+

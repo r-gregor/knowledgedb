@@ -1,0 +1,99 @@
+filename: docker_accessing-private-git-repositories-from-docker-containers_20230324.txt
+https://embeddeduse.com/2023/03/20/accessing-private-git-repositories-from-docker-containers/
+
+Accessing Private Git Repositories from Docker Containers
+2023/03
+
+   We keep the source code of our applications and libraries in private repositories. Quite a few SoM
+   and terminal makers do the same with their Yocto layers and their additional software. We typically
+   use a Docker container to build the whole embedded Linux system with Yocto. Hence, we must be able to
+   clone and update private repositories from the container.
+
+Preparation
+   We ensure that we can access the private git repository from the host computer, on which we will run
+   the Docker container. My example private repository is foss-compliance.git. Of course, you will have
+   to use one of your private repositories.
+$> git clone git@github.com:bstubert/foss-compliance.git
+
+   When we clone a repository from the server github.com for the very first time, git-clone will ask us
+   whether we want to add the key fingerprint (that is, the public key) of the server to the list of
+   known hosts. We confirm with "yes". Git-clone adds the fingerprint to $HOME/.ssh/known_hosts. From
+   then on, accessing the private repository works without interaction.
+
+   The article Understanding SSH known_hosts File with Examples gives tips how to analyse and fix
+   problems with ssh keys. Once we can clone the private repository from the host computer, we are ready
+   to try the same from a Docker container.
+
+git@github.com: Permission denied (publickey)
+   I have prepared an example Docker container in my repository embeddeduse. After cloning the
+   repository, we change to the directory embeddeduse/BlogPosts/docker-private-repos. We build the
+   container with the command
+$> docker build --tag docker-private-repos:0.1 .
+
+   The container provides a basic Ubuntu 20.04 system with git. We run the container and clone the same
+   private repository as above
+$> docker run -it --rm -e "USER_ID=$(id -u)" -e GROUP_ID="$(id -g)" \
+      docker-private-repos:0.1 /bin/bash
+@ git clone git@github.com:bstubert/foss-compliance.git
+Cloning into 'foss-compliance'...
+The authenticity of host 'github.com (140.82.121.4)' can't be established.
+ECDSA key fingerprint is SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM.
+Are you sure you want to continue connecting (yes/no/[fingerprint])? yes
+Warning: Permanently added 'github.com,140.82.121.4' (ECDSA) to the list of known hosts.
+git@github.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights and the repository exists.
+
+   As the container has neither access to the ssh keys nor to the known-hosts files, cloning fails.
+
+git@github.com: Permission granted!
+
+$> docker run -it --rm -e "USER_ID=$(id -u)" -e GROUP_ID="$(id -g)" \
+      -v "$HOME/.ssh:/home/builder/.ssh:rw" \
+      -v "$SSH_AUTH_SOCK:/ssh.socket" -e "SSH_AUTH_SOCK=/ssh.socket" \
+      docker-private-repos:0.1 /bin/bash
+
+@ git clone git@github.com:bstubert/foss-compliance.git
+Cloning into 'foss-compliance'...
+...
+Resolving deltas: 100% (2187/2187), done.
+@ ls -F
+container-entrypoint*  foss-compliance/
+
+   The first bold line mounts the directory $HOME/.ssh of the host computer to its counterpart
+   /home/builder/.ssh in the container. It is important that the user on the host computer and the use
+   in the container have the same user and group ID. If the IDs differ, the authentication with the
+   github server will fail.
+
+   The docker-run command passes the USER_ID and GROUP_ID to the script container-entrypoint, which
+   Docker executes when entering the container. The script adds a user builder with the given USER_ID
+   and a group builder with the given GROUP_ID. It finally starts a bash shell as the user builder.
+
+   The second bold line maps the file path of the ssh authentication socket, $SSH_AUTH_SOCK, to the
+   /ssh.socket in the container and sets the environment variable SSH_AUTH_SOCK to /ssh.socket in the
+   container. Tools like git-clone use this socket to communicate with the SSH agent, which manages the
+   private SSH keys for public authentication. I found the tip about SSH_AUTH_SOCK in a thread on
+   the Linux kernel mailing list.
+
+   Once we add the two bold lines to docker-run, accessing private repositories in the container works
+   fine. We should only expose private keys to containers we trust. We don't want our private keys end
+   up with some rogues selling access to our software in the dark web.
+
+For kas Builds: Permission granted, too!
+   I am a heavy user of kas for building embedded Linux images with Yocto. Kas uses Docker
+   containers under the hood. Here are the options we need to add kas-container calls to access private
+   git repositories.
+$> kas/kas-container \
+      --ssh-dir $HOME/.ssh \
+      --runtime-args "-v $SSH_AUTH_SOCK:/ssh.socket -e SSH_AUTH_SOCK=/ssh.socket" \
+      build smart-hmi.yml
+
+   Kas expands the first bold line to the first bold line of the docker-run command above. Kas passes
+   the single argument of the option --runtime-args verbatim to its internal docker-run command. The
+   option value is the same as the second bold line above.
+
+
+
+---
+

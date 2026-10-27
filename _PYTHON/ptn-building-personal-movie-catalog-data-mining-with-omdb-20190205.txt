@@ -1,0 +1,154 @@
+filename: ptn_building-personal-movie-catalog-data-mining-with-omdb_20190205.txt
+https://blog.rinatussenov.com/building-personal-movie-catalog-part-1-data-mining-with-python-and-omdb-387e097aefce
+
+Building personal movie catalog part 1: data-mining with Python and [21]OMDb
+Oct 15, 2016
+
+   As probably many of you, i have a couple movies i really liked on my hard drive, just in case if i
+   want to watch them later again. Which was fine until recently when i realized that i don’t actually
+   remember what I have and i had to go through my files to refresh my memory. It wasn’t that bad but i
+   wish i could visualize the media content on my computer. That’s where the idea of personal movie
+   catalog came from.
+
+   In this article I will cover first part of the solution, which is movies’ meta-data gathering service
+   that builds our catalog data. Next article will be about actual UI that you can run on your home
+   media server and access it over LAN from anywhere in you house or apartment from any device. You will
+   be able to browse and maybe even stream your media content. Sounds nice! Doesn’t it? Header image in
+   this article is home page of the UI that I’m currently working on.
+
+   The goal of this article if to create simple Python script that will walk our directories recursively
+   and get video file names, then using filename send a request to the Open Move Database API ([24]OMDb)
+   to get movie information along with movie poster and then compile JSON file with the results. Lets
+   keep it simple for now and stick only with local JSON files without any external
+   dependencies/databases.
+
+   Here is the first step, simple method that walks my local directory and gathers file names:
+
+<code>
+class Scanner:
+  
+    movies = []
+    movies_directory = ''
+    
+    def __init__(self):
+      self.get_file_names()
+      
+    def get_file_names(self):
+        for dir_name, sub_dir_list, file_list in os.walk(self.movies_directory):
+            for file in file_list:
+                if file.lower().endswith(('.movie', '.files', '.extentions')):
+                    movie_info = {}
+                    movie_info['file'] = file.lower().split('.')[0]
+                    movie_info['path'] = dir_name + '/' + file
+                    self.movies.append(movie_info)
+</code>
+
+   As you can see it compiles a collection of my movies, each collection item has file name and file
+   path. File path is important because we want to access that file later for local streaming.
+
+   Now the second step. Lets make our script talk to [26]OMDb! Here is a simple method for our
+   interaction with Open Movie Database:
+
+<code>
+    def get_movie_info(self, movie):
+        match = re.search('\d{4}', movie['file'])
+        year = match.group(0).strip().replace(' ', '%20') if match else ''
+        title = movie['file'].replace(year, '').strip().replace(' ', '%20') if match else movie['file'].strip().replace(' ', '%20')
+        request = urllib2.urlopen(self.omdb+'?t='+title+'&y='+year+'&r=json').read()
+
+        movie_object = json.loads(request, object_hook=self.ascii_encode_dict)
+        movie_object['File'] = movie['file']
+        movie_object['filePath'] = movie['path']
+
+        return  movie_object
+
+
+    def ascii_encode_dict(self, data):
+        ascii_encode = lambda x: x.encode("utf-8")
+        return dict(map(ascii_encode, pair) for pair in data.items())
+</code>
+
+   It is very straightforward but i still need to explain a few things.
+
+   First of all I’m using this format to name my local video files: [Title] [Year], Where Title is video
+   title and Year is the year when video was filmed or if its a movie, when movie was released. Our
+   movie API supports search by title and as an additional filter, year. So i had to do some string
+   manipulation to extract Year from file names.
+
+   As you can see i used Python’s urllib2.urlopen() for making a request to the API which is considered
+   programmatic low-level request, meaning that we have to figure out things like encoding, something
+   that we never think about while surfing our favorite web-sites, moderns browsers are pretty smart and
+   do everything for you. Here i did lazy manual URLencode for spaces (requests were failing with 400
+   otherwise) and UTF-8.
+
+   Now finally we can put everything together and have our script walk our directories and gather
+   meta-data from OMDb API and save everything into our result.json file:
+
+<code>
+import os
+import json
+import urllib2
+import re
+
+class Scanner:
+
+    result = []
+    driver = None
+    movies_directory = 'Movies'
+    omdb = 'http://www.omdbapi.com/'
+    movies = []
+
+    def __init__(self):
+        self.get_file_names()
+        self.process_movies()
+        self.save_json()
+
+    def save_json(self):
+        with open('result.json', 'w') as outfile:
+            json.dump(self.result, outfile, ensure_ascii=False)
+
+    def get_file_names(self):
+        for dir_name, sub_dir_list, file_list in os.walk(self.movies_directory):
+            for file in file_list:
+                if file.lower().endswith(('.video', '.files', '.extentions')):
+                    movie_info = {}
+                    movie_info['file'] = file.lower().split('.')[0]
+                    movie_info['path'] = dir_name + '/' + file
+                    self.movies.append(movie_info)
+
+    def process_movies(self):
+        for movie in self.movies:
+            self.result.append(self.get_movie_info(movie))
+
+    def get_movie_info(self, movie):
+        match = re.search('\d{4}', movie['file'])
+        year = match.group(0).strip().replace(' ', '%20') if match else ''
+        title = movie['file'].replace(year, '').strip().replace(' ', '%20') if match else movie['file'].\
+        strip().replace(' ', '%20')
+        request = urllib2.urlopen(self.omdb+'?t='+title+'&y='+year+'&r=json').read()
+
+        movie_object = json.loads(request, object_hook=self.ascii_encode_dict)
+        movie_object['File'] = movie['file']
+        movie_object['filePath'] = movie['path']
+
+        return  movie_object
+
+    def ascii_encode_dict(self, data):
+        ascii_encode = lambda x: x.encode("utf-8")
+        return dict(map(ascii_encode, pair) for pair in data.items())
+
+Scanner()
+</code>
+
+   Done! We have created our scanner and meta-data grabber with only 52 lines of code. Not bad.
+
+   Now if we spin up a simple Nodejs server and serve resulting json file, it will look something like
+   this:
+   [https://cdn-images-1.medium.com/max/1600/1*wRKMplN940z0b2cPv7XLcg.png] - result.json
+
+   Great! First step completed. Now when we have all this information, including movie poster, we can
+   slice and dice it any way we want, build our own UI, categories, search functionality etc.
+   Data-mining part of our catalog is officially done.
+
+
+---

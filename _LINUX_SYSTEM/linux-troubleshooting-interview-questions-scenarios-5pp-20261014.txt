@@ -1,0 +1,540 @@
+filename: linux-troubleshooting-interview-questions-scenarios-5pp-20261014.txt
+https://www.tecmint.com/linux-troubleshooting-interview-questions-scenarios/
+
+10 Scenario-Based Linux Troubleshooting Interview Questions and Answers
+Oct 2, 2026
+
+   Linux interviews used to be full of definition questions, such as what the chmod command does or
+   which file stores user passwords. Those still come up, but more interviewers now describe a server
+   that is misbehaving and ask how you would find the cause, because that is much closer to the real job
+   and much harder to answer from memorised notes.
+
+   For example, an interviewer might tell you that a server shows its disk as 100% full, even though a
+   developer just deleted a 6 GB log file. A candidate who only knows df and rm usually gets stuck at
+   that point, while a candidate who has handled a real incident starts asking which process might still
+   have that file open.
+
+   In this guide, we´ll work through 10 scenario-based Linux troubleshooting questions that come up in
+   sysadmin, DevOps, and SRE interviews.
+
+1. Find Deleted Files Still Using Disk Space
+   Let´s start with the disk space question from the introduction, since it´s one of the most common and
+   it tests whether you understand how Linux handles open files.
+
+   Interview question: "A developer deleted a 6 GB log file from /var/log/myapp, but df still shows the
+   filesystem as full. What´s going on, and how do you free the space?"
+
+   When you delete a file with rm, Linux removes its directory entry, but the data blocks are only
+   released once no process has the file open anymore.
+
+   If an application called myapp (our example service) is still writing to that log, the space stays in
+   use, and because du works by walking the directory tree, it can´t see a file that no longer has a
+   name.
+
+   You can confirm the mismatch by comparing what the filesystem reports with what du can actually find:
+$> df -h /var
+$> sudo du -sh /var 2>/dev/null
+
+   Output:
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vda3        20G   20G     0 100% /
+4.1G    /var
+
+   Here the filesystem says it´s full, but du only finds about 4 GB under /var, which is the classic
+   sign of a deleted file that is still open.
+
+   Minimal Rocky Linux and RHEL installs don´t include lsof, so install it first if the command isn´t
+   found:
+$> sudo dnf install -y lsof
+
+   Now list open files whose link count is below 1, which is exactly what a deleted-but-open file looks
+   like:
+$> sudo lsof +L1
+
+   Output:
+COMMAND  PID  USER   FD   TYPE DEVICE   SIZE/OFF NLINK    NODE NAME
+java    2143 myapp    4w   REG  253,3 6442450944     0 1835012 /var/log/myapp/debug.log (deleted)
+
+   The NLINK value of 0 and the (deleted) label confirm that the Java process with PID 2143 is still
+   holding the 6 GB file open on file descriptor 4 (the 4w in the FD column).
+
+   The cleanest fix is restarting the service, which closes the file and releases the space:
+$> sudo systemctl restart myapp
+
+   If the application can´t be restarted during business hours, a stronger answer is to empty the file
+   through the process´s file descriptor in /proc, which frees the blocks without stopping anything:
+$> sudo truncate -s 0 /proc/2143/fd/4
+
+   Running df -h /var again should now show the space as available.
+
+   To prevent a repeat, empty a busy log with sudo truncate -s 0 /var/log/myapp/debug.log instead of
+   deleting it, and make sure the application´s logrotate configuration uses copytruncate or reloads the
+   service after rotation, since otherwise the process keeps writing to the old, deleted file.
+
+2. Fix "No space left on device" Caused by Inode Exhaustion
+   The first scenario had used space that du couldn´t see, and the next one is the opposite situation,
+   where the disk has plenty of free space but still refuses to create new files.
+
+   Interview question: "An application keeps logging No space left on device, but df -h shows the root
+   filesystem is only 45% full. How do you troubleshoot it?"
+
+   Every file on a Linux filesystem needs an inode, which is a small record that stores the file´s
+   metadata, such as its owner, permissions, and the location of its data.
+
+   On ext4, the number of inodes is fixed when the filesystem is created, so millions of tiny files can
+   use up every inode long before the disk runs out of space.
+
+   That´s why the right command here is df with the -i flag:
+$> df -i /
+
+   Output:
+Filesystem      Inodes   IUsed IFree IUse% Mounted on
+/dev/vda3      1310720 1310720     0  100% /
+
+   With IUse% at 100%, the next step is finding the directory that holds all those files. GNU du can
+   count inodes instead of bytes, and limiting the depth keeps the output readable:
+$> sudo du --inodes -x -d 4 / 2>/dev/null | sort -rn | head
+
+   Output:
+1310412 /
+1297355 /var
+1296980 /var/lib
+1294102 /var/lib/php
+1294101 /var/lib/php/sessions
+
+   In this case, PHP session files have filled the inode table, which usually means the session cleanup
+   job stopped running. Running rm /var/lib/php/sessions/* here fails with Argument list too long,
+   because the shell expands the wildcard into more than a million arguments, so use find to delete old
+   files instead:
+$> sudo find /var/lib/php/sessions -type f -mtime +7 -delete
+
+   Once the inode count drops, the real fix is repairing whatever should have been cleaning up those
+   files, such as the PHP session garbage collection or a systemd-tmpfiles rule.
+
+   It´s worth mentioning in the interview that this problem is mostly seen on ext4, the default on
+   Ubuntu and Debian, because XFS (the default on RHEL-based systems) allocates inodes dynamically
+   and runs out far less often.
+
+3. Debug a Service That Fails After Reboot
+   Disk problems are easy to spot once you know where to look, but services that break only at boot are
+   trickier, because everything works when you test by hand.
+
+   Interview question: "A service you set up runs perfectly when you start it manually, but after every
+   reboot it´s either not running or in a failed state. Where do you look?"
+
+   The first thing to check is whether the service is even set to start at boot, since systemctl
+   start only starts it for the current session:
+$> systemctl is-enabled myapp
+
+   If the answer is disabled, enabling the service is the whole fix. If it says enabled, the service did
+   try to start, so read its log for the current boot with the -b flag:
+$> sudo journalctl -b -u myapp
+
+   Output:
+Oct 02 09:14:07 server1 myapp[812]: FATAL: could not connect to 192.168.122.20:5432: Network is unreachable
+Oct 02 09:14:07 server1 systemd[1]: myapp.service: Main process exited, code=exited, status=1/FAILURE
+Oct 02 09:14:07 server1 systemd[1]: myapp.service: Failed with result 'exit-code'.
+
+   The exact application message will differ, but Network is unreachable during boot tells you the
+   service started before the network was configured.
+
+   You can also look at the previous boot with 'journalctl -b -1 -u myapp', although that only works when
+   the journal is stored on disk. If 'journalctl --list-boots' shows a single boot, the journal is kept in
+   memory only.
+
+   Most unit files use 'After=network.target', which only means the network stack has started, so the
+   interface may not have an IP address yet. Services that need a working connection at startup should
+   wait for 'network-online.target' instead.
+
+   Rather than editing the packaged unit file, which a package update would overwrite, we´ll add a
+   drop-in override, so first create its directory:
+$> sudo mkdir -p /etc/systemd/system/myapp.service.d
+
+   On Ubuntu and Debian, open the override file with nano:
+$> sudo nano /etc/systemd/system/myapp.service.d/override.conf
+
+   On Rocky Linux, AlmaLinux, and RHEL, minimal installs ship with vi rather than nano, so use vi there:
+$> sudo vi /etc/systemd/system/myapp.service.d/override.conf
+
+   Then add the following configuration:
+# /etc/systemd/system/myapp.service.d/override.conf
+[Unit]
+Wants=network-online.target
+After=network-online.target
+
+   Replace myapp with your own service name in the directory path. Save the file and exit the editor,
+   then reload systemd so it reads the new drop-in and enable the service in the same step:
+$> sudo systemctl daemon-reload
+$> sudo systemctl enable --now myapp
+
+4. Troubleshoot DNS Resolution Failures
+   The service in the last scenario failed because the network wasn´t ready yet, and the next question
+   looks at a network that is up but only partly working.
+
+   Interview question: "A server can ping 8.8.8.8, but ping google.com fails and the package manager
+   can´t reach any mirrors. What do you check?"
+
+   Since pinging an IP address works, routing and the network interface are fine, which narrows the
+   problem down to name resolution. The error message gives you a clue as well.
+
+   Name or service not known means the resolver got an answer saying the name doesn´t exist, while
+   Temporary failure in name resolution usually means no DNS server could be reached at all.
+
+   Start by checking which DNS server the system is using. On Rocky Linux, AlmaLinux, and RHEL,
+   NetworkManager writes the real DNS server addresses straight into /etc/resolv.conf, so reading that
+   file is enough:
+$> cat /etc/resolv.conf
+
+   On Ubuntu, /etc/resolv.conf points at the local systemd-resolved stub on 127.0.0.53, which hides the
+   real upstream servers, so ask systemd-resolved directly instead:
+$> resolvectl status enp1s0
+
+   Next, test the DNS server directly with dig, which bypasses the local resolver configuration. The
+   tool comes from a different package on each family, so install it from bind-utils on RHEL-based
+   systems:
+$> sudo dnf install -y bind-utils
+
+   On Ubuntu and Debian, dig is part of the dnsutils package:
+$> sudo apt install -y dnsutils
+
+   Now query the libvirt DNS server at 192.168.122.1 directly:
+$> dig @192.168.122.1 google.com +short
+
+   If this returns IP addresses, the DNS server works, and the problem is the server´s resolver
+   configuration. If it times out, the DNS server itself is down, or something is blocking UDP port 53
+   between the two machines.
+
+   For a configuration problem on RHEL-based systems, set the DNS server through NetworkManager rather
+   than editing /etc/resolv.conf by hand, because NetworkManager overwrites that file on the next
+   connection change.
+
+   The connection on our server is named enp1s0, which you can confirm with nmcli connection show:
+$> sudo nmcli connection modify enp1s0 ipv4.dns "192.168.122.1" ipv4.ignore-auto-dns yes
+$> sudo nmcli connection up enp1s0
+
+5. Fix a Web Server That Works on localhost Only
+   Once name resolution works, the next layer up is the service itself, and this question checks whether
+   you can tell a listening problem apart from a firewall problem.
+
+   Interview question: "Nginx is running, and curl http://localhost returns the page on the server, but
+   the site doesn´t load from your laptop. How do you find the cause?"
+
+   From the admin machine, the error that curl shows already narrows things down:
+$> curl -I http://192.168.122.248
+
+   Connection refused means the request reached the server but nothing was listening on that address and
+   port. No route to host is what you typically see when firewalld rejects the connection on RHEL-based
+   systems, and a long wait followed by a timeout means a firewall is silently dropping the packets.
+
+   Back on the server, check which address Nginx is actually listening on:
+$> sudo ss -tlnp | grep ':80'
+
+   Output:
+LISTEN 0 511 127.0.0.1:80 0.0.0.0:* users:(("nginx",pid=1432,fd=6))
+
+   The 127.0.0.1:80 address means Nginx only accepts connections from the server itself. A healthy setup
+   shows 0.0.0.0:80 (all IPv4 addresses) or the server´s own IP. To find where that address is set,
+   search the Nginx configuration for listen directives:
+$> sudo grep -rn "listen" /etc/nginx/
+
+   Output:
+/etc/nginx/nginx.conf:39: listen 127.0.0.1:80;
+
+   Open that file, change the line to listen 80;, and save it. Then test the configuration before
+   reloading, so a typo doesn´t take the running site down:
+$> sudo nginx -t
+$> sudo systemctl reload nginx
+
+   Output:
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+
+   If ss already showed 0.0.0.0:80, the firewall is the likely cause instead. On Rocky Linux, AlmaLinux,
+   and RHEL, firewalld is active by default and blocks HTTP, so allow the service permanently and reload
+   the rules:
+$> sudo firewall-cmd --permanent --add-service=http
+$> sudo firewall-cmd --reload
+
+   Ubuntu ships with ufw installed but inactive, so this only matters if someone enabled it, in which
+   case allow the port like this:
+$> sudo ufw allow 80/tcp
+
+   Running the same curl -I command from the admin machine should now return HTTP/1.1 200 OK.
+
+6. Speed Up Slow SSH Logins with UseDNS and GSSAPIAuthentication
+   Scenario 4 showed how a broken DNS setup stops the package manager from working, and it can also make
+   SSH logins painfully slow, which is the next question.
+
+   Interview question: "Every SSH login to a server takes 20 to 30 seconds before the password prompt
+   appears, but once you´re logged in, the session is fast. Why?"
+
+   A delay that always lasts about the same time usually means SSH is waiting for something to time out.
+   Running the client in verbose mode from the admin machine shows exactly where the pause happens:
+$> ssh -v tecmint@192.168.122.248
+
+   Watch for the last debug1: line printed before the pause. If it stops at debug1: Next authentication
+   method: gssapi-with-mic, the client is trying Kerberos authentication (GSSAPI), which waits on DNS
+   lookups for a Kerberos server that doesn´t exist.
+
+   You can confirm that by skipping GSSAPI for a single login:
+$> ssh -o GSSAPIAuthentication=no tecmint@192.168.122.248
+
+   If that login is instant, GSSAPI is the cause. The other common cause is UseDNS on the server, which
+   makes sshd look up the client´s IP address in reverse DNS.
+
+   OpenSSH has defaulted to UseDNS no since version 6.8, so it only causes trouble when someone has
+   enabled it, and you can check the value sshd is actually using:
+$> sudo sshd -T | grep -i usedns
+
+   To fix both on the server, add a small drop-in file. Current Ubuntu and RHEL releases include
+   /etc/ssh/sshd_config.d/*.conf at the top of sshd_config, and sshd uses the first value it reads for
+   each setting, so a file named 10-*.conf takes priority over the distribution´s own 50-*.conf file.
+
+   On Ubuntu and Debian, open the new file with nano:
+$> sudo nano /etc/ssh/sshd_config.d/10-tecmint.conf
+
+   On Rocky Linux, AlmaLinux, and RHEL, use vi:
+$> sudo vi /etc/ssh/sshd_config.d/10-tecmint.conf
+
+   Then add the following configuration:
+# /etc/ssh/sshd_config.d/10-tecmint.conf
+UseDNS no
+GSSAPIAuthentication no
+
+   Save the file and exit the editor, then check the syntax, because sshd refuses to start with a broken
+   config and you could lock yourself out of a remote server:
+$> sudo sshd -t
+
+   No output means the configuration is valid. The service has a different name on each family, so on
+   Rocky Linux, AlmaLinux, and RHEL, restart sshd:
+$> sudo systemctl restart sshd
+
+   On Ubuntu and Debian, the same service is called ssh:
+$> sudo systemctl restart ssh
+
+   Keep your current session open and test a new login from a second terminal, so you still have a way
+   in if anything went wrong. If DNS is the real underlying issue, fix it as shown in scenario 4 as
+   well, since other services will run into the same delay.
+   If your SSH logins just went from 25 seconds to instant, share this with a teammate who has been
+   living with the delay for months.
+
+7. Explain High Load Average with Low CPU Usage
+   So far, every problem has come with a clear error message, but performance questions often don´t,
+   which is why interviewers like this next one.
+
+   Interview question: "Monitoring shows a load average of 12 on a 4-core server, yet top shows the CPUs
+   are mostly idle. How is that possible, and what do you check?"
+
+   The key fact is that the Linux load average counts two kinds of processes, which are those running or
+   waiting for a CPU, and those in uninterruptible sleep (the D state), which usually means they are
+   waiting on disk or network I/O.
+
+   So a high load with idle CPUs points to processes stuck waiting on storage. Start by comparing the
+   load against the number of cores:
+$> uptime
+$> nproc
+
+   Output:
+10:42:13 up 12 days, 3:07, 2 users, load average: 12.31, 11.84, 9.02
+4
+
+   Next, vmstat shows what those processes are waiting for, printing a new line every second for 5
+   seconds:
+$> vmstat 1 5
+
+   Output:
+procs -----------memory---------- ---swap-- -----io---- -system-- -------cpu-------
+r b swpd free buff cache si so bi bo in cs us sy id wa st gu
+1 9 0 312456 10240 2804112 0 0 8420 15360 812 1450 3 4 21 72 0 0
+
+   The two columns to read are b, the number of processes blocked on I/O (9 here), and wa, the share of
+   CPU time spent waiting for I/O (72%). The column layout varies slightly between procps versions, but
+   those two columns are always present.
+
+   To see which processes are stuck, list everything in the D state:
+$> ps -eo state,pid,user,comm | awk '$1 == "D"'
+
+   Then find out which disk is struggling with iostat, which comes from the sysstat package.
+$> sudo dnf install -y sysstat
+OR
+$> sudo apt install -y sysstat
+
+   Now print extended device statistics every 2 seconds, 3 times:
+$> iostat -x 2 3
+
+   Look for a device with %util close to 100 and high r_await or w_await values, which are average wait
+   times in milliseconds.
+
+8. Fix "Permission denied (publickey)"
+   Scenario 6 dealt with SSH logins that were slow, and this one covers logins that fail completely,
+   even though the key looks correct.
+
+   Interview question: "A user added their public key to ~/.ssh/authorized_keys, but SSH still returns
+   Permission denied (publickey). What do you check?"
+
+   Start on the client, because verbose mode shows which key is being offered and whether the server
+   rejected it:
+$> ssh -v -i ~/.ssh/id_ed25519 tecmint@192.168.122.248
+
+   A line like debug1: Offering public key: /home/tecmint/.ssh/id_ed25519 followed by debug1:
+   Authentications that can continue: publickey means the key was offered and refused.
+
+   The client never learns why, because sshd deliberately keeps that detail on the server, so the reason
+   has to come from the server log.
+$> sudo journalctl -u sshd -n 20
+OR
+$> sudo journalctl -u ssh -n 20
+
+   Output:
+Oct 02 10:58:31 server1 sshd[2410]: Authentication refused: bad ownership or modes for directory /home/tecmint/.ssh
+
+   This message comes from StrictModes, which is enabled by default and makes sshd ignore keys when the
+   .ssh directory, the authorized_keys file, or the home directory can be written by other users.
+
+   Fix the ownership and permissions as the affected user:
+$> chmod 700 ~/.ssh
+$> chmod 600 ~/.ssh/authorized_keys
+$> chmod go-w ~
+
+   If the permissions were already correct and the log shows nothing useful, check that the key in
+   authorized_keys is on a single line, since copying it from an email or chat often breaks it across
+   lines.
+
+   On RHEL-based systems, an authorized_keys file that was moved in from somewhere else can also have
+   the wrong SELinux label, which restorecon -Rv ~/.ssh fixes.
+
+9. Fix Nginx 403 Forbidden Errors
+   The restorecon command at the end of the last scenario is a hint that file permissions aren´t the
+   only access control on RHEL-based systems, and the next question is built entirely around that.
+   Ubuntu uses AppArmor instead of SELinux, so this scenario applies to Rocky Linux, AlmaLinux, RHEL,
+   and Fedora.
+
+   Interview question: "You moved a website into /srv/www. The files are owned correctly and readable by
+   everyone, yet Nginx returns 403 Forbidden. What´s blocking it?"
+
+   The Nginx error log is the first place to look, since it records why each request failed:
+$> sudo tail -n 5 /var/log/nginx/error.log
+
+   Output:
+2026/10/02 11:05:21 [error] 1432#1432: *7 open() "/srv/www/index.html" failed (13: Permission denied), \
+client: 192.168.122.1, server: _, request: "GET / HTTP/1.1", host: "192.168.122.248"
+
+   Error 13 on a file that everyone can read is a strong sign that SELinux is involved. Check that it´s
+   enforcing, and then look at the file´s SELinux label (its context) with ls -Z:
+$> getenforce
+$> ls -Z /srv/www/index.html
+
+   Output:
+Enforcing
+unconfined_u:object_r:user_home_t:s0 /srv/www/index.html
+
+   The user_home_t type gives the cause away. The files were created in a home directory and then moved
+   with mv, which keeps the original label, and the SELinux policy doesn´t let Nginx (running as
+   httpd_t) read home directory content.
+
+   The audit log confirms the denial:
+$> sudo ausearch -m AVC -ts recent
+
+   Output:
+type=AVC msg=audit(1791011121.402:418): avc: denied { read } for pid=1432 comm="nginx" name="index.html" \
+dev="vda3" ino=2104331 scontext=system_u:system_r:httpd_t:s0 tcontext=unconfined_u:object_r:user_home_t:s0 \
+tclass=file permissive=0
+
+   The correct fix is telling SELinux that /srv/www holds web content and then relabelling the files.
+   The semanage command comes from the policycoreutils-python-utils package, so install that first if
+   the command isn´t found:
+$> sudo semanage fcontext -a -t httpd_sys_content_t "/srv/www(/.*)?"
+$> sudo restorecon -Rv /srv/www
+
+   Output:
+Relabeled /srv/www/index.html from unconfined_u:object_r:user_home_t:s0 to unconfined_u:object_r:httpd_sys_content_t:s0
+
+10. Find Out Why a Process Was Killed
+   The last scenario brings back the myapp service from scenarios 1 and 3, because a process that
+   disappears without any error in its own log is one of the most confusing problems to debug.
+
+   Interview question: "An application process dies every few days. Its own logs show nothing unusual,
+   and nobody restarted it. How do you find out what killed it?"
+
+   When an application´s log just stops, something outside the application usually ended it. The service
+   status is a good starting point, since systemd records how the main process exited:
+$> systemctl status myapp
+
+   A line such as Main process exited, code=killed, status=9/KILL means the process received SIGKILL,
+   which it can´t catch or log. The most common sender is the kernel´s OOM killer (out-of-memory
+   killer), which kills a process when the system runs out of memory, and it records that decision in
+   the kernel log:
+$> sudo dmesg -T | grep -iE "out of memory|oom-kill"
+
+   Output:
+[Fri Oct 2 02:14:07 2026] Out of memory: Killed process 2143 (java) total-vm:6291456kB, anon-rss:3145728kB, \
+file-rss:0kB, shmem-rss:0kB, UID:991 pgtables:7200kB oom_score_adj:0
+
+   The kernel ring buffer is cleared at reboot, so for older events use sudo journalctl -k | grep -i
+   "out of memory" instead, as long as the journal is stored on disk, as we saw in scenario 3.
+
+   The anon-rss value shows the Java process was using about 3 GB of memory when it was killed, and free
+   -h shows whether the server has swap space to absorb short spikes.
+
+   The long-term fix is finding out why the application grows, such as a memory leak or a JVM heap set
+   larger than the server can hold. In the meantime, you can limit the service with systemd, so that if
+   it grows too large, only myapp is killed instead of the kernel picking some other important process.
+
+   We´ll add this to the same drop-in file we created in scenario 3.
+$> sudo nano /etc/systemd/system/myapp.service.d/override.conf
+Or
+$> sudo vi /etc/systemd/system/myapp.service.d/override.conf
+
+   Then add the [Service] section, so the complete file looks like this:
+# /etc/systemd/system/myapp.service.d/override.conf
+[Unit]
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+MemoryMax=2G
+Restart=on-failure
+RestartSec=5
+
+   Set MemoryMax to a value that suits your application and server. Save the file and exit the editor,
+   then reload systemd, restart the service, and confirm the limit is applied:
+$> sudo systemctl daemon-reload
+$> sudo systemctl restart myapp
+$> systemctl show myapp -p MemoryMax
+
+   Output:
+MemoryMax=2147483648
+
+   The value is shown in bytes, and 2147483648 bytes is 2 GB. From now on, if the limit is reached,
+   systemctl status myapp reports Failed with result 'oom-kill', which makes the cause obvious the next
+   time it happens.
+
+   MemoryMax= relies on cgroup v2, which is the default on current RHEL-based and Ubuntu releases.
+
+Summary
+   You now have a repeatable method and the exact commands for 10 of the most common Linux
+   troubleshooting scenarios, from deleted files that still hold disk space to services killed by the
+   OOM killer.
+
+   If you´re preparing for interviews, the Linux Interview Handbook on Pro TecMint goes much
+   further, with more than 240 questions across three parts, including more advanced scenarios around
+   storage, networking, and services. Several of the scenarios above, especially systemd units, SSH
+   keys, and SELinux contexts, also appear in the RHCSA (RHEL 10 / EX200) exam, which the course
+   covers hands-on.
+
+   We´d love to hear about the troubleshooting questions you´ve been asked in your own interviews. Which
+   scenario caught you off guard, and how did you answer it? If you´ve handled one of these problems in
+   production, feel free to share the error you saw and the fix that worked in the comments, so other
+   readers can learn from it too.
+
+Two small things before you go
+   If something didn´t work on your setup, leave a comment and tell me which distro and version you´re
+   on. I read every one, and most of these articles got better because a reader pointed out what was
+   missing.
+
+   And if it did work, share it. TecMint has stayed free for 14 years because people pass these articles
+   around, and that traffic is what pays for writing the next one.
+
+
+---
+

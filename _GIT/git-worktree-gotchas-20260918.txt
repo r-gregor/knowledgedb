@@ -1,0 +1,140 @@
+filename: git-worktree-gotchas-20260918.txt
+https://www.olafalders.com/2026/09/16/git-worktree-gotchas/
+
+git worktree gotchas
+September 16, 2026
+
+   A couple of years ago I wrote 4 Strategies for Context Switching in Git, and a lot of the
+   reaction I got was basically "that´s cool - probably not gonna use it". Something has changed since
+   then, and git worktrees are no longer a niche tool, but they still come with some gotchas.
+
+Some terms
+   To make this a little less confusing, let´s define some terms around worktrees. What you may not
+   realize, is that every git checkout is a worktree:
+$> git worktree list
+/home/olaf/github/oalders/www-olafalders-dot-com                             6d11097 [main]
+/home/olaf/.worktree/www-olafalders-dot-com/2026-05-14/dependabot-cooldown   e22309a [dependabot-cooldown]
+/home/olaf/.worktree/www-olafalders-dot-com/2026-09-15/gh-49                 0858e51 [notes-on-git-worktree-and-coding-agents]
+
+   That first result is my main checkout - the dir that I cloned from GitHub. The next two are worktrees
+   which I created. When we are talking about the main checkout, we´ll call it the "main working tree".
+   The other worktrees will be the "linked worktrees".
+
+The root cause
+   All of these gotchas are rooted in one fact. In a linked worktree, .git is a pointer file rather than
+   a directory. Once you wrap your head around this, it all makes a lot more sense.
+
+Finding the root of your repository
+   Sometimes you have some clever hack that decides whether or not you are in the root of a git
+   repository. Maybe that takes the form of code that traverses up from the current directory looking
+   for a directory named .git. That works in the main working tree, but if you try this in a linked
+   worktree, you´re in for a surprise.
+$> pwd
+/home/olaf/github/oalders/www-olafalders-dot-com
+
+$> file .git
+.git: directory
+
+$> cd /home/olaf/.worktree/www-olafalders-dot-com/2026-09-15/gh-49
+
+$> file .git
+.git: ASCII text
+
+$> cat .git
+gitdir: /home/olaf/github/oalders/www-olafalders-dot-com/.git/worktrees/gh-49
+
+   In the main working tree, .git is a directory with a lot of interesting stuff in it. In a linked
+   worktree, .git is a file, the contents of which are (of course?) a path to this worktree´s own
+   git directory, which git keeps at .git/worktrees/<name> (so, it´s inside the main working tree´s
+   .git). If you find yourself inside a linked worktree and your logic is looking for a dir called .git,
+   it´s going to motor right past the top of your worktree. Now, if your linked worktree is a
+   subdirectory of the main working tree, it´ll stop there (in the main working tree - not the linked
+   worktree), which may not be what you wanted. It´ll also be confusing, because things might look a lot
+   like your linked worktree, but they won´t have your changes.
+
+   For this reason, I like to keep my linked worktrees in an entirely different path. It means I won´t
+   accidentally end up totally confused and in the wrong place if I keep going up, up, up.
+
+   If you´d rather not roll your own solution and you don´t mind calling out to git, we´ve got you
+   covered:
+$> git rev-parse --show-toplevel
+/home/olaf/.worktree/www-olafalders-dot-com/2026-09-15/gh-49
+
+   This command will do the right thing whether you are in a linked worktree or not.
+
+Finding the main working tree
+   Finding the main working tree is essentially just a different flavour of what we just discussed.
+
+   Maybe you have a gitignored .env or secrets file in the main working tree. To find it from either the
+   main working tree or a linked worktree, try this one neat trick that sysadmins don´t want you to
+   know, --git-common-dir.
+$> git rev-parse --git-common-dir
+/home/olaf/github/oalders/www-olafalders-dot-com/.git
+
+   Note that this path is not directly to the main working tree, but to its .git folder. Remember to
+   chdir up one more level. In bash that might look like:
+$> dirname $(git rev-parse --git-common-dir)
+/home/olaf/github/oalders/www-olafalders-dot-com
+
+git hooks in a sandboxed linked worktree
+   Let´s say you´re on top of the latest developments and you keep your linked worktree in a sandbox.
+   You might use nono, Docker, Landlock on Linux or Seatbelt on macOS (both of which
+   nono wraps) or some other solution. (A common use case for sandboxing would be to ensure that your
+   LLM agent cannot easily go rogue). How does that work with git hooks? It depends. In my case,
+   I restrict the sandbox to my linked worktree and some other resources that it may need, but I don´t
+   allow access to most dirs in the main working tree because I like to keep them as separate as
+   possible. That means my linked worktree cannot read or write the .git/hooks directory.
+
+   This complicates things, because git hooks are a shared, common resource between the main working
+   tree and the linked worktrees.
+$> pwd
+/home/olaf/.worktree/www-olafalders-dot-com/2026-09-15/gh-49
+
+$> git rev-parse --git-path hooks
+/home/olaf/github/oalders/www-olafalders-dot-com/.git/hooks
+
+   Oof. That´s in the main working tree, which is walled off from my sandbox. My linked worktree cannot
+   read or write that directory. This is a problem.
+
+   The modus operandi in your pre-worktree days was to symlink your pre-commit hook to the .git/hooks
+   directory (.git/hooks/pre-commit), which was not a checked-in directory. Now what you want to do is
+   keep your hooks in a directory that is checked in and then configure git to use a relative path to
+   find them.
+
+$> mkdir .githooks
+$> # Make sure this is a relative path.
+$> git config core.hooksPath .githooks
+
+   Now your pre-commit hook is tracked by git and lives in .githooks/pre-commit. git chdir´s into each
+   worktree´s own root before it runs a hook, so a relative core.hooksPath ensures that the path
+   resolves to a directory inside the same worktree, inside the sandbox and not to a directory you may
+   not have the necessary permissions for.
+
+   The core.hooksPath setting lives in the shared config (your common .git) of your repository,
+   which means that setting git config once is enough to cover every worktree you currently have or will
+   have in future on the machine you´re working on.
+
+   The nice thing about this is that your hooks are now also immediately available in a new checkout,
+   provided you run git config prior to using it. This is slightly easier than having to create symlinks
+   for your hook files.
+
+Wrap-up
+   All of the sharp edges we discussed are the result of .git in a linked worktree not being what you
+   first might expect. So if you remember one thing from today, let it be ".git can be a directory or it
+   can be a pointer and which one you get depends on where you are".
+
+   To summarize our findings:
+   -------------------------------------------------------------------
+   To find...                           Run
+   -------------------------------------------------------------------
+   the root of your current worktree    git rev-parse --show-toplevel
+   the common .git directory            git rev-parse --git-common-dir
+   the active hooks directory           git rev-parse --git-path hooks
+   -------------------------------------------------------------------
+
+   These are not the only git worktree quirks, but this is a good start. Maybe we´ll get to more gotchas
+   in a different post.
+
+
+---
+

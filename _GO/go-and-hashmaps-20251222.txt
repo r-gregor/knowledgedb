@@ -1,0 +1,115 @@
+filename: go-and-hashmaps-20251222.txt
+https://rushter.com/blog/go-and-hashmaps/
+
+Hash tables in Go and advantage of self-hosted compilers
+December 14, 2025
+
+   Recently, I was looking at the Go codebase that was using map[int]bool to track unique values. As
+   some of you may know, Go has no set data structure. Instead, developers usually use hash maps
+   (key-value data structure).
+
+   The first idea that comes to mind is to use map[int]bool, where keys are integers and values are
+   booleans. But experienced Go developers know that Go has an empty-struct type that can be used for
+   maps: map[int]struct{}.
+
+   The benefit of such a type is that it occupies zero bytes in memory; it's a so-called zero-sized
+   type. The compiler knows this and uses it to your advantage when it can. In this case, it should omit
+   storing values and keep only keys.
+
+   So when I saw the bool struct, my first thought was to switch to map[int]struct{} to save some
+   memory. In theory, that map can hold more than 100 000 integers.
+
+   To my surprise, this change had no effect on memory consumption when running in production.
+
+Debugging the issue
+   I double-checked that using struct{} should save memory in Google and with LLMs. It was, in fact,
+   true. After a bit more searching, I found that since Go 1.24, there is a new map implementation
+   called Swiss Tables. A lot of articles, including the official Go blog, say that the new
+   implementation consumes less memory on average (for all use cases).
+
+   If you specifically ask LLMs about Go 1.24 and map[int]struct{} (with web search enabled), they will
+   assure you that using empty maps consumes less memory.
+
+   So what's actually happening?
+
+What is self-hosted compiler?
+   Not to be confused with self-hosting a compiler, a self-hosted compiler means that the compiler
+   itself is written in the same language. So, the current compiler for Go is also written in Go.
+
+   This has a big advantage. Since Go is a relatively simple language, we can quickly check how some of
+   the parts are actually implemented.
+
+   I had an experience of looking at Python's dict implementation, and I can say that Go's source code
+   is much easier to understand. Especially given that it's hard for a Python programmer with little C
+   experience to understand complex C.
+
+Go implementation
+   After looking at the map implementation, I found the structure of each slot (key and value pair):
+
+type slot struct {
+	key  typ.Key
+	elem typ.Elem
+}
+
+   Which can be translated to this:
+
+type slot struct {
+	key  int
+	elem struct{}
+}
+
+   The key requires 8 bytes, and the elem is zero since it's an empty struct type.
+
+   But here is a catch. The amount of memory that a struct uses is not always equals to the sum of its
+   fields. Structs need padding to ensure proper memory alignment for CPU.
+
+   If the last field of a struct is zero, Go compiler makes its size 1 byte so that the field can be
+   actually referred in memory by pointer arithmetic without violating memory access (out of bounds
+   reads).
+
+   Go specs:
+     For a variable x of struct type: unsafe.Alignof(x) is the largest of all the values
+     unsafe.Alignof(x.f) for each field f of x, but at least 1.
+
+   Now, since the first item is 8 bytes and our struct is 1 byte, we also have to align our empty
+   struct. We need this so that the structure have proper alignment - multiple of 8. We do this by
+   adding 7 bytes to the end that won't be used.
+
+   You can see the actual size [https://go.dev/play/p/HRgFiu6tsVM]here.
+
+How about bool?
+   Boolean type in Go also occupies 1 byte and follows the same alignment rules described above.
+
+   That's why we get the same memory consumption.
+
+Why did struct{} work before?
+   Prior to Go 1.24, maps were implemented differently.
+
+   Here is how it looked like:
+
+type bmap struct {
+	// tophash generally contains the top byte of the hash value
+	// for each key in this bucket. If tophash[0] < minTopHash,
+	// tophash[0] is a bucket evacuation state instead.
+	tophash [abi.MapBucketCount]uint8
+	// Followed by bucketCnt keys and then bucketCnt elems.
+	// NOTE: packing all the keys together and then all the elems together makes the
+	// code a bit more complicated than alternating key/elem/key/elem/... but it allows
+	// us to eliminate padding which would be needed for, e.g., map[int64]int8.
+	// Followed by an overflow pointer.
+}
+
+   Prior to Go 1.24, keys and values are stored as separate fixed-size arrays. One array for keys,
+   followed by second array for values.
+
+   When using struct{}, compiler omits the values array completely.
+
+Conclusion
+   I think a lot of people still rely on this trick, but in newer versions of Go it won't work (at least
+   for now). Using empty structs also hurts readability.
+
+   Another takeaway here, as always, is not to trust everything LLMs say.
+
+
+---
+

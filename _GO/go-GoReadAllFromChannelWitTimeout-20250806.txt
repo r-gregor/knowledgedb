@@ -1,0 +1,173 @@
+filename: go-GoReadAllFromChannelWitTimeout-20250806.txt
+https://utcc.utoronto.ca/~cks/space/blog/programming/GoReadAllFromChannelWithTimeout
+
+Understanding reading all available things from a Go channel (with a timeout)
+August 3, 2025
+
+   Recently I saw [++1][https://go.dev/play/p/OKuSCBBgyW2]this example Go code ([7]via), and I had to stare at
+   it a while in order to understand what it was doing and how it worked (and why it had to be that way). The
+   goal of waitReadAll() is to either receive (read) all currently available items from a channel (possibly a
+   buffered one) or to time out if nothing shows up in time. This requires two nested selects, with the inner
+   one in a for loop.
+
+   The outer select has this form:
+
+select {
+	case v, ok := <- c:
+		if !ok {
+			return ...
+		}
+		[... inner code ...]
+
+	case <- time.After(dur) // wants go 1.23+
+		return ...
+}
+
+   This is doing three things. First (and last in the code), it's timing out of the duration expires
+   before anything is received on the channel. Second, it's returning right away if the channel is
+   closed and empty; in this case the channel receive from c will succeed, but ok will be false. And
+   finally, in the code I haven't put in, it has received the first real value from the channel and now
+   it has to read the rest of them.
+
+   The job of the inner code is to receive any (additional) currently ready items from the channel but
+   to give up if the channel is closed or when there are no more items. It has the following form
+   (trimmed of the actual code to properly accumulate things and so on, [8]see the playground for the
+   full version):
+
+.. setup elided ..
+
+for {
+	select {
+		case v, ok := <- c:
+			if ok {
+				// accumulate values
+			} else {
+				// channel closed and empty
+				return ...
+			}
+		case default:
+			// out of items
+			return ...
+	}
+}
+
+   There's no timeout in this inner code because the 'case default' means that we never wait for the
+   channel to be ready; either the channel is ready with another item (or it's been closed), or we give
+   up.
+
+   One of the reasons this Go code initially confused me is that I started out misreading it as
+   receiving as much as it could from a channel until it reached a timeout. Code that did that would do
+   a lot of the same things (obviously it needs a timeout and a select that has that as one of the
+   cases), and you could structure it somewhat similarly to this code (although I think it's more
+   clearly written without a nested loop).
+
+   (This is one of those entries that I write partly to better understand something myself. I had to
+   read this code carefully to really grasp it and I found it easy to mis-read on first impression.)
+
+
+---
+[**1]https://go.dev/play/p/OKuSCBBgyW2
+
+package main
+
+import (
+	"testing"
+	"time"
+)
+
+func waitReadAll[T any](c chan T, d time.Duration) ([]T, bool) {
+	select {
+	case v, ok := <-c:
+		var out []T
+		if !ok {
+			return []T{}, false
+		}
+
+		out = append(out, v)
+		for {
+			select {
+			case v, ok := <-c:
+				if ok {
+					out = append(out, v)
+				} else {
+					return out, false
+				}
+			default:
+				return out, true
+			}
+		}
+	case <-time.After(d): // as of go1.23 this no longer leaks memory
+		return []T{}, true
+	}
+}
+
+func TestReadAll(t *testing.T) {
+	var out []int
+	var ok bool
+
+	c := make(chan int, 10)
+
+	out, ok = waitReadAll(c, 1*time.Millisecond)
+	if !ok {
+		t.Fatal("channel closed")
+	}
+	if len(out) != 0 {
+		t.Fatal("extra elements")
+	}
+
+	c <- 1
+	c <- 2
+	out, ok = waitReadAll(c, 1*time.Millisecond)
+	if !ok {
+		t.Fatal("channel closed")
+	} else if len(out) != 2 || out[0] != 1 || out[1] != 2 {
+		t.Fatal("missing elements")
+	}
+
+	out, ok = waitReadAll(c, 1*time.Millisecond)
+	if !ok {
+		t.Fatal("channel closed")
+	} else if len(out) != 0 {
+		t.Fatal("missing elements")
+	}
+
+	c <- 3
+	c <- 4
+	out, ok = waitReadAll(c, 1*time.Millisecond)
+
+	if !ok {
+		t.Fatal("channel closed")
+	} else if len(out) != 2 || out[0] != 3 || out[1] != 4 {
+		t.Fatal("missing elements")
+	}
+
+	close(c)
+	out, ok = waitReadAll(c, 10*time.Second)
+	if ok {
+		t.Fatal("channel open")
+	}
+
+	out, ok = waitReadAll(c, 10*time.Second)
+	if ok {
+		t.Fatal("channel open")
+	}
+}
+
+func main() {
+	matchString := func(a, b string) (bool, error) {
+		return a == b, nil
+	}
+	testSuite := []testing.InternalTest{
+		{
+			Name: "TestReadAll",
+			F:    TestReadAll,
+		},
+	}
+	testing.Main(matchString, testSuite, nil, nil)
+}
+
+$> go run
+PASS
+
+---
+

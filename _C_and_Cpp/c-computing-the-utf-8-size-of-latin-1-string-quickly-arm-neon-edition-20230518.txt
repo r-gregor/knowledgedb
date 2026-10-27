@@ -1,0 +1,253 @@
+filename: c_computing-the-utf-8-size-of-latin-1-string-quickly-arm-neon-edition_20230518.txt
+https://lemire.me/blog/2023/05/15/computing-the-utf-8-size-of-a-latin-1-string-quickly-arm-neon-edition/
+
+Computing the UTF-8 size of a Latin 1 string quickly (ARM NEON edition)
+
+   While most of our software relies on Unicode strings, we often still encounter legacy encodings such
+   as Latin 1. Before we convert Latin 1 strings to Unicode (e.g., UTF-8), we must compute the size of
+   the UTF-8 string. It is fairly easy: all ASCII characters map 1 byte to 1 byte, while other
+   characters (with code point values from 128 to 256) map 1 Latin byte to 2 Unicode bytes (in UTF-8).
+
+   Computers represent strings using bytes. Most often, we use the Unicode standard to represent
+   characters in bytes. The universal format to exchange strings online is called UTF-8. It can
+   represent over a million characters while retaining compatibility with the ancient ASCII format.
+
+   Though most of our software stack has moved to Unicode strings, there are still older standards like
+   Latin 1 used for European strings. Thus we often need to convert Latin 1 strings to UTF-8. It is
+   useful to first compute the size (in bytes) of the eventual UTF-8 strings. You can code a simple C
+   function to compute the UTF-8 size from the Latin 1 input as follow:
+
+size_t scalar_utf8_length(const char * c, size_t len) {
+	size_t answer = 0;
+
+	for(size_t i = 0; i<len; i++) {
+		if((c[i]>>7)) { answer++;}
+	}
+	return answer + len;
+}
+
+   In [**1] Computing the UTF-8 size of a Latin 1 string quickly (AVX edition), I reviewed faster
+   techniques to solve this problem on x64 processors.
+
+   What about ARM processors (as in your recent MacBook)?
+
+   Keyhan Vakil came up with a nice solution with relies on the availability for "narrowing
+   instructions" in ARM processors. Basically you can take a 16-byte vector registers and create a
+   8-byte register (virtually) by truncating or rounding the results. Conveniently, you can also combine
+   bit shifting with narrowing.
+
+   Consider pairs of successive 8-bit words as a 16-bit word. E.g., if the 16 bits start out as
+   aaaaaaaabbbbbbbb then a shift-by-four-and-narrow creates the byte value aaaabbbb. Indeed, if you
+   shift a 16-bit word by 4 bits and keep only the least significant 8 bits of the result, then
+	1. the most significant 4 bits from the second 8-bit word become the least significant 4 bits in the
+	   result
+	2. and the least significant 4 bits from the first 8-bit word become the most significant 4 bits.
+
+   This is convenient because vectorized comparison functions often generate filled bytes when the
+   comparison is true (all 1s). The final algorithm in C looks as follows:
+
+uint64_t utf8_length_kvakil(const uint8_t *data, uint32_t length) {
+	uint64_t result = 0;
+	const int lanes = sizeof(uint8x16_t);
+	uint8_t rem = length % lanes;
+	const uint8_t *simd_end = data + (length / lanes) * lanes;
+	const uint8x16_t threshold = vdupq_n_u8(0x80);
+
+	for (; data < simd_end; data += lanes) {
+		// load 16 bytes
+		uint8x16_t input = vld1q_u8(data);
+		
+		// compare to threshold (0x80)
+		uint8x16_t withhighbit = vcgeq_u8(input, threshold);
+
+		// shift and narrow
+		uint8x8_t highbits = vshrn_n_u16(vreinterpretq_u16_u8(withhighbit), 4);
+
+		// we have 0, 4 or 8 bits per byte
+		uint8x8_t bitsperbyte = vcnt_u8(highbits);
+
+		// sum the bytes vertically to uint16_t
+		result += vaddlv_u8(bitsperbyte);
+	}
+	result /= 4; // we overcounted by a factor of 4
+	             // scalar tail
+	for (uint8_t j = 0; j < rem; j++) {
+		result += (simd_end[j] >> 7);
+	}
+	return result + length;
+}
+
+   Can you beat Vakil? You can surely reduce the instruction count but once you reach speeds like 20
+   GB/s, it becomes difficult to go much faster without hitting memory and cache speed limits.
+
+   Pete Cawley proposed a simpler algorithm which avoids the narrowing shifts, and does a vertical
+   addition instead:
+
+uint64_t utf8_length_simpler(const uint8_t *data, uint32_t length) {
+	uint64_t result = 0;
+	const int lanes = sizeof(uint8x16_t);
+	uint8_t rem = length % lanes;
+	const uint8_t *simd_end = data + (length / lanes) * lanes;
+	const uint8x16_t threshold = vdupq_n_u8(0x80);
+
+	for (; data < simd_end; data += lanes) {
+		// load 16 bytes
+		uint8x16_t input = vld1q_u8(data);
+		
+		// compare to threshold (0x80)
+		uint8x16_t withhighbit = vcgeq_u8(input, threshold);
+
+		// vertical addition
+		result -= vaddvq_s8(withhighbit);
+	}
+	// scalar tail
+	for (uint8_t j = 0; j < rem; j++) {
+		result += (simd_end[j] >> 7);
+	}
+	return result + length;
+}
+
+   Are the hand-tuned NEON functions fast?
+
+   On my Apple M2, they are three times as fast as what the compiler produces from the scalar code on
+   large enough inputs. Observe that the compiler already relies on vector instructions even when
+   compiling scalar code.
+   scalar code				  ~6 GB/s
+   NEON code (both functions) ~20 GB/s
+
+   On my Apple laptop, both NEON functions are equally fast. Using Graviton 3 processors on AWS (with
+   GCC 11), I can tell them apart:
+   scalar code		  ~7 GB/s
+   NEON code (Vakil)  ~27 GB/s
+   NEON code (Cawley) ~30 GB/s
+
+   The Cawley function is slightly better.
+
+   Update: if you check out my source code, you will find two new versions that are quite fast. It seems
+   that there is a lot of room for optimization on this problem.
+
+
+---
+[**1]
+https://lemire.me/blog/2023/02/16/computing-the-utf-8-size-of-a-latin-1-string-quickly-avx-edition/
+
+Computing the UTF-8 size of a Latin 1 string quickly (AVX edition)
+
+   Computers represent strings using bytes. Most often, we use the Unicode standard to represent
+   characters in bytes. The universal format to exchange strings online is called UTF-8. It can
+   represent over a million characters while retaining compatibility with the ancient ASCII format.
+
+   Though most of our software stack has moved to Unicode strings, there are still older standards like
+   Latin 1 used for European strings. Thus we often need to convert Latin 1 strings to UTF-8. It is
+   useful to first compute the size (in bytes) of the eventual UTF-8 strings.
+
+   Thanfully, it is an easy problem: it suffices to count two output bytes for each input byte having
+   the most significant bit set, and one output byte for other bytes. A relatively simple C++ function
+   suffices:
+
+size_t scalar_utf8_length(const char * c, size_t len) {
+	size_t answer = 0;
+
+	for(size_t i = 0; i<len; i++) {
+		if((c[i]>>7)) { answer++;}
+	}
+	return answer + len;
+}
+
+   To go faster, we may want to use fancy "SIMD" instructions: instructions that process several bytes
+   at once. Your compiler is likely to already do some autovectorization with the simple C function. At
+   compile-time, it will use some SIMD instructions. However, you can try to do hand-code your own
+   version.
+
+   We have several instruction sets to choose from, but let us pick the AVX2 instruction sets, available
+   on most x64 processors today. AVX2 has a fast mask function that can extract all the most significant
+   bits, and then another fast function that can count them (popcount). Thus the following routine
+   should do well (credit to Anna Henningsen):
+
+size_t avx2_utf8_length_basic(const uint8_t *str, size_t len) {
+	size_t answer = len / sizeof(__m256i) * sizeof(__m256i);
+	size_t i;
+
+	for (i = 0; i + sizeof(__m256i) <= len; i += 32) {
+		__m256i input = _mm256_loadu_si256((const __m256i *)(str + i));
+		answer += __builtin_popcount(_mm256_movemask_epi8(input));
+	}
+	return answer + scalar_utf8_length(str + i, len - i);
+}
+
+   Can you do better? On Intel processors, both the 'movemask' and population count instructions are
+   fast, but they have some latency: it takes several cycles for them to execute. They may also have
+   additional execution constraints. Part of the latency and constraints is not going to get better with
+   instruction sets like AVX-512 because it requires moving from SIMD registers to general registers at
+   every iterations. It will similarly be a bit of challenge to port this routine to ARM processors.
+
+   Thus we would like to rely on cheaper instructions, and stay in SIMD registers until the end. Even if
+   it does not improve the speed of the AVX code, it may work better algorithmically with other
+   instruction sets.
+
+   For this purpose, we can borrow a recipe from the paper Faster Population Counts Using AVX2
+   Instructions (Computer Journal 61 (1), 2018). The idea is to quickly extract the bits, and add them
+   to a counter that is within a SIMD register, and only exact the values at the end.
+
+   The code is slightly more complicated because we have an inner loop. Within the inner loop, we use
+   8-bit counters, only moving to 64-bit counters at the end of the inner loop. To ensure that there is
+   no overflow, the inner loop can only run for 255 iterations. The code looks as follows...
+
+size_t avx2_utf8_length_mkl(const uint8_t *str, size_t len) {
+	size_t answer = len / sizeof(__m256i) * sizeof(__m256i);
+	size_t i = 0;
+	__m256i four_64bits = _mm256_setzero_si256();
+
+	while (i + sizeof(__m256i) <= len) {
+		__m256i runner = _mm256_setzero_si256();
+		size_t iterations = (len - i) / sizeof(__m256i);
+		if (iterations > 255) { iterations = 255; }
+		size_t max_i = i + iterations * sizeof(__m256i) - sizeof(__m256i);
+		for (; i <= max_i; i += sizeof(__m256i)) {
+			__m256i input = _mm256_loadu_si256((const __m256i *)(str + i));
+			runner = _mm256_sub_epi8(
+					runner, _mm256_cmpgt_epi8(_mm256_setzero_si256(), input));
+		}
+		four_64bits = _mm256_add_epi64(four_64bits,
+				_mm256_sad_epu8(runner, _mm256_setzero_si256()));
+	}
+	answer += _mm256_extract_epi64(four_64bits, 0) +
+		_mm256_extract_epi64(four_64bits, 1) +
+		_mm256_extract_epi64(four_64bits, 2) +
+		_mm256_extract_epi64(four_64bits, 3);
+	return answer + scalar_utf8_length(str + i, len - i);
+}
+
+   We can also further unroll the inner loop to save a bit on the number of instructions.
+
+   I wrote a small benchmark with 8kB random inputs, with an AMD Rome (Zen2) server and GCC 11 (-O3
+   -march=native). The results will vary depending on your input, your compiler and your processor.
+
+   --------------------------------------------------------------------------------
+   function                  cycles/byte    instructions/byte    instructions/cycle
+   --------------------------------------------------------------------------------
+   scalar (no autovec)       0.89           3.3                  3.8
+   scalar (w. autovec)       0.56           0.71                 1.27
+   AVX2 (movemask)           0.055          0.15                 2.60
+   AVX2 (in-SIMD)            0.039          0.15                 3.90
+   AVX2 (in-SIMD/unrolled)   0.028          0.07                 2.40
+   --------------------------------------------------------------------------------
+
+   So the fastest method in my test is over 30 times faster than the purely scalar version. If I allow
+   the scalar vector to be 'autovectorized' by the compiler, it gets about 50% faster.
+
+   It is an interesting scenario because the number of instructions retired by cycle varies so much. The
+   slightly more complex "in-SIMD" function does better than the 'movemask' function because it manages
+   to retire more instructions per cycle, in these tests. The unrolled version is fast and requires few
+   instructions per cycle, but it has a 'relatively' low number of instructions retired per cycle.
+
+   [https://github.com/lemire/Code-used-on-Daniel-Lemire-s-blog/tree/master/2023/02/16]My code is available.
+   It should be possible to further tune this code. You need privileged access to run the benchmark because
+   I rely on performance counters.
+
+   Further work: It is not necessary to use SIMD instructions explicitly, you can use SWAR instead
+   for a compromise between portability and performance.
+
+
+---
+

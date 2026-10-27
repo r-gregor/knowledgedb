@@ -1,0 +1,113 @@
+filename: cs_parsing-tiny-and-very-large-floating-point-values-comparison_20240828.txt
+https://lemire.me/blog/2024/08/26/parsing-tiny-and-very-large-floating-point-values-a-programming-language-comparison/
+
+Parsing tiny and very large floating-point values: a programming-language comparison
+August 26, 2024
+
+   Most programming languages support floating-point numbers. You typically have the ability to turn a
+   string into a floating-point number. E.g., "3.1416" could be parsed as a number close to pi. However
+   strings typically cannot be represented exactly or at all. For example, "1e-1000" is too small and
+   "1e1000" is too large for even 64-bit floating-point types.
+
+   Most languages represent these strings as the number zero and the value 'infinity'. Let us consider
+   Python as an example:
+>>> float("1e-1000")
+0.0
+>>> float("1e1000")
+inf
+
+   The Go language gives the same result with the caveat that 1e1000 triggers an error (which you can
+   ignore). Consider the following Go code:
+package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func main() {
+	f, err := strconv.ParseFloat("1e-1000", 64)
+	fmt.Println(f, err)
+	f, err = strconv.ParseFloat("1e1000", 64)
+	fmt.Println(f, err)
+}
+
+   It prints out:
+0
++Inf strconv.ParseFloat: parsing "1e1000": value out of range
+
+   The C language also gives you 0 and infinity, but both are consider out of range. Let us consider the
+   following C code...
+
+#include <stdio.h>
+#include <errno.h>
+#include <stdlib.h>
+
+int main(void) {
+	const char *p = "1e-1000 1e1000";
+	printf("Parsing '%s':\n", p);
+	char *end;
+	for (double f = strtod(p, &end); p != end; f = strtod(p, &end)) {
+		printf("'%.*s' -> ", (int)(end-p), p);
+		p = end;
+		if (errno == ERANGE){
+			printf("range error, got ");
+			errno = 0;
+		}
+		printf("%f\n", f);
+	}
+}
+
+   It prints out
+Parsing '1e-1000 1e1000':
+'1e-1000' -> range error, got 0.000000
+' 1e1000' -> range error, got inf
+
+   What about C++? Let us consider the following code.
+#include <cstdio>
+#include <charconv>
+#include <string>
+
+int main() {
+	for(std::string str : {"1e-1000", "1e1000"}) {
+		double value = -1;
+		printf("parsing %s\n", str.c_str());
+		auto r = std::from_chars(str.data(), str.data() + str.size(), value);
+		if(r.ec == std::errc::result_out_of_range) { printf("out of range "); }
+		printf("%f\n", value);
+	}
+	return EXIT_SUCCESS;
+}
+
+   What does this output?
+
+   The answer is: "it depends".
+
+   Under LLVM/libc++, the code does not build because it is still lacking support for floating parsing.
+   (You are expected to use the C function strtod.)
+
+   Under Visual Studio, you get the same result as C:
+parsing 1e-1000
+out of range 0.000000
+parsing 1e1000
+out of range inf
+
+   GCC/glibc++ relies on the fast_float library which follows the same behavior. However, the GCC
+   folks added a special case handling, and they discard the parsed value before returning, thus you
+   cannot distinguish 1e1000 and 1e-1000 when parsing strings with GCC/glibc++: both are unknown values
+   'out of range'. You get the following with GCC:
+parsing 1e-1000
+out of range -1.000000
+parsing 1e1000
+out of range -1.00000
+
+   The -1 value is just the bogus value that I had used to initialize the variable. The C++ language
+   architects are aware of this issue, search for Floating point from_chars API does not distinguish
+   between overflow and underflow.
+
+   Interestingly, both GCC/glibc++ and Microsoft Visual Studio will happily return infinity when parsing
+   the string "inf" and not trigger an out of range error.
+
+
+---
+

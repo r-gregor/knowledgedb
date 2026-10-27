@@ -1,0 +1,273 @@
+filename: floating-points-boxes_20250307.txt
+https://blog.toast.cafe/floating-points-boxes
+
+Floating Points & Boxes
+2025-03-04
+
+   Computers deal with numbers, big and small, but must do this with real-world constraints (how big
+   your CPU registers are, and how big your RAM is). As a consequence, CPUs tend to understand two types
+   of numbers natively. The first, called integers, are perfectly accurate, and represent a whole number
+   (either exclusively positive, named unsigned integers, or both positive and negative, named signed
+   integers, or just "integers"). These have a strict size limit of 2 to the power of the size of the
+   register (so on most modern CPUs, 2^64 for unsigned integers). The second can represent partial
+   numbers and numbers that are bigger than this, at the cost of (potentially) losing precision. These
+   are called floating point numbers, and are defined by the IEEE 754 specification.
+
+   There's a bunch of explanations online about how floating points ACTUALLY work internally, but
+   basically none of them that I've read have went into the kind of detail I wanted. I wanted to
+   understand them well enough I could implement them in software, and know how I can manipulate them
+   safely. I got there! The goal of this post is to get you there, without needing to buy a copy of the
+   standard.
+
+Unsigned Integers
+   Before we can start explaining floating points conceptually, we need to start by talking about
+   unsigned integers. Thankfully they're not very complex. An unsigned integer simply represents the
+   whole (positive) number "as-is" in base 2. That's the binary representation.
+
+   For the sake of the example, let's say our CPU is 8bit (has 1 byte registers). Zero in binary is 0,
+   and one is 1. Two, however, becomes 10, because we're in base 2. We can represent this in binary as
+   00000010, this way it still takes up 8 bits. What we're really seeing though is a representation of
+   the binary number, one where we have the most significant digit to the least significant digit
+   represented with 1 bit dedicated to each.
+
+   Just like we padded it with 0s before the 10, we can represent the number more "completely" by also
+   adding the . and then padding 0s on the other side. So another way to represent the same number in 8
+   bits (which is no longer an unsigned integer, since it is no longer a bit-wise representation) would
+   be 0010.0000. Same number, different way to use bits to represent it.
+
+   Of course, the decision of where we placed (as in, how many digits are to the left and to the right
+   of it) the . (the point, if you will) is arbitrary. 010.00000, 10.000000, 00010.000, 000010.00,
+   0000010.0, and indeed 00000010. are all valid ways to utilize 8 bits to store the digits of the
+   binary number 2. You might even say the point here is floating, because that is how those actually
+   work!
+
+Scientific Notation
+   "But wait", you cry out, "every other explanation talks about how it's actually scientific notation!"
+   You're not wrong, both are right. This way is actually much more useful to reason about, but
+   mathematically, they're equivalent, and we can talk about it some more now.
+
+   Let's go back to our previous example of 2, and go back to decimal for a moment. In scientific
+   notation, 1e0 means 1*10^0, 1e1 means 1*10^1, 1e-1 means 1*10^-1 and so on. We can represent the
+   number 2 as 2e0, 0.2e1, 20e-1, and so on. These valid representations can be called the "cohort"
+   for the number. Notice what happens to the base number (the part before the e) in the same cohort as
+   we move the exponent around though. 20e1 is equivalent to 2e2. Let's rewrite these: 20.00e1 is equal
+   to 2.000e2. By changing the exponent, we have moved the point. This is why these things are
+   equivalent: the exponent in floating point numbers is used to record where the point is.
+
+Where is the Point?
+   We can start talking about the storage format now, though we'll keep it quite abstract temporarily.
+   From the previous bit, we know that a floating point is composed of some digits, and the point
+   location (determined by the exponent, which for the binary representation is base 2). With this
+   knowledge, we can start talking about where the point is.
+
+   The first thing to understand is that the binary format enforces one particular cohort to be used,
+   which means there is exactly one unique representation for every number. Since both really small
+   and really large numbers are representable, it's useful to place the point somewhere in sight. In the
+   end, the point is actually outside of the digits inside of the floating point.
+
+   Imagine the floating point number 5. In binary, that makes 0...101.0.... The canonical cohort for this
+   number is 0.101e3. The point is placed such that the whole part of the significant (I'm going to call
+   it the mantissa, it's the part before the e) is exactly 0, and the very first digit after the 0 is a
+   1. Because we know this is the convention, we can cheat some more digits out in some cases, by
+   defining these two digits (0.1) as not being part of the physical representation. This is to say that
+   the floating point number 5 will be represented by a mantissa 010... and an exponent of value 3.
+
+Exponent Value?
+   Yeah so, in the previous example, the exponent value is 3. It is not represented as a 3. The authors
+   of the specification wanted to make it easy to sort floating point numbers (the canonical cohort
+   helps with this a lot already!), which means we can't just use two's complement for negative
+   exponents. Instead, the exponent is implemented as a biased number, with a few special format
+   meanings. The bias is built into the specific representation (albeit indirectly).
+
+   Every IEEE 754 floating point representation is parametrized (in part) by emax, which is the maximum
+   value that is representable by the exponent. The minimum value is fixed to exactly 1-emax. Then you
+   eliminate the special meanings of the exponent (these are "all 1s" and "all 0s"). From there, we can
+   calculate the bias.
+
+   Well, realistically, the other way to look at it that's even simpler is: the smallest possible
+   non-zero exponent (so 0...1 in big endian) must represent the minimum exponent value. Since that's set
+   to 1-emax, which must be equal to 1-bias, the bias is simply emax.
+
+   The other thing of note here are the special meanings of the exponent. All 1s means ±NaN or ±Inf. All
+   0s mean subnormals, which we'll talk about later. The exponent is in a more significant position than
+   the mantissa, which means that (the absolute of) both NaNs and Infs are greater than any
+   representable finite number in the representation. We'll see this later, but NaNs are even bigger
+   than Inf!
+
+Physical Storage
+   Ok, we can finally talk about how the binary format (technically called the "binary interchange
+   format") of IEEE 754 floating point numbers works. First, we have the sign bit. Then, we have the
+   biased exponent. Then we have the digits. Ok everyone, we can go home now. What, you want to hear
+   about that whole subnormal thing, NaNs, and some examples? Ok, we can do that.
+
+Subnormals
+   There is one disadvantage to enforcing the canonical cohort to be starting with 0.1, and that has to
+   do with really really small numbers. Consider, for example, the number 0.001*2^emin. We can't
+   actually represent this, as we'd need to lower the exponent even further for that to be possible.
+   This results in an unfortunate side-effect where this normal representation would "jump to 0".
+   Subnormals fix this by saying that when the exponent is all 0s, the real value of the exponent should
+   be emin (so 1-emax), and the canonical cohort actually starts with 0.0, with everything else being
+   identical.
+
+   If the mantissa is also full of zeroes, that number is zero. However, if you've been paying
+   attention, if you were to simply interpret it as a subnormal, you'd still be correct: indeed,
+   0.0...0^2^emin is still 0.
+
+Non-Numbers
+   Really, I was faking you out earlier. NaNs are actually extremely important nowadays because of a
+   technique called NaNboxing. I'll go over how that works in this section, but first let's talk about
+   NaNs in general.
+
+   So infinite numbers are numbers with the sign bit, then an exponent of all 1s, and then a mantissa of
+   all 0s. If a single bit is set in the mantissa, it becomes a NaN instead (meaning a positive NaN is
+   necessarily "greater" than a positive Inf, and it's the only case thereof). It's also how Inf is
+   greater than any finite number, and -Inf is smaller than any finite number.
+
+   Anyway, back to NaNs. If any mantissa bit is set, that makes the NaN a NaN, but which bits are set
+   also matters! Specifically, if the very first bit of the mantissa is a 0, it's considered a
+   "signaling" NaN. This so you can make a signaling NaN into a quiet NaN by just setting that bit to a
+   1, but the inverse might not be possible.
+
+   So what is this "signaling" vs "quiet" business? Well, the concept is that we might have ended up
+   with a NaN for any number of reasons. A signaling NaN is intended to be the consequence of an
+   uninitialized variable, or to represent some enhancements to the format. Quiet NaNs are intended to
+   potentially afford debug information of unavailable or otherwise invalid data. To this end, the
+   "payload" of a quiet NaN is meant to be preserved even through operations when possible. The
+   exact method to do this is a detail we'll skip here though since...
+
+   In practice, that doesn't really happen. What does ultimately happen is that the payload of quiet
+   NaNs is used to carry a whole bunch of information in the runtimes of programming languages! As far
+   as I can tell, this was first introduced in JavaScriptCore, but a whole bunch of them do this now.
+   The idea makes more sense when you consider a classic garbage collector problem: how do you tell
+   whether something on the stack is a pointer or a value? How do you represent a value of your
+   programming language? This is what NaNboxing tries to solve.
+
+   The way NaNboxing works (which should make sense to you at this point, otherwise try re-reading the
+   rest of the article, it's a lot to take in all at once!), is it uses the payload of a 64bit quiet NaN
+   (qNaN) to encode type information and whatever else is needed (typically a pointer). Let's see what
+   this might look like.
+
+   First, let's talk about the exact parameters of a 64bit floating point (which'll also let us mention
+   the exact parameters of the binary64 interchange format). It's one sign bit, then the exponent with
+   an emax of 1023 (meaning 11 bits of storage), and 53 digits of mantissa precision (which are
+   represented in 52 bits) (indeed, 52 + 11 + 1 = 64). With one of the mantissa bits having to be 1 to
+   make it a quiet NaN, we're left with 51 bits to do with as we will.
+
+   Typically speaking, on modern platforms 48 bits is enough to represent any real pointer (and
+   even once we go above that, virtual address space ends up fitting in that). This means that we can
+   use those first 3 bits for whatever else we want, and still fit in a pointer. Those 3 bits are used
+   to embed type information. To make it easier to handle, NaNboxing does an unsigned addition to shift
+   the range to make it easier to handle, but conceptually, that's all it is!
+
+Precision Loss
+   You've probably figured it out by now, but it bears explaining separately anyway. The mantissa is
+   basically a "window" of digits, and the exponent simply tells you where in the field it is. We always
+   select the most significant bit as the start of the window. The combination of these two factors
+   means that if the number should include (set) digits outside of that window, they will be lost. This
+   is one of two places where floating point errors come from: you cannot represent a really big number
+   + a really small number, because the really small number will be lost!
+
+   The other kind of floating point precision loss comes from the representation format. Since we're
+   representing the numbers in terms of a series of "digits", we're at the mercy of our base. For
+   example, consider the (decimal) number 0.2. In binary, this actually becomes 0.00110011..., i.e. it is
+   non-terminating. With how floating points work (the "window"), we simply cut it off at some point,
+   which means we lose precision.
+
+Manipulations
+   The final thing I'd like to talk about is how to manipulate floating point numbers without losing
+   (any more) precision. It's actually not that obvious! For example, for my uses, I want to get two
+   integers out (to make big rationals), even if they're big, but how can I do that?
+
+   It's actually quite simple. We can just move the point to a non-canonical location by adding the
+   number of digits of precision to the exponent. Instead of necessarily doing this with the scalbn
+   or similar function though, you can just extract the unsigned integer directly and adjust your
+   exponent separately. The standard (very helpfully) had this in mind, so when you're interepreting the
+   mantissa as an unsigned integer, you want to use the exponent q (rather than e). The relationship
+   between these two is e = q + p - 1, where p is the number of digits in the mantissa (including the
+   hidden one). To invert this for your convenience, that also means that q = e + 1 - p.
+
+   So you can figure out the number of bits in the exponent, mask them (and the sign) out, and then
+   manipulate the exponent in a (larger) integer type, giving you a convenient uint* times 2 to the
+   power of int*. The uint is guaranteed to fit the mantissa of a floating point of the same bit size
+   for obvious reason (a uint64 can always hold the mantissa of a double), and a similar logic applies
+   to the int of the exponent, leaving only the sign to worry about.
+
+   For the sake of convenience, here's how to manually extract e, q, the mantissa, and the sign with
+   floats in C. Note that this doesn't handle NaNs, Inf or subnormals!
+
+#include <float.h> // FLT_MAX_EXP, FLT_MANT_DIG
+                   // ...
+float f;
+uint32_t F = *(uint32_t*)&f; // casting directly would reinterpret it
+
+// mathematical float constants
+int32_t femax = FLT_MAX_EXP-1, // by C specification
+femin = 1 - femax,
+fbias = femax,
+fp = FLT_MANT_DIG; // includes the hidden bit
+
+// we can also get some useful constants for our own use
+int32_t FLT_MANT_BITS = fp - 1,
+		FLT_EXP_BITS  = 32 - FLT_MANT_BITS - 1; // also = - FLT_MANT_DIG
+		                                        // you could also calculate FLT_EXP_BITS from the bit-width
+
+		                                        // the physical representations of the sign, exponent, and mantissa
+uint32_t fS = F >> 31,
+		 fE = (F >> FLT_MANT_BITS) & ((1u << FLT_EXP_BITS)-1),
+		 fM = F & ((1u << FLT_MANT_BITS)-1);
+
+// the logical values of the above
+int32_t fe = fE - fbias,
+		fq = fe - fp + 1;
+uint32_t fm = fM | (1u << (fp - 1)); // set the hidden bit
+
+printf("%f = %u * 2^%d\n", f, fm, fq);
+
+   The logic is exactly identical for doubles, except:
+    1. Change all the 32s (e.g. uint32_t) to 64s (like uint64_t).
+    2. Change the 31 to 63.
+    3. Change all of the FLT_s to DBL_s (e.g. DBL_MANT_DIG).
+    4. Change the format string for the printf.
+
+   In case you're confused about the parts like ((1u << something)-1), it's a fast way to generate a
+   mask range. For example, imagine I want a 4-bit mask that looks like this: 0b01111. The fastest way
+   to generate this is to do a -1 on 0b10000. You can get 0b10000 by left-shifting a 1u (aka 0b1) by the
+   number of bits you want in your mask (in this case 4). So when you see ((1u << FOO)-1) you should be
+   reading it as "a series of 1s of length FOO". If you want your mask to be deeper in, you can just
+   shift the result of that afterwards. This is applicable in a lot more contexts than just this, but
+   apparently not that many people know about it!
+
+Summary
+   To solidify everything, let's do a point by point summary.
+     * An IEEE 754 binary floating point interchange format (what we care about, as that's what CPUs and
+       so on all use) is a series of bits.
+          + The first bit is the sign.
+          + Then, an amount of bits is the biased exponent.
+          + Finally, the rest of the bits are the physically represented mantissa.
+     * The true exponent is the unsigned integer representation of the physical exponent, minus the
+       bias. The bias is the maximum representable value of the exponent. The smallest representable
+       value of the exponent is set to be exactly 1 - emax.
+     * Unless the exponent is all 1s (in which case it's either infinity or NaN) or all 0s (in which
+       case the exponent is still emin, but the mantissa should be interpreted as a subnormal).
+     * The mantissa is a window of digits in the naive representation of the number (writing it out in
+       binary), where the point is locked to right before the first set bit.
+          + This bit is not included in the physical representation, but is rather "hidden".
+          + If the exponent is all 0s, then it's not set (making the number a subnormal).
+     * The reason we lose precision in floating points is because some numbers have bits that are set
+       outside of the window provided to us by the size of the mantissa and the location of the point
+       (as determined by the exponent).
+     * The difference between infinities and NaNs is that NaNs have at least one bit set in the
+       mantissa.
+     * NaNs can be quiet or signaling, which carries very little practical difference.
+          + A NaN is quiet if the first (leftmost) bit of the mantissa is set.
+     * Quiet NaNs are often used to encode extra information in doubles, to use them as more general
+       values than just numbers.
+
+   I hope you learned something! I certainly did. As a final disclaimer, I'm not a visual person. This
+   means that some of my figures (even textual ones like 0b... might be wrong. If that's the case, let me
+   know and I'll make sure to correct them - I want this article to be useful to as many people as
+   possible down the line.
+
+
+---
+
