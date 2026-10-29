@@ -1,0 +1,1509 @@
+filename: vim-quickfix-list-multif-20261029.txt
+https://vonheikemen.github.io/devlog/tools/vim-and-the-quickfix-list/
+
+vim and the quickfix list: jump to a location, search and replace in multiple files, and other shenanigans
+2021-06-13
+
+   We are going to learn about an avanced feature of vim, the quickfix list. We´re going to figure out
+   how to use it to search (and replace) a pattern in multiple files, and also how can we jump to the
+   location of an error thrown by an external command.
+
+Quickfix list
+   Is a special mode where vim show us a list of positions, meaning line and column numbers in a file.
+   This list was made to save the position of the errors we see in the error message of a compiler. This
+   way we could jump quickly to this location, fix the bug and then go to the next or try to compile the
+   code again.
+
+   My description can make it sound like a feature with a very minimal scope, but fear not, there is
+   more to it than that. For starters the quickfix list can be created in different ways. We can create
+   it with commands like :make, :vimgrep and :grep. And can also be created programatically with the
+   help of the setqflist function, so we do have a great deal of flexibility.
+
+   I feel the need to tell you that when I say quickfix list I literally mean the list of positions.
+   There are two ways we can see this list, we have the quickfix window and the location list. Both of
+   these are 'windows' in which the quickfix list is shown. The quickfix window is global, we can only
+   have one in the current active vim session. Meanwhile, we can have many location lists in the current
+   active vim session
+
+Jump to a location
+   So, our journey throught the wonderful quickfix list begins with the :make command, this is one of
+   vim´s native way of calling a compiler. But does the name make sound familiar to you? If so, I can
+   assure you it is not a coincidence. vim does assume we have [8]make installed on our system. How can
+
+   you be sure? Well, let´s make a test. Create a file called Makefile with the following content:
+.PHONY: test another
+
+test:
+	@echo 'hello'
+
+another:
+	@echo 'another'
+
+     In this post I will not tell you how to use make but if you want to know how you can use it like a
+     regular task runner you can [9]read this one.
+
+   When you call the :make command you should get something like this.
+hello
+
+(1 de 1): hello
+
+   make´s default behaviour is to execute the first 'task' it sees in our Makefile. Cool, but then how
+   do we get it to execute another? We just provide more arguments to our command, like this: :make
+   [argument]. If you try to execute :make another you should get this.
+another
+
+(1 de 1): another
+
+   That´s fine, but those commands don´t output any error. After showing the messages nothing happens.
+
+   This is the perfect time for our first contrived example. Since vim knows how to 'read' the errors
+   gcc gives let me show you an example using C.
+
+An example in C
+   So let´s create a file hello.c with this.
+
+#include <stdio.h>
+
+int main() {
+	printf("Hello, World!\n");
+
+	return 0;
+}
+
+   Notice that there is nothing wrong here. We can compile this thing easily using make. So our next
+   step will be to create a Makefile.
+
+.PHONY: run-hello
+
+run-hello:
+	gcc -Wall -o hello hello.c
+	./hello
+	rm ./hello
+
+   With everything in place, we can run :make --silent run-hello. If we did everything right we should
+   have our hello world.
+
+Hello, World!
+
+(1 de 1): Hello, World!
+
+   If we introduce an error, like say delete a semicolon, this is what we should get.
+
+hello.c: In function 'main':
+hello.c:4:28: error: expected ';' before 'return'
+    printf("Hello, World!\n")
+                            ^
+                            ;
+    return 0;
+    ~~~~~~
+make: *** [Makefile:7: run-hello] Error 1
+
+(2 de 8): error: expected ';' before 'return'
+
+   After showing this message you´ll notice that vim took you to the location of the error (how cool is
+   that?). If you want to check the content of the quickfix list you´ll need to open the quickfix window
+   using the :copen command. You should have something like this.
+
+|| hello.c: In function 'main':
+hello.c|4 col 28| error: expected ';' before 'return'
+||       printf("Hello, World!\n")
+||                               ^
+||                               ;
+||       return 0;
+||       ~~~~~~
+make: *** [Makefile|7| run-hello] Error 1
+
+     To close the quickfix window we use the :cclose command.
+
+   Now pay attention to this line.
+
+hello.c|4 col 28| error: expected ';' before 'return'
+
+   In here vim is telling us where is the error, it´s showing the file name, the line and the column.
+   Right now what we should do is fix the bug and try to compile again. For the most part this is the
+   workflow that we want. But if you do have more than one item in the quickfix list you could navigate
+   between them using the commands :cnext and :cprev, to go forward and backwards in the quickfix list.
+
+   This is nice and all but what happens if we don´t use gcc? What if we use nodejs? Could vim handle
+   it? Yes, with some help.
+
+errorformat
+   If you start using other compilers or interpreters you´ll notice that vim can´t read properly all the
+   error messages they give you. To overcome this vim offers an option called errorformat, a variable
+   that can store the 'shape' of an error message, this way vim can recognize it when they appear in the
+   quickfix list.
+
+   To test this thing let´s try make vim read the errors node shows us. Start by creating a file called
+   greeting.js and make a simple 'hello world' that has an error.
+
+console.log(greeting);
+const greeting = 'Hello, World!';
+
+   Now in our Makefile let´s add another task.
+
+run-greeting:
+	node ./greeting.js
+
+   If we try to run :make --silent run-greeting we´ll get this.
+
+console.log(greeting);
+            ^
+
+ReferenceError: Cannot access 'greeting' before initialization
+    at Object.<anonymous> (/tmp/test/greeting.js:1:13)
+    at Module._compile (internal/modules/cjs/loader.js:1063:30)
+    at Object.Module._extensions..js (internal/modules/cjs/loader.js:1092:10)
+    at Module.load (internal/modules/cjs/loader.js:928:32)
+    at Function.Module._load (internal/modules/cjs/loader.js:769:14)
+    at Function.executeUserEntryPoint [as runMain] (internal/modules/run_main.js:72:12)
+    at internal/main/run_main_module.js:17:47
+make: *** [Makefile:4: run-greeting] Error 1
+
+   vim will try to take us to the location of the error but it is not likely to succeed. In my case, it
+   tried to take me to a file it doesn´t exists.
+
+   To fix this we need to tell vim how to read these messages. I´m going to show one way of doing it.
+
+set errorformat=%E%.%#ReferenceError:\ %m,%Z%.%#%at\ Object.<anonymous>\ (%f:%l:%c)
+
+   In here we specify the 'shape' of each line in the error message or at least the ones we care about.
+   Each line has its own format and must be separated by a coma. That means...
+
+%E%.%#ReferenceError:\ %m
+
+   And
+
+%Z%.%#%at\ Object.<anonymous>\ (%f:%l:%c)
+
+   Are two expressions that tell vim how to read the error message. We are telling vim where it can find
+   the type of the error (ReferenceError) and where is the location data of the error. In our example
+   those two things are in separate lines so we must have these expressions separated by a coma.
+
+   If we want to improve readability we could also try to write it this way.
+
+set errorformat=%E%.%#ReferenceError:\ %m
+set errorformat+=%Z%.%#%at\ Object.<anonymous>\ (%f:%l:%c)
+
+   When we do it this way we don´t need to put the coma at the end. But we still need a \ before each
+   special character (like a blank space) so there is no conflict between vim´s syntax and the error
+   format. If you find that annoying you could try another way.
+
+let &errorformat =
+  \ '%E%.%#ReferenceError: %m,' .
+  \ '%Z%.%#at Object.<anonymous> (%f:%l:%c)'
+
+   When we use let we have the oportunity to use strings to write our formats, avoiding any sort of
+   conflict between vim´s syntax and the errorformat. To further improve readability I have every
+   expression in its own line, taking advantage of the . operator to concat these strings.
+
+   Now if we try to run :make --silent run-greeting vim will take us to the right place, which is where
+   node says the error is. The quickfix should show us this.
+
+|| /tmp/test/greeting.js:1
+|| console.log(greeting);
+||             ^
+||
+greeting.js|1 col 13 error| Cannot access 'greeting' before initialization
+||	   at Module._compile (internal/modules/cjs/loader.js:1063:30)
+||	   at Object.Module._extensions..js (internal/modules/cjs/loader.js:1092:10)
+||	   at Module.load (internal/modules/cjs/loader.js:928:32)
+||	   at Function.Module._load (internal/modules/cjs/loader.js:769:14)
+||	   at Function.executeUserEntryPoint [as runMain] (internal/modules/run_main.js:72:12)
+||	   at internal/main/run_main_module.js:17:47
+|| make: *** [Makefile:4: run-greeting] Error 1
+
+   Now the ReferenceError is no longer on the quickfix list, neither the line that was below. Those has
+   been replaced with this.
+greeting.js|1 col 13 error| Cannot access 'greeting' before initialization
+
+   If vim shows that, it means the errorformat worked.
+
+   We have a bit of an issue, those two expressions will only work with a ReferenceError type. You
+   probably need more than that in your day to day workflow. We should really have something like this.
+
+let &errorformat =
+  \ '%E%.%#AssertionError %m,' .
+  \ '%E%.%#TypeError: %m,' .
+  \ '%E%.%#ReferenceError: %m,' .
+  \ '%E%.%#SyntaxError: %m,' .
+  \ '%E%.%#RangeError: %m,' .
+  \ '%Z%.%#at Object.<anonymous> (%f:%l:%c),' .
+  \ '%-G%.%#'
+
+Special tokens
+   That´s a lot weird stuff, stuff you might want to know about. Let´s dive a little bit into the syntax
+   I use in that last example.
+     * %f: Is the filepath where the error was found.
+     * %l: Is the line number where the error was found.
+     * %c: Is the column number where the error was found.
+     * %m: Is the error message. In our example we use it to capture the text that´s right after the
+       type of the error.
+     * %E: Tells vim this is the beginning of a multi-line error message. The letter E means this is an
+       error. There other types of messages like warnings (%W), informative (%I) or general purpose
+       (%G).
+     * %Z: Means is the end of the message. Specifically, that is the last line of the message.
+     * %.%#: This one is a wildcard, one that matches everything. So, you could read %Z%.%#at
+       Object.<anonymous> (%f:%l:%c) like this: The last line of this message (%Z) can start with
+       anything (%.%#) followed by at Object.<anonymous> and in parenthesis you´ll find the filepath
+       (%f), the line number (%l) and the column (%c) where the error was found.
+     * %-: Tells vim it should exclude this piece from the quickfix window. %-G could be read like
+       'don´t include this message.'In our example we use %-G%.%# which means 'ignore everything else.'
+       Now, since %.%# matches everything, we put this expression last.
+
+   If you want to know more about the special tokens the errorformat can have run the command :help
+   errorformat.
+
+makeprg
+   By now you know you can make vim read any type of error but the current configuration is still tied
+   to make. It doesn´t have to be like that. We can change the command vim calls when we run :make.
+
+   Let´s say we want to use node, just node, to achieve this we need to change the option makeprg.
+
+set makeprg=node
+
+   Or we can do.
+
+let &makeprg = 'node'
+
+   Now instead of using :make --silet run-greeting we can run :make ./greeting.js or :make % if we are
+   already editing greeting.js.
+
+Search
+   Jumping to an error is not the only feature of the quickfix list, we can also use it to explore the
+   code we are working on. For this vim has commands like :grep and :vimgrep, they create a quickfix
+   list with the results of a search.
+
+vimgrep
+   With this command we can take advantage of the built-in search engine that comes with vim. It is very
+   much like the good old [10]grep, but the :vimgrep command uses vim´s regex engine. Basically :vimgrep
+   is what we´ll use when we want to search a pattern (a regular expression) in multiple files. This is
+   how you use it.
+
+:vimgrep /<pattern>/ <files>
+
+   The / in the pattern are not mandatory, but they are useful when your pattern has characters that
+   cause a conflict with vim´s syntax. Like in this example.
+
+:vimgrep /create table/ db/**/*.sql
+
+   Here we are searching the pattern create table in a folder called db. And we are searching only in
+   the files that end with .sql extension
+
+   These delimeters we use in the search pattern don´t have to be /. They could be anything that vim
+   doesn´t consider to be an 'identifier'. Find out more about identifiers in the documentation, using
+   the command :help isident. This is specially useful when our search pattern already has a /. Imagine
+   we are searching for a path in our code, we could write our search like this.
+
+:vimgrep #/home/user/code# scripts/*.sh
+
+   But what happens when we want to ignore a whole directory in our search? There are several solutions.
+   For starters we could set the option wildignore. Say we want to ignore a cache and tmp directories,
+   we could set wildignore to something like this.
+
+:set wildignore=*/cache/*,*/tmp/*
+
+   As far as I can tell wildignore tells vim the paths that should be excluded when doing a path
+   expansion. For example, if we use this pattern **/*.js vim will exclude any directory that has
+   /cache/ or /tmp/ anywhere in its path. So :vimgrep will not search these directories because it will
+   never receive them as arguments. This means wildignore can affect other commands, and not just
+
+   :vimgrep.
+
+   Some stackoverflow questions suggest this method may not work all the time. In that case we can try
+   to create the argument list with a backtick expression, these will let you call an external command
+   with your shell. We could for example search only on files tracked by git, like this.
+
+:vimgrep /function/ `git ls-files`
+
+   In this case git ls-files will give us a list file path which will then be processed by :vimgrep.
+   Isn´t that cool? The best part is that as long as :vimgrep gets a valid a file list everything will
+   work as expected.
+
+grep
+
+   And then there is the :grep command. This is vim´s way of integrating with the search utility grep.
+   This command works almost like :vimgrep but this time we need to use a 'syntax' that is compatible
+   with grep. Take this example.
+
+:grep -r 'create table' db/**/*.sql
+
+   Notice I´m not using / as delimeters, also I´m adding the -r flag (to enable a recursive search),
+   this is because vim calls grep in a non-interactive shell and gives all the arguments to grep as is.
+
+   But now the question is 'when should we use :grep instead of :vimgrep?'Turns out :grep is much
+   faster and efficient than :vimgrep. So, :grep would be the better choice if your search involves lots
+   of files.
+
+   Okay, that´s fine. What about the opposite? What advantage :vimgrep has over :grep? Not much I´d say.
+   If you´re more familiar with vim´s regular expressions maybe that would be a reason to choose
+
+   :vimgrep. :vimgrep also works fine on all platforms, since it´s all done inside vim.
+
+   Cross-platform support. That´s a problem with :grep, how does vim solve it? Well, in the same way
+   :make does. We can configure the external command vim calls with the variable grepprg. Say that
+   instead of using grep we want to use [11]ripgrep, in order to do that we add this to our config.
+
+set grepprg=rg\ --vimgrep\ --smart-case\ --follow
+
+   With that in place vim will use rg with all those arguments included when we invoke :grep.
+
+Special guess: FZF
+   The last external search tool I´ll mention is [12]fzf.vim. This is a plugin that provides an
+   interface where we can execute an interactive search. I won´t get into any details here. Just going
+   to tell you something I found out long after I started using it.
+
+   Turns out we can populate the quickfix list using FZF, specifically with the results of commands like
+   :Rg or :Ag. After doing a search you´ll have all the matches inside a list ready to be filtered, it´s
+   here when you can select an item using tab or select all using Alt + a, then press enter. After this
+   the quickfix list will have every item you selected. This little feature is very useful when you want
+   to execute a certain command only on specific parts of your code using :cdo.
+
+Replace
+   Speaking of :cdo, let me show you one cool thing we can do with it: search and replace in multiple
+   files. If you ever wondered how to do this in vim, the answer is the quickfix list and the :cdo
+   command.
+
+   In a simple case where all we want to do is replace a known pattern this is what we do:
+
+     * Step 1:
+   Use our favorite search command :grep, :vimgrep or anything that can populate the quickfix list.
+
+     * Step 2 (optional):
+   Open the quickfix window using :copen
+
+     * Step 3:
+   Use :cdo to execute a command on every item in the quickfix list. In our case what we want to do is
+   replace the pattern, which we can do using this syntax s/{pattern}/{replacement}.
+
+   Say that our quickfix list is filled with the results of this search.
+
+:vimgrep node **/*.js
+
+   Once that is done we can replace the word node with deno using this command.
+
+:cdo s/node/deno/ | update
+
+   With it vim will run the command s/node/deno | update on every item in the quickfix list. We take
+   advantage of the fact :cdo can execute any valid vim command and actually do two things, we replace
+   the pattern node and save the changes to the file.
+
+A more advanced use case
+   Now let´s take it one step further, suppose we want to replace some pattern but before doing anything
+   we want filter the results so we only change some parts of our code. Basically we don´t want to
+   replace all the matches of a search. How do we do it? One way would be changing the quickfix list so
+   it only has the items we want to replace.
+
+   This process will take a bit of effort. First, we need to tell vim how to read its own quickfix list,
+   so we can create modified versions of other quickfix lists. To achieve our goal we need to add a
+   pattern to the errorformat option. So in your .vimrc you should have something like this.
+
+set errorformat+=%f\|%l\ col\ %c\|%m
+
+   We are one step closer but it´s still not enough, vim will not let us change the quickfix list. For
+   this we need to be able to write to the buffer where the quickfix list is. We need to run this
+   command.
+
+:set modifiable
+
+   Once we do that we can delete the items we want, but we can´t run :cdo just yet. We need to save the
+   changes we´ve made with this command.
+
+:cgetbuffer
+
+   Next, just to be on the safe side, make sure you´re going to perform the actions on the correct
+   version of the quickfix list. Run, :cclose and :copen.
+
+   Finally you can execute the substitute command.
+
+   Here is a demo of the whole process.
+
+     See in [https://asciinema.org/a/385145]asciinema.
+
+Improving the experience
+   As you might have noticed the quickfix list is not the most intuitive thing in the world. But we can
+   make it better. I can give you a few suggestions you can add to your .vimrc.
+
+     * A better grep.
+   First thing you might want to do is make vim open the quickfix window after doing a search. Lucky for
+   us the official documentation offers something we can use:
+
+command! -nargs=+ Grep execute 'silent grep! <args>' | copen
+
+   I think in this case you could change grep with vimgrep if you wanted to. The important thing is,
+   with this now you could use :Grep (with capital G) to make your search.
+
+     * Navigating throught the results.
+   We could 'navigate' throught every item in the quickfix list without even opening the quickfix window
+   with this shortcuts.
+
+" Go to the previous location
+nnoremap [q :cprev<CR>
+
+" Go to the next location
+nnoremap ]q :cnext<CR>
+	 * Manage your window.
+
+   If your going to use the quickfix window you better have some keybindings to show and hide it easily.
+" Show the quickfix window
+nnoremap <Leader>co :copen<CR>
+
+" Hide the quickfix window
+nnoremap <Leader>cc :cclose<CR>
+
+     * The errorformat.
+   Let´s make sure vim can always read the format on the quickfix list when we want to update it.
+augroup quickfix_group
+	autocmd!
+	autocmd filetype qf setlocal errorformat+=%f\|%l\ col\ %c\|%m
+augroup END
+
+     * Keybindings
+   We´ll also need some keybindings that only work on the quickfix window. You know, so the 'advance use
+   case' won´t be so tedious.
+
+function! QuickfixMapping()
+	" Go to the previous location and stay in the quickfix window
+	nnoremap <buffer> K :cprev<CR>zz<C-w>w
+
+	" Go to the next location and stay in the quickfix window
+	nnoremap <buffer> J :cnext<CR>zz<C-w>w
+
+	" Make the quickfix list modifiable
+	nnoremap <buffer> <leader>u :set modifiable<CR>
+
+	" Save the changes in the quickfix window
+	nnoremap <buffer> <leader>w :cgetbuffer<CR>:cclose<CR>:copen<CR>
+
+	" Begin the search and replace
+	nnoremap <buffer> <leader>r :cdo s/// \| update<C-Left><C-Left><Left><Left><Left>
+endfunction
+
+augroup quickfix_group
+	autocmd!
+	autocmd filetype qf call QuickfixMapping()
+augroup END
+
+     * Now everything put together.
+
+" :Grep - search and then open the window
+command! -nargs=+ Grep execute 'silent grep! <args>' | copen
+
+" Go to the previous location
+nnoremap [q :cprev<CR>
+
+" Go to the next location
+nnoremap ]q :cnext<CR>
+
+" Show the quickfix window
+nnoremap <Leader>co :copen<CR>
+
+" Hide the quickfix window
+nnoremap <Leader>cc :cclose<CR>
+
+function! QuickfixMapping()
+	" Go to the previous location and stay in the quickfix window
+	nnoremap <buffer> K :cprev<CR>zz<C-w>w
+
+	" Go to the next location and stay in the quickfix window
+	nnoremap <buffer> J :cnext<CR>zz<C-w>w
+
+	" Make the quickfix list modifiable
+	nnoremap <buffer> <leader>u :set modifiable<CR>
+
+	" Save the changes in the quickfix window
+	nnoremap <buffer> <leader>w :cgetbuffer<CR>:cclose<CR>:copen<CR>
+
+	" Begin the search and replace
+	nnoremap <buffer> <leader>r :cdo s/// \| update<C-Left><C-Left><Left><Left><Left>
+endfunction
+
+augroup quickfix_group
+	autocmd!
+
+	" Use custom keybindings
+	autocmd filetype qf call QuickfixMapping()
+
+	" Add the errorformat to be able to update the quickfix list
+	autocmd filetype qf setlocal errorformat+=%f\|%l\ col\ %c\|%m
+augroup END
+
+Plugins
+   If you know how and you´re willing to install some plugins I´d recommend these:
+
+     * [https://github.com/romainl/vim-qf]vim-qf
+   This one sets some sane defaults to the behaviour of the quickfix window. For example, it can open
+   the quickfix window after calling :grep, :vimgrep and even :vimgrep without having to create new
+   commands. Things don´t end there, it also offers some functions we can bind.
+
+     * Toggle the quickfix window.
+nmap <Leader>cc <Plug>(qf_qf_toggle)
+
+     * Navigating throught results
+" Go to previous location
+nmap [q <Plug>(qf_qf_previous)zz
+
+" Go to next location
+nmap ]q <Plug>(qf_qf_next)zz
+
+function! QuickfixMapping()
+	" Go to the previous location and stay in the quickfix window
+	nmap <buffer> K <Plug>(qf_qf_previous)zz<C-w>w
+
+	" Go to the next location and stay in the quickfix window
+	nmap <buffer> J <Plug>(qf_qf_next)zz<C-w>w
+endfunction
+
+augroup quickfix_group
+	autocmd!
+	autocmd filetype qf call QuickfixMapping()
+augroup END
+
+   The difference between these command and the built-in vim commands is, the plugin commands will not
+   throw an error when we reach the end of the list. Meaning that if we are on last location of the list
+   pressing ]q will take us to the first item in the quickfix list.
+
+     * [https://github.com/stefandtw/quickfix-reflector.vim]quickfix-reflector
+   This plugin makes everything I told you in the 'advanced use case' section be useless. Once is
+   installed the buffer in the quickfix window acts like a normal buffer. On top of that, every change
+   we make is 'reflected' on the actual file.
+
+   Remember the example I showed in the demo. Say we have this on the quickfix list.
+
+./test dir/a-file.txt|1 col 11| nnoremap <leader>f :FZF
+./test dir/a-file.txt|2 col 11| nnoremap <leader>ff :FZF<CR>
+./test dir/a-file.txt|3 col 11| nnoremap <leader>fh :History<CR>
+./test dir 2/another-file.txt|1 col 11| nnoremap <leader>? :Maps<CR>
+./test dir 2/another-file.txt|2 col 11| nnoremap <leader>bb :Buffers<CR>
+
+   Now say I modify the list, delete the first and fourth item using dd.
+
+- ./test dir/a-file.txt|1 col 11| nnoremap <leader>f :FZF
++ ./test dir/a-file.txt|1 col 11| nnoremap <AAA>f :FZF
+  ./test dir/a-file.txt|2 col 11| nnoremap <leader>ff :FZF<CR>
+  ./test dir/a-file.txt|3 col 11| nnoremap <leader>fh :History<CR>
+- ./test dir 2/another-file.txt|1 col 11| nnoremap <leader>? :Maps<CR>
++ ./test dir 2/another-file.txt|1 col 11| nnoremap <BBB>? :Maps<CR>
+  ./test dir 2/another-file.txt|2 col 11| nnoremap <leader>bb :Buffers<CR>
+
+   If I save these changes with the :write command (or the short version :w) they will take effect on
+   their respective files. This gives us great power and flexibility because now the changes we can make
+   are only limited by our knowledge of vim.
+
+   Any trick you can think that can modify chunks of code should work flawlessly with this plugin. For
+   example if we want to make the same thing I did in the demo we would do it like this:
+
+     * Delete the lines we don´t want to change
+./test dir/a-file.txt|1 col 11| nnoremap <leader>f :FZF
+./test dir/a-file.txt|3 col 11| nnoremap <leader>fh :History<CR>
+./test dir 2/another-file.txt|1 col 11| nnoremap <leader>? :Maps<CR>
+
+     * Use the 'regular' substitution command.
+:%s/leader/localleader/g
+
+   After that quickfix list should be on this state.
+
+./test dir/a-file.txt|1 col 11| nnoremap <localleader>f :FZF
+./test dir/a-file.txt|3 col 11| nnoremap <localleader>fh :History<CR>
+./test dir 2/another-file.txt|1 col 11| nnoremap <localleader>? :Maps<CR>
+
+     * Save the changes.
+:write
+
+   And that´s it.
+
+Conclusion
+   We got to know what is the quickfix list and its most common use cases.
+
+   Now we know we can use :make to call any compiler or external command that can run our code and give
+   us error messages. We also have the tools to 'teach' vim how to read an error message and put all the
+   information we need in the quickfix list.
+
+   We learned that we can use :vimgrep and :grep to search patterns in multiple files in our project. We
+   had the chance to explore a few methods to search and replace text, with some simple cases and
+   another one slightly more complex. With these examples we learned how to replace text with and
+   without plugins.
+
+   Lastly we learned about some options and commands we can use in our .vimrc to improve the user
+   experience when we use the quickfix list.
+
+
+
+---
+https://neovim.substack.com/p/a-quick-guide-to-quickfix
+
+A quick guide to quickfix
+May 19, 2023
+
+Or, how to use grep from within Vim, without plugins
+
+   This is part of an ongoing sub-feature about codebase navigation. Until recently, if I needed to find
+   a specific string in a codebase, I would switch tabs or background Neovim (with ctrl-z), search, and
+   then open the file directly with :e. But it´s possible to do that entire workflow from within the
+   editor, using a feature called 'quickfix.' (Also called 'Quickfix', 'QuickFix', 'Quickfix mode', and
+   'the Quickfix view.')
+
+   Quickfix is more general purpose than just grepping, but today we´ll focus on that use case.
+
+   Quickfix shows you a list of locations in a codebase and lets you go to them. You can get that list
+   of locations from a lot of different sources but the navigation once you get them into a quickfix
+   [https://neovim.io/doc/user/windows.html]window is the same.
+
+   Without any plugins or anything, there are two basic ways to get a quickfix list: grep and make. You
+   can see what grep produces by running an [https://neovim.io/doc/user/cmdline.html#cmdline-lines]Ex command
+   like this:
+
+:gr zsh . -R
+   (Substitute whatever search pattern you want for 'zsh')
+
+   You should see a list of filepaths and an input prompt. If you hit ENTER you´ll open up the first
+   result in the list. By default quickfix mode assumes that you´re working through a list of errors
+   (from, say, a compiler) and you want to deal with them one at a time.
+
+   But for something like grep, you might want to navigate to a different result. There are a couple of
+   ways you can do that.
+
+   From the raw quickfix list you can type this command to get a specific result line.
+
+:cc 4
+   That will return the fourth grep result. Then when you hit ENTER you´ll open that file. This is also
+   awkward though because there aren´t line numbers in this raw quickfix view, so you have to count by
+   yourself like an animal.
+
+:cope-ing with quickfix
+   There are a bunch of ways to navigate around in this list and get numbers for them, but what you
+   probably want to do instead is to open the quickfix window with this command.
+
+:cope
+   This feeds that quickfix list output into a window that you can navigate around in using normal Vim
+   cursor commands. Then you hit 'enter' on the one you want, and it opens.
+
+So, to recap
+    1. ":gr [pattern] . -R" (or another command that creates a quickfix list)
+    2. ':cope' to open that list in the quickfix window
+    3. Use cursor navigation, /search, etc. to move to the line with the file you want
+    4. ENTER to open that file
+
+   There are ways to clean this interaction up, or to use tools other than :grep with this command, and
+   a lot of search and file navigation plugins will do that for you. But this is the basic component
+   that´s powering plugins like [https://github.com/Numkil/ag.nvim]Ag.
+
+Notes and links
+   This is largely just restating some key points from [https://neovim.io/doc/user/quickfix.html]the Vim :help
+   pages about Quickfix.
+
+   I use [https://github.com/Numkil/ag.nvim]this Ag plugin for search instead of trying to :grep directly.
+
+   I use [https://github.com/ggreer/the_silver_searcher]Ag because it´s fast, and its defaults better match
+   what I usually want than grep´s.
+
+   But also because I´m old and haven´t gotten around to switching to
+   [https://github.com/monochromegane/the_platinum_searcher]the platinum searcher.
+
+   I´ll get into more detail about this at some point but I emphasize
+   [https://neovim.io/doc/user/windows.html]window in this point because it´s a kind of primitive concept in
+   Vim.
+
+   Those things that start with :? There´s a word for it - those are
+   [https://neovim.io/doc/user/cmdline.html#cmdline-lines]Ex commands.
+
+A note on the Vim documentation, or, 'just what is a mode, anyway?'
+
+   At some point I should write specifically about the Vim docs, because they are simultaneously
+     * comprehensive
+     * precise
+     * helpful
+     * and strange
+
+   They tend to assume that you know (or at least are interested in) the fundamentals of the underlying
+   model of Vim editing, and have a tendency to drop details like that quickfix "inspired by the
+   quickfix option of the Manx´s Aztec C compiler on Amiga" before explaining what quickfix does.
+
+   Did you know that Vim has thirteen modes? (Seven BASIC modes and six ADDITIONAL modes that are
+   variations on the BASIC modes.)
+
+   'Quickfix' isn´t one of them, but the documentation for it refers to it as a "special mode." So it´s
+   a mode in the program but not technically a Vim input mode. I´ll probably look more into what exactly
+   a 'mode' is in the near future.
+
+
+---
+https://vi.stackexchange.com/questions/24561/running-make-from-vim
+
+Running make from vim
+Apr 12, 2020
+
+I would like to use vim as a c++ IDE. Is there a possibility to run 'make' and see the 'make' progression in a
+separate (newly opened) pane. Also, the consecutive execution of the binary would be nice.
+
+***
+Try term make , if you need quickfix, execute cgetbuffer from the terminal buffer later. To be honest, I
+prefer the colored raw make output. The quickfix for make result of c++ looks awful to me.
+
+***
+Yes, Vim has the built in :make command which executes make by default, but you can set up other build systems
+by setting makeprg. There´s no progress visualisation by default, but once :make is done you can move through
+errors an earnings encountered with :cnext and :cprev. Calling :copen will show you all of them.
+
+One disadvantage though is that :make is synchronous so your Vim instance will be blocked until compilation
+finish. There are plugins like Neomake that implement similar functionality using the asynchronous API.
+
+There´s no default way to run your compiled program, but you can define a custom mapping or command to run it
+after compilation
+
+***
+You can make use of vim terminal in vim 8.0 and later to handle asynchronous jobs.
+
+Thus, to launch make in a vertical split, you can do:
+
+:vertical terminal make
+
+I have a small function (with a command) to do exactly this:
+
+command! -complete=shellcmd -nargs=+ Shell call s:RunShellCommand(<q-args>)
+function! s:RunShellCommand(cmdline) abort
+	exe 'vert terminal '. a:cmdline
+endfunction
+
+So you can do :Shell any_command to launch a command in a vertical split (i.e :Shell find /).
+
+For make specifically, I use it in conjunction with those mappings:
+
+nnoremap <leader>csm :Shell make<cr><cr>
+nnoremap <leader>csr :Shell make re<cr><cr>
+nnoremap <leader>cst :Shell make ex<cr><cr>
+
+ex is a rule in my Makefile that launches my tests.
+
+One caveat is that make rules auto-completion does not work.
+
+***
+Throw away make
+make is synchronous, that´s it, just throw it away.
+
+Async tool
+One can use :h :terminal or :h term_start() to do async stuff in vim. We will use term_start here as the basic
+async tool.
+
+Goal
+ * Async make, update quickfix after it, user should see the making progress just like make in terminal.
+ * Show make successful message if no error, no warning happens.
+ * Show found n qf entries if there exists quickfix entry with specific buffer number and line number.
+ * Toggle making buffer if user request make again during making.
+ * Spawn new make, delete last making buffer if user request make during idle.
+
+Interface
+nnoremap <f7> :Make<cr>
+command -nargs=* Make call s:make(<q-args>)
+
+Spawn async job
+
+let s:making = 0
+
+function s:make(args) abort
+	if s:making
+		if bufwinid(s:make_buf) == -1
+			" show making buffer
+			exe 'sbuffer' s:make_buf
+			wincmd p
+		else
+			" hide making buffer
+			exe printf('%d wincmd q', bufwinnr(s:make_buf))
+		endif
+		return
+	endif
+
+	" delete last result
+	if exists('s:make_buf') && bufexists(s:make_buf)
+		silent! exe 'bdelete' s:make_buf
+	endif
+
+	" spawn new make
+	let cmd = 'make'
+	if !empty(a:args)
+		let cmd .= ' ' . a:args
+	endif
+
+	let options = {'close_cb': function('s:make_callback'), 'term_rows': 16}
+
+	let s:make_buf = term_start(cmd, options)
+	let s:making = 1
+
+	wincmd p
+endfunction
+
+The subtle handler
+
+func s:make_callback(channel)
+	" look, you can not get buffer content directly here.
+	call timer_start(10, function('s:make_callback_impl'))
+endfunction
+
+function s:make_callback_impl(timer) abort
+	exe 'cgetbuffer' s:make_buf
+
+	" consider entry with num zero bufnr and lnum an error or warning
+	let qfl = filter(getqflist(), {k,v -> v.bufnr != 0 && v.lnum != 0})
+
+	if empty(qfl)
+		echo 'make successful'
+	else
+		echohl WarningMsg
+		echom printf('found %d qf entries', len(qfl))
+		echohl None
+	endif
+	let s:making = 0
+endfunction
+
+Be careful here, one might try to get buffer directly at s:make_callback, that won´t work, see this question
+for detail.
+
+
+---
+https://stackoverflow.com/questions/1747091/how-do-you-use-vims-quickfix-feature
+
+How do you use vim´s quickfix feature?
+Sep 15, 2021
+
+I´m a pretty new Vim user and I´ve found that its learning curve is quite steep (at least for me). I
+just installed this vim script for JavaScriptLint error checking, which shows errors in vim´s quickfix
+window once I save a buffer.
+
+However, I don´t know what to do next.. How do I 'scroll' through all the errors? How do I close the
+quickfix 'window'? How do I get it to check for errors after I´ve made changes to my code?
+
+I´ve looked at the vim quickfix docs but the amount of commands are overwhelming and I can´t seem to
+find what I want. Any help would be appreciated.
+
+A side question: is there any way to have javascriptlint check for js errors for code residing in a
+.html file?
+
+***
+There are a lot of commands for quickfix as you have said, but I tend to find I only use a small subset
+of them:
+
+:copen " Open the quickfix window
+:ccl   " Close it
+:cw    " Open it if there are 'errors', close it otherwise (some people prefer this)
+:cn    " Go to the next error in the window
+:cp    " Go to the previous error in the window
+:cnf   " Go to the first error in the next file
+:.cc   " Go to error under cursor (if cursor is in quickfix window)
+
+I tend to use this with :make and :vimgrep, so I can´t comment on the Javascript lint checker, but this
+should give you something to get started.
+
+Regarding the general use of JavascriptLint, I´m not a javascript programmer, but it looks like the
+script exposes a function called 'JavascriptLint', so if you want to call it manually, you can use :call
+JavascriptLint(). However, it works on the disk copy of the file, so it´ll have to be saved first. If
+(and only if) the command line jsl works on html files, you should be able to use :call JavascriptLint()
+on an html file to check the internal javascript. You could also do:
+
+autocmd BufWritePost,FileWritePost *.html call JavascriptLint()
+
+to automate it. If jsl doesn´t support html files, then (short of patching the application or asking
+the author to change it), it´s probably a lost cause...
+
+***
+Thanks, those commands are a good start, I´ll just have to play around a bit and get used to how it
+works. If I use :cn to go to an error in the qf window, can I jump to the window with my code without
+exiting the qf window? Can it jump to the line that has an error? And your suggestion of using :call
+works, however it follows <script src> links which isn´t what I want.
+
+***
+:cn shouldn´t close the qf window, but it will switch to the window containing the error: is
+this what you mean by 'jump'? You can quickly switch back with Ctrl-W p or :wincmd p, so you could do
+:command! CN :cn | wincmd p<CR> or something like that (untested). This should give you a :CN command
+that goes to the next error without switching out of the quickfix window. Alternatively you could do
+something like :au BufWinEnter quickfix nmap <buffer> <Enter> :.cc | wincmd p<CR> (again untested)
+and use Enter to select an error without switching out of the quickfix window.
+
+***
+For a beginner "You could also do: 'somecodehere' to automate it" does not mean much. It means that the
+shown line of code must be placed in ~/.vimrc (_VIMRC on windows AFAIK) and from the next start of VIM
+every time the file is saved this command will be invoked. Right?
+
+***
+The easiest way to navigate the quickfix list (or the location list, for that matter) is the unimpaired
+plugin.
+
+Once the quickfix window is populated, ]q and [q go forward and back (respectively) in the quickfix
+list. [Q and ]Q go to the beginning and end (which is especially handy if you only have one item in the
+list; this makes vim complain about ]q and [q). So the workflow is:
+ * Run whatever command populates the quickfix list
+ * Type [Q to go to the first item
+ * Scroll through subsequent items (if any) with ]q and [q
+
+If you´re using Syntastic, you´ll get the location list instead of the quickfix list. No problem; just
+use [L, ]L, [l, and ]l in the same way.
+
+unimpaired has loads of other handy mappings too -- [e and ]e 'bubble' lines up and down, [<Space>
+and ]<Space> insert blank lines above and below, etc. I was surprised nobody mentioned it here before;
+that´s probably because it didn´t exist until January 2010, though the question was asked in 2009.
+
+***
+Put the following two lines in your .vimrc file:
+map <C-j> :cn<CR>
+map <C-k> :cp<CR>
+
+Now you can navigate through the errors using ctrl-j and ctrl-k, which mimics the standard down and up
+motion commands j and k.
+
+***
+<c-j> sometime (depends on the terminal?!) is erroneous or altogether not working, because
+it means the same as <NL> // the easiest ist, to to use <c-n> and <c-p> instead // otherwise:
+stackoverflow.com/questions/8304421/...
+
+***
+I already use <C-j> and <C-k> to navigate between vim splits and tmux panes with vim tmux navigator. The
+combinations <C-M-j> and <C-M-k> might be an alternative.
+
+***
+In addition to @DrAl´s great answer about how to open and close the quick window and navigate between
+entries, I made an image to show some of the other quick fix navigation commands.
+
+Each group of 3 files below represents a set of quickfix results, e.g. from a vimgrep. cnewer and colder
+are for going through historic result sets. enter image description here
+
+***
+Thanks, I didn´t know about older/newer! Is there anyway to browse the older lists without blindly
+stepping backwards? And for example see how many old quickfix lists there are?
+
+***
+You can also use :cc 2 (or any other number) to jump to, in this case, the second error in the quickfix
+window. Navigating with :cn, :cc 4, etc will put the cursor on the line in question.
+
+***
+Maybe this option didn´t exist when this question was written (or maybe I´m embarrassing myself because
+there´s something in my .vimrc that makes this happen) but when I get a Quickfix List, I just navigate
+it with j and k then hit <CR> (i.e. the Enter key) to jump to that place in the file.
+
+Then, to get back to the Quickfix List I type Ctrl+W j for 'move down a window' and I´m back.
+
+Finally, when I´m done, I just type :q, like I would to close any normal window.
+
+***
+The best-practice way of integrating JavaScript syntax-checking is using the Syntastic Vim plugin,
+which is using Vim´s location-list (which is parallel to the quickfix) window.
+
+I´ve written answers for this question and this question explaining how to do it, plus also how to get
+source-code browsing / tag-list for Vim using the community-driven jshint.com (which is way better than
+JSLint IMO) and Mozilla´s DoctorJS (formerly jsctags).
+
+***
+the quickfix window is operated mostly like any other vim window: j down a line, k up a line, :cn to
+jump to the next error/warning, etc.
+
+***
+Although this requires > Vim 7.4.858, the cdo (or ldo for location lists) command allows updating a
+non-contiguous set of lines in a way you could once only do with sed:
+
+:vimgrep /re/ %:p
+:cdo! norm @a
+# or
+:cdo! s/re/repl/
+
+The above shows running a recorded macro or a simple search and replace. Missing seems to a be a way to
+pipe through and external command as you can with :range! command
+
+
+---
+https://vim.fandom.com/wiki/Review_code_effectively_using_quickfix
+
+Review code effectively using quickfix
+
+If you do code reviews on a regular basis, this tip could be of help to you. This tip is about:
+ * Helping the reviewer review code
+ * Helping the author in collating reviews from various peers
+ * Helping the author in fixing the review comments
+
+First learn about quickfix if you don´t know about it already :help quickfix.
+
+If you type your comments in a file in the format as shown below, then the author can use the quickfix mode
+for zeroing on the exact file/line.
+
+<file_name>:<line_number>: <your comment in a single line>
+
+For filling in the file name/line number automatically, put the following code in your vimrc:
+
+function SavePosition()
+	let g:file_name=expand("%:t")
+	let g:line_number=line(".")
+	let g:reviewer_initials="KG" " Your initials
+endfunction
+
+function InsertComment()
+	execute "normal i". g:file_name . ":" . g:line_number . ": " . g:reviewer_initials . " - "
+	startinsert
+endfunction
+
+nmap ,sp :call SavePosition()<CR>
+nmap ,ic :call InsertComment()<CR>
+
+Typical review session:
+ 01 - A reviewer open the code to review, positions the cursor on the line they want to comment on, and
+      types ",sp"
+ 02 - They then open a text file in the same Vim session (say my_comment.txt) and type ",ic" - this puts the
+      file name and the line number
+ 03 - The comment is typed next to the line number, all in a single line. This makes it possible for the file
+      to be sorted later
+ 04 - Send the comments to the author of the code
+ 05 - The author collates the inputs from various reviewers into one file (by simply concatenating them) and
+      sorts it. Now the comments are arranged per file, in the order of line numbers (in a file called say,
+      all_comments.txt)
+ 06 - Using the :cfile all_comments.txt the author can now navigate through all the comments.
+
+
+---
+https://vim.fandom.com/wiki/Using_quickfix_in_a_different_way
+
+Using quickfix in a different way
+
+I´m a software developer and I find Vim´s quickfix very helpful. You can also use this while debugging your
+code, in a slightly different way.
+
+Usually, you will have some print messages in your code, and after the program runs, you´ll look at the output
+to see the execution trace (e.g which if-constructs were taken, how many times did a while loop iterate.. ).
+If you precede these statements with a <filename>:<linenumber>:, then, the program output can be parsed with a
+:cfile, and the execution trace becomes very simple.
+
+For instance, in C:
+
+// fdebug is a pointer to the debug file called, debug.txt say.
+#define DEBUG_MESG() fprintf(fdebug, "%0s:%0d:\n", __FILE__, __LINE__)
+...
+function( ) {
+	...
+	if (something)
+		DEBUG_MESG( );
+	else
+		DEBUG_MESG( );
+	...
+}
+
+Open your code in vim and do
+:cfile debug.txt
+
+References
+    :help quickfix
+    :help :cfile
+
+Comments
+
+***
+In your vimrc file add:
+ia prtf fprintf(fdebug, "%0s:%0d:\n", __FILE__, __LINE__);
+
+to make this macro part of vim aliases in 'insert' mode.
+
+One disadvantage of having fprints scattered all over the code is, after debugging, you got to remove them. If
+you have defined a macro instead, you can easily (re)define it to null..  By the way, if you want to debug
+shell scripts/perl/tcl/whatever, consider getting yourself a generic preprocessor. I found filepp
+(http://www.cabaret.demon.co.uk/filepp/) pretty good.
+
+***
+The advantage of the alias is that you can modify the expanded alias to suite your need at point of insertion.
+ie.
+fprintf(fdebug, "%0s:%0d:\n >>> the variable i am interested = %d<<<", __FILE__, __LINE__, variable_in_question) ;
+
+I work in embedded system and a lot of time our only debugging tool for code is printf. Not all of us have in
+circuit emulators available to us.
+
+And like you said, this is debugging. The code does not go live with debugging statements, they are removed.
+
+
+---
+https://vim.fandom.com/wiki/Always_keep_quickfix_window_at_specified_height
+
+Always keep quickfix window at specified height
+October 18, 2004
+
+When I use Vim I have multiple windows open which are all maximized after becoming active, see for example
+VimTip173.
+
+This makes debugging code in combination with the quickfix window a little difficult. After switching from the
+quickfix window to the code, the quickfix window is minimized and the error message is out of sight. Put the
+following in your gvimrc to keep the quickfix window at a user specified height:
+
+" Maximize the window after entering it, be sure to keep the quickfix window
+" at the specified height.
+au WinEnter * call MaximizeAndResizeQuickfix(8)
+
+" Maximize current window and set the quickfix window to the specified height.
+function MaximizeAndResizeQuickfix(quickfixHeight)
+	" Redraw after executing the function.
+	set lazyredraw
+	" Ignore WinEnter events for now.
+	set ei=WinEnter
+	" Maximize current window.
+	wincmd _
+	" If the current window is the quickfix window
+	if (getbufvar(winbufnr(winnr()), "&buftype") == "quickfix")
+		" Maximize previous window, and resize the quickfix window to the
+		" specified height.
+		wincmd p
+		resize
+		wincmd p
+		exe "resize " . a:quickfixHeight
+	else
+		" Current window isn´t the quickfix window, loop over all windows to
+		" find it (if it exists...)
+		let i = 1
+		let currBufNr = winbufnr(i)
+		while (currBufNr != -1)
+		" If the buffer in window i is the quickfix buffer.
+		if (getbufvar(currBufNr, "&buftype") == "quickfix")
+			" Go to the quickfix window, set height to quickfixHeight, and jump to the previous
+			" window.
+			exe i . "wincmd w"
+			exe "resize " . a:quickfixHeight
+			wincmd p
+			break
+		endif
+		let i = i + 1
+		let currBufNr = winbufnr(i)
+		endwhile
+	endif
+	set ei-=WinEnter
+	set nolazyredraw
+endfunction
+
+" Remap ,m to make and open error window if there are any errors. If there
+" weren´t any errors, the current window is maximized.
+map <silent> ,m :mak<CR><CR>:cw<CR>:call MaximizeIfNotQuickfix()<CR>
+
+" Maximizes the current window if it is not the quickfix window.
+function MaximizeIfNotQuickfix()
+	if (getbufvar(winbufnr(winnr()), "&buftype") != "quickfix")
+		wincmd _
+	endif
+endfunction
+
+Comments
+Shouldn´t you be save/restoring those global values:
+
+" Redraw after executing the function.
+set lazyredraw
+
+" Ignore WinEnter events for now.
+set ei=WinEnter
+
+
+---
+https://vim.fandom.com/wiki/Automatically_open_the_quickfix_window_on_:make
+
+Automatically open the quickfix window on :make
+
+Put the following into your vimrc, then use :Make instead of :make.
+" Command Make will call make and then cwindow which
+" opens a 3 line error window if any errors are found.
+" If no errors, it closes any open cwindow.
+:command -nargs=* Make make <args> | cwindow 3
+
+Try this mapping so you can just press \j to make your program:
+:map <Leader>j :Make<CR>
+
+You can use the new :Make command as an extension point for other customizations, too.
+
+Automatically open the quickfix window on :make
+Starting with Vim 7, there´s no need for an additional :Make command; autocmds can be used to hook into the
+execution of the quickfix command, and open the quickfix window automatically:
+
+" Automatically open, but do not go to (if there are errors) the quickfix /
+" location list window, or close it when is has become empty.
+"
+" Note: Must allow nesting of autocmds to enable any customizations for quickfix
+" buffers.
+" Note: Normally, :cwindow jumps to the quickfix window if the command opens it
+" (but not if it´s already open). However, as part of the autocmd, this doesn´t
+" seem to happen.
+autocmd QuickFixCmdPost [^l]* nested cwindow
+autocmd QuickFixCmdPost    l* nested lwindow
+
+Note that the quickfix window will also automatically close in case the quickfix list becomes empty. If
+instead you always want to open the quickfix window, replace the cwindow with copen.
+
+Comments
+:cc      see the current error
+:cn      next error
+:cp      previous error
+:clist   list all errors
+
+
+---
+https://vim.fandom.com/wiki/Show_entire_multiline_error_in_quickfix
+
+Show entire multiline error in quickfix
+
+Put this in your vimrc if you use the cwindow:
+
+" \cc
+map <Leader>cc :cwindow<CR>:cc<CR><c-w>bz<CR><CR>
+
+" \cn
+map <Leader>cn :cwindow<CR>:cn<CR><c-w>bz<CR><CR>
+
+" \cp
+map <Leader>cp :cwindow<CR>:cp<CR><c-w>bz<CR><CR>
+
+and when you use \cc (or whatever your leader character is + cc), \cn or \cp, it will do what :cc, :cn and :cp
+usually did, with the added bonus of showing the entire contents of multiline errors. this is especially
+useful for javac via ant, and it´s obnoxious to keep typing <c-w>b<CR> every time i do a :cn, so i mapped
+this.
+
+Detailed explanation:
+    ':cwindow<CR>' ensures that the quickfix window is shown.
+    ':cc' (:cn, and :cp) actually do the operation
+    '<c-w>b' go to the bottom window (which cwindow will be if it´s shown) which will magically center on the error
+    'z<CR>' will reposition the buffer in the window so that the current line becomes the top line in the window
+    '<CR>' carriage-return on the error line, taking you back to the code with the error
+
+Comments
+Another solution to this problem is to 'set cmdheight=2' which will provide two lines at the bottom of the
+screen for quickfix error lines instead of the default one. 
+
+
+---
+https://vim.fandom.com/wiki/Use_the_quickfix_window_to_list_all_errors
+
+Use the quickfix window to list all errors
+
+Until vim 5.8, I was using the cfile, clist etc for quickfix mode. In vim6.x, I found out that :cw will boost
+my productivity as a programmer. To make, type :make as we do in older versions of vim (<6.0).
+Instead of clist, cfile, etc., type
+:cw<enter>
+
+you get one split window, in which errors are listed. Current error line will be highlighted and cursor will
+move to the corresponding source file line. Pressing Enter on any error line in the error window will take the
+cursor to the corresponding source line. This eliminates the need for the process described in VimTip345.(Now
+you can get rid of Visual studio altogether !)
+
+References
+    :help :cw
+
+Comments
+I guess I should say what works for me for compiling Java programs on MS Windows. It can be improved, but I am
+not sure how. I put the following in _vimrc.
+
+set makeprg=javac
+set makeef=c:\dev\src\errors.txt
+set shellpipe=2>
+set errorformat=%A%f:%l:\ %m,%C%m
+noremap <M-1> :w<CR>:set ch=5<CR>:make -d C:\\dev\\classes %:p<CR>
+noremap <M-2> :cp<CR>
+noremap <M-3> :cn<CR>
+noremap <M-4> :cl<CR>
+
+Press Alt-1 to compile the current file. Alt-2 and Alt-3 move the cursor in the source code to previous and
+next errors. (I have another command to reset the command line height when I´m done looking at errors.)
+
+Problem: it removes spaces so the caret that javac uses to point to the error location is wrong. I have tried
+all kinds of different formats. If someone does not know a better error format for javac, I just discoved that
+:set shellpipe= will open DOS window with all the spaces preserved.
+
+
+---
+https://vim.fandom.com/wiki/Show_only_lines_in_quickfix_list_for_current_buffer
+
+Show only lines in quickfix list for current buffer
+
+After executing :make or :grep you can browse the list of errors/matches, and the appropriate source code
+locations, with commands like :cnext. :help quickfix
+
+This tip folds away lines in the current buffer that have no errors (when using :make), or that do not match
+the search pattern (when using :grep). See here to fold lines in the quickfix list.
+
+Fold away misses
+The following script can be used to fold away lines with no errors/matches.
+
+Usage:
+ * Create file ~/.vim/plugin/foldmisses.vim (Unix) or $HOME/vimfiles/plugin/foldmisses.vim (Windows)
+   containing the script below, then restart Vim.
+ * Edit a file.
+ * Enter a command like :vimgrep /regexp/ % to get a quickfix list.
+ * Enter :FoldMisses to fold away lines in the current buffer that are not in the quickfix list.
+ * Enter :FoldLMisses to fold away lines in the current buffer that are not in the buffer´s location list.
+ * Optional: :1FoldMisses will give 1 extra context line (fewer lines folded). You can set a default via let
+   g:foldmisses_context = 1
+ * As normal, za toggles a fold, and zR opens all folds.
+
+if ! exists('g:foldmisses_context')
+  let g:foldmisses_context = 0
+endif
+
+" Add manual fold from line1 to line2, inclusive.
+function! s:Fold(line1, line2)
+	if a:line1 < a:line2
+		execute a:line1.','.a:line2.'fold'
+	endif
+endfunction
+
+" Return list of line numbers for current buffer found in quickfix list.
+function! s:GetHitLineNumbers(list)
+	let result = []
+	for d in a:list
+		if d.valid && d.bufnr == bufnr('')
+			call add(result, d.lnum)
+		endif
+	endfor
+	return result
+endfunction
+
+function! s:FoldMisses(list, context)
+	setlocal foldmethod=manual
+	normal! zE
+	let extra = a:context == 99999 ? g:foldmisses_context : a:context
+	let last = 0
+	for lnum in s:GetHitLineNumbers(a:list)
+		let start = last==0 ? 1 : last+1+extra
+		call s:Fold(start, lnum-1-extra)
+		let last = lnum
+	endfor
+	call s:Fold(last+1+extra, line('$'))
+endfunction
+
+":[N]FoldMisses [N]     Show only the lines (and surrounding [N] lines
+":[N]FoldLMisses [N]    of context) in the current buffer that appear
+"                       in the quickfix / location list.
+"                       Missed, error-free lines are folded away.
+command! -bar -count=99999 FoldMisses call s:FoldMisses(getqflist(), <count>)
+command! -bar -count=99999 FoldLMisses call s:FoldMisses(getloclist(0), <count>)
+
+
+---
+https://vim.fandom.com/wiki/Search_using_quickfix_to_list_occurrences
+
+Search using quickfix to list occurrences
+
+You can define a command allowing you to type :GREP to search for the current word under the cursor, with the
+results presented in the quickfix window as a 'list occurrences' search.
+
+See :help :ilist for another method.
+
+This is inspired by VimTip391 Simple programmers TODO list using grep, and taglist.vim in script#273.
+
+" Easily GREP current word in current file.
+command GREP :execute 'vimgrep '.expand('<cword>').' '.expand('%') | :copen | :cc
+
+This makes use of the vimgrep command, normally used as a 'find in files' utility, but here limited to search
+the current file only. In Vim 7.0 and later, see :help :vimgrep for help on this tool. Alternatively, you
+could replace 'vimgrep' with 'grep', and set the grepprg option (see :help 'grepprg'. For example, you might
+use set grepprg=C:\bin\grep.exe\ -niH on a win32 system.
+
+Here are some mappings to avoid needing to type :cnext and :cprev to move through the quickfix window.
+
+" Assign some keys for handy quickfix window commands.
+if has("win32")
+	nnoremap <kPlus>     :call <SID>Fancy_Quickfix_Cmd(':cnext')<CR>
+	nnoremap <kMinus>    :call <SID>Fancy_Quickfix_Cmd(':cprev')<CR>
+	nnoremap <kMultiply> :call <SID>Fancy_Quickfix_Cmd(':cc')<CR>
+	nnoremap <c-kPlus>   :clast<CR>
+	nnoremap <c-kMinus>  :cfirst<CR>
+	nnoremap <m-kPlus>   :cnewer<CR>
+	nnoremap <m-kMinus>  :colder<CR>
+endif
+
+" Very simple wrapper: do quickfix cmd, center line and,
+" if taglist.vim´s window is open, sync.
+function s:Fancy_Quickfix_Cmd(Cmd)
+	try
+		execute a:Cmd
+	catch /^Vim(\a\+):E553:/
+		echohl ErrorMsg | echo v:exception | echohl None
+	endtry
+	norm! zz
+	" If the taglist window is open then :TlistSync
+	"    Tag list window name: '__Tag_List__'
+	if bufwinnr('__Tag_List__') != -1
+		TlistSync
+	endif
+endfunction
+
+If you do not want to use a user command, you can use:
+
+nnoremap <kPlus>      :cnext<CR> :norm! zz<CR> :TlistSync<CR>
+nnoremap <kMinus>     :cprev<CR> :norm! zz<CR> :TlistSync<CR>
+nnoremap <kMultiply>  :cc<CR> :norm! zz<CR>
+
+Of course if you do not want the syncing with taglist.vim simply remove :TlistSync.
+
+Now, the advantage of having s:Fancy_Quickfix_Cmd() is that we can conditionally do something based on the
+command, or some other attribute. In this case we function the same for all commands (and just blindly execute
+them). We do check to see if the taglist window is open and if so ask it to Sync, if it is not, we don´t. One
+other (minor, cosmetic) advantage to this is we see the user command in the echo area and not the last command
+executed (as with just the pure mapping method directly above).
+
+Another way to list occurrences in the current file would be
+:g//p
+
+with the text you want to list as your current search pattern. See :help :g and :help :p)
+
+Of course, :cnext can be abbreviated to :cn, and :cprev can be abbreviated to :cp.
+
+Comments
+TODO Check that no more changes need to be made since I quickly used ":vimgrep" instead of 'grep' in the
+command.
+
+---
+https://vim.fandom.com/wiki/Quickfix_and_Visual_Studio_and_cygwin
+
+Quickfix and Visual Studio and cygwin
+
+I run gvim inside a cygwin XFree86 session running WindowMaker. Because I´m inside cygwin-XFree86, I can´t use
+the useful VisVim plugin to step through Visual Studio compiler errors. To work around this limitation, I
+wrote a Bash/Perl script that munges nmake output into something that has cygwin compliant path, and is
+parseable by the default quickfix errorformat setting.
+
+Here´s what to do:
+1. Install the following from cygwin:
+      * perl
+      * cygutils
+      * bash
+2. Set up Visual Studio to support command line compiles. Basically this involves adding paths to the PATH,
+   INCLUDE, and LIB environment variables. See vcvars32.bat in the Visual Studio VC98/bin directory for
+   guidelines.
+3. Export a makefile for your dsp project file via the Visual Studio 'Project - Export Makefile...'
+4. Create the cygwin shell script defined below. Put the script in '/bin/dovcmake'
+
+#!/bin/bash
+# This script takes output from
+# Visual Studio´s nmake and reformats
+# it so that it can be parsed by
+# cygwin´s vim default errorformat
+# setting
+nmake /F $1 2>&1 | perl -n -e \
+	' chomp;
+	if(/^([a-z]:[^(]+)\((\d+)\)(.+)$/i) {
+		$f = $1; $l = $2; $m = $3;
+		$f =~ s/\\/\// g;
+		$cyp = `cygpath -au $f`; \
+		chomp $cyp;
+		print qq{"$cyp",$l:$m\n};
+	} elsif(/error/i) {
+		print qq{$_\n};
+	}'
+
+
+5. Add this map to your vimrc:
+set makeprg=/bin/dovcmake
+map <F7> :make <C-R>%<CR>
+
+6. Fire up cygwin vim and open the makefile from step 3. If you hit F7, you´ll automatically start a Visual
+Studio build and you´ll be able to step through compiler errors via the :cp and :cn commands.
+
+Comments
+You should look at the errorformat option (:help errorformat). This may solve your problem without Perl.
+
+I needed to use Perl because I needed to convert windows paths from nmake´s output to cygwin paths. Otherwise
+I would have used errorformat
+
+You could use Cygwin´s cygpath to translate between Cygwin (posix) and windows paths instead of Perl.
+
+I am using cygpath within the Perl script to translate the paths, but the Perl script does more that just
+translate paths. It also filters extraneous nmake output , such as the MS copyright info that nmake generates.
+
+Instead of using cygpath, you may want to look at whether cyg-wrapper.sh will help you. It handles a lot of
+the tricky path conversion issues between cygwin and Windows. http:// hermitte.free.fr/cygwin/#Win32
+
+
+---
+
