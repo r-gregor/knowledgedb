@@ -1,0 +1,551 @@
+filename: bash-parameter-expansion-20261118.txt
+https://linuxize.com/post/bash-parameter-expansion/
+
+Bash Parameter Expansion: Defaults, Substrings, and Replacement
+Jul 9, 2026
+
+   Most Bash scripts call sed, awk, or cut for jobs the shell can do by itself. Stripping an extension
+   from a filename, providing a default when a variable is empty, or replacing part of a string are all
+   built into the ${...} syntax, run in the current process, and cost no fork to an external program.
+   The syntax is dense, which is why many people never move past ${var}, but there are only a handful of
+   patterns to learn.
+
+   This guide explains Bash parameter expansion: default values, length, substrings, prefix and suffix
+   trimming, search and replace, and case conversion, with practical examples of each.
+
+The Basic Form
+   ${var} expands to the value of var, exactly like $var. The braces become mandatory when the variable
+   name would otherwise run into the surrounding text:
+$> file="report"
+$> echo "${file}_final.txt"
+
+   output
+report_final.txt
+
+   Without braces, Bash would look for a variable named file_final. Everything else in this guide builds
+   on this form by adding an operator inside the braces.
+
+Default Values
+   The :- operator substitutes a fallback when a variable is unset or empty:
+$> echo "Deploying to ${ENVIRONMENT:-staging}"
+
+   output
+Deploying to staging
+
+   The variable itself is not modified; the default only applies to this one expansion. To also assign
+   the fallback to the variable, use := instead:
+$> : "${LOG_DIR:=/var/log/myapp}"
+$> echo "$LOG_DIR"
+
+/var/log/myapp
+
+   The leading : is the null command; it evaluates its arguments and does nothing else, which makes it
+   the idiomatic way to trigger the assignment. This pattern is common at the top of scripts to give
+   every configuration variable a sane default.
+
+   Two related operators round out the family. :? aborts the script with a message when the variable is
+   missing, which turns a silent misconfiguration into a loud one:
+$> : "${API_KEY:?API_KEY must be set}"
+
+   output
+bash: API_KEY: API_KEY must be set
+
+   And :+ is the inverse of :-: it expands to a value only when the variable is set and non-empty, which
+   is useful for building optional command arguments:
+$> curl ${PROXY:+--proxy "$PROXY"} https://example.com
+
+   When PROXY is empty, the expansion vanishes entirely and curl runs without the option.
+
+   Each operator also exists without the colon (-, =, ?, +). The colon versions treat an empty string
+   the same as an unset variable; the colon-free versions act only when the variable is truly unset. In
+   practice, the colon versions are what you want nearly all the time.
+
+   Defaults work on positional parameters too, which makes optional script arguments trivial:
+$> target="${1:-.}"
+
+   This uses the first argument if given and the current directory otherwise; see our guide on Bash
+   script arguments for the wider context.
+
+String Length
+   ${#var} expands to the length of the value in characters:
+$> password="s3cretPass"
+$> echo "${#password}"
+
+   output
+10
+
+   A common use is input validation, such as rejecting a password shorter than a minimum inside an
+   if statement . For arrays, the same syntax with [@] counts elements instead: ${#files[@]}.
+
+Substrings
+   The ${var:offset:length} form extracts a substring. Offsets count from zero, and the length is
+   optional:
+$> date="2026-01-01"
+$> echo "${date:0:4}"
+$> echo "${date:5}"
+
+   output
+2026
+01-01
+
+   The first expansion takes four characters starting at position zero; the second takes everything from
+   position five onward.
+
+   Negative offsets count from the end of the string, but they require a space or parentheses so Bash
+   does not confuse the syntax with the :- default operator:
+$> file="backup-2026.tar.gz"
+$> echo "${file: -6}"
+
+   output
+tar.gz
+
+   A negative length means "stop that many characters before the end" rather than a count, so
+   ${var:1:-1} trims one character from each side. Negative lengths require Bash 4.2 or later.
+
+Trimming Prefixes and Suffixes
+   Four operators remove a pattern from the front or the back of the value. # removes the shortest match
+   from the front, ## the longest match from the front, % the shortest match from the back, and %% the
+   longest match from the back. The patterns are globs, the same wildcards used for filenames.
+
+   The classic use is pulling filenames apart:
+$> path="/var/www/site/index.backup.html"
+
+$> echo "${path##*/}"
+$> echo "${path%/*}"
+$> echo "${path%.*}"
+$> echo "${path##*.}"
+
+   output
+index.backup.html
+/var/www/site
+/var/www/site/index.backup
+html
+
+   The first two replicate the basename and dirname commands: ##*/ deletes the longest match of
+   "anything followed by a slash" from the front, and %/* deletes the shortest "slash followed by
+   anything" from the back. The last two split at the final dot, so %.* strips one extension while ##*.
+   keeps only the extension.
+
+   The shortest/longest distinction matters exactly when the pattern can match at more than one place.
+   With the file above, ${path%.*} removes only .html, while ${path%%.*} would remove .backup.html as
+   well.
+
+   Renaming files in a loop shows the pattern in action. For bulk changes, preview the commands first:
+for f in *.jpeg; do
+	printf 'mv -- %q %q\n' "$f" "${f%.jpeg}.jpg"
+done
+
+   After checking the generated commands, run the rename:
+for f in *.jpeg; do
+	mv -- "$f" "${f%.jpeg}.jpg"
+done
+
+   Each name has its .jpeg suffix trimmed and .jpg appended, with no sed in sight. The -- tells mv that
+   option parsing is done, which protects filenames that begin with a dash.
+
+Search and Replace
+   The ${var/pattern/replacement} form replaces the first match of a glob pattern, and doubling the
+   first slash replaces all matches:
+$> csv="one,two,three"
+$> echo "${csv/,/;}"
+$> echo "${csv//,/;}"
+
+   output
+one;two,three
+one;two;three
+
+   Anchors are available: ${var/#pattern/replacement} replaces only a match at the start of the string,
+   and ${var/%pattern/replacement} only at the end. Omitting the replacement deletes the match:
+$> echo "${csv//,}"
+
+   output
+onetwothree
+
+   Keep in mind the pattern is a glob, not a regular expression: * and ? work, but . is a literal dot
+   and there are no + or ^ operators. When you genuinely need regular expressions, that is the job of
+   sed or the =~ operator; for everything simpler, the expansion is faster and has no quoting headaches.
+   Our Bash string manipulation guide compares these approaches side by side.
+
+Changing Case
+   Bash 4 added case conversion operators: ^^ uppercases the value, ,, lowercases it, and the single
+   forms ^ and , convert only the first character:
+$> name="alice"
+$> echo "${name^}"
+$> echo "${name^^}"
+
+$> header="CONTENT-TYPE"
+$> echo "${header,,}"
+
+   output
+Alice
+ALICE
+content-type
+
+   Lowercasing is the standard trick for case-insensitive comparisons: normalize both sides with ,, and
+   compare the results. Most current Linux distributions ship Bash 5, and Bash 4 is enough for these
+   operators. Availability is mainly a concern in scripts that must also run on macOS´s ancient default
+   Bash 3.2, where they are missing.
+
+Indirect Expansion
+   ${!var} expands to the value of the variable whose name is stored in var:
+$> staging_host="staging.example.com"
+$> production_host="prod.example.com"
+
+$> env="staging"
+$> ref="${env}_host"
+$> echo "${!ref}"
+
+   output
+staging.example.com
+
+   Indirection occasionally saves the day in configuration-driven scripts, but if you find yourself
+   using it often, an associative array is usually the cleaner tool.
+
+Combining with Positional Parameters
+   All the operators work on $1, $2, and friends, and the substring form even works on $@:
+$> command="${1:?usage: $0 command [args...]}"
+$> shift_args=("${@:2}")
+
+   The first line insists on at least one argument and prints a usage message otherwise; the second
+   collects every argument after the first into an array. These two lines are the skeleton of most
+   subcommand-style scripts.
+
+Quick Reference
+   For a printable quick reference, see the Bash parameter expansion cheatsheet . For scripting
+   syntax, see the [**1][https://linuxize.com/cheatsheet/bash-parameter-expansion/]Bash cheatsheet.
+
+   -----------------------------------------------------------------
+   Expansion           Result
+   -----------------------------------------------------------------
+   ${var:-default}     Value, or default if unset or empty
+   ${var:=default}     Same, and assigns the default to var
+   ${var:?message}     Value, or exit with message if unset or empty
+   ${var:+word}        word only if var is set and non-empty
+   ${#var}             Length of the value
+   ${var:2:5}          Five characters starting at offset 2
+   ${var: -3}          Last three characters
+   ${var#pattern}      Remove shortest matching prefix
+   ${var##pattern}     Remove longest matching prefix
+   ${var%pattern}      Remove shortest matching suffix
+   ${var%%pattern}     Remove longest matching suffix
+   ${var/old/new}      Replace first match
+   ${var//old/new}     Replace all matches
+   ${var/#old/new}     Replace match at start only
+   ${var/%old/new}     Replace match at end only
+   ${var^^} / ${var,,} Uppercase / lowercase the value
+   ${var^} / ${var,}   Uppercase / lowercase the first character
+   ${!var}             Value of the variable named by var
+   -----------------------------------------------------------------
+
+Conclusion
+   Parameter expansion replaces a surprising share of the sed | awk | cut pipelines found in everyday
+   scripts, with defaults via :- and :=, filename surgery via # and %, and replacement via // covering
+   the bulk of real cases. The patterns pair naturally with the string techniques in our Bash string
+   manipulation guide, and with set -u from the Bash set command , where a well-placed ${var:-}
+   marks a variable as intentionally optional.
+
+
+---
+[**1]
+https://linuxize.com/cheatsheet/bash-parameter-expansion/
+
+Bash Parameter Expansion Cheatsheet
+Oct 27, 2026
+
+   Bash parameter expansion syntax for default values, substrings, prefix and suffix removal, search and
+   replace, case conversion, and arrays.
+
+   Parameter expansion reads, tests, and reshapes variable values inside ${...} without running an
+   external command. The syntax below is for Bash 5. If a script must also run on macOS, which ships
+   Bash 3.2, check the version card first.
+
+Basic Expansion
+   Braces mark where the variable name ends. Quote expansions to keep the value as one word.
+   -------------------------------------------------------------------------
+   Expansion     Result
+   -------------------------------------------------------------------------
+   $var          Value of var
+   ${var}_old    Value followed by _old; without braces, Bash reads $var_old
+   "${var}"      Value as one word, with no word splitting or globbing
+   ${10}         Tenth positional parameter; $10 is $1 followed by 0
+   -------------------------------------------------------------------------
+
+Default Values
+   The colon forms treat an empty value like an unset one. Without the colon, only an unset variable
+   triggers the operator.
+   ---------------------------------------------------------------------
+   Expansion        Result
+   ---------------------------------------------------------------------
+   ${var:-word}     word if var is unset or empty; var stays unchanged
+   ${var-word}      word only if var is unset
+   ${var:=word}     Assign word to var if unset or empty, then expand it
+   ${var=word}      Assign word only if var is unset
+   ${var:?message}  Print message and fail if var is unset or empty
+   ${var?message}   Fail only if var is unset
+   ${var:+word}     word if var is set and non-empty, otherwise nothing
+   ${var+word}      word if var is set, even to an empty string
+   : "${var:=word}" Assign a default on its own line
+   ---------------------------------------------------------------------
+
+   Bash expands word only when it is used, so ${var:-$(cmd)} runs cmd only when var is unset or empty.
+   In a script, a failed :? check exits the script.
+
+Length and Substrings
+   Offsets start at 0. A negative offset needs a space or parentheses, otherwise Bash reads it as the :-
+   operator.
+
+   ------------------------------------------------------------------------------------
+   Expansion    Result
+   ------------------------------------------------------------------------------------
+   ${#var}      Number of characters in the value
+   ${var:7}     Everything from offset 7 to the end
+   ${var:0:5}   Five characters starting at offset 0
+   ${var: -5}   Last five characters
+   ${var:(-5)}  Last five characters, using parentheses instead of a space
+   ${var: -5:3} Three characters, starting five from the end
+   ${var:1:-1}  Value without its first and last character
+   ${var:i:n}   Offset and length from variables; both are arithmetic, so $ is optional
+   ------------------------------------------------------------------------------------
+
+   ${var:-5} is a default value, not an offset. It returns the whole value when var is set and
+   non-empty, or 5 when it is unset or empty. In a UTF-8 locale, lengths and offsets count characters,
+   not bytes.
+
+Remove a Prefix or Suffix
+   # trims from the start and % trims from the end. One operator removes the shortest match; two remove
+   the longest.
+   ------------------------------------------------------------------------------
+   Expansion          Result
+   ------------------------------------------------------------------------------
+   ${var#pattern}     Remove the shortest match from the start
+   ${var##pattern}    Remove the longest match from the start
+   ${var%pattern}     Remove the shortest match from the end
+   ${var%%pattern}    Remove the longest match from the end
+   ${var#"$prefix"}   Remove the exact text in prefix, even if it contains * or ?
+   ${dir%/}           Remove one trailing slash
+   ------------------------------------------------------------------------------
+
+   A pattern that does not match leaves the value unchanged.
+
+Split Paths and Filenames
+   These examples use path=/var/www/site/index.backup.html and file=archive.tar.gz.
+   --------------------------------------------------------------------
+   Expansion     Result
+   --------------------------------------------------------------------
+   ${path##*/}   index.backup.html, the filename
+   ${path%/*}    /var/www/site, the directory
+   ${path%.*}    /var/www/site/index.backup, without the last extension
+   ${path%%.*}   /var/www/site/index, without any extension
+   ${path##*.}   html, the last extension
+   ${file#*.}    tar.gz, every extension
+   ${file%%.*}   archive, the name before the first dot
+   --------------------------------------------------------------------
+
+   A name without a dot comes back unchanged from ${file##*.}, and ${file%.*} turns .bashrc into an
+   empty string. Extension patterns also match dots in directory names, so extract the filename with
+   file=${path##*/} before removing extensions when directory names may contain dots. For the edge cases
+   that the basename command handles, such as a trailing slash, use the command instead.
+
+Search and Replace
+   Patterns are globs, not regular expressions. Leave out the replacement to delete the match.
+   --------------------------------------------------------------------------
+   Expansion              Result
+   --------------------------------------------------------------------------
+   ${var/pattern/text}    Replace the first match
+   ${var//pattern/text}   Replace every match
+   ${var/#pattern/text}   Replace a match at the start only
+   ${var/%pattern/text}   Replace a match at the end only
+   ${var//pattern}        Delete every match
+   ${var// /_}            Replace each space with an underscore
+   ${var//[0-9]/#}        Replace each digit with #
+   ${var/#/text}          Add text at the start
+   ${var/%/text}          Add text at the end
+   ${var//o/[&]}          Wrap each o in brackets; & inserts the matched text
+   ${var//o/\&}           Replace each o with a literal &
+   --------------------------------------------------------------------------
+
+   Bash 5.2 turned on patsub_replacement, so an unquoted & in the replacement means the matched text,
+   even when it comes from a variable. Quote the replacement, as in ${var//o/"$text"}, to keep it
+   literal.
+
+Change Case
+   A pattern after the operator limits which characters change.
+   -------------------------------------------------------------------
+   Expansion                Result
+   -------------------------------------------------------------------
+   ${var^}                  Uppercase the first character
+   ${var^^}                 Uppercase every character
+   ${var,}                  Lowercase the first character
+   ${var,,}                 Lowercase every character
+   ${var^^[aeiou]}          Uppercase only the vowels
+   [[ ${a,,} == "${b,,}" ]] Compare two strings without regard to case
+   -------------------------------------------------------------------
+
+Transform Values
+   The ${var@op} operators format a value or describe the variable that holds it.
+   ---------------------------------------------------------------------------------------------
+   Expansion                                       Result
+   ---------------------------------------------------------------------------------------------
+   ${var@Q}      Value quoted so the shell can read it back as input
+   ${var@E}      Value with backslash escapes such as \n and \t expanded
+   ${var@P}      Value expanded like a prompt string, so \u@\h becomes user@host
+   ${var@A}      Assignment or declare command that recreates var
+   ${var@a}      Attribute flags, such as a (array), i (integer), r (read-only), or x (exported)
+   ${var@U}      Uppercase the value
+   ${var@u}      Uppercase the first character
+   ${var@L}      Lowercase the value
+   "${arr[@]@Q}" Every element, quoted separately
+   ${map[@]@K}   Keys and quoted values of an associative array, as one string
+   "${map[@]@k}" Keys and values as separate words
+   ---------------------------------------------------------------------------------------------
+
+Arrays
+   Quote [@] to keep each element as one word. The string operators above apply to every element.
+   ----------------------------------------------------------------------------------
+   Expansion          Result
+   ----------------------------------------------------------------------------------
+   ${arr[0]}          Element at index 0
+   ${arr[-1]}         Last element
+   "${arr[@]}"        Every element, one word each
+   "${arr[*]}"        Every element in one word, joined by the first character of IFS
+   ${#arr[@]}         Number of elements
+   ${#arr[2]}         Length of element 2
+   ${!arr[@]}         Indices, or the keys of an associative array
+   "${arr[@]:1:2}"    Two elements, starting at index 1
+   "${arr[@]: -2}"    Last two elements when indices are consecutive
+   "${arr[@]%.*}"     Every element without its extension
+   "${arr[@]/#/dir/}" Every element with dir/ added at the start
+   ----------------------------------------------------------------------------------
+
+   Negative slice offsets count back from one greater than the highest index, so gaps can leave fewer
+   elements in the result. $arr and ${#arr} refer only to element 0. For declaring and changing arrays,
+   see the Bash arrays guide.
+
+Positional Parameters
+   $@ accepts the same substring and pattern operators as an array.
+   --------------------------------------------------------------------------------------------
+   Expansion              Result
+   --------------------------------------------------------------------------------------------
+   ${1:-.}                First argument, or . when it is missing or empty
+   ${1:?usage: $0 FILE}   Stop with a usage message when the first argument is missing or empty
+   $#                     Number of arguments
+   "${@:2}"               Every argument from the second onward
+   "${@:2:3}"             Three arguments, starting at the second
+   ${@: -1}               Last argument
+   ${!#}                  Last argument, using indirection
+   "${@/#/--}"            Every argument with -- added at the start
+   --------------------------------------------------------------------------------------------
+
+   See Bash positional parameters for shift, $*, and quoting rules.
+
+Indirect Expansion
+   These forms expand a variable whose name is stored in another variable.
+   -----------------------------------------------------------------------------------
+   Expansion                 Result
+   -----------------------------------------------------------------------------------
+   ${!ref}                   Value of the variable named in ref
+   ${!ref:-default}          Same, with a default when that variable is unset or empty
+   ref='arr[@]'; "${!ref}"   Every element of the array named in ref
+   ${!prefix*}               Names of all variables that start with prefix
+   "${!prefix@}"             Same names, one word each
+   declare -n ref=var        Make ref a nameref; reading or assigning ref uses var
+   -----------------------------------------------------------------------------------
+
+   Do not build the name in ref from untrusted input. Bash evaluates array subscripts in the name, so
+   ref='a[$(cmd)]' runs cmd.
+
+Pattern Syntax
+   The #, %, and / operators match with the same wildcards as filenames. The extglob forms need
+   shopt -s extglob.
+   ------------------------------------------------------------------------------------------
+   Pattern             Matches
+   ------------------------------------------------------------------------------------------
+   *                   Any string, including an empty one
+   ?                   Any single character
+   [abc]               One of the listed characters
+   [!abc] or [^abc]    One character that is not listed
+   [0-9]               One character in the range
+   [[:space:]]         One character from a class, such as [:digit:], [:alpha:], or [:upper:]
+   +(pattern)          One or more matches (extglob)
+   *(pattern)          Zero or more matches (extglob)
+   ?(pattern)          Zero or one match (extglob)
+   @(jpg|jpeg)         Exactly one of the alternatives (extglob)
+   ------------------------------------------------------------------------------------------
+
+Common Recipes
+   ----------------------------------------------------------------------------------------------------
+   Recipe                                Result
+   ----------------------------------------------------------------------------------------------------
+   echo "${PATH//:/$'\n'}"               Print each PATH directory on its own line
+   n=${var//[^,]}; echo "${#n}"          Count the commas in var
+   (IFS=,; printf '%s\n' "${arr[*]}")    Join array elements with commas
+   host=${url#*://}; host=${host%%/*}    Host and port from a URL such as https://example.com:8080/page
+   ${ver%%.*}                            Major version, 5 from 5.3.9
+   ${var##+([[:space:]])}                Trim leading whitespace (extglob)
+   ${var%%+([[:space:]])}                Trim trailing whitespace (extglob)
+   ${var#"${var%%[![:space:]]*}"}        Trim leading whitespace without extglob
+   ${var%"${var##*[![:space:]]}"}        Trim trailing whitespace without extglob
+   ${file/%.@(jpg|jpeg)/.png}            Change a .jpg or .jpeg extension to .png (extglob)
+   [[ -z ${var+x} ]]                     True only when var is unset
+   ----------------------------------------------------------------------------------------------------
+
+Common Mistakes
+   Most expansion bugs come from a missing space, missing quotes, or the wrong shell.
+   -------------------------------------------------------------------------------------------------------
+   Mistake                             Fix
+   -------------------------------------------------------------------------------------------------------
+   ${var:-3} returns the whole value   Add a space for a negative offset: ${var: -3}
+   -------------------------------------------------------------------------------------------------------
+   A value with spaces splits into     Quote the expansion: "$var", "${arr[@]}"
+   several words
+   -------------------------------------------------------------------------------------------------------
+   A variable in the pattern acts      Quote it: ${var#"$prefix"}
+   as a wildcard
+   -------------------------------------------------------------------------------------------------------
+   & in a replacement turns into       Write \& or quote the replacement
+   the match
+   -------------------------------------------------------------------------------------------------------
+   .+ or ^ in a pattern does not work  Patterns are globs; use [[ $var =~ regex ]] or sed for
+                                       regular expressions
+   -------------------------------------------------------------------------------------------------------
+   unbound variable under set -u       Write ${var:-} for variables that may be unset
+   -------------------------------------------------------------------------------------------------------
+   Bad substitution                    The script runs under sh or an old Bash; run it with bash and check
+                                       the version
+   -------------------------------------------------------------------------------------------------------
+   substring expression < 0            The negative length points before the offset, or Bash is older
+                                       than 4.2
+   -------------------------------------------------------------------------------------------------------
+
+   See the Bash set command guide for set -u and the other strict mode options.
+
+Bash Version Support
+   Run echo "$BASH_VERSION" to check your version. Bash 3.2, still /bin/bash on macOS, has none of the
+   features below.
+   ------------------------------------------------------
+   Feature                                   Minimum Bash
+   ------------------------------------------------------
+   ${var^^}, ${var,,}, associative arrays    4.0
+   ${var:1:-1}, ${arr[-1]}                   4.2
+   declare -n namerefs                       4.3
+   @Q, @E, @P, @A, @a                        4.4
+   @U, @u, @L, @K                            5.1
+   @k, & as the match in replacements        5.2
+   ------------------------------------------------------
+
+Related Guides
+   Use these guides for worked examples and the full syntax.
+   ------------------------------------------------------------------------------------
+   Reference                     Covers
+   ------------------------------------------------------------------------------------
+   Bash Parameter Expansion      Worked examples of defaults, trimming, and replacement
+   Bash String Manipulation      Substrings, replacement, case, and substring checks
+   Bash Cheatsheet               Variables, conditionals, loops, and functions
+   Regex Cheatsheet              Regular expressions for [[ =~ ]], grep, and sed
+   GNU Bash Shell Parameter      Official definitions of every operator
+   Expansion
+   ------------------------------------------------------------------------------------
+
+
+---
+
