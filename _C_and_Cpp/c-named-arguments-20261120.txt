@@ -1,0 +1,213 @@
+filename: c-named-arguments-20261120.txt
+https://quuxplusone.github.io/blog/2026/11/16/named-arguments-in-c/
+
+C´s designated initializers give us named arguments
+2026-11-16
+
+In my previous post I talked about C++´s "relatively nerfed" form of designated initializers. This time I
+want to show you a neat thing you can do with C´s full-power designated initializers. I first saw this pattern
+in Ben Klemens´ book [https://link.amazon/B01S8VI8a]21st Century C (2014), pages 226-228.
+([https://godbolt.org/z/sq9oT4ETr]Godbolt.)
+
+struct IdealVolumeArgs {
+	double atm;      // P
+	double moles;    // n
+	double kelvin;   // T
+};
+
+#define ideal_volume(...) ideal_volume_impl( \
+	(struct IdealVolumeArgs){ \
+		.atm=1, .moles=1, .kelvin=273.15, __VA_ARGS__})
+
+double ideal_volume_impl(struct IdealVolumeArgs args) {
+	// The ideal gas law: PV = nRT
+	return args.moles * 0.082057366 * args.kelvin / args.atm;
+}
+
+int main() {
+	printf("1 mole of gas at STP occupies %g L\n",
+		ideal_volume());
+	printf("1 mole of gas at 100°C occupies %g L\n",
+		ideal_volume(.kelvin = 373.15));
+	printf("2 moles of gas at 100°C occupies %g L\n",
+		ideal_volume(.kelvin = 373.15, .moles = 2));
+	printf("2 moles of gas at 0°C and 2 atm occupies %g L\n",
+		ideal_volume(.moles = 2, .atm = 2));
+}
+
+This idiom gives us named, defaultable arguments with natural function-call syntax. It relies on two
+features of C´s designated initializers that C++20 didn´t adopt:
+  * They can appear in any order: (struct IdealVolumeArgs){ .atm=1, .moles=2 } means the same thing
+    as (struct IdealVolumeArgs){ .moles=2, .atm=1 }.
+  * The same designator can appear multiple times, and only the last one "sticks": (struct
+    IdealVolumeArgs){ .atm=1, .moles=2, .atm=3 } means the same thing as (struct IdealVolumeArgs){
+    .atm=3, .moles=2 }.
+
+  That second bullet means we´re relying on something that would be bad style if it weren´t
+  intentional. Clang emits a -Winitializer-overrides diagnostic by default. GCC (more sensibly IMHO)
+  emits -Woverride-init only with -Wextra.
+
+Once a function uses this idiom, adding a new named parameter to the function definition is no longer
+an API break! For example, we might decide to let the caller provide their own value for the ideal
+gas constant R. We simply add a new field to the Args struct. All the old call-sites will still
+compile just fine, and have the same behavior. (It´s not an API break, but it is an ABI break: the
+callers needn´t be re-written, but they do need to be re-compiled against the new header.)
+
+struct IdealVolumeArgs {
+	double atm;      // P
+	double moles;    // n
+	double R;        // R -- this new field changes ABI
+	double kelvin;   // T
+};
+
+#define ideal_volume(...) ideal_volume_impl((struct IdealVolumeArgs){ \
+	.atm=1, .moles=1, .R = 0.082057366, .kelvin=273.15, __VA_ARGS__})
+
+double ideal_volume_impl(struct IdealVolumeArgs args) {
+	return args.moles * args.R * args.kelvin / args.atm;
+}
+
+If you´re writing a family of related functions, you can share the Args struct among the whole family; for
+example, we might add a .liters field to our struct, rename it IdealGasArgs, and define a whole family of
+functions using that bag of keyword arguments:
+
+#define ideal_pressure(...) ideal_pressure_impl((struct IdealGasArgs){ \
+	.atm=NAN, .moles=1, .kelvin=273.15, .liters=1, __VA_ARGS__ })
+
+#define ideal_amount(...) ideal_amount_impl((struct IdealGasArgs){ \
+	.atm=1, .moles=NAN, .kelvin=273.15, .liters=1, __VA_ARGS__ })
+
+#define ideal_temperature(...) ideal_temperature_impl((struct IdealGasArgs){ \
+	.atm=1, .moles=1, .kelvin=NAN, .liters=1, __VA_ARGS__ })
+
+You can also prepend any number of non-keyword arguments:
+
+typedef struct { int cx, cy, r; } CircleArgs;
+void sc_circle_impl(ScreenContext *, int opcode, CircleArgs);
+#define sc_erase_circle(sc, ...) sc_circle_impl(sc, 0, (CircleArgs){__VA_ARGS__})
+#define sc_draw_circle(sc, ...)  sc_circle_impl(sc, 1, (CircleArgs){__VA_ARGS__})
+#define sc_fill_circle(sc, ...)  sc_circle_impl(sc, 2, (CircleArgs){__VA_ARGS__})
+
+Usage in the wild
+Should you go out and replace all your ordinary C code with this pattern? Absolutely not. It´s heavyweight,
+and "cute," compared to just writing an ordinary non-named-argument function like
+
+double ideal_volume(double atm, double moles, double kelvin) {
+	return moles * 0.082057366 * kelvin / atm;
+}
+
+which almost invariably is all you need. Still, a quick regex search of GitHub turns up a few real-looking
+uses of the pattern. The first shareworthy use I found was in [13]gab462/hof-flecs-raylib, which uses it to
+write calls [14]such as:
+
+send_message(&globals.send_buf, msg, .from_id = globals.name);
+
+The most high-profile project in which I found this pattern was [15]EpicGames/raddebugger:
+
+typedef struct UI_AnimParams UI_AnimParams;
+
+struct UI_AnimParams {
+	F32 initial;
+	F32 target;
+	F32 rate;
+	F32 epsilon;
+	B32 reset;
+};
+
+internal F32 ui_anim_(UI_Key key, UI_AnimParams *params);
+
+#define ui_anim(key, target_val, ...) \
+	ui_anim_((key), \
+	&(UI_AnimParams){.target = (target_val), \
+	.rate = (ui_state->default_animation_rate), \
+	__VA_ARGS__})
+~~~~
+F32 cursor_pixel_off__animated = ui_anim(ui_key_from_stringf(~~~~), \
+	cursor_pixel_off, .initial = cursor_pixel_off);
+~~~~
+u->alive_t = ui_anim(ui_key_from_stringf(~~~~), 1.f, .rate = entity_alive_t_rate);
+
+
+---
+TEST
+
+[ideal-gas.c]
+#include <stdio.h>
+#include <string.h>
+
+#if 0
+struct IdealVolumeArgs1 {
+	double atm;      // P
+	double moles;    // n
+	double kelvin;   // T
+};
+
+#define ideal_volume1(...) ideal_volume_impl1( \
+	(struct IdealVolumeArgs1){ \
+		.atm=1, .moles=1, .kelvin=273.15, __VA_ARGS__ \
+	})
+
+double ideal_volume_impl1(struct IdealVolumeArgs1 args) {
+	// The ideal gas law: PV = nRT
+	return args.moles * 0.082057366 * args.kelvin / args.atm;
+}
+
+int main() {
+	printf("1 mole of gas at STP occupies %g L\n",
+		ideal_volume1());
+	printf("1 mole of gas at 100°C occupies %g L\n",
+		ideal_volume1(.kelvin = 373.15));
+	printf("2 moles of gas at 100°C occupies %g L\n",
+		ideal_volume1(.kelvin = 373.15, .moles = 2));
+	printf("2 moles of gas at 0°C and 2 atm occupies %g L\n",
+		ideal_volume1(.moles = 2, .atm = 2));
+
+	return 0;
+}
+#endif
+
+#if 1
+struct IdealVolumeArgs2 {
+	double atm;      // P
+	double moles;    // n
+	double R;        // R -- this new field changes ABI
+	double kelvin;   // T
+};
+
+#define ideal_volume2(...) ideal_volume_impl2((struct IdealVolumeArgs2){ \
+	.atm=1, .moles=1, .R = 0.082057366, .kelvin=273.15, __VA_ARGS__ \
+})
+
+double ideal_volume_impl2(struct IdealVolumeArgs2 args) {
+	return args.moles * args.R * args.kelvin / args.atm;
+}
+
+int main() {
+	printf("1 mole of gas at STP occupies %g L\n",
+		ideal_volume2());
+	printf("1 mole of gas at 100°C occupies %g L\n",
+		ideal_volume2(.kelvin = 373.15));
+	printf("2 moles of gas at 100°C occupies %g L\n",
+		ideal_volume2(.kelvin = 373.15, .moles = 2));
+	printf("2 moles of gas at 0°C and 2 atm occupies %g L\n",
+		ideal_volume2(.moles = 2, .atm = 2));
+
+	return 0;
+}
+#endif
+
+RUN:
+$> gcc -Wall -o ideal-gas ideal-gas.c
+$> gcc -Wall -o ideal-gas2 ideal-gas.c #after aplayong second option with R constant
+$> ./ideal-gas
+$> ./ideal-gas2
+
+OUTPUT (in both examples):
+1 mole of gas at STP occupies 22.414 L
+1 mole of gas at 100°C occupies 30.6197 L
+2 moles of gas at 100°C occupies 61.2394 L
+2 moles of gas at 0°C and 2 atm occupies 22.414 L
+
+
+---
+

@@ -1,0 +1,137 @@
+filename: c-serialization-techniques-20261124.txt
+https://stackoverflow.com/questions/6002528/c-serialization-techniques
+
+C - serialization techniques
+May 14, 2011
+Jun 16, 2021
+
+I´m writing some code to serialize some data to send it over the network. Currently, I use this primitive
+procedure:
+
+ * create a void *buffer
+ * apply any byte ordering operations such as the hton family on the data I want to send over the network
+ * use memcpy to copy the memory into the buffer
+ * send the memory over the network
+
+The problem is that with various data structures (which often contain void* data so you don´t know
+whether you need to care about byte ordering) the code becomes really bloated with serialization code
+that´s very specific to each data structure and can´t be reused at all.
+
+What are some good serialization techniques for C that make this easier / less ugly?
+
+Note: I´m bound to a specific protocol so I cannot freely choose how to serialize my data.
+
+***
+For each data structure, have a serialize_X function (where X is the struct name) which takes a pointer
+to an X and a pointer to an opaque buffer structure and calls the appropriate serializing functions. You
+should supply some primitives such as serialize_int which write to the buffer and update the output
+index. The primitives will have to call something like reserve_space(N) where N is the number of bytes
+that are required before writing any data. reserve_space() will realloc the void *buffer to make it at
+least as big as it´s current size plus N bytes. To make this possible, the buffer structure will need to
+contain a pointer to the actual data, the index to write the next byte to (output index) and the size
+that is allocated for the data. With this system, all of your serialize_X functions should be pretty
+straightforward, for example:
+
+struct X {
+	int n, m;
+	char *string;
+}
+
+void serialize_X(struct X *x, struct Buffer *output) {
+	serialize_int(x->n, output);
+	serialize_int(x->m, output);
+	serialize_string(x->string, output);
+}
+
+And the framework code will be something like:
+
+#define INITIAL_SIZE 32
+
+struct Buffer {
+	void *data;
+	size_t next;
+	size_t size;
+}
+
+struct Buffer *new_buffer() {
+	struct Buffer *b = malloc(sizeof(Buffer));
+
+	b->data = malloc(INITIAL_SIZE);
+	b->size = INITIAL_SIZE;
+	b->next = 0;
+
+	return b;
+}
+
+void reserve_space(Buffer *b, size_t bytes) {
+	if((b->next + bytes) > b->size) {
+
+		/* double size to enforce O(lg N) reallocs */
+		b->data = realloc(b->data, b->size * 2);
+		b->size *= 2;
+	}
+}
+
+From this, it should be pretty simple to implement all of the serialize_() functions you need.
+
+EDIT: For example:
+
+void serialize_int(int x, Buffer *b) {
+	/* assume int == long; how can this be done better? */
+	x = htonl(x);
+
+	reserve_space(b, sizeof(int));
+
+	memcpy(((char *)b->data) + b->next, &x, sizeof(int));
+	b->next += sizeof(int);
+}
+
+EDIT: Also note that my code has some potential bugs. There is no provision for error handling and no
+function to free the Buffer after you´re done so you´ll have to do this yourself. I was just giving a
+demonstration of the basic architecture that I would use.
+
+***
+    Using b->data + b->next is not portable because b->next has type void *. -
+
+***
+I suggest using a library.
+As I was not happy with the existing ones, I created the Binn library to make our lives easier.
+Here is an example of using it:
+
+binn *obj;
+
+// create a new object
+obj = binn_object();
+
+// add values to it
+binn_object_set_int32(obj, "id", 123);
+binn_object_set_str(obj, "name", "Samsung Galaxy Charger");
+binn_object_set_double(obj, "price", 12.50);
+binn_object_set_blob(obj, "picture", picptr, piclen);
+
+// send over the network
+send(sock, binn_ptr(obj), binn_size(obj));
+
+// release the buffer
+binn_free(obj);
+
+***
+I would say definitely don´t try to implement serialization yourself. It´s been done a zillion times
+and you should use an existing solution. e.g. protobufs: https://github.com/protobuf-c/protobuf-c
+
+It also has the advantage of being compatible with many other programming languages.
+
+***
+This library can help you. https://github.com/souzomain/Packer
+It´s easy to use, and the code is clean to study.
+
+use example:
+
+PPACKER protocol = packer_init();
+packer_add_data(protocol, yourstructure, sizeof(yourstructure));
+send(fd, protocol->buffer, protocol->offset, 0);
+packer_free(protocol);
+
+
+---
+

@@ -1,0 +1,397 @@
+filename: c-pointers-for-beginners-20261124.txt
+https://alexanderobregon.substack.com/p/pointers-in-c-for-beginners
+
+Pointers in C for Beginners
+Jan 12, 2026
+
+   Those learning C run into the * operator next to a variable name and the & operator in front of it
+   very early, and both symbols refer to memory addresses rather than ordinary numeric values, so
+   pointer expressions follow rules that differ from earlier integer or float examples. C stores
+   addresses in pointer types that carry information about the kind of object at that location, and the
+   way those pointer values interact with the address-of and dereference operators, along with pointer
+   arithmetic tied to element size, explains how the language connects pointers to array access on real
+   systems.
+
+Memory Addresses for C Pointers
+   In C, memory is treated as a long sequence of bytes, and each byte sits at a numbered position called
+   an address. Pointers hold those addresses in a typed way so that the compiler can tell what sort of
+   object lives at that location. With that in mind, it becomes easier to read what a pointer value
+   represents, how large it is on different machines, and why some pointer values are valid while others
+   are not.
+
+What an Address Represents in C
+   C works with objects such as int, double, or char, and each object occupies one or more bytes in
+   memory. The address of an object is the numeric index of its first byte. On a 64 bit platform, that
+   index is stored in a 64 bit machine word inside the pointer value. On a 32 bit platform, the pointer
+   usually uses 32 bits. The language does not expose a built in integer type that is guaranteed to
+   match the pointer width, but the standard library type uintptr_t from <stdint.h> is intended to hold
+   converted pointer values when code needs to move between integers and pointers.
+
+   The pointer type combines that machine address with information about the pointed to type. An int *
+   holds the address of an int, a double * holds the address of a double, and so on. The compiler uses
+   the type to decide how many bytes to read or write when a pointer is dereferenced. For an int *, *p
+   reads sizeof(int) bytes beginning at the stored address. For a char *, *p reads one byte.
+
+   Take this example that helps tie those ideas together visually:
+#include <stdio.h>
+
+int main(void) {
+	int temperature = 72;
+	int *p_temp = &temperature;
+	printf("temperature value = %d\n", temperature);
+	printf("address of variable = %p\n", (void *)&temperature);
+	printf("pointer value = %p\n", (void *)p_temp);
+	printf("dereferenced value = %d\n", *p_temp);
+
+	return 0;
+}
+
+   The pointer p_temp does not contain the number 72, it contains whatever address the system assigned
+   to temperature. The %p format prints that address in an implementation defined representation,
+   commonly hexadecimal, and the two %p outputs match because they refer to the same location.
+
+   Pointer size is independent of the size of the target type. On many 64 bit platforms, sizeof(int *),
+   sizeof(char *), and sizeof(void *) all evaluate to 8, even though sizeof(int) and sizeof(char)
+   differ. That behavior exists because the machine word that holds the address is the same size no
+   matter what sort of object is stored there. On common 32 bit platforms, those pointer sizes usually
+   evaluate to 4.
+
+   The language allows null pointer values that compare unequal to any valid object address. A null
+   pointer is a special bit pattern that does not point to live storage. The macro NULL from headers
+   such as <stddef.h> or <stdio.h> expands to a null pointer constant. In C23, the identifier nullptr is
+   also defined as a null pointer constant of type nullptr_t. Code can test pointers against these
+   values to see whether they hold a useful address.
+   #include <stdio.h>
+   #include <stddef.h>
+
+int main(void) {
+	int *px = NULL;
+
+	if (px == NULL) {
+		printf("px does not refer to any int yet\n");
+	}
+
+	int value = 15;
+	px = &value;
+
+	if (px != NULL) {
+		printf("px now points to %d\n", *px);
+	}
+
+	return 0;
+}
+
+   The pointer px in that example starts as a null pointer, then later receives the address of value.
+   That change shows that pointer variables can move between "no object" and "some object" states during
+   a run.
+
+   Not every address that fits in the pointer type is valid for the running process. Operating systems
+   restrict which portions of the virtual address space belong to each process, and the C abstract
+   machine speaks in terms of objects that have storage duration and lifetime. If a pointer value refers
+   to storage that has been released, or to storage that never belonged to the process, the pointer
+   still holds a bit pattern but has no valid target in terms of the C memory model.
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+	int *p = malloc(sizeof(int));
+	if (p == NULL) { return 1; }
+	*p = 100;
+	printf("value through p = %d\n", *p);
+	free(p); /* p still holds some address here, but dereferencing it would be undefined */
+	p = NULL;
+
+	return 0;
+}
+
+   The call to free releases the storage, yet p still contains the old address until it is set to NULL.
+   After free, that address no longer refers to live storage in a defined way.
+
+Pointer Object Layout With Values
+   Pointer variables in C are objects that occupy storage and hold address values, just as int variables
+   hold plain integers. Code can read and write the pointer variable without touching the target object,
+   and can also read and write the target object through the pointer without altering the pointer bits.
+
+#include <stdio.h>
+
+int main(void) {
+	int count = 10;
+	int *pcount = &count;
+	printf("address of count = %p\n", (void *)&count);
+	printf("address of pcount = %p\n", (void *)&pcount);
+	printf("pcount holds = %p\n", (void *)pcount);
+	printf("*pcount before write = %d\n", *pcount);
+	*pcount = 15; printf("count after write = %d\n", count);
+	printf("*pcount after write = %d\n", *pcount);
+
+	return 0;
+}
+
+   Two different regions of memory appear in that run. One region stores count, which begins at the
+   address printed for &count. Another region stores pcount, which begins at the address printed for
+   &pcount. The pointer variable pcount holds a number that matches &count, so dereferencing it reads
+   and writes the same storage that belongs to count.
+
+   Pointer variables obey the same scope and storage duration rules as other variables. When declared
+   inside a function without static, a pointer has automatic storage duration and usually resides in the
+   stack frame for that call. When declared with static at file scope, it resides in static storage.
+   Lifetime of the pointer variable and lifetime of the target object can differ. One typical pattern is
+   a pointer that exists for the entire run of the process but points to different objects at different
+   times.
+
+#include <stdio.h>
+
+static int *current_value = NULL;
+
+void set_current(int *p) {
+	current_value = p;
+}
+
+void print_current(void) {
+	if (current_value != NULL) {
+		printf("current value is %d\n", *current_value);
+	} else {
+		printf("no current value set\n");
+	}
+}
+
+int main(void) {
+	int first = 30;
+	int second = 55;
+	set_current(&first);
+	print_current();
+	set_current(&second);
+	print_current();
+	current_value = NULL;
+	print_current();
+
+	return 0;
+}
+
+   The storage for current_value lives for the entire process, but the value inside that storage flips
+   between &first, &second, and NULL during main. The pointer object stores whichever address is
+   currently active, and the dereference in print_current acts on the target that the pointer carries at
+   that moment.
+
+   Assignments between pointers copy address values, not the data they point to. If two pointers refer
+   to the same object, a write through one pointer is visible through the other pointer because they
+   both lead to the same storage.
+
+#include <stdio.h>
+
+int main(void) {
+	int number = 5;
+	int *pa = &number;
+	int *pb = pa;
+	*pa = 9;
+	printf("number = %d\n", number);
+	printf("*pb = %d\n", *pb);
+
+	return 0;
+}
+
+   The assignment pb = pa copies the address held by pa. After that line both pointers carry the same
+   value, so dereferencing either one reaches the same number object.
+
+   The C memory model also speaks about effective types and aliasing, which affects how multiple
+   pointers can safely refer to the same storage with different types. For basic beginner level use of
+   pointers to scalar types such as int and double, the common pattern is to work with pointers whose
+   target type matches the original object type. More advanced cases, such as treating a block of bytes
+   as different structures through unsigned char *, involve stricter rules and belong to later topics.
+
+   Null pointer constants and pointer comparisons round out the picture. Any pointer to object type can
+   be compared to NULL or nullptr, and any pair of pointers that both point within the same array object
+   or to one past its last element can be compared relationally. Those rules are part of how pointer
+   values relate to the abstract memory model, which is built around objects, their storage duration,
+   and the valid region of addresses that describe those objects.
+
+Pointer Syntax With Array Access
+   Pointer syntax in C ties together types, stars, brackets, and parentheses, and the same rules control
+   how arrays behave when they appear in expressions. When that clicks, declarations, address-of
+   expressions, dereferences, and pointer arithmetic all line up in a consistent way and explain why
+   array indexing and pointer stepping give the same results.
+
+Reading C Pointer Declarations
+   C declarations follow a rule where the base type appears on the left and the more detailed
+   information gathers around the variable name. That means the same syntax can describe a single
+   pointer, a pointer to a pointer, an array of pointers, a pointer to an array, or a pointer to a
+   function, all by rearranging stars, brackets, and parentheses.
+
+   The most basic case introduces a single level of indirection. Such as this declaration:
+int *ptr;
+
+   Here, the base type is int, and the * attached to the declarator name says that ptr holds the address
+   of an int. The star belongs to the declarator, not to the base type, which matters when more than one
+   variable appears in the same declaration.
+int *pa, pb;
+
+   This declares pa as a pointer to int, while pb is a plain int. Both share the same base type, and
+   only the star attached to pa changes its meaning. Many code bases avoid combining pointer and
+   nonpointer variables in one declaration to keep the meaning obvious at a quick look.
+
+   C encourages reading complex declarations by starting at the variable name, then moving right when
+   possible, then left, while paying attention to parentheses. Take this group of declarations:
+int *pvalue; int **ppvalue; int *row[10]; int (*parray)[10];
+
+   The identifier pvalue sits next to a single *, so pvalue is a pointer to int. The identifier ppvalue
+   sits next to two stars, so it is a pointer to a pointer to int. The identifier row sits next to [10],
+   which binds more tightly than *, so row is an array of ten elements where each element has type int
+   *. The identifier parray sits inside parentheses with *, and that group sits next to [10], so parray
+   is a pointer to an array of ten int values.
+
+   Function pointers follow the same reading rule. Parentheses make the boundary between the pointer
+   itself and the function type easier to see. Take a declaration like:
+double (*pfunc)(int, double);
+
+   This starts with the identifier pfunc surrounded by (* ), so *pfunc has function type that takes an
+   int and a double and returns double. That means pfunc is a pointer to such a function. Without the
+   parentheses, a declaration double *pfunc(int, double); would describe a function returning double *
+   instead, which is very different.
+
+   These reading habits scale up. Arrays of function pointers, pointers to arrays of function pointers,
+   and other advanced combinations obey the same rule. For a beginner, working through a few
+   declarations by hand and tracing from the name outward helps reinforce how stars, brackets, and
+   parentheses combine to describe storage and behavior.
+
+Address Of Operator Plus Dereference Operator
+   Two operators sit at the heart of pointer use in C. The address of operator & takes the location of
+   an object, and the dereference operator * accesses the object that lives at a stored address. They
+   are defined so that they cancel each other out for ordinary objects, which gives a useful mental
+   model for how references move between variables and memory.
+
+   Take a small fragment of code that connects a pointer to a plain variable:
+
+#include <stdio.h>
+
+int main(void) {
+	int value = 7;
+	int *pvalue = &value;
+	printf("value stored directly = %d\n", value);
+	printf("value through pointer = %d\n", *pvalue);
+	*pvalue = 20;
+	printf("value after update = %d\n", value);
+
+	return 0;
+}
+
+   The expression &value forms an int * that holds the address of value. That address is stored in
+   pvalue. The dereference *pvalue accesses the int at that address. When *pvalue appears on the left
+   side of an assignment, the assignment writes through the pointer to the original value variable.
+
+   For an object x of type T, the expression &x has type T *, and the expression *(&x) refers back to x.
+   The two operators behave as inverse steps for that case. In the other direction, if p is a T * that
+   currently holds &x, then *p and x name the same storage. That relationship is what makes passing
+   pointers into functions a way to let those functions update caller variables.
+
+   A slight change in syntax can either change the object pointed to or change the pointer value. With a
+   declaration such as:
+int count = 3; int *pcount = &count;
+
+   The expression (*pcount)++ increments the int stored at the address, leaving pcount unchanged. An
+   expression pcount++ increments the pointer value so it refers to the next int in memory, leaving the
+   stored int unchanged. Parentheses in (*pcount)++ force the dereference to happen before the
+   increment.
+
+   Passing pointers to functions brings the address of a caller variable into a callee without copying
+   the variable itself. That pattern appears frequently in simple numeric examples.
+
+#include <stdio.h>
+
+void increment_int(int *p) {
+	if (p != NULL) {
+		(*p)++;
+	}
+}
+
+int main(void) {
+	int counter = 0;
+	increment_int(&counter);
+	increment_int(&counter);
+	printf("counter = %d\n", counter);
+
+	return 0;
+}
+
+   The function increment_int receives an int * and, after a null check, dereferences it and increments
+   the referred value. The caller passes &counter, so the updates apply directly to counter. No copy of
+   counter needs to travel into the function; only its address moves across the call boundary.
+
+   Dereferencing requires that the pointer value refers to live storage of the correct type. Applying *
+   to a null pointer or to a pointer that holds an address of freed storage leads to undefined behavior
+   in C, which means the standard does not specify what happens. Keeping careful track of where each
+   pointer came from and whether its target still exists is part of correct use of & and *.
+
+Pointer Arithmetic With Arrays
+   Pointer arithmetic gives a way to move through sequences of objects in memory. For a pointer p of
+   type T *, adding an integer offset n produces a new pointer p + n that points n elements past p. The
+   compiler multiplies the offset by sizeof(T) to compute the byte address that matches that new pointer
+   value.
+
+   Arrays and pointers meet at this point. In many expressions, an array name converts to a pointer to
+   its first element. Like this declaration:
+
+#include <stdio.h>
+
+int main(void) {
+	int scores[5] = {10, 20, 30, 40, 50}
+	int *ps = scores;
+	printf("scores[0] with index = %d\n", scores[0]);
+	printf("scores[0] with pointer = %d\n", *ps);
+	ps = ps + 2;
+	printf("scores[2] with pointer = %d\n", *ps);
+
+	return 0;
+}
+
+   Here, the expression scores in the line int *ps = scores; converts to a pointer of type int * that
+   holds the address of scores[0]. The expression *ps reads the same int as scores[0]. After ps = ps +
+   2, the pointer refers to scores[2], and dereferencing reads the third element in the array. The
+   subscript expression scores[i] is defined by the language as *(scores + i), which explains why
+   indexing and pointer stepping end up at the same locations.
+
+   Element size controls how far pointer arithmetic steps in bytes. On a system where sizeof(int) is 4,
+   adding 1 to an int * advances the address by 4 bytes. On that same system, adding 1 to a double *
+   advances by sizeof(double) bytes, and so on. The compiler handles that scaling internally, so source
+   code can work in units of elements rather than raw bytes.
+
+   Single byte access uses char * or unsigned char *. C defines sizeof(char) as 1, so incrementing a
+   char * moves the address by one byte each time. A short fragment shows the contrast between element
+   stepping and byte stepping:
+
+#include <stdio.h>
+int main(void) {
+	int values[3] = {1, 2, 3};
+	int *pi = values;
+	unsigned char *pb = (unsigned char *)values;
+	printf("pi = %p\n", (void *)pi);
+	printf("pi + 1 = %p\n", (void *)(pi + 1));
+	printf("pb = %p\n", (void *)pb);
+	printf("pb + 1 = %p\n", (void *)(pb + 1));
+	printf("pb + 4 = %p\n", (void *)(pb + 4));
+
+	return 0;
+}
+
+   The pointer pi + 1 advances by one int, while pb + 1 advances by a single byte, and pb + 4 lands at
+   the same address as pi + 1 on systems where sizeof(int) equals 4. This kind of comparison makes the
+   scaling rule very solid to see.
+
+   Pointer arithmetic is defined only for pointers that refer into an array object or to one element
+   past its last entry. Adding offsets that move a pointer outside that region gives undefined behavior,
+   even if the code never dereferences the out of range pointer. That rule lets compilers apply
+   reasoning about loops that walk arrays and lets them map those loops onto efficient machine
+   instructions that operate on contiguous memory.
+
+Conclusion
+   Pointers link C code to concrete memory locations, with each pointer object storing an address in a
+   machine word along with a static type that tells the compiler how many bytes belong to the target.
+   The & operator moves from an object to its address, the * operator moves from a stored address back
+   to the object, and pointer arithmetic steps in units of whole elements so that expressions like a[i]
+   and *(a + i) describe the same access pattern through contiguous storage. With those mechanics in
+   place, dynamic allocation, pointer parameters, and linked data structures all follow from the same
+   rules about addresses, types, and element-sized movement through memory.
+
+
+---
+

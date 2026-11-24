@@ -1,0 +1,207 @@
+filename: c-serialization-deserialization-of-a-struct-to-a-char-20261124.txt
+https://stackoverflow.com/questions/1653681/serialization-deserialization-of-a-struct-to-a-char-in-c
+
+Serialization/Deserialization of a struct to a char * in C
+Oct 31, 2009
+
+I have a struct
+
+struct Packet {
+	int senderId;
+	int sequenceNumber;
+	char data[MaxDataSize];
+
+	char *Serialize() {
+		char *message = new char[MaxMailSize];
+		message[0] = senderId;
+		message[1] = sequenceNumber;
+		for (unsigned i=0;i<MaxDataSize;i++)
+			message[i+2] = data[i];
+		return message;
+	}
+
+	void Deserialize(char *message) {
+		senderId = message[0];
+		sequenceNumber = message[1];
+		for (unsigned i=0;i<MaxDataSize;i++)
+			data[i] = message[i+2];
+	}
+
+};
+
+I need to convert this to a char *, maximum length MaxMailSize > MaxDataSize for sending over network
+and then deserialize it at the other end. I can´t use tpl or any other library.
+
+Is there any way to make this better I am not that comfortable with this, or is this the best we can do.
+
+***
+since this is to be sent over a network, I strongly advise you to convert those data into network byte
+order before transmitting, and back into host byte order when receiving. this is because the byte ordering
+is not the same everywhere, and once your bytes are not in the right order, it may become very difficult
+to reverse them (depending on the programming language used on the receiving side). byte ordering functions
+are defined along with sockets, and are named htons(), htonl(), ntohs() and ntohl(). (in those name: h means
+'host' or your computer, n means 'network', s means 'short' or 16bit value, l means 'long' or 32 bit value).
+
+then you are on your own with serialization, C and C++ have no automatic way to perform it. some softwares
+can generate code to do it for you, like the ASN.1 implementation asn1c, but they are difficult to use
+because they involve much more than just copying data over the network.
+
+***
+Depending if you have enough place or not... you might simply use the streams :)
+
+std::string Serialize() {
+	std::ostringstream out;
+	char version = '1';
+	out << version << senderId << '|' << sequenceNumber << '|' << data;
+	return out.str();
+}
+
+void Deserialize(const std::string& iString) {
+	std::istringstream in(iString);
+	char version = 0, check1 = 0, check2 = 0;
+	in >> version;
+
+	switch(version) {
+		case '1':
+			senderId >> check1 >> sequenceNumber >> check2 >> data;
+			break;
+		default:
+			// Handle
+	}
+	// You can check here than 'check1' and 'check2' both equal to '|'
+}
+
+I readily admit it takes more place... or that it might.
+
+Actually, on a 32 bits architecture an int usually cover 4 bytes (4 char). Serializing them using streams
+only take more than 4 'char' if the value is superior to 9999, which usually gives some room.
+
+Also note that you should probably include some guards in your stream, just to check when you get it
+back that it´s alright.
+
+Versioning is probably a good idea, it does not cost much and allows for unplanned later development.
+
+***
+You can have a class reprensenting the object you use in your software with all the niceties and member
+func and whatever you need. Then you have a 'serialized' struct that´s more of a description of what
+will end up on the network.
+
+To ensure the compiler will do whatever you tell him to do, you need to instruct it to 'pack' the
+structure. The directive I used here is for gcc, see your compiler doc if you´re not using gcc.
+
+Then the serialize and deserialize routine just convert between the two, ensuring byte order and details
+like that.
+
+#include <arpa/inet.h>   /* ntohl htonl */
+#include <string.h>      /* memcpy */
+
+class Packet {
+	int senderId;
+	int sequenceNumber;
+	char data[MaxDataSize];
+	public:
+	char *Serialize();
+	void Deserialize(char *message);
+};
+
+struct SerializedPacket {
+	int senderId;
+	int sequenceNumber;
+	char data[MaxDataSize];
+} __attribute__((packed));
+
+void *Packet::Serialize() {
+	struct SerializedPacket *s = new SerializedPacket();
+	s->senderId = htonl(this->senderId);
+	s->sequenceNumber = htonl(this->sequenceNumber);
+	memcpy(s->data, this->data, MaxDataSize);
+	return s;
+}
+
+void Packet::Deserialize(void *message) {
+	struct SerializedPacket *s = (struct SerializedPacketi *)message;
+	this->senderId = ntohl(s->senderId);
+	this->sequenceNumber = ntohl(s->sequenceNumber);
+	memcpy(this->data, s->data, MaxDataSize);
+}
+
+***
+int senderId;
+int sequenceNumber;
+...
+char *message = new char[MaxMailSize];
+message[0] = senderId;
+message[1] = sequenceNumber;
+
+You´re overwriting values here. senderId and sequenceNumber are both ints and will take up more than
+sizeof(char) bytes on most architectures. Try something more like this:
+
+char *message = new char[MaxMailSize];
+int offset = 0;
+memcpy(message + offset, &senderId, sizeof(senderId));
+offset += sizeof(senderId);
+memcpy(message + offset, &sequenceNumber, sizeof(sequenceNumber));
+offset += sizeof(sequenceNumber);
+memcpy(message + offset, data, MaxDataSize);
+
+EDIT: fixed code written in a stupor. Also, as noted in comment, any such packet is not portable due to
+endian differences.
+
+***
+    The second argument to memcpy takes const void *, but you are passing it the int. It should be:
+    memcpy(message + offset, &senderId, sizeof(senderId)). Also, you do not need the last memcpy, as
+    data need not be serialized since it is merely the buffer used for unserialization.
+
+***
+To answer your question generally, C++ has no reflection mechanism, and so manual serialize and unserialize
+functions defined on a per-class basis is the best you can do. That being said, the serialization function
+you wrote will mangle your data. Here is a correct implementation:
+
+char *message = new char[MaxMailSize];
+int net_senderId = htonl(senderId);
+int net_sequenceNumber = htonl(sequenceNumber);
+memcpy(message, &net_senderId, sizeof(net_senderId));
+memcpy(message + sizeof(net_senderId), &net_sequenceNumber, sizeof(net_sequenceNumber));
+
+***
+As mentioned in other posts, senderId and sequenceNumber are both of type int, which is likely to be
+larger than char, so these values will be truncated.
+
+If that´s acceptable, then the code is OK. If not, then you need to split them into their constituent
+bytes. Given that the protocol you are using will specifiy the byte order of multi-byte fields, the most
+portable, and least ambiguous, way of doing this is through shifting.
+
+For example, let´s say that senderId and sequenceNumber are both 2 bytes long, and the protocol requires
+that the higher byte goes first:
+
+char *Serialize() {
+	char *message = new char[MaxMailSize];
+
+	message[0] = senderId >> 8;
+	message[1] = senderId;
+
+	message[2] = sequenceNumber >> 8;
+	message[3] = sequenceNumber;
+
+	memcpy(&message[4], data, MaxDataSize);
+
+	return message;
+}
+
+I´d also recommend replacing the for loop with memcpy (if available), as it´s unlikely to be less efficient,
+and it makes the code shorter.
+
+Finally, this all assumes that char is one byte long. If it isn´t, then all the data will need to be
+masked, e.g.:
+
+    message[0] = (senderId >> 8) & 0xFF;
+
+***
+You can use Protocol Buffers for defining and serializing of structs and classes. This is what google
+uses internally, and has a very small transfer mechanism.
+
+http://code.google.com/apis/protocolbuffers/
+
+
+---
+

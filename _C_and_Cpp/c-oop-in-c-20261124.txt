@@ -1,0 +1,815 @@
+filename: c-oop-in-c-20261124.txt
+https://dmitryfrank.com/articles/oop_in_c
+
+Object-oriented techniques in C
+2015/09/22
+
+   Although the techniques described below won´t be very popular nowadays (after all, why bother using C
+   if we´re going to write object-oriented code?), they are still quite relevant for embedded systems
+   and other low-level things (kernel development, etc). For example, lots of Linux Kernel subsystems
+   use similar approach.
+
+   I work with embedded stuff a lot: that is, I have a microcontroller with limited resources and
+   limited set of toolchains that I can use. Usually it´s just C compiler provided by chip manufacturer.
+
+   I also have experience in modern techniques, such as Java and Qt, and I think in object-oriented way.
+   Don´t get me wrong, I don´t consider it as "the only right way" to implement everything: as ever, we
+   have to apply common sense. However, it is a decent tool that comes in handy in many cases in order
+   to build modular software, if we use it right.
+
+   So, of course I really want to use object-oriented approach in the embedded world, when it is
+   appropriate, and the techniques I´m going to tell you about worked quite well for me. As an example,
+   here´s a class diagram (drawn by PlantUML) of a subsystem of my actual embedded project in C
+   (clickable of course) :
+
+   It is considerably large. The resulting system works stably and is flexible enough. I have no idea
+   how would I implement all of this to the same degree of flexibility without object-oriented approach.
+
+   There are C++ compilers for some embedded CPUs, but they are uncommon, so I need to stick to C, in
+   the name of portability.
+
+   There are already publications on the topic (for example, see this very thorough book), but none
+   of the existing solutions satisfies me. Requirements that I have:
+     * Avoid typecasts as much as possible, so we don´t lose type safety;
+     * Polymorphism: we should be able to use virtual methods, and client of the class should not be
+       aware whether some particular method is virtual or not;
+     * Multiple inheritance: I don´t use it often, but sometimes I really want some class to implement
+       multiple interfaces (or to extend multiple superclasses).
+
+   Most of the existing solutions use typecasts heavily, so we lose type safety: compiler won´t help you
+   if you make a mistake. This is completely unacceptable.
+
+   So I decided to share my experience. Of course it is not going to be too smooth, but it is robust and
+   architecturally clean, so it helps me a lot in my daily programming life.
+
+   Whether to use it or not is a subject to debate (if not a holy war), and I don´t expect everyone to
+   agree with me. The rule of thumb for me: don´t overuse it. If you need to develop a car multimedia
+   system, it´s much better to get a more expensive chip which can run Linux, and then write an
+   application in C++, which will run in userspace. But if it´s rather little project on a two-dollar
+   MCU, it might be the way to go. Apply common sense.
+
+Concrete class
+   Please note that things I´m going to tell you in this section are pretty trivial if you´re familiar
+   with basic OO techniques.
+
+   Let´s start from very simple yet realistic example: the CRC calculator. In fact, it was my first
+   experience of OO in C, ages ago. Back then, I was working on firmware upgrade for device via
+   bluetooth, so I wanted to have some common C module that I can use on both parties (device and host
+   computer).
+
+   The usual C approach to calculate things like CRC is to have one-function module that calculates crc
+   of the buffer. Function prototype looks like this:
+
+uint32_t crc32_calc(const uint8_t *buf, size_t size);
+
+   This function may work at the host side, where we have lots of RAM. However, such function isn´t too
+   useful if we haven´t the whole buffer at once. After firmware upgrade is completed, device´s
+   bootloader should compare calculated CRC of programmed data with the one received from host. If they
+   match, operation considered successful. Even if I wanted to calculate CRC "at once" by calling
+   crc32_calc(), I couldn´t, because flash space on MCU I worked with isn´t easily mapped to address
+   space, and of course the MCU hasn´t enough RAM so that I could read the whole firmware to RAM and
+   then calculate CRC.
+
+   Instead, I´d like to be able to calculate CRC gradually: when next frame (say, 64 bytes) is received
+   from host, the device programs it to flash, then reads it back, and accumulates ("feeds") this data
+   to "global" CRC. When next frame is received, it is fed to global CRC again, and so on. Eventually,
+   we have CRC of the whole firmware.
+
+   For that to be done, OO-approach comes to the rescue. We want to have object Crc which has two
+   methods:
+     * byte_feed(uint8_t byte) : feed next byte;
+     * value_get() : get current crc32 value.
+
+   Since C doesn´t support object-oriented programming, we have to manually pass pointer to the object
+   for which method is called. To avoid useless confusion, I use the name me instead of this.
+
+   Here´s the easiest interface for this, ever:
+
+[crc32.h]
+
+/*******************************************************************************
+ *    CRC32 calculator
+ ******************************************************************************/
+
+#ifndef _CRC32_H
+#define _CRC32_H
+
+/*******************************************************************************
+ *    INCLUDED FILES
+ ******************************************************************************/
+
+#include <stdint.h>
+
+
+/*******************************************************************************
+ *    PUBLIC TYPES
+ ******************************************************************************/
+
+/**
+ * CRC32 object context.
+ *
+ * In fact, we could even put it into source file instead of header file,
+ * but then we can allocate it in heap only, which might not be good idea,
+ * especially in embedded world.
+ */
+struct S_Crc32 {
+	uint32_t    crc;
+};
+
+
+/*******************************************************************************
+ *    CONSTRUCTOR, DESTRUCTOR
+ ******************************************************************************/
+
+void crc32_ctor(struct S_Crc32 *me);
+void crc32_dtor(struct S_Crc32 *me);
+
+
+/*******************************************************************************
+ *    PUBLIC METHOD PROTOTYPES
+ ******************************************************************************/
+
+/**
+ * Feed next byte to crc32
+ */
+void crc32_byte_feed(struct S_Crc32 *me, uint8_t byte);
+
+/**
+ * Get current crc32 value
+ */
+uint32_t crc32_value_get(const struct S_Crc32 *me);
+
+
+/*******************************************************************************
+ *    end of file
+ ******************************************************************************/
+
+#endif  /* _CRC32_H */
+
+   Implementation is pretty straightforward as well:
+
+[crc32.c]
+
+/*******************************************************************************
+ *    INCLUDED FILES
+ ******************************************************************************/
+
+#include "crc32.h"
+
+
+/*******************************************************************************
+ *    CONSTRUCTOR, DESTRUCTOR
+ ******************************************************************************/
+
+void crc32_ctor(struct S_Crc32 *me) {
+	me->crc = 0xffffffff;
+}
+
+void crc32_dtor(struct S_Crc32 *me) {
+	//-- nothing to do here
+}
+
+
+/*******************************************************************************
+ *    PUBLIC METHODS
+ ******************************************************************************/
+
+/**
+ * Feed next byte to crc32
+ */
+void crc32_byte_feed(struct S_Crc32 *me, uint8_t byte) {
+	static const uint32_t _crc32_table[16] = {
+		0x00000000, 0x1db71064, 0x3b6e20c8, 0x26d930ac,
+		0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c,
+		0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c,
+		0x9b64c2b0, 0x86d3d2d4, 0xa00ae278, 0xbdbdf21c,
+	};
+
+	me->crc ^= byte;
+	me->crc = _crc32_table[me->crc & 0x0f] ^ (me->crc >> 4);
+	me->crc = _crc32_table[me->crc & 0x0f] ^ (me->crc >> 4);
+}
+
+/**
+ * Get current crc32 value
+ */
+uint32_t crc32_value_get(const struct S_Crc32 *me) {
+	return me->crc ^ 0xffffffff;
+}
+
+   Now, we can use crc32 calculator object as follows:
+
+[main.c]
+
+#include "crc32.h"
+#include <stdint.h>
+
+int main(void) {
+	//-- Allocate crc_calc object and construct it
+	struct S_Crc32 crc_calc;
+	crc32_ctor(&crc_calc);
+
+	//-- Get bytes from wherever you want, and feed them to crc_calc
+	//   (in this example, bytes are just hardcoded)
+	crc32_byte_feed(&crc_calc, 0x01);
+	crc32_byte_feed(&crc_calc, 0x02);
+	crc32_byte_feed(&crc_calc, 0x03);
+	crc32_byte_feed(&crc_calc, 0x04);
+
+	//-- get crc32 value
+	uint32_t crc_val = crc32_value_get(&crc_calc);
+
+	//-- destruct crc_calc
+	crc32_dtor(&crc_calc);
+}
+
+   Great, that´s just what we need: we can get data from wherever we want, and feed data byte-by-byte to
+   CRC calculator.
+
+   By the way, the module for bmp screenshot generation, Bmp writer, uses similar approach, so you
+   might want to check its API as well.
+
+   Now, let´s proceed to something more interesting.
+
+Inheritance and polymorphism
+   I use inheritance when I want some objects to share common interface.
+
+   Approach that I use in C offers 1-level inheritance quite well, but maintaining hierarchy of more
+   levels becomes too verbose. Luckily, 1-level inheritance is usually quite enough to implement common
+   interface that is shared by multiple objects, so, it´s not a major problem for me. However, sometimes
+   I use more levels, when I really need to. The only problem with it is that it becomes too verbose.
+
+   When some class (Derived) is derived from another class (Base), then, in terms of C, struct Derived
+   contains struct Base. Like this:
+
+/* base class */
+typedef struct S_Base {
+	/* ... */
+} T_Base;
+
+/* derived class */
+typedef struct S_Derived {
+	/* ... */
+	T_Base base;
+	/* ... */
+} T_Derived
+
+   In order to achieve polymorphism, we need to manually do what C++ compiler does behind the scenes:
+   maintain virtual functions table. For each class (but not for each instance of class), we´re going to
+   have struct with pointers to virtual functions.
+
+   At least, the following items should be virtual:
+     * destructor
+     * memory deallocator
+
+   Virtual destructor is quite common thing: when we destruct an instance of subclass, then destructor
+   of derived class should be called first, and then destructor of base class should be called. We also
+   need virtual memory deallocator, since pointer to derived class might not match the pointer to base
+   class.
+
+   I´ll go ahead and tell you that I´ve prepared small tool that generates boilerplate "class" code for
+   you, so that you don´t have to type all of the following stuff yourself. Here it is:
+   https://github.com/dimonomid/ooc. At the end of this article, I´ll explain usage of it in more
+   detail.
+
+Base class
+   Assume we have base class MyBase, which is going to have some derived classes. Apart from destructor
+   and memory deallocator, it has two virtual methods: some_method(int a, int b) and other_method(void).
+   We need to define prototypes for all virtual methods:
+
+/*******************************************************************************
+ *    VTABLE
+ ******************************************************************************/
+
+/**
+ * Destructor
+ */
+typedef void (T_MyBase_Dtor)                (T_MyBase *me);
+
+/**
+ * Memory deallocator. Needs to be overridden because pointer to subclass not
+ * necessarily matches pointer to superclass.
+ */
+typedef void (T_MyBase_Free)                (T_MyBase *me);
+
+/**
+ * Some method
+ */
+typedef void (T_MyBase_SomeMethod)          (T_MyBase *me, int a, int b);
+
+/**
+ * Other method
+ */
+typedef void (T_MyBase_OtherMethod)          (T_MyBase *me);
+
+   Note that each of them explicitly takes pointer to the object for which the method is called. Now,
+   create virtual functions table (vtable) :
+/**
+ * Virtual functions table (vtable)
+ */
+typedef struct S_MyBase_VTable {
+	T_MyBase_Dtor            *p_dtor;
+	T_MyBase_Free            *p_free;
+	T_MyBase_SomeMethod      *p_some_method;
+	T_MyBase_OtherMethod     *p_other_method;
+} T_MyBase_VTable;
+
+   And object context of MyBase should contain a pointer to that vtable:
+struct S_MyBase {
+	/* ... */
+	struct S_MyBase_VTable *p_vtable;
+	/* ... */
+};
+
+   Obviously, we should implement these virtual methods for MyBase:
+static void _some_method(T_MyBase *me, int a, int b) {
+	/* ... */
+}
+
+static void _other_method(T_MyBase *me) {
+	/* ... */
+}
+
+static void _dtor(T_MyBase *me) {
+	/* ... */
+}
+
+static void _free(T_MyBase *me) {
+	free(me);
+}
+
+   The question now is: how to initialize vtable. First of all, I decided to make it const, like this:
+/* not so good: */
+static const T_MyBase_VTable _vtable = {
+	.p_dtor         = _dtor,
+	.p_free         = _free,
+	.p_some_method  = _some_method,
+	.p_other_method = _other_method,
+};
+
+   This approach works, but it has serious drawback for derived classes: when we define vtable for
+   derived class, we might or might not want to override some particular method. If we do, that´s no
+   problem: we just specify pointer to function that overrides that from base class. But if we don´t,
+   then:
+     * We need to get pointer to base function somehow. So, these functions can no longer be static, and
+       all subclasses should have access to them;
+     * When we add some new virtual method to vtable, we need to manually modify vtable of all
+       subclasses. This practice is error-prone;
+     * It violates the DRY principle (Don´t Repeat Yourself).
+
+   After some research, I decided to make it non-const, and use lazy initialization. This approach
+   worked for me for years, and I´m quite happy with it. So, for MyBase, we´re going to have vtable and
+   bool variable indicating status of vtable (initialized or not) :
+
+static T_MyBase_VTable _vtable;
+static bool _bool_vtable_initialized = 0;
+
+   We need function that initializes vtable if needed:
+static void _vtable_init() {
+	if (!_bool_vtable_initialized) {
+		_vtable.p_dtor           = _dtor;
+		_vtable.p_free           = _free;
+
+		_vtable.p_some_method    = _some_method;
+		_vtable.p_other_method   = _other_method;
+
+		_bool_vtable_initialized = true;
+	}
+}
+
+   And, finally, this function needs to be called from constructor. So, when first instance of the class
+   MyBase is created, its vtable gets initialized. When more instances are created, vtable isn´t
+   modified anymore.
+
+   Let´s get to constructor. The constructor usually needs to have some parameters. Personally I find it
+   useful to create special structure for constructor params, and implement constructor so that it takes
+   pointer to that struct. That way, we can easily add new params to ctor later, and we don´t need to
+   modify function signatures for that. So, initially the params struct is empty:
+
+typedef struct S_MyBase_CtorParams {
+		//-- add your ctor params here
+} T_MyBase_CtorParams;
+
+   And constructor might look like this:
+
+/**
+ * Constructor
+ */
+void mybase__ctor(T_MyBase *me, const T_MyBase_CtorParams *p_params) {
+	memset(me, 0x00, sizeof(T_MyBase));
+
+	//-- init vtable
+	_vtable_init();
+	me->p_vtable = &_vtable;
+
+	//-- some construct code
+}
+
+   We can now define non-virtual methods easily:
+void mybase__my_method(T_MyBase *me) {
+	/* ... */
+}
+
+   But how we´re going to call virtual methods? We definitely don´t want to impose a burden of dealing
+   with vtable to the client of MyBase. So, for each virtual method (except memory deallocator) we just
+   define inline function in the header:
+
+/**
+ * Desctructor
+ */
+static inline void mybase__dtor(T_MyBase *me) {
+	me->p_vtable->p_dtor(me);
+}
+
+/**
+ * Some method
+ */
+static inline void mybase__some_method(T_MyBase *me, int a, int b) {
+	me->p_vtable->p_some_method(me, a, b);
+}
+
+/**
+ * Other method
+ */
+static inline void mybase__other_method(T_MyBase *me) {
+	me->p_vtable->p_other_method(me);
+}
+
+   Now, client of MyBase can equally call mybase__some_method() or mybase__other_method(), and he/she
+   doesn´t need to care about whether the method is virtual or not.
+
+   If we need to use heap, we also need to define allocator (which will call constructor as well) and
+   deallocator (which will call destructor). I prefer to name them like this in order to replicate new
+   and delete operators from C++ :
+
+/* allocator */
+T_MyBase *new_mybase(const T_MyBase_CtorParams *p_params) {
+	T_MyBase *me = (T_MyBase *)malloc( sizeof(T_MyBase) );
+	mybase__ctor(me, p_params);
+	return me;
+}
+
+/* deallocator */
+void delete_mybase(T_MyBase *me) {
+	mybase__dtor(me);
+	me->p_vtable->p_free(me);
+}
+
+   Now, we can use our class as follows:
+T_MyBase_CtorParams params = {};
+
+//-- in stack
+{
+	T_MyBase mybase;
+	mybase__ctor(&mybase, &params);
+	mybase__some_method(&mybase, 1, 2);
+	mybase__dtor(&mybase);
+}
+
+//-- in heap
+{
+	T_MyBase *p_mybase = new_mybase(&params);
+	mybase__some_method(p_mybase, 1, 2);
+	delete_mybase(p_mybase);
+}
+
+   So if we create two instances of T_MyBase: my_base_1 and my_base_2, the data and code will be
+   arranged as follows:
+
+   Please note that even though we´re bringing some object stuff to C, we can´t write in C in the same
+   manner as in C++: in C, we have to manually call new_...() / delete_...() (or constructor / destructor),
+   but in C++, we should avoid plain delete as much as possible, and rely on RAII instead.
+
+   Ok, base class seems to be done to a first approximation, let´s proceed to derived class now.
+
+Derived class
+   As I already mentioned, I use inheritance when I want some objects to share common interface. So, the
+   interface is already done (for base class), now we should make derived class accessible through that
+   interface.
+
+   First of all, let´s specify structure for derived class context:
+
+struct S_MyDerived {
+	/* ... */
+	struct {
+		T_MyBase mybase;
+	} super;
+	/* ... */
+};
+
+   I´d like to put base class(es) to the separate struct super, even though it is more verbose. If you
+   like, you may omit it, as follows:
+
+struct S_MyDerived {
+	/* ... */
+	T_MyBase mybase;
+	/* ... */
+};
+
+   In the rest of the text, I assume the first approach. We need a way to convert between pointer to
+   base class and pointer to derived class. The derived-to-base is trivial, and I´d put it into the
+   header as static inline function:
+
+static inline T_MyBase *myderived__mybase__get(T_MyDerived *me) {
+	return &(me->super.mybase);
+}
+
+   But for reverse conversion we need to perform some tricks.
+
+   Firstly, we´d like to ensure that the given pointer to base class actually points to an instance of
+   some particular derived class. Unfortunately, it´s not so easy to implement it correctly without a
+   kind of RTTI (run-time type information). I haven´t bothered yet about RTTI in C. But, as I already
+   mentioned, most of the time I´m happy with 1-level inheritance. And then, we have very simple
+   solution: since derived class has its own vtable, we can just check that pointer to vtable in the
+   given instance actually points to vtable of some particular subclass:
+
+/*
+ * NOTE: works for 1-level hierarchy only!
+ */
+bool instanceof_myderived(const T_MyBase *me_super) {
+	//-- here we just check vtable pointer.
+	return (me_super->p_vtable == &_super_vtable);
+}
+
+   _super_vtable will be explained later, but I bet you´ve already guessed how it is defined.
+
+   Secondly, we can´t just typecast from T_MyBase * to T_MyDerived *, since mybase might be not a first
+   field of T_MyDerived. At least that inevitably happens with multiple inheritance. We need to be
+   smarter.
+
+   I´ve created the header file ooc.h, in which I put common things useful for object-oriented approach
+   in C. At least, there are a couple of macros:
+
+/**
+ * Calculates offset of member inside the struct
+ */
+#define OOC_OFFSETOF(_struct_, _member_)  (size_t)&(((_struct_ *)0)->_member_)
+
+/**
+ * Calculates pointer to subclass (i.e. containing struct) from pointer to
+ * superclass (i.e. contained struct).
+ */
+#define OOC_GET_CONTAINER_PT (                            \
+	_T_Subclass_,                                         \
+	_superclass_field_name_,                              \
+	_superclass_pt_                                       \
+)                                                         \
+                                                          \
+((_T_Subclass_ *) (                                       \
+	(unsigned char *)(_superclass_pt_)                    \
+	- OOC_OFFSETOF(_T_Subclass_, _superclass_field_name_) \
+	)                                                     \
+)
+
+   Given macro OOC_GET_CONTAINER_PT(), we can calculate offset of base class field within derived class
+   struct.
+
+   At the beginning of this article, I mentioned that I want to avoid typecasts as much as possible, but
+   in the macro above you clearly see typecast to subclass. This is the only typecast I use in my OOC
+   approach, and it is localized to well-defined macro, so that we aren´t likely to make a mistake here.
+   Even more, the code that uses this macro is autogenerated from template (see
+   https://github.com/dimonomid/ooc), so you don´t have to write it manually for every new subclass.
+   I consider it quite acceptable (taking into account that there is no other way to convert from base
+   to derived).
+
+   So, base-to-derived conversion will be done as follows:
+T_MyDerived *myderived__get_by_mybase(const T_MyBase *me_super) {
+	T_MyDerived *p_derived = NULL;
+
+	if (instanceof_myderived(me_super)){
+		p_derived = OOC_GET_CONTAINER_PT(
+				T_MyDerived,
+				super.mybase,
+				me_super
+				);
+	} else {
+		//-- TODO: probably add some run-time error
+	}
+
+	return p_derived;
+}
+
+   Let´s get to virtual methods implementation for derived class. The derived class needs access to the
+   vtable of base class. So, we should add function to base class for that:
+
+const T_MyBase_VTable *_mybase__vtable__get(void) {
+	_vtable_init();
+	return &_vtable;
+}
+
+   This function is considered as "protected", i.e. it is expected to be called from subclasses only. I
+   found it useful to add the underscore prefix to "protected" functions.
+
+   Now, subclass can call _mybase__vtable__get to get pointer to the vtable of base class. Let´s
+   implement virtual methods:
+
+static void _some_method(T_MyBase *me_super, int a, int b) {
+	//-- call method of superclass (if we need implementation inheritance as well)
+	_mybase__vtable__get()->p_some_method(me_super, a, b);
+
+	T_MyDerived *me = myderived__get_by_mybase(me_super);
+
+	/* ... */
+}
+
+/**
+ * Destructor (virtual)
+ */
+static void _dtor(T_MyBase *me_super) {
+	T_MyDerived *me = myderived__get_by_mybase(me_super);
+
+	/* ... some destruct code ... */
+
+	// NOTE: this is a subclass, so that after performing destruction code,
+	// we should call desctructor of superclass:
+	_mybase__vtable__get()->p_dtor(me_super);
+}
+
+/**
+ * Memory deallocator (virtual)
+ */
+static void _free(T_MyBase *me_super) {
+	//-- we need to free pointer to "outer" struct, not to "inner" one.
+	T_MyDerived *me = myderived__get_by_mybase(me_super);
+	free(me);
+}
+
+   As you see, in these implementations we use myderived__get_by_mybase() heavily, since these functions
+   take pointer to base class, not to derived class (see prototypes of virtual functions above:
+   T_MyBase_Dtor, etc). Additionally, we should call method of base class where appropriate. Say, in
+   _dtor it is mandatory (because we clearly want base class to perform its needed cleanup), but in
+   _some_method() we might not want to inherit implementation, so we could omit call of base method
+   there.
+
+   Now we need to create vtable for our derived class. Here it is:
+static T_MyBase_VTable _super_vtable;
+static OOC_BOOL _bool_vtable_initialized = 0;
+
+   And the function that initializes it, it´s similar to that of base class, but here we first copy
+   vtable from base, and then override what we want:
+
+static void _vtable_init() {
+	if (!_bool_vtable_initialized){
+		//-- firstly, just copy vtable of base class
+		_super_vtable = *_mybase__vtable__get();
+
+		//-- and then, specify what we need to override.
+		//   There are _dtor and _free, inevitably.
+		_super_vtable.p_dtor           = _dtor;
+		_super_vtable.p_free           = _free;
+
+		//-- and then, our own virtual methods. If we don´t override them here,
+		//   it´s ok: then, methods of base class will be called.
+		_super_vtable.p_some_method    = _some_method;
+
+		//-- remember that vtable is already initialized.
+		_bool_vtable_initialized = 1;
+	}
+}
+
+   Please note that it´s quite fine not to override some method (other than _dtor and _free) : you might
+   have noticed that we´ve left p_other_method unchanged, so, it points to that of base class. We
+   couldn´t achieve this convenience if vtable is const.
+
+   Proceed to constructor now. For derived class, we create its own struct with params, which will of
+   course contain struct with base params:
+
+typedef struct S_MyDerived_CtorParams {
+	T_MyBase_CtorParams super_params;
+
+	//-- add your ctor params here
+} T_MyDerived_CtorParams;
+
+   And constructor looks as follows:
+
+void myderived__ctor(T_MyDerived *me, const T_MyDerived_CtorParams *p_params) {
+	memset(me, 0x00, sizeof(T_MyDerived));
+	mybase__ctor(&me->super.mybase, &p_params->super_params);
+
+	//-- init virtual methods
+	_vtable_init();
+	me->super.mybase.p_vtable = &_super_vtable;
+
+	//-- some construct code
+}
+
+   We´re almost done. What is missing is an allocator for our derived class:
+
+T_MyDerived *new_myderived(const T_MyDerived_CtorParams *p_params) {
+	T_MyDerived *me = (T_MyDerived *)malloc( sizeof(T_MyDerived) );
+	myderived__ctor(me, p_params);
+	return me;
+}
+
+   Note that we don´t need deallocator: for that, deallocator of base class should be used (see "Usage"
+   section below).
+
+   So if we create two instances of T_MyBase: my_base_1 and my_base_2, and one instance of T_MyDerived:
+   my_derived_1, the data and code will be arranged as follows:
+
+Some conclusions
+   Note that each instance of the class (either base or derived) has a pointer to the vtable, not the
+   vtable itself.
+
+   As an example, let´s imagine that we have one base class Shape and three derived classes: Circle,
+   Triangle, Rectangle. We would probably have lots of virtual methods for these classes, for drawing,
+   resizing, converting them, etc. And we use them in some GUI-extensive application with lots of
+   shapes: let it be 100 Circles, 100 Triangles and 100 Rectangles.
+
+   With the techniques described in this article, we end up with just 4 vtables, not 300 vtables, since
+   vtable is created for each class, not for each instance. Effectively, this is approximately what the
+   C++ compiler does for you behind the scenes when you use virtual methods (well, in fact, C++ compiler
+   can be even smarter: it can eliminate pointers to non-overridden methods, but maintaining that
+   manually in C is hardly a way to go).
+
+   So, this approach doesn´t waste your RAM, which is always insufficient in the embedded world.
+
+Usage
+   There is a very important design principle: "program to an interface, not an implementation". If you
+   haven´t heard of it, you probably should read the Design Patterns book, or at least this
+   conversation with its author.
+
+   Actually, that´s why I bothered implementing all of this in the first place: I want most of my code
+   not to care about exact object classes with which it works; instead, the code should work with some
+   common interfaces.
+
+   Say, we might have some function that works with base class and then deletes it:
+
+void my_func(T_MyBase *p_base) {
+	/* ... */
+	mybase__some_method(p_base, 1, 2);
+	/* ... */
+	delete_mybase(p_base);
+}
+
+   Then, we can equally use base or derived class for that. Consider:
+
+int main(void) {
+	//-- use base class
+	{
+		const T_MyBase_CtorParams params = {/* ... */};
+
+		T_MyBase *p_mybase = new_mybase(&params);
+		my_func(p_mybase);
+	}
+
+	//-- use derived class
+	{
+		const T_MyDerived_CtorParams params = {/* ... */};
+
+		T_MyDerived *p_myderived = new_myderived(&params);
+		T_MyBase *p_mybase_inner = myderived__mybase__get(p_myderived);
+		my_func(p_mybase_inner);
+	}
+}
+
+   In either case (with base or derived class), everything will work as expected: appropriate version of
+   some_method() will be called, and when my_func() deletes object, needed destructors will be called,
+   and memory will be freed correctly. That is, my_func() is completely unaware of exact type of object
+   it works with; it knows the interface.
+
+   Of course we may write it more compact, but I wanted to elaborate on the process more, so I´ve
+   written in in verbose manner.
+
+   Note that when we call mybase__some_method() on an instance of T_MyDerived, the actual pointer given
+   to _some_method() of derived class is a pointer to base class, wrapped into the derived one. That´s
+   why it is named me_super. And then, we can obtain a pointer to the wrapper derived instance by
+   calling myderived__get_by_mybase(me_super).
+
+   Consider this call chain, which happens when we call my_func(p_mybase_inner) :
+
+   Of course, compiler will optimize a call to inline mybase__some_method() away, but the idea is still
+   the same.
+
+Boilerplate code generator
+   Writing all this mess manually for each new class, or copy-pasting from existing classes all the time
+   would be tedious and error-prone, so I´ve written a little utility that generates base and derived
+   class templates with given names.
+
+   Here it is: https://github.com/dimonomid/ooc
+
+   The script ooc_gen.rb is written in ruby, so you need ruby for that to work.
+
+   Usage is trivial:
+   Generate base class Shape and subclass Circle:
+$> ruby ooc_gen.rb new class shape circle
+
+   Generate base class Shape and two subclasses: Circle and MyShape:
+$> ruby ooc_gen.rb new class shape circle myshape:MyShape
+
+   After either command, the directory shape containing all generated files will be created in the
+   current directory.
+
+   So that, each class name may be specified as just single lowecased (underscore-separated) word, or as
+   two words separated by colon.
+
+   If camelized version isn´t provided by user, it is autogenerated, which isn´t always what you want
+   (say, for myshape autogenerated version is Myshape. However, if you provide my_shape, then it will be
+   converted to MyShape).
+
+   In order to use generated classes, you also need for ooc.c and ooc.h, and configuration file
+   ooc_cfg.h (initially, just copy default ooc_cfg_default.h as ooc_cfg.h in your project)
+
+
+---
+
