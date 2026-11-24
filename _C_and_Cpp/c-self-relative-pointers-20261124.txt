@@ -1,0 +1,1211 @@
+filenme: c-self-relative-pointers-20261124.txt
+
+AI Overview:
+
+An autorelative pointer (also known as a self-relative pointer or offset pointer) is a pointer that stores a
+memory offset relative to its own address in memory, rather than an absolute memory address.
+
+To find the target data, the program adds the stored offset value to the memory address of the pointer itself:
+
+Key Benefits
+ * Relocatability (Position Independence): If a data structure containing autorelative pointers is copied or
+   moved to a new location in memory (e.g., via memcpy), the internal pointers remain valid without needing to
+   be updated or "fixed up," as long as the relative distance between the pointer and its target stays the
+   same.
+ * Zero-Cost Serialization: Data structures using autorelative pointers can be written directly to disk, sent
+   over a network, or memory-mapped from a file and used immediately without parsing or pointer
+   reconstruction.
+ * Shared Memory & IPC: Multiple processes can map the same shared memory block at different virtual base
+   addresses and safely traverse the pointers inside it.
+ * Memory Savings: Because offsets only need to span the distance within a specific buffer or struct rather
+   than the entire 64-bit address space, they can use smaller integer types (such as int16_t or int32_t)
+   instead of full 8-byte pointers.
+
+Common Drawbacks
+ * Addressable Memory Requirement: Because resolving the target depends on the pointer´s own memory location
+   (&offset), an autorelative pointer cannot exist purely in a CPU register or as a temporary r-value.
+ * Range Limitations: If a smaller integer type (like a 32-bit integer) is used to save space, the pointer can
+   only reference targets within ± 2 GB of itself.
+ * Null Representation: Since an offset of 0 points to the pointer itself, 0 is typically reserved as a
+   sentinel value to represent nullptr (meaning an autorelative pointer cannot point to itself). 
+
+Example (C++)
+Languages like Odin and Jai support relative pointers natively, while in C++ they are typically implemented
+using templates and operator overloading (such as boost::interprocess::offset_ptr or decodeless::offset_ptr):
+
+cpp
+
+#include <cstdint>
+
+template <typename T, typename OffsetType = int32_t>
+
+struct AutoRelativePtr {
+	OffsetType offset = 0;
+
+	// Assign from a standard pointer
+	AutoRelativePtr& operator=(T* ptr) {
+		offset = ptr ? static_cast<OffsetType>(
+				reinterpret_cast<char*>(ptr) - reinterpret_cast<char*>(this)
+				) : 0;
+		return *this;
+	}
+
+	// Resolve back to a standard pointer
+	T* get() const {
+		return offset ? reinterpret_cast<T*>(
+				const_cast<char*>(reinterpret_cast<const char*>(this)) + offset
+				) : nullptr;
+	}
+
+	T* operator->() const { return get(); }
+	T& operator*() const { return *get(); }
+};
+
+Are you looking to implement this in a specific programming language (like C++, Rust, or C), or are you
+exploring it for a particular use case such as memory-mapped files, shared memory, or custom allocators?
+
+I am looking to implement this in c language:
+
+Because C lacks templates and operator overloading, an autorelative pointer in C is best implemented using a
+signed integer typedef combined with preprocessor macros (or inline helper functions).
+
+Complete C Implementation
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// 1. Define the offset type (int32_t gives +/- 2GB range and saves 4 bytes on 64-bit systems)
+typedef int32_t rel_ptr_t;
+
+// 2. Macro to set a relative pointer to point to 'target_ptr'
+// Evaluates 'rel_ptr' and 'target_ptr' safely
+#define REL_PTR_SET(rel_ptr, target_ptr) do { \
+	const void *_t = (target_ptr); \
+	(rel_ptr) = _t ? (rel_ptr_t)((const char *)_t - (const char *)&(rel_ptr)) : 0; \
+} while (0)
+
+// 3. Macro to resolve a relative pointer back into a standard typed pointer
+#define REL_PTR_GET(type, rel_ptr) \
+	((rel_ptr) ? (type *)((char *)&(rel_ptr) + (rel_ptr)) : NULL)
+
+// --- Example Usage ---
+
+struct Node {
+	int value;
+	rel_ptr_t next; // Relative pointer to the next Node
+};
+
+int main(void) {
+	// Allocate a single contiguous buffer for two nodes
+	struct Node *buffer = malloc(sizeof(struct Node) * 2);
+	if (!buffer) return 1;
+
+	buffer[0].value = 10;
+	buffer[1].value = 20;
+
+	// Link buffer[0] -> buffer[1], and buffer[1] -> NULL
+	REL_PTR_SET(buffer[0].next, &buffer[1]);
+	REL_PTR_SET(buffer[1].next, NULL);
+
+	// Relocate the entire buffer to a completely new memory address
+	struct Node *relocated_buffer = malloc(sizeof(struct Node) * 2);
+	if (!relocated_buffer) { free(buffer); return 1; }
+
+	memcpy(relocated_buffer, buffer, sizeof(struct Node) * 2);
+	free(buffer); // Destroy the original memory
+
+	// Traverse the list in the new memory location without fixing any pointers
+	struct Node *second = REL_PTR_GET(struct Node, relocated_buffer[0].next);
+	if (second) {
+		printf("Second node value after relocation: %d\n", second->value); // Prints 20
+	}
+
+	free(relocated_buffer);
+	return 0;
+}
+
+Important C Caveats
+ * Always Pass L-Values: Because the macros take the address of the relative pointer (&(rel_ptr)), you must
+   pass an actual variable or struct member—never a temporary value or return value from a function.
+ * Strict Aliasing: Casting through (char *) or (const char *) is required by the C standard to perform
+   byte-level pointer arithmetic without triggering undefined behavior from strict aliasing rules.
+ * Self-Pointing Prohibition: 0 is reserved to represent NULL. Never assign a relative pointer to point to its
+   own exact address (REL_PTR_SET(p, &p)), as it will evaluate to 0 and read back as NULL.
+ * Contiguous Arena / Buffer: Only store relative pointers between objects allocated inside the same
+   contiguous memory block (like a custom arena, array, or memory-mapped file). Pointing between two separate
+   malloc() calls breaks relocatability because their distance is not guaranteed to stay constant.
+
+Are you building a custom arena allocator, serializing data to disk/network, or working with shared memory?
+Let me know if you´d like help structuring a specific data structure (like a tree or hash table) around this.
+
+---
+I am serializing data to disk:
+For disk serialization in C, the cleanest approach is to pack all your structs and variable-length data (like
+strings) into a single contiguous byte buffer (a bump/arena allocator), and then write that entire buffer to a
+file in a single fwrite() call.
+When you read the file back into memory (or mmap it), all internal relative pointers work immediately without
+parsing.
+
+Complete Disk Serialization Pattern in C
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef int32_t rel_ptr_t;
+
+#define REL_PTR_SET(rel_ptr, target_ptr) do { \
+	const void *_t = (target_ptr); \
+	(rel_ptr) = _t ? (rel_ptr_t)((const char *)_t - (const char *)&(rel_ptr)) : 0; \
+} while (0)
+
+#define REL_PTR_GET(type, rel_ptr) \
+	((rel_ptr) ? (type *)((char *)&(rel_ptr) + (rel_ptr)) : NULL)
+
+// --- 1. Simple Bump Arena for Building the Blob ---
+typedef struct {
+	uint8_t *buffer;
+	size_t capacity;
+	size_t offset;
+} Arena;
+
+void *arena_alloc(Arena *a, size_t size, size_t align) {
+	// Align the current offset
+	size_t padded = (a->offset + (align - 1)) & ~(align - 1);
+	if (padded + size > a->capacity) return NULL; // Out of space
+
+	void *ptr = a->buffer + padded;
+	a->offset = padded + size;
+	memset(ptr, 0, size);
+	return ptr;
+}
+
+// --- 2. Serializable Data Structures ---
+typedef struct {
+	uint32_t magic;       // File signature (e.g., 0x44415441 "DATA")
+	uint32_t version;     // Format version
+	rel_ptr_t root_item;  // Points to the first Item
+} FileHeader;
+
+typedef struct Item {
+	int32_t id;
+	rel_ptr_t name;       // Relative pointer to a null-terminated char[]
+	rel_ptr_t next;       // Relative pointer to the next struct Item
+} Item;
+
+// --- 3. Serialize to Disk ---
+int save_to_disk(const char *filename) {
+	Arena arena = { .buffer = malloc(4096), .capacity = 4096, .offset = 0 };
+	if (!arena.buffer) return -1;
+
+	// Allocate header at offset 0
+	FileHeader *hdr = arena_alloc(&arena, sizeof(FileHeader), _Alignof(FileHeader));
+	hdr->magic = 0x44415441;
+	hdr->version = 1;
+
+	// Allocate first item and its string inside the SAME arena
+	Item *item1 = arena_alloc(&arena, sizeof(Item), _Alignof(Item));
+	item1->id = 101;
+	char *str1 = arena_alloc(&arena, 6, 1);
+	memcpy(str1, "Alpha", 6);
+	REL_PTR_SET(item1->name, str1);
+
+	// Allocate second item
+	Item *item2 = arena_alloc(&arena, sizeof(Item), _Alignof(Item));
+	item2->id = 102;
+	char *str2 = arena_alloc(&arena, 5, 1);
+	memcpy(str2, "Beta", 5);
+	REL_PTR_SET(item2->name, str2);
+	REL_PTR_SET(item2->next, NULL);
+
+	// Link Header -> Item 1 -> Item 2
+	REL_PTR_SET(hdr->root_item, item1);
+	REL_PTR_SET(item1->next, item2);
+
+	// Dump the exact used bytes straight to disk
+	FILE *f = fopen(filename, "wb");
+	if (!f) { free(arena.buffer); return -1; }
+	fwrite(arena.buffer, 1, arena.offset, f);
+	fclose(f);
+
+	free(arena.buffer);
+	return 0;
+}
+
+// --- 4. Load from Disk (Zero-Copy Read) ---
+int load_from_disk(const char *filename) {
+	FILE *f = fopen(filename, "rb");
+	if (!f) return -1;
+
+	fseek(f, 0, SEEK_END);
+	long file_size = ftell(f);
+	rewind(f);
+
+	// Allocate aligned memory (malloc is guaranteed to be max_align_t aligned)
+	uint8_t *blob = malloc(file_size);
+	if (!blob) { fclose(f); return -1; }
+	fread(blob, 1, file_size, f);
+	fclose(f);
+
+	// Cast directly to FileHeader and traverse immediately
+	FileHeader *hdr = (FileHeader *)blob;
+	if (hdr->magic != 0x44415441) { free(blob); return -1; }
+
+	Item *curr = REL_PTR_GET(Item, hdr->root_item);
+	while (curr != NULL) {
+		const char *name = REL_PTR_GET(const char, curr->name);
+		printf("Item %d: %s\n", curr->id, name);
+		curr = REL_PTR_GET(Item, curr->next);
+	}
+
+	free(blob);
+	return 0;
+}
+
+int main(void) {
+	save_to_disk("data.bin");
+	load_from_disk("data.bin");
+	return 0;
+}
+
+Critical Disk Serialization Rules
+ * Do Not Reallocate the Arena While Building: Never use realloc() on your arena buffer while you are still
+   constructing relative pointers. If realloc() moves the buffer, REL_PTR_SET will still work for new
+   pointers, unless you saved raw Item* variables on the stack before the realloc()—those stack pointers will
+   become dangling. Pre-allocate a large enough buffer, or build in two passes (Pass 1: calculate sizes; Pass
+   2: allocate once and write).
+ * Enforce Alignment: Notice _Alignof(T) in arena_alloc. If you store a string of 5 bytes ("Beta\0"), the next
+   struct would sit at an unaligned byte offset unless you pad it. Unaligned struct access causes crashes on
+   some CPUs (like older ARM) and slows down x86.
+ * Include a File Header: Always place a fixed-size header at offset 0 containing a magic number, version, and
+   a root rel_ptr_t so you know where traversal starts when loading the file.
+ * Endianness & Padding Portability: Raw memory dumps depend on the CPU´s endianness (little-endian vs.
+   big-endian) and compiler struct padding. If files are shared across different OSes or architectures (e.g.,
+   x86 Windows to ARM Linux), use fixed-width types (int32_t, uint64_t) and explicitly pad your structs so
+   compilers don´t insert hidden bytes.
+
+Would you like to see how to handle dynamic arena growth safely without breaking pointers, or how to load the
+file using POSIX mmap() for instant, zero-RAM-copy access?
+
+---
+I am building custom arena allocator:
+
+When combining a custom arena allocator with autorelative pointers for disk serialization, the biggest trap is
+buffer relocation during realloc().
+
+If your arena runs out of space and calls realloc(), the OS might move the buffer to a new memory address.
+While the relative offsets inside the buffer remain valid, any standard C pointers (Node*) you are holding in
+local variables on the stack immediately become dangling pointers.
+
+To solve this safely, never expose raw T* pointers while building the arena. Instead, hand out integer offsets
+(handles) from your allocator, and resolve them to pointers only momentarily when reading or writing fields.
+
+Safe Arena Allocator + Relative Pointer Design in C
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef int32_t rel_ptr_t;
+typedef uint32_t arena_off_t; // Safe handle returned by the arena (0 = invalid/null)
+
+// --- 1. Growable Contiguous Arena ---
+typedef struct {
+	uint8_t *data;
+	size_t used;
+	size_t capacity;
+} Arena;
+
+int arena_init(Arena *a, size_t initial_cap) {
+	a->data = malloc(initial_cap);
+	if (!a->data) return -1;
+	a->used = 0;
+	a->capacity = initial_cap;
+	return 0;
+}
+
+// Allocates aligned bytes and returns an OFFSET (not a raw pointer!)
+arena_off_t arena_alloc(Arena *a, size_t size, size_t align) {
+	size_t padded = (a->used + (align - 1)) & ~(align - 1);
+	size_t required = padded + size;
+
+	// Grow buffer safely if needed
+	if (required > a->capacity) {
+		size_t new_cap = a->capacity ? a->capacity * 2 : 1024;
+		while (new_cap < required) new_cap *= 2;
+
+		uint8_t *new_data = realloc(a->data, new_cap);
+		if (!new_data) return 0; // Allocation failed
+		a->data = new_data;
+		a->capacity = new_cap;
+	}
+
+	// Zero out padding + new allocation (prevents uninitialized garbage on disk)
+	memset(a->data + a->used, 0, required - a->used);
+	a->used = required;
+	return (arena_off_t)padded;
+}
+
+// Helper to resolve an arena offset to a temporary C pointer
+#define ARENA_PTR(arena, type, off) \
+	((type *)((arena)->data + (off)))
+
+// Helper to link two arena offsets using an autorelative pointer
+// 'field_off' is the byte offset of the rel_ptr_t member itself
+// 'target_off' is the byte offset of the target object (or 0 for NULL)
+static inline void arena_set_rel(Arena *a, arena_off_t field_off, arena_off_t target_off) {
+	rel_ptr_t *rel = (rel_ptr_t *)(a->data + field_off);
+	*rel = target_off ? (rel_ptr_t)((int64_t)target_off - (int64_t)field_off) : 0;
+}
+
+// Macro to read a relative pointer normally (for traversal or after loading from disk)
+#define REL_PTR_GET(type, rel_ptr) \
+	((rel_ptr) ? (type *)((char *)&(rel_ptr) + (rel_ptr)) : NULL)
+
+// --- 2. Example Usage ---
+typedef struct {
+	uint32_t magic;
+	rel_ptr_t head;
+} Header;
+
+typedef struct {
+	int32_t value;
+	rel_ptr_t next;
+} Node;
+
+int main(void) {
+	Arena arena;
+
+	// Start intentionally tiny (16 bytes) to force realloc() during construction
+	arena_init(&arena, 16);
+
+	// Offset 0 is always the Header
+	arena_off_t hdr_off = arena_alloc(&arena, sizeof(Header), _Alignof(Header));
+	ARENA_PTR(&arena, Header, hdr_off)->magic = 0xCAFEBABE;
+
+	// Allocate Node 1 and Node 2 (this triggers realloc!)
+	arena_off_t n1_off = arena_alloc(&arena, sizeof(Node), _Alignof(Node));
+	ARENA_PTR(&arena, Node, n1_off)->value = 42;
+
+	arena_off_t n2_off = arena_alloc(&arena, sizeof(Node), _Alignof(Node));
+	ARENA_PTR(&arena, Node, n2_off)->value = 99;
+
+	// Link Header -> Node 1 -> Node 2 using offsets (100% immune to realloc)
+	arena_set_rel(&arena, hdr_off + offsetof(Header, head), n1_off);
+	arena_set_rel(&arena, n1_off + offsetof(Node, next), n2_off);
+	arena_set_rel(&arena, n2_off + offsetof(Node, next), 0); // NULL
+
+	// Write directly to disk
+	FILE *f = fopen("arena.bin", "wb");
+	if (f) {
+		fwrite(arena.data, 1, arena.used, f);
+		fclose(f);
+	}
+
+	// Verify traversal in memory using standard relative pointers
+	Header *hdr = ARENA_PTR(&arena, Header, 0);
+	for (Node *curr = REL_PTR_GET(Node, hdr->head); curr; curr = REL_PTR_GET(Node, curr->next)) {
+		printf("Node value: %d\n", curr->value);
+	}
+
+	free(arena.data);
+	return 0;
+}
+
+Key Architectural Takeaways
+ * Build with Offsets, Read with Relative Pointers: During construction, work strictly with arena_off_t and
+   offsetof(). Never store the result of ARENA_PTR() across another arena_alloc() call, because arena_alloc()
+   might realloc() the underlying buffer. Once construction is finished (or after reading the file from disk),
+   traverse freely with REL_PTR_GET().
+ * Zero Padding Bytes Before Writing: Notice memset(a->data + a->used, 0, required - a->used). This zeroes
+   both the allocated struct and any alignment padding gaps between allocations. Without this, uninitialized
+   heap memory gets written to your file—causing non-deterministic file hashes and potential security leaks.
+ * Reserve Offset 0 for the Header: Placing the file header at offset 0 ensures every subsequent allocation
+   has a non-zero arena_off_t, allowing 0 to cleanly represent NULL in arena_set_rel().
+
+Would you like to add virtual memory reservation (using mmap / VirtualAlloc to reserve address space upfront
+so the buffer never moves), or look into handling cyclic graphs and hash tables inside this arena?
+
+---
+I would like to add virtual memory reservation (using mmap / VirtualAlloc to reserve address space upfront so
+the buffer never moves):
+
+Reserving virtual address space upfront is the gold-standard pattern for arena allocators paired with relative
+pointers. Because the base address never changes, standard C pointers (Node*) remain valid throughout the
+entire build phase, and the OS only backs pages with physical RAM as you actually touch them.
+
+Cross-Platform Virtual Memory Arena in C
+Here is a clean, cross-platform implementation using VirtualAlloc on Windows and mmap + mprotect on POSIX
+(Linux/macOS):
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+
+#ifdef _WIN32
+	#define WIN32_LEAN_AND_MEAN
+	#include <windows.h>
+#else
+	#include <sys/mman.h>
+	#include <unistd.h>
+#endif
+
+typedef int32_t rel_ptr_t;
+
+#define REL_PTR_SET(rel_ptr, target_ptr) do { \
+	const void *_t = (target_ptr); \
+	(rel_ptr) = _t ? (rel_ptr_t)((const char *)_t - (const char *)&(rel_ptr)) : 0; \
+} while (0)
+
+#define REL_PTR_GET(type, rel_ptr) \
+	((rel_ptr) ? (type *)((char *)&(rel_ptr) + (rel_ptr)) : NULL)
+
+// --- 1. Virtual Memory Arena ---
+typedef struct {
+	uint8_t *base;
+	size_t reserved;  // Total virtual address space reserved (e.g., 1 GB)
+	size_t committed; // Physical RAM currently backed by the OS
+	size_t used;      // Bytes allocated to user structs
+	size_t page_size; // System page size (typically 4 KB or 16 KB)
+} VMArena;
+
+static size_t get_system_page_size(void) {
+#ifdef _WIN32
+	SYSTEM_INFO si;
+	GetSystemInfo(&si);
+	return (size_t)si.dwPageSize;
+#else
+	return (size_t)sysconf(_SC_PAGESIZE);
+#endif
+}
+
+int vm_arena_init(VMArena *a, size_t reserve_bytes) {
+	memset(a, 0, sizeof(*a));
+	a->page_size = get_system_page_size();
+
+	// Round reservation up to a multiple of page_size
+	a->reserved = (reserve_bytes + a->page_size - 1) & ~(a->page_size - 1);
+
+#ifdef _WIN32
+	// Reserve address space without allocating physical RAM
+	a->base = (uint8_t *)VirtualAlloc(NULL, a->reserved, MEM_RESERVE, PAGE_NOACCESS);
+	if (!a->base) return -1;
+#else
+	// Reserve address space with PROT_NONE (no physical RAM backed yet)
+	void *ptr = mmap(NULL, a->reserved, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (ptr == MAP_FAILED) return -1;
+	a->base = (uint8_t *)ptr;
+#endif
+
+	return 0;
+}
+
+void *vm_arena_alloc(VMArena *a, size_t size, size_t align) {
+	size_t padded = (a->used + (align - 1)) & ~(align - 1);
+	size_t required = padded + size;
+
+	if (required > a->reserved) return NULL; // Exceeded max virtual reservation
+
+	// Commit new OS pages on demand if 'required' passes 'committed'
+	if (required > a->committed) {
+		size_t new_commit = (required + a->page_size - 1) & ~(a->page_size - 1);
+		if (new_commit > a->reserved) new_commit = a->reserved;
+
+		size_t commit_delta = new_commit - a->committed;
+		uint8_t *commit_addr = a->base + a->committed;
+
+#ifdef _WIN32
+		if (!VirtualAlloc(commit_addr, commit_delta, MEM_COMMIT, PAGE_READWRITE)) {
+			return NULL;
+		}
+#else
+		if (mprotect(commit_addr, commit_delta, PROT_READ | PROT_WRITE) != 0) {
+			return NULL;
+		}
+#endif
+		a->committed = new_commit;
+	}
+
+	// Newly committed OS pages are guaranteed zero-filled by the kernel
+	void *ptr = a->base + padded;
+	a->used = required;
+	return ptr;
+}
+
+void vm_arena_destroy(VMArena *a) {
+	if (!a->base) return;
+#ifdef _WIN32
+	VirtualFree(a->base, 0, MEM_RELEASE);
+#else
+	munmap(a->base, a->reserved);
+#endif
+	memset(a, 0, sizeof(*a));
+}
+
+// --- 2. Example Usage ---
+typedef struct {
+	uint32_t magic;
+	rel_ptr_t head;
+} Header;
+
+typedef struct {
+	int32_t value;
+	rel_ptr_t next;
+} Node;
+
+int main(void) {
+	VMArena arena;
+
+	// Reserve 1 GB of virtual address space (uses 0 bytes of physical RAM upfront)
+	if (vm_arena_init(&arena, 1024ULL * 1024ULL * 1024ULL) != 0) {
+		return 1;
+	}
+
+	// Direct pointers are now completely safe across future allocations!
+	Header *hdr = vm_arena_alloc(&arena, sizeof(Header), _Alignof(Header));
+	hdr->magic = 0xCAFEBABE;
+
+	Node *n1 = vm_arena_alloc(&arena, sizeof(Node), _Alignof(Node));
+	n1->value = 42;
+
+	Node *n2 = vm_arena_alloc(&arena, sizeof(Node), _Alignof(Node));
+	n2->value = 99;
+
+	// Link directly using REL_PTR_SET
+	REL_PTR_SET(hdr->head, n1);
+	REL_PTR_SET(n1->next, n2);
+	REL_PTR_SET(n2->next, NULL);
+
+	// Serialize ONLY the 'used' bytes to disk (not the 1 GB reservation)
+	FILE *f = fopen("vm_arena.bin", "wb");
+	if (f) {
+		fwrite(arena.base, 1, arena.used, f);
+		fclose(f);
+	}
+
+	printf("Reserved: %zu MB | Committed: %zu KB | Used: %zu B\n",
+			arena.reserved / (1024 * 1024),
+			arena.committed / 1024,
+			arena.used);
+
+	vm_arena_destroy(&arena);
+	return 0;
+}
+
+Why This Works So Well
+ * Zero Relocation: arena.base is fixed for the lifetime of the arena. You can hold onto Header*, Node*, or
+   char* variables freely without ever worrying about dangling pointers.
+ * Automatic Zero-Initialization: Both VirtualAlloc(..., MEM_COMMIT) and mmap(..., MAP_ANONYMOUS) guarantee
+   that freshly mapped pages are zeroed by the OS kernel, keeping your serialized file clean and deterministic
+   without extra memset calls.
+ * Watch Your int32_t Range: Because rel_ptr_t is a signed 32-bit integer, cap your reserve_bytes at 2 GB
+   (2ULL * 1024 * 1024 * 1024). If you reserve more than 2 GB, an object near the end of the arena could be
+   farther than INT32_MAX away from an object near the start, causing silent integer overflow in REL_PTR_SET.
+
+Would you like to add arena reset/reuse (decommitting pages so you can reuse the arena across multiple
+serialization cycles without unmapping), or see how to memory-map (mmap / MapViewOfFile) the file directly on
+load?
+
+---
+arena reset/reuse
+
+To reuse a VMArena across multiple serialization cycles without calling munmap/VirtualFree, add a
+vm_arena_reset() function.
+
+There are two ways to reset:
+ * Soft Reset (Fastest): Keep a small "high-water" amount of committed pages warm (e.g., 64 KB) and just reset
+   used = 0 and zero out the dirty memory. This avoids OS syscalls on your next cycle.
+ * Hard Decommit (Lowest RAM): Release physical RAM pages beyond a chosen retention threshold back to the OS
+   while keeping the virtual address reservation intact.
+
+Adding vm_arena_reset to Your Arena
+Add this function right below vm_arena_alloc:
+
+// Reset the arena for reuse without releasing the virtual address reservation.
+// 'keep_committed_bytes' lets you keep a small warm cache of pages (e.g., 64 * 1024)
+// to avoid page-fault syscalls on the next cycle. Pass 0 to decommit everything.
+void vm_arena_reset(VMArena *a, size_t keep_committed_bytes) {
+	if (!a->base || a->used == 0) return;
+
+	// 1. Round retention threshold up to a page boundary
+	size_t retain = (keep_committed_bytes + a->page_size - 1) & ~(a->page_size - 1);
+	if (retain > a->committed) {
+		retain = a->committed;
+	}
+
+	// 2. Zero out the portion we are keeping warm so old data doesn't leak into new files
+	size_t zero_bytes = (a->used < retain) ? a->used : retain;
+	if (zero_bytes > 0) {
+		memset(a->base, 0, zero_bytes);
+	}
+
+	// 3. Decommit physical RAM above the retention threshold
+	if (a->committed > retain) {
+		uint8_t *decommit_addr = a->base + retain;
+		size_t decommit_size = a->committed - retain;
+
+#ifdef _WIN32
+		// Releases physical RAM back to Windows, keeps address space reserved
+		VirtualFree(decommit_addr, decommit_size, MEM_DECOMMIT);
+#else
+		// POSIX: mprotect(PROT_NONE) + madvise(MADV_DONTNEED) drops physical pages
+		// and guarantees they re-fault as zero-filled if committed again later
+		mprotect(decommit_addr, decommit_size, PROT_NONE);
+		madvise(decommit_addr, decommit_size, MADV_DONTNEED);
+#endif
+		a->committed = retain;
+	}
+
+	// 4. Reset bump pointer
+	a->used = 0;
+}
+
+Example Serialization Loop
+
+int main(void) {
+	VMArena arena;
+	vm_arena_init(&arena, 1024ULL * 1024ULL * 1024ULL); // Reserve 1 GB once
+
+	const char *files[] = { "batch_1.bin", "batch_2.bin", "batch_3.bin" };
+
+	for (int i = 0; i < 3; i++) {
+		// Build data structure in arena...
+		Header *hdr = vm_arena_alloc(&arena, sizeof(Header), _Alignof(Header));
+		hdr->magic = 0xCAFEBABE;
+
+		Node *n = vm_arena_alloc(&arena, sizeof(Node), _Alignof(Node));
+		n->value = (i + 1) * 100;
+		REL_PTR_SET(hdr->head, n);
+		REL_PTR_SET(n->next, NULL);
+
+		// Write batch to disk
+		FILE *f = fopen(files[i], "wb");
+		if (f) {
+			fwrite(arena.base, 1, arena.used, f);
+			fclose(f);
+		}
+
+		// Reset for next batch: keep 64 KB warm in RAM, release any excess pages
+		vm_arena_reset(&arena, 64 * 1024);
+	}
+
+	vm_arena_destroy(&arena);
+	return 0;
+}
+
+Key Details for Disk Serialization
+ * Always Zero Retained Pages: Notice memset(a->base, 0, zero_bytes). Because retained pages are not
+   re-faulted by the kernel, stale bytes from batch_1.bin would remain in alignment padding gaps of
+   batch_2.bin if you didn't zero them.
+ * Linux vs. macOS madvise: On Linux, MADV_DONTNEED immediately frees anonymous physical pages and zeroes them
+   on next access. On macOS/BSD, MADV_DONTNEED is only a hint (it won't necessarily zero pages immediately),
+   so keeping mprotect(..., PROT_NONE) paired with memset on the retained portion ensures safety across both
+   OSes.
+ * Header Note on Linux: To use madvise and MADV_DONTNEED with strict C standards (-std=c11 or -std=c17),
+   define #define _DEFAULT_SOURCE at the very top of your .c file before #include <sys/mman.h>.
+
+Would you like to see how to memory-map the serialized file on read (mmap / MapViewOfFile) for zero-copy
+loading, or add temporary scratch checkpoints (saving and restoring arena.used mid-build)?
+
+
+---
+memory-map the serialized file on read:
+
+Memory-mapping the file on read is where autorelative pointers truly shine: the OS maps the file directly into
+your virtual address space with zero malloc calls, zero fread copies, and instant startup, even for
+multi-hundred-megabyte files.
+
+Cross-Platform Zero-Copy File Loader in C
+Because your data is read-only when mapped from disk, you should also define a const-safe REL_PTR_GET_CONST
+macro so you don't accidentally write to read-only mapped memory (which triggers a segmentation fault).
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+
+#ifdef _WIN32
+	#define WIN32_LEAN_AND_MEAN
+	#include <windows.h>
+#else
+	#include <fcntl.h>
+	#include <sys/mman.h>
+	#include <sys/stat.h>
+	#include <unistd.h>
+#endif
+
+typedef int32_t rel_ptr_t;
+
+// Const-safe relative pointer resolution for read-only memory-mapped files
+#define REL_PTR_GET_CONST(type, rel_ptr) \
+	((rel_ptr) ? (const type *)((const char *)&(rel_ptr) + (rel_ptr)) : NULL)
+
+// --- 1. Cross-Platform Mapped File Wrapper ---
+typedef struct {
+	const uint8_t *data;
+	size_t size;
+#ifdef _WIN32
+	HANDLE file_handle;
+	HANDLE map_handle;
+#else
+	int fd;
+#endif
+} MappedFile;
+
+int mapped_file_open(MappedFile *mf, const char *path) {
+	memset(mf, 0, sizeof(*mf));
+
+#ifdef _WIN32
+	mf->file_handle = CreateFileA(
+			path, GENERIC_READ, FILE_SHARE_READ, NULL,
+			OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL
+			);
+	if (mf->file_handle == INVALID_HANDLE_VALUE) return -1;
+
+	LARGE_INTEGER file_size;
+	if (!GetFileSizeEx(mf->file_handle, &file_size) || file_size.QuadPart == 0) {
+		CloseHandle(mf->file_handle);
+		return -1;
+	}
+	mf->size = (size_t)file_size.QuadPart;
+
+	mf->map_handle = CreateFileMappingA(
+			mf->file_handle, NULL, PAGE_READONLY, 0, 0, NULL
+			);
+	if (!mf->map_handle) {
+		CloseHandle(mf->file_handle);
+		return -1;
+	}
+
+	mf->data = (const uint8_t *)MapViewOfFile(
+			mf->map_handle, FILE_MAP_READ, 0, 0, 0
+			);
+	if (!mf->data) {
+		CloseHandle(mf->map_handle);
+		CloseHandle(mf->file_handle);
+		return -1;
+	}
+#else
+	mf->fd = open(path, O_RDONLY);
+	if (mf->fd < 0) return -1;
+
+	struct stat st;
+	if (fstat(mf->fd, &st) != 0 || st.st_size <= 0) {
+		close(mf->fd);
+		return -1;
+	}
+	mf->size = (size_t)st.st_size;
+
+	void *ptr = mmap(NULL, mf->size, PROT_READ, MAP_PRIVATE, mf->fd, 0);
+	if (ptr == MAP_FAILED) {
+		close(mf->fd);
+		return -1;
+	}
+	mf->data = (const uint8_t *)ptr;
+#endif
+
+	return 0;
+}
+
+void mapped_file_close(MappedFile *mf) {
+	if (!mf->data) return;
+
+#ifdef _WIN32
+	UnmapViewOfFile(mf->data);
+	CloseHandle(mf->map_handle);
+	CloseHandle(mf->file_handle);
+#else
+	munmap((void *)mf->data, mf->size);
+	close(mf->fd);
+#endif
+
+	memset(mf, 0, sizeof(*mf));
+}
+
+// --- 2. Example Usage (Reading the Batch File Saved Earlier) ---
+typedef struct {
+	uint32_t magic;
+	rel_ptr_t head;
+} Header;
+
+typedef struct {
+	int32_t value;
+	rel_ptr_t next;
+} Node;
+
+int main(void) {
+	MappedFile mf;
+	if (mapped_file_open(&mf, "batch_1.bin") != 0) {
+		perror("Failed to map file");
+		return 1;
+	}
+
+	// Basic bounds & magic validation before dereferencing any pointers
+	if (mf.size < sizeof(Header)) {
+		mapped_file_close(&mf);
+		return 1;
+	}
+
+	const Header *hdr = (const Header *)mf.data;
+	if (hdr->magic != 0xCAFEBABE) {
+		fprintf(stderr, "Invalid file format\n");
+		mapped_file_close(&mf);
+		return 1;
+	}
+
+	// Traverse directly in the OS page cache with zero copies!
+	const Node *curr = REL_PTR_GET_CONST(Node, hdr->head);
+	while (curr != NULL) {
+		printf("Mapped Node value: %d\n", curr->value);
+		curr = REL_PTR_GET_CONST(Node, curr->next);
+	}
+
+	mapped_file_close(&mf);
+	return 0;
+}
+
+Important Safety Checks for Memory-Mapped Relative Pointers
+ * Alignment Is Guaranteed at Offset 0: Both mmap() and MapViewOfFile() always align the start of the mapped
+   view (mf.data) to the system page size (at least 4096 bytes), so every aligned offset inside your arena
+   retains its exact alignment on load.
+ * Validate Offsets on Untrusted Files: If your program ever opens files that could be corrupted, truncated,
+   or tampered with, a corrupted rel_ptr_t could point outside [mf.data, mf.data + mf.size) and crash your
+   process with SIGSEGV. For untrusted files, wrap resolution in a bounds-checked helper:
+
+static inline const void *rel_ptr_safe (
+	const MappedFile *mf, const rel_ptr_t *rel, size_t target_size, size_t target_align
+) {
+	if (!*rel) return NULL;
+	const uint8_t *target = (const uint8_t *)rel + *rel;
+	const uint8_t *end = mf->data + mf->size;
+	if (target < mf->data || target > end - target_size) return NULL;
+	if (((uintptr_t)target & (target_align - 1)) != 0) return NULL;
+	return target;
+}
+
+Do Not Modify or Delete the File While Mapped: On POSIX, truncating a file while it is mmap-ped will trigger
+SIGBUS when reading past the new end. On Windows, FILE_SHARE_READ automatically prevents other processes from
+deleting or writing to the file until mapped_file_close() is called.
+
+Would you like to explore how to store hash tables or dynamic arrays inside this arena format for fast O(1)
+lookups on mapped files, or add file checksums / versioning to the header?
+
+
+---
+store hash tables or dynamic arrays:
+
+To store dynamic arrays and hash tables inside your serialized arena, design them as flat, contiguous "spans"
+(rel_ptr_t + uint32_t count) rather than pointer-chasing linked lists.
+
+Flat arrays are faster on CPU caches, take fewer bytes on disk, and give you O(1) random access or O(1) hash
+lookups directly inside a memory-mapped file.
+
+1. Flat Dynamic Array (RelSpan)
+Because a memory-mapped file is immutable once written to disk, a "dynamic array" inside the file is stored as
+a relative pointer to a contiguous array of elements + an element count.
+
+During the build phase, you either know the count upfront or collect items in a temporary scratch buffer, then
+copy them into your VMArena as one contiguous block.
+
+typedef struct {
+	uint32_t count;
+	rel_ptr_t items; // Points to an array of T[count]
+} RelSpan;
+
+// Helper to resolve element 'i' safely
+#define REL_SPAN_GET(type, span, index) \
+	(&(REL_PTR_GET_CONST(type, (span).items))[(index)])
+
+2. Flat Open-Addressed Hash Table (RelHashMap)
+For O(1) lookups in a memory-mapped file, use open addressing with linear probing.
+
+ * Cache-Friendly: Everything sits in a single contiguous array of slots—no linked-list bucket pointers to
+   chase across pages.
+ * Fast Empty Check: Store a uint64_t hash in each slot (reserving hash == 0 for an empty slot). During
+   lookup, compare the 64-bit hashes first before touching the string pointer—eliminating 99.9% of unnecessary
+   string dereferences and page faults.
+
+Complete C Example: Building & Querying a Mapped Hash Table
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef int32_t rel_ptr_t;
+
+#define REL_PTR_SET(rel_ptr, target_ptr) do { \
+	const void *_t = (target_ptr); \
+	(rel_ptr) = _t ? (rel_ptr_t)((const char *)_t - (const char *)&(rel_ptr)) : 0; \
+} while (0)
+
+#define REL_PTR_GET(type, rel_ptr) \
+	((rel_ptr) ? (type *)((char *)&(rel_ptr) + (rel_ptr)) : NULL)
+
+#define REL_PTR_GET_CONST(type, rel_ptr) \
+    ((rel_ptr) ? (const type *)((const char *)&(rel_ptr) + (rel_ptr)) : NULL)
+
+// --- 1. Hash Function (FNV-1a 64-bit, never returns 0) ---
+static uint64_t hash_key(const char *str) {
+	uint64_t h = 14695981039346656037ULL;
+	for (const unsigned char *p = (const unsigned char *)str; *p; p++) {
+		h ^= *p;
+		h *= 1099511628211ULL;
+	}
+	return h ? h : 1; // Reserve 0 to mean "empty slot"
+}
+
+// --- 2. Serializable Hash Table Structures ---
+typedef struct {
+	uint64_t hash;   // 0 = empty slot
+	rel_ptr_t key;   // Relative pointer to null-terminated key string
+	int32_t value;   // Stored payload (or another rel_ptr_t to a struct)
+	uint32_t _pad;   // Explicit padding for 8-byte alignment
+} MapSlot;
+
+typedef struct {
+	uint32_t capacity; // Always a power of 2 (e.g., 16, 64, 1024)
+	uint32_t count;    // Number of active entries
+	rel_ptr_t slots;   // Points to MapSlot[capacity]
+} RelHashMap;
+
+typedef struct {
+	uint32_t magic;
+	RelHashMap index;  // Embedded directly in the header
+} FileHeader;
+
+// --- 3. Build Helper (Writes directly into your VMArena) ---
+// Assumes 'arena_alloc(void *ctx, size_t size, size_t align)' from earlier
+void rel_map_init(RelHashMap *map, MapSlot *allocated_slots, uint32_t power_of_two_cap) {
+	map->capacity = power_of_two_cap;
+	map->count = 0;
+	REL_PTR_SET(map->slots, allocated_slots);
+}
+
+int rel_map_insert(RelHashMap *map, const char *arena_key_str, int32_t value) {
+	if (map->count * 4 >= map->capacity * 3) return -1; // Keep load factor <= 75%
+
+	MapSlot *slots = REL_PTR_GET(MapSlot, map->slots);
+	uint64_t h = hash_key(arena_key_str);
+	uint32_t mask = map->capacity - 1;
+	uint32_t idx = (uint32_t)h & mask;
+
+	while (slots[idx].hash != 0) {
+		if (slots[idx].hash == h) {
+			const char *existing = REL_PTR_GET_CONST(char, slots[idx].key);
+			if (strcmp(existing, arena_key_str) == 0) {
+				slots[idx].value = value; // Update existing
+				return 0;
+			}
+		}
+		idx = (idx + 1) & mask; // Linear probe
+	}
+
+	slots[idx].hash = h;
+	REL_PTR_SET(slots[idx].key, arena_key_str);
+	slots[idx].value = value;
+	map->count++;
+	return 0;
+}
+
+// --- 4. Zero-Copy Lookup (Works directly on read-only MappedFile!) ---
+const MapSlot *rel_map_find(const RelHashMap *map, const char *query_key) {
+	if (map->capacity == 0 || map->count == 0) return NULL;
+
+	const MapSlot *slots = REL_PTR_GET_CONST(MapSlot, map->slots);
+	uint64_t h = hash_key(query_key);
+	uint32_t mask = map->capacity - 1;
+	uint32_t idx = (uint32_t)h & mask;
+
+	while (slots[idx].hash != 0) {
+		if (slots[idx].hash == h) {
+			const char *existing = REL_PTR_GET_CONST(char, slots[idx].key);
+			if (strcmp(existing, query_key) == 0) {
+				return &slots[idx];
+			}
+		}
+		idx = (idx + 1) & mask;
+	}
+	return NULL; // Not found
+}
+
+Best Practices for Flat Hash Tables in Arenas
+ * Size the Table Upfront (70% Load Factor): Choose capacity as the next power of two above (expected_items *
+   10) / 7. Keeping at least 25–30% of slots empty prevents long linear-probing chains and guarantees
+   near-O(1) lookups.
+ * Allocate Strings Anywhere in the Arena: Notice arena_key_str is just a char* allocated inside the same
+   VMArena. Each MapSlot stores a compact rel_ptr_t pointing to its string wherever it landed in the arena.
+ * Deterministic Hash Function: Never use randomized hash seeds (like rand() or ASLR-salted hashes) when
+   writing hash tables to disk—your lookup function on load must compute the exact same hash value that the
+   writer computed.
+
+Would you like to see how to build dynamic arrays of unknown size using a scratch arena (or linked-chunk
+builder) before flattening them into the final serialized arena?
+
+
+---
+build dynamic arrays of unknown size:
+
+When you don't know the final length of an array upfront while building your serialized file, collect elements
+in a temporary scratch arena (or linked list of chunks) during construction, then flatten them into one
+contiguous RelSpan inside your main VMArena when finished.
+
+This keeps your final disk format 100% contiguous and cache-friendly without wasting space or leaving dead
+gaps inside the serialized file.
+
+Two-Arena Pattern: Scratch Builder -> Final RelSpan
+
+Use a second VMArena as a scratch arena. You can push elements of unknown count into a linked list of small
+chunks in the scratch arena, call builder_finish() to copy them contiguously into your main output arena, and
+then reset the scratch arena for the next array.
+
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+typedef int32_t rel_ptr_t;
+
+#define REL_PTR_SET(rel_ptr, target_ptr) do { \
+	const void *_t = (target_ptr); \
+	(rel_ptr) = _t ? (rel_ptr_t)((const char *)_t - (const char *)&(rel_ptr)) : 0; \
+} while (0)
+
+#define REL_PTR_GET_CONST(type, rel_ptr) \
+	((rel_ptr) ? (const type *)((const char *)&(rel_ptr) + (rel_ptr)) : NULL)
+
+// --- 1. Final Disk Representation (Contiguous Flat Span) ---
+typedef struct {
+	uint32_t count;
+	rel_ptr_t items; // Points to contiguous T[count] in the main arena
+} RelSpan;
+
+#define REL_SPAN_GET(type, span, index) \
+	(&(REL_PTR_GET_CONST(type, (span).items))[(index)])
+
+// --- 2. Scratch Chunked Array Builder ---
+#define CHUNK_ITEMS 64
+
+typedef struct ArrayChunk {
+	struct ArrayChunk *next;
+	uint32_t count;
+	alignas(16) uint8_t data[]; // Flexible array member for raw element bytes
+} ArrayChunk;
+
+typedef struct {
+	VMArena *scratch;      // Temporary scratch arena (never written to disk)
+	size_t elem_size;
+	size_t elem_align;
+	uint32_t total_count;
+	ArrayChunk *head;
+	ArrayChunk *tail;
+} SpanBuilder;
+
+void span_builder_init(SpanBuilder *b, VMArena *scratch, size_t elem_size, size_t elem_align) {
+	memset(b, 0, sizeof(*b));
+	b->scratch = scratch;
+	b->elem_size = elem_size;
+	b->elem_align = elem_align;
+}
+
+// Push one element of unknown final count into the scratch arena
+void *span_builder_push(SpanBuilder *b, const void *elem_ptr) {
+	if (!b->tail || b->tail->count == CHUNK_ITEMS) {
+		size_t chunk_bytes = sizeof(ArrayChunk) + (b->elem_size * CHUNK_ITEMS);
+		size_t align = (b->elem_align > _Alignof(ArrayChunk)) ? b->elem_align : _Alignof(ArrayChunk);
+
+		ArrayChunk *chunk = vm_arena_alloc(b->scratch, chunk_bytes, align);
+		if (!chunk) return NULL;
+
+		chunk->next = NULL;
+		chunk->count = 0;
+
+		if (b->tail) b->tail->next = chunk;
+		else b->head = chunk;
+		b->tail = chunk;
+	}
+
+	uint8_t *slot = b->tail->data + (b->tail->count * b->elem_size);
+	if (elem_ptr) {
+		memcpy(slot, elem_ptr, b->elem_size);
+	}
+	b->tail->count++;
+	b->total_count++;
+	return slot; // Returns pointer to the newly pushed element
+}
+
+// Flatten all chunks into one contiguous array inside the FINAL output arena
+int span_builder_finish(SpanBuilder *b, VMArena *out_arena, RelSpan *out_span) {
+	out_span->count = b->total_count;
+
+	if (b->total_count == 0) {
+		REL_PTR_SET(out_span->items, NULL);
+		return 0;
+	}
+
+	size_t total_bytes = b->total_count * b->elem_size;
+	uint8_t *dst = vm_arena_alloc(out_arena, total_bytes, b->elem_align);
+	if (!dst) return -1;
+
+	uint8_t *cursor = dst;
+	for (ArrayChunk *c = b->head; c != NULL; c = c->next) {
+		size_t bytes = c->count * b->elem_size;
+		memcpy(cursor, c->data, bytes);
+		cursor += bytes;
+	}
+
+	REL_PTR_SET(out_span->items, dst);
+	return 0;
+}
+
+Example: Building Nested Dynamic Arrays
+Because SpanBuilder only allocates temporary chunks in scratch, you can build multiple dynamic arrays
+concurrently (for example, streaming records from a database or parser) and flatten each one into out_arena
+whenever it completes:
+
+typedef struct {
+	uint32_t magic;
+	RelSpan scores; // Unknown length at start of serialization
+} FileHeader;
+
+void build_file(VMArena *out_arena, VMArena *scratch_arena) {
+	FileHeader *hdr = vm_arena_alloc(out_arena, sizeof(FileHeader), _Alignof(FileHeader));
+	hdr->magic = 0xCAFEBABE;
+
+	SpanBuilder sb;
+	span_builder_init(&sb, scratch_arena, sizeof(int32_t), _Alignof(int32_t));
+
+	// Stream an arbitrary number of items without knowing the total upfront
+	for (int32_t i = 0; i < 500; i++) {
+		if (i % 3 == 0) {
+			span_builder_push(&sb, &i);
+		}
+	}
+
+	// Flatten into 'out_arena' and link into 'hdr->scores'
+	span_builder_finish(&sb, out_arena, &hdr->scores);
+
+	// Reclaim scratch memory instantly (keeping 64 KB warm)
+	vm_arena_reset(scratch_arena, 64 * 1024);
+}
+
+Important Caveat When Elements Contain rel_ptr_t
+ * Do Not Store rel_ptr_t Inside Scratch Elements Before Flattening: An autorelative pointer stores the byte
+   distance from its own address to its target. If an element in the scratch arena contains a rel_ptr_t,
+   copying that element from scratch_arena into out_arena during span_builder_finish() would move the
+   rel_ptr_t to a new address and break its offset.
+ * How to Handle Arrays of Structs That Contain Strings/Pointers: Store standard const char * (pointing to
+   strings already allocated in out_arena) inside your temporary scratch structs, or allocate the flat array
+   in out_arena first and fill its rel_ptr_t fields in a quick loop right after span_builder_finish().
+
+...
+
+
+---
+
